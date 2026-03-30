@@ -1,0 +1,261 @@
+repo_discovery_task:
+  description: >
+    Azure DevOps projesindeki tum Git repolarini kesfet ve haritala.
+    Her repo icin sunlari belirle:
+    1. Reponun adi, varsayilan dali ve boyutu
+    2. Kok dizindeki dosyalari ve klasorleri gozden gecir
+    3. Proje konfigurasyonu dosyalarini oku (package.json, pom.xml, .csproj,
+       Dockerfile, docker-compose.yml, requirements.txt, go.mod vb.)
+    4. Kullanilan programlama dili ve framework'u tespit et
+    5. Reponun amacini ve sorumlulugunu belirle (API, frontend, backend,
+       shared library, infrastructure, database migration vb.)
+    6. Branch yapisini incele (main, develop, feature, release vb.)
+    7. Son commit'leri inceleyerek aktif gelistirme durumunu degerlendir
+
+    {work_item_id} numarali is kalemiyle ilgili olabilecek repolari ozellikle
+    isaretleyerek cikarimda bulun.
+  expected_output: >
+    Repo Haritasi Raporu:
+    - Toplam repo sayisi ve genel bakis
+    - Her repo icin:
+      * Ad, dil, framework, amac
+      * Dizin yapisi ozeti
+      * Aktif gelistirme durumu (son commit tarihi, aktif branch sayisi)
+      * Is kalemiyle iliski derecesi (yuksek/orta/dusuk/yok)
+    - Repolar arasi iliskiler ve bagimliliklar
+    - Kullanilan teknoloji yigini ozeti
+  agent: software_architect
+
+repo_dependency_analysis_task:
+  description: >
+    Kesfedilen repolar arasindaki bagimliliklari ve iliskileri derinlemesine analiz et.
+    Ozellikle su konulari arastir:
+    1. Servisler arasi API cagrilari - hangi repo hangi reponun API'sini cagiriyor
+    2. Paylasilan kutuphane ve paketler - ortak kullanilan internal package'lar
+    3. Mesaj kuyrugu / event baglantilari - event-driven iletisim noktalari
+    4. Veritabani bagimliliklari - paylasilan DB'ler veya DB migration'lar
+    5. Konfigurasyondaki referanslar - ortam degiskenleri, servis URL'leri
+    6. Docker compose veya Kubernetes manifest'lerindeki servis baglantilari
+    7. CI/CD pipeline'larindaki bagimliliklar
+
+    {work_item_id} numarali is kalemi icin etkilenecek repo ve servisleri belirle.
+    Kod arama araci ile API endpoint'lerini, servis isimlerini ve
+    konfigurasyondaki referanslari ara.
+  expected_output: >
+    Repo Bagimlilik Analiz Raporu:
+    - Bagimlilik haritasi (hangi repo hangi repoya bagimli)
+    - API entegrasyon noktalari (endpoint -> tuketici eslestirmesi)
+    - Paylasilan kutuphaneler ve versiyonlari
+    - Event/mesaj akislari
+    - Veritabani bagimliliklari
+    - Etki analizi: {work_item_id} icin degisiklik yapildiginda
+      hangi repolar ve servisler etkilenecek
+    - Deployment sirasi onerileri
+  agent: software_architect
+  context:
+    - repo_discovery_task
+
+requirement_analysis_task:
+  description: >
+    Azure DevOps'tan {work_item_id} numarali is kalemini oku ve detayli analiz et.
+    Is kaleminin basligi, aciklamasi, kabul kriterleri ve iliskili is kalemlerini incele.
+
+    ONEMLI: Repo haritasi ve bagimlilik analizini kullanarak gereksinimleri
+    mevcut kod tabani baglami ile birlikte degerlendir. Hangi repolarda
+    degisiklik gerekecegini, mevcut kodun yapisiyla uyumlu gereksinimleri
+    ve teknik kisitlamalari belirle.
+
+    Analiz sonuclarini Azure DevOps'a yorum olarak ekle.
+  expected_output: >
+    Detayli gereksinim analizi raporu:
+    - Is kalemi ozeti
+    - Fonksiyonel gereksinimler listesi
+    - Fonksiyonel olmayan gereksinimler
+    - Kullanici hikayeleri (As a... I want... So that...)
+    - Kabul kriterleri
+    - Etkilenen repolar ve servisler (bagimlilik analizinden)
+    - Mevcut kodla uyumluluk degerlendirmesi
+    - Risk ve bagimliliklar
+    - Oncelik degerlendirmesi
+  agent: business_analyst
+  context:
+    - repo_discovery_task
+    - repo_dependency_analysis_task
+
+technical_design_task:
+  description: >
+    Gereksinim analizine ve repo/bagimlilik haritasina dayanarak
+    {work_item_id} numarali is kalemi icin teknik tasarim dokumani olustur.
+
+    ONEMLI: Mevcut kod tabanini temel al. Repo gozden gecirme aracini
+    kullanarak etkilenen repolardaki mevcut kodu oku, mimari yapiyi anla
+    ve buna uygun bir tasarim olustur. Kod arama araci ile mevcut
+    implementasyonlari ve kaliplari bul.
+
+    Tasarim kararlarini mevcut mimariyle uyumlu olacak sekilde al.
+  expected_output: >
+    Teknik tasarim dokumani:
+    - Mimari genel bakis (mevcut yapiyla uyumlu)
+    - Degistirilecek dosyalar ve moduller (repo bazli)
+    - Yeni olusturulacak komponent'ler
+    - Veri modeli degisiklikleri (migration gereksinimleri)
+    - API degisiklikleri (yeni/guncellenen endpoint'ler)
+    - Etkilenen servisler ve entegrasyon noktalari
+    - Teknoloji secimi ve gerekceleri
+    - Performans ve guvenlik degerlendirmeleri
+    - Mevcut tasarim kaliplariyla uyumluluk
+    - Deployment ve rollback stratejisi
+  agent: software_architect
+  context:
+    - requirement_analysis_task
+    - repo_discovery_task
+    - repo_dependency_analysis_task
+
+implementation_task:
+  description: >
+    Teknik tasarima uygun olarak {work_item_id} numarali is kalemi icin
+    kod gelistir. Temiz kod prensiplerini uygula, uygun tasarim kaliplarini
+    kullan ve birim testlerini yaz.
+
+    ONEMLI: Mevcut kod tabanindaki kaliplari ve konvansiyonlari takip et.
+    Repo gozden gecirme araci ile mevcut kodu okuyarak mevcut stile uygun
+    kod yaz. Kodu dosyalara yaz ve implementasyon detaylarini belgele.
+  expected_output: >
+    Gelistirilen kod ve dokumantasyon:
+    - Kaynak kod dosyalari (iyi yorumlanmis)
+    - Birim testleri
+    - Implementasyon notlari
+    - Kullanilan tasarim kaliplari
+    - Bilinen kisitlamalar
+    - Degistirilen/eklenen dosyalarin repo bazli listesi
+  agent: senior_developer
+  context:
+    - requirement_analysis_task
+    - technical_design_task
+
+code_review_task:
+  description: >
+    Gelistirilen kodu teknik tasarima uygunluk, kod kalitesi, guvenlik
+    ve performans acisindan incele. SOLID prensipleri, tasarim kaliplari
+    ve en iyi pratiklere uygunlugu degerlendir.
+
+    Mevcut kod tabanindaki konvansiyonlara uygunlugu da kontrol et.
+    Repo gozden gecirme araci ile mevcut kodla karsilastirma yap.
+  expected_output: >
+    Kod inceleme raporu:
+    - Genel degerlendirme (Onaylandi/Degisiklik Gerekli/Reddedildi)
+    - Kod kalitesi puani (1-10)
+    - Tasarima uygunluk degerlendirmesi
+    - Mevcut kod konvansiyonlarina uyumluluk
+    - Guvenlik analizi
+    - Performans degerlendirmesi
+    - Bulunan sorunlar ve oneriler
+    - Refaktoring onerileri
+  agent: software_architect
+  context:
+    - technical_design_task
+    - implementation_task
+
+test_planning_task:
+  description: >
+    {work_item_id} numarali is kalemi icin kapsamli test plani olustur.
+    Fonksiyonel testler, entegrasyon testleri, performans testleri ve
+    kenar durum testlerini iceren test senaryolari hazirla.
+
+    Repo bagimlilik analizini kullanarak etkilenen servislerin
+    entegrasyon testlerini de planla.
+  expected_output: >
+    Test plani dokumani:
+    - Test stratejisi
+    - Birim test senaryolari (repo bazli)
+    - Entegrasyon test senaryolari (servisler arasi)
+    - Kenar durum testleri
+    - Performans test kriterleri
+    - Regresyon test kapsamı (etkilenen servisler)
+    - Test oncelik sirasi
+    - Test ortami gereksinimleri
+  agent: qa_engineer
+  context:
+    - requirement_analysis_task
+    - code_review_task
+    - repo_dependency_analysis_task
+
+test_execution_task:
+  description: >
+    Hazirlanan test planina gore testleri calistir. Her test senaryosunun
+    sonuclarini belgele. Bulunan hatalari detayli olarak raporla.
+  expected_output: >
+    Test sonuc raporu:
+    - Calisan/Kalan test sayisi
+    - Basarili/Basarisiz test sayisi
+    - Bulunan hatalar ve detaylari
+    - Her test senaryosunun sonucu
+    - Test kapsam yuzdesi
+    - Kritik bulgular
+    - Test ortami bilgileri
+  agent: qa_engineer
+  context:
+    - test_planning_task
+    - implementation_task
+
+uat_preparation_task:
+  description: >
+    {work_item_id} numarali is kalemi icin kullanici kabul testi
+    senaryolari hazirla. Is gereksinimlerine ve kabul kriterlerine
+    dayali test senaryolari olustur.
+  expected_output: >
+    UAT senaryo dokumani:
+    - Kabul testi senaryolari
+    - Is sureci test adimlari
+    - Beklenen sonuclar
+    - Kullanici deneyimi kontrol listesi
+    - Veri dogrulama senaryolari
+    - Performans kabul kriterleri
+  agent: uat_specialist
+  context:
+    - requirement_analysis_task
+    - test_execution_task
+
+uat_execution_task:
+  description: >
+    Hazirlanan UAT senaryolarini calistir ve sonuclari belgele.
+    Is gereksinimlerine uygunlugu dogrula. Kabul veya ret kararini belirle.
+  expected_output: >
+    UAT sonuc raporu:
+    - Her senaryonun sonucu (Kabul/Ret)
+    - Is gereksinimleri uygunluk matrisi
+    - Kullanici deneyimi degerlendirmesi
+    - Eksik veya hatali islevler
+    - Genel kabul karari (Kabul Edildi/Sartli Kabul/Reddedildi)
+    - Oneriler ve notlar
+  agent: uat_specialist
+  context:
+    - uat_preparation_task
+    - implementation_task
+
+completion_report_task:
+  description: >
+    Tum surec sonuclarini ozetleyen final raporu olustur.
+    Azure DevOps'taki {work_item_id} numarali is kaleminin durumunu guncelle
+    ve ozet yorum ekle. Tum asamalarin sonuclarini raporla.
+
+    Etkilenen repolar ve servisler hakkinda deployment notlarini da ekle.
+  expected_output: >
+    Tamamlanma raporu:
+    - Is kalemi ozeti
+    - Etkilenen repolar ve servisler
+    - Gereksinim analizi ozeti
+    - Teknik tasarim ozeti
+    - Gelistirme ozeti (degistirilen dosyalar)
+    - Kod inceleme sonucu
+    - Test sonuclari ozeti
+    - UAT sonuclari ozeti
+    - Genel durum (Basarili/Basarisiz/Kismen Basarili)
+    - Deployment notlari ve sirasi
+    - Sonraki adimlar ve oneriler
+    Azure DevOps'ta is kalemi durumu guncellenmis olmali.
+  agent: business_analyst
+  context:
+    - uat_execution_task
+    - test_execution_task
+    - repo_dependency_analysis_task
