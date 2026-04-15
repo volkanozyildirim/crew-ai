@@ -1,0 +1,328 @@
+# ══════════════════════════════════════════════════════════════
+# FAZ 0: Scrum Master - Repo Kesfetme ve Bagimlilik Analizi
+# ══════════════════════════════════════════════════════════════
+
+discover_repos_task:
+  description: >
+    GOREV: {work_item_id} is kalemi icin ilgili Azure DevOps repolarini kesfet.
+    "Repo Listele" aracini kullanarak projedeki tum repolari listele.
+    Is kalemindeki bilgilere dayanarak hangi repo(lar)da calisma yapilacagini belirle.
+
+    ONCEKI ADIM CIKTILARI:
+    {previous_context}
+  expected_output: >
+    Kesfedilen repolarin listesi ve is kalemi ile iliskili repo(lar)in adi.
+  agent: software_architect
+
+dependency_analysis_task:
+  description: >
+    GOREV: Belirlenen repo(lar)in yapisini incele.
+    "Repo Gezgini" aracini kullanarak dizin yapisini, ana dosyalari ve
+    bagimliliklari (import, config dosyalari) analiz et.
+
+    ONCEKI ADIM CIKTILARI:
+    {previous_context}
+  expected_output: >
+    Repo yapisi ozeti, kullanilan dil/framework ve bagimlilik haritasi.
+  agent: software_architect
+
+# ══════════════════════════════════════════════════════════════
+# FAZ 1: Is Analizi ve Teknik Tasarim
+# ══════════════════════════════════════════════════════════════
+
+requirements_analysis_task:
+  description: >
+    GOREV: {work_item_id} idli isin sadece aciklamasini oku ve kabul kriterlerini belirle.
+    "Azure DevOps Work Item Getir" aracini kullanarak is kalemini oku.
+    Description alanini dikkatlice incele ve kabul kriterlerini cikar.
+
+    {scrum_master_feedback}
+
+    ONCEKI ADIM CIKTILARI:
+    {previous_context}
+  expected_output: >
+    Is kaleminin aciklamasi ve belirlenen kabul kriterleri listesi.
+  agent: business_analyst
+
+technical_design_task:
+  description: >
+    GOREV: Azure DevOps is kalemi #{work_item_id} icin gelistirme plani olustur.
+
+    ADIM 1 - IS KALEMINI OKU:
+    "Azure DevOps Work Item Getir" aracini kullanarak {work_item_id} is kalemini oku.
+    Description alaninin TAMAMINI dikkatlice incele. Asagidakileri bul:
+    - Hangi repository uzerinde calisilacak (Repository: veya repo adi)
+    - Ne yapilmasi isteniyor (translate, refactor, yeni endpoint, fix vb.)
+    - Hangi dosya/endpoint/route degisecek
+    - Ornek dosya veya pattern referansi varsa not al
+
+    ADIM 2 - DEGISECEK DOSYALARI OKU:
+    Description'da belirtilen HEDEF dosyayi "Repo Gezgini" araci ile oku.
+    Araç parametreleri: repo_name="{target_repo}", path="dosya/yolu", include_content=true
+    Dosyanin TAMAMINІ goruntule, sadece ilgili metodlari degil.
+
+    ADIM 3 - ORNEK DOSYAYI OKU (varsa):
+    Description'da ornek dosya/pattern belirtilmisse, o dosyayi da oku.
+    Ornek dosyadaki pattern'i anla - ayni yapiyi hedef dosyaya uygulayacaksin.
+
+    ADIM 4 - DEGISIKLIK PLANINI YAZ:
+    Asagidaki JSON formatinda ciktini olustur.
+    HER dosya icin mevcut kodu ve yeni kodu GOSTER.
+    Tahminde bulunma - sadece okudugu kodlara dayali plan yaz.
+
+    ONEMLI:
+    - Sadece is kaleminde istenen degisiklikleri planla
+    - Is kaleminde BELIRTILMEYEN dosyalara/modullere DOKUNMA
+    - Her dosyayi MUTLAKA oku, tahminde bulunma
+    - Ornek dosyadaki pattern'i hedef dosyaya uyarla, kopyalama
+
+    {scrum_master_feedback}
+
+    ONCEKI ADIM CIKTILARI:
+    {previous_context}
+  expected_output: >
+    Ciktini KESINLIKLE asagidaki JSON formatinda ver.
+    JSON disinda HICBIR ACIKLAMA YAZMA.
+
+    ```json
+    {
+      "work_item_id": "{work_item_id}",
+      "repo_name": "repository-adi",
+      "summary": "is kaleminin tek cumlede ozeti",
+      "changes": [
+        {
+          "file_path": "/tam/dosya/yolu.php",
+          "change_type": "edit",
+          "description": "Bu dosyada ne degisecek (tek cumle)",
+          "current_code": "dosyadan okunan MEVCUT ilgili kod bolumu",
+          "new_code": "uygulanmasi gereken YENİ kod bolumu",
+          "start_marker": "degisikligin basladigi satirdaki unique string",
+          "end_marker": "degisikligin bittigi satirdaki unique string"
+        }
+      ],
+      "acceptance_criteria": ["kriter 1", "kriter 2"]
+    }
+    ```
+
+    KURALLAR:
+    - current_code alani GERCEK dosyadan okunmus olmali, uydurmali degil
+    - new_code alani derlenebilir/calisabilir olmali
+    - start_marker ve end_marker dosyada gercekten var olan satirlar olmali
+    - Sadece is kaleminde istenen degisiklikleri icerir
+  agent: software_architect
+
+# ══════════════════════════════════════════════════════════════
+# FAZ 2: Developer - Kod Yazma
+# ══════════════════════════════════════════════════════════════
+
+implement_change_task:
+  description: >
+    GOREV: Asagidaki degisiklik planini BIREBIR uygula.
+
+    PLAN:
+    Repo: {target_repo}
+    Dosya: {target_file}
+    Degisiklik: {change_description}
+
+    MEVCUT KOD (planda belirtilen):
+    ```
+    {current_code}
+    ```
+
+    YENI KOD (planda belirtilen):
+    ```
+    {new_code}
+    ```
+
+    ADIMLARIN:
+    1. Once {target_file} dosyasini "Repo Gezgini" araci ile oku
+    2. Plandaki current_code boluumunu dosyada bul
+    3. current_code bolumunu new_code ile degistir
+    4. Dosyanin TAMAMINI (degisiklik uygulanmis haliyle) dondur
+
+    KESIN KURALLAR:
+    - Dosyanin TAMAMINI dondur, sadece degisen bolumu degil
+    - Planda OLMAYAN degisiklik YAPMA
+    - Mevcut import'lara, namespace'lere, indentation'a DOKUNMA
+    - Yeni import gerekiyorsa SADECE planda belirtilenleri ekle
+    - Kod blogu disinda HICBIR ACIKLAMA YAZMA, sadece kod dondur
+    - Dosyayi okumadan ASLA kod dondurme
+  expected_output: >
+    Dosyanin DEGISIKLIK UYGULANMIS TAMAMINI tek bir kod blogu icinde dondur.
+    Kod blogu disinda HICBIR METIN YAZMA.
+    ```
+    [dosyanin tamami]
+    ```
+  agent: senior_developer
+
+# ══════════════════════════════════════════════════════════════
+# FAZ 3: Review - PR Dogrulama
+# ══════════════════════════════════════════════════════════════
+
+review_pr_task:
+  description: >
+    GOREV: PR #{pr_id} degisikliklerinin is kalemiyle uyumunu ve kod kalitesini dogrula.
+
+    IS KALEMI: #{work_item_id}
+    IS GEREKSINIMLERI:
+    {requirements}
+
+    PR: {pr_url}
+    Repo: {target_repo}
+
+    ADIMLARIN:
+    1. "Azure DevOps PR Degisiklikleri" araci ile PR'daki degisen dosyalari listele
+    2. Her degisen dosyayi "Repo Gezgini" ile oku (branch: {target_branch})
+    3. Asagidaki kontrol listesini uygula:
+
+    IS UYUMU KONTROL LISTESI:
+    - [ ] PR sadece is kaleminde istenen dosyalari mi degistirmis?
+    - [ ] Gereksiz/alakasiz dosya degisikligi var mi?
+    - [ ] Is kalemindeki TUM gereksinimler karsilanmis mi?
+    - [ ] Ornek pattern dogru uygulanmis mi?
+
+    KOD KALITESI KONTROL LISTESI (SOLID & CLEAN CODE):
+    - [ ] Single Responsibility: Her sinif/metod tek bir sorumluluga mi sahip?
+    - [ ] Open/Closed: Degisiklik mevcut kodu bozmadan genisletme yapiyor mu?
+    - [ ] Liskov Substitution: Alt siniflar ust siniflarin yerine gecebiliyor mu?
+    - [ ] Interface Segregation: Gereksiz bagimlilik olusturulmus mu?
+    - [ ] Dependency Inversion: Somut siniflara degil soyutlamalara mi bagli?
+    - [ ] Naming conventions projenin mevcut konvansiyonlarina uygun mu?
+    - [ ] Hata yonetimi (try-catch, null check, validation) yeterli mi?
+    - [ ] Edge case'ler ele alinmis mi?
+    - [ ] Gereksiz karmasiklik (over-engineering) var mi?
+    - [ ] Performans etkisi (N+1 query, gereksiz dongu, buyuk bellek kullanimi) var mi?
+    - [ ] Syntax hatasi veya eksik import var mi?
+
+    4. Sonucu "Azure DevOps PR Review" araci ile PR'a yorum olarak ekle
+    5. Ayrica is kalemine ({work_item_id}) yorum olarak da ekle
+
+    {scrum_master_feedback}
+
+    ONCEKI ADIM CIKTILARI:
+    {previous_context}
+  expected_output: >
+    ## PR Review Sonucu
+
+    **Karar:** ONAY / DEGISIKLIK GEREKLI
+
+    **Is Uyumu:**
+    - Karsilanan gereksinimler: [liste]
+    - Eksik gereksinimler: [liste veya "Yok"]
+
+    **Kod Kalitesi (SOLID & Clean Code):**
+    - SOLID uyumu: [degerlendirme]
+    - Clean code: [degerlendirme]
+    - Sorunlar: [liste veya "Sorun yok"]
+
+    **Gereksiz Degisiklikler:**
+    - [liste veya "Yok"]
+  agent: code_reviewer
+
+# ══════════════════════════════════════════════════════════════
+# FAZ 4: Test ve Kalite Guvence
+# ══════════════════════════════════════════════════════════════
+
+test_planning_task:
+  description: >
+    GOREV: {work_item_id} is kalemi icin yapilan degisikliklerin test planini olustur.
+    PR'daki degisiklikleri incele, {target_repo} reposundaki {target_branch} branch'ini oku.
+
+    Test planinda su bolumleri icermeli:
+    - Basarili senaryolar (happy path)
+    - Hata senaryolari (error cases)
+    - Sinir degerleri (edge cases)
+    - Entegrasyon test senaryolari
+    - Mumkunse unit test kodu
+
+    {scrum_master_feedback}
+
+    ONCEKI ADIM CIKTILARI:
+    {previous_context}
+  expected_output: >
+    Test plani: test senaryolari listesi, edge case'ler, onerilen unit test kodlari.
+  agent: qa_engineer
+
+uat_task:
+  description: >
+    GOREV: {work_item_id} is kalemi icin kullanici kabul testi yap.
+
+    ADIM 1 - KABUL KRITERLERINI CIKAR:
+    "Azure DevOps Work Item Getir" aracini kullanarak {work_item_id} is kalemini oku.
+    Description ve Acceptance Criteria alanlarindan kabul kriterlerini cikar.
+    Acikca belirtilmemis ancak is kaleminden cikarilabilecek ek kriterleri de ekle.
+    Her kriteri numaralandir.
+
+    ADIM 2 - PR DEGISIKLIKLERINI INCELE:
+    "Azure DevOps PR Degisiklikleri" araci ile PR'daki degisiklikleri incele.
+    Her degisikligin hangi kabul kriterine karsilik geldigini belirle.
+
+    ADIM 3 - DEGERLENDIRME:
+    Her kabul kriteri icin GECTI veya KALDI karari ver.
+    KALDI olanlar icin ne eksik oldugunu acikla.
+
+    {scrum_master_feedback}
+
+    ONCEKI ADIM CIKTILARI:
+    {previous_context}
+  expected_output: >
+    ## UAT Raporu
+
+    **Kabul Kriterleri:**
+    1. [Kriter] - GECTI/KALDI - [Aciklama]
+    2. [Kriter] - GECTI/KALDI - [Aciklama]
+    ...
+
+    **Genel Degerlendirme:** KABUL / RED
+    **Eksikler:** [liste veya "Yok"]
+  agent: uat_specialist
+
+# ══════════════════════════════════════════════════════════════
+# FAZ 5: Tamamlanma Raporu
+# ══════════════════════════════════════════════════════════════
+
+completion_report_task:
+  description: >
+    GOREV: {work_item_id} is kalemi icin tamamlanma raporu olustur.
+    Tum sureci ozetle: gereksinimler, yapilan degisiklikler, test sonuclari,
+    UAT sonuclari ve PR bilgisi.
+    Is kalemine yorum olarak ozet ekle.
+
+    ONCEKI ADIM CIKTILARI:
+    {previous_context}
+  expected_output: >
+    Tamamlanma raporu: is ozeti, degisiklik listesi, test sonuclari,
+    UAT sonuclari, PR linki. Is kalemine yorum eklenmis olmali.
+  agent: scrum_master
+
+# ══════════════════════════════════════════════════════════════
+# Scrum Master Review (her adim sonrasi kalite kontrolu)
+# ══════════════════════════════════════════════════════════════
+
+scrum_review_task:
+  description: >
+    GOREV: Asagidaki adimin ciktisini incele ve kalite kontrolu yap.
+
+    ADIM: {step_name}
+    IS KALEMI: #{work_item_id}
+
+    ADIM CIKTISI:
+    {step_output}
+
+    DEGERLENDIRME KRITERLERI:
+    - Cikti is kalemiyle uyumlu mu?
+    - Cikti eksiksiz ve anlasilir mi?
+    - Ciktida hatali veya tutarsiz bilgi var mi?
+    - Cikti bir sonraki adim icin yeterli mi?
+
+    Kararini ONAY veya IYILESTIR olarak belirt.
+    IYILESTIR dersen, eksikleri ve somut iyilestirme onerilerini yaz.
+  expected_output: >
+    **Karar:** ONAY veya IYILESTIR
+
+    **Degerlendirme:** [kisa aciklama]
+
+    **Iyilestirme Onerileri (IYILESTIR ise):**
+    - [somut oneri 1]
+    - [somut oneri 2]
+  agent: scrum_master

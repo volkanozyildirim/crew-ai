@@ -1,0 +1,231 @@
+"""Pixel art dashboard icin durum takip modulu.
+
+StatusTracker sinifi gorev durumlarini JSON olarak yazar,
+DashboardServer sinifi basit bir HTTP server ile web dashboard'u sunar.
+"""
+
+import json
+import os
+import threading
+from datetime import datetime
+from functools import partial
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+
+
+TASK_DISPLAY_NAMES = {
+    "requirements_analysis_task": "İş Analizi",
+    "discover_repos_task": "Repo Keşfetme",
+    "dependency_analysis_task": "Bağımlılık Analizi",
+    "technical_design_task": "Teknik Tasarım",
+    "create_branch_task": "Branch Oluşturma",
+    "implement_change_task": "Kod Yazma & Push",
+    "create_pr_task": "PR Oluşturma",
+    "review_pr_task": "Kod İnceleme",
+    "test_planning_task": "Test Planlama",
+    "uat_task": "UAT Doğrulama",
+    "completion_report_task": "Tamamlanma Raporu",
+}
+
+TASK_AGENTS = {
+    "requirements_analysis_task": "business_analyst",
+    "discover_repos_task": "software_architect",
+    "dependency_analysis_task": "software_architect",
+    "technical_design_task": "software_architect",
+    "create_branch_task": "senior_developer",
+    "implement_change_task": "senior_developer",
+    "create_pr_task": "senior_developer",
+    "review_pr_task": "code_reviewer",
+    "test_planning_task": "qa_engineer",
+    "uat_task": "uat_specialist",
+    "completion_report_task": "scrum_master",
+}
+
+AGENT_AVATARS = {
+    "scrum_master": "crown",
+    "business_analyst": "chart",
+    "software_architect": "blueprint",
+    "senior_developer": "keyboard",
+    "qa_engineer": "test",
+    "uat_specialist": "checkmark",
+    "code_reviewer": "magnifier",
+}
+
+AGENT_DISPLAY_NAMES = {
+    "scrum_master": "Scrum Master",
+    "business_analyst": "Is Analisti",
+    "software_architect": "Yazilim Mimari",
+    "senior_developer": "Kidemli Gelistirici",
+    "qa_engineer": "QA Muhendisi",
+    "uat_specialist": "UAT Uzmani",
+    "code_reviewer": "Kod Inceleyici",
+}
+
+
+class StatusTracker:
+    """Crew calisma durumunu JSON dosyasina yazan sinif."""
+
+    def __init__(self, status_dir: str | None = None):
+        if status_dir is None:
+            status_dir = str(Path(__file__).parent / "web")
+        self.status_file = os.path.join(status_dir, "status.json")
+        self._lock = threading.Lock()
+        self._status = {
+            "work_item_id": "",
+            "started_at": "",
+            "finished_at": "",
+            "agents": {},
+            "tasks": [],
+            "progress": {"completed": 0, "total": len(TASK_DISPLAY_NAMES)},
+            "log": [],
+            "repo_map": None,
+        }
+
+        for agent_key, display_name in AGENT_DISPLAY_NAMES.items():
+            self._status["agents"][agent_key] = {
+                "display_name": display_name,
+                "status": "idle",
+                "current_task": None,
+                "avatar": AGENT_AVATARS.get(agent_key, "person"),
+            }
+
+        for task_key in TASK_DISPLAY_NAMES:
+            self._status["tasks"].append({
+                "key": task_key,
+                "name": TASK_DISPLAY_NAMES[task_key],
+                "status": "pending",
+                "agent": TASK_AGENTS[task_key],
+            })
+
+    def _save(self):
+        with open(self.status_file, "w", encoding="utf-8") as f:
+            json.dump(self._status, f, ensure_ascii=False, indent=2)
+
+    def update_repo_map(self, repo_map: dict):
+        """Repo haritasini gunceller. Dashboard'da goruntulenir.
+
+        repo_map formati:
+        {
+            "repos": [
+                {"name": "api-service", "language": "C#", "framework": ".NET 8",
+                 "purpose": "REST API servisi", "affected": True},
+                ...
+            ],
+            "dependencies": [
+                {"from": "web-app", "to": "api-service", "type": "REST API"},
+                ...
+            ]
+        }
+        """
+        with self._lock:
+            self._status["repo_map"] = repo_map
+            self._add_log(f"Repo haritasi guncellendi ({len(repo_map.get('repos', []))} repo)")
+            self._save()
+
+    def start(self, work_item_id: str):
+        with self._lock:
+            self._status["work_item_id"] = str(work_item_id)
+            self._status["started_at"] = datetime.now().isoformat()
+            # Ilk gorevi otomatik baslat
+            if self._status["tasks"]:
+                first_task = self._status["tasks"][0]
+                first_task["status"] = "in_progress"
+                agent_key = first_task["agent"]
+                if agent_key in self._status["agents"]:
+                    self._status["agents"][agent_key]["status"] = "working"
+                    self._status["agents"][agent_key]["current_task"] = first_task["name"]
+            self._add_log("Sprint baslatildi")
+            self._save()
+
+    def task_started(self, task_key: str):
+        with self._lock:
+            agent_key = TASK_AGENTS.get(task_key, "")
+            task_name = TASK_DISPLAY_NAMES.get(task_key, task_key)
+
+            for t in self._status["tasks"]:
+                if t["key"] == task_key:
+                    t["status"] = "in_progress"
+                    break
+
+            if agent_key and agent_key in self._status["agents"]:
+                self._status["agents"][agent_key]["status"] = "working"
+                self._status["agents"][agent_key]["current_task"] = task_name
+
+            self._add_log(f"{task_name} baslatildi")
+            self._save()
+
+    def task_completed(self, task_key: str):
+        with self._lock:
+            agent_key = TASK_AGENTS.get(task_key, "")
+            task_name = TASK_DISPLAY_NAMES.get(task_key, task_key)
+
+            # Mevcut gorevi tamamla
+            for t in self._status["tasks"]:
+                if t["key"] == task_key:
+                    t["status"] = "completed"
+                    break
+
+            if agent_key and agent_key in self._status["agents"]:
+                self._status["agents"][agent_key]["status"] = "idle"
+                self._status["agents"][agent_key]["current_task"] = None
+
+            self._status["progress"]["completed"] = sum(
+                1 for t in self._status["tasks"] if t["status"] == "completed"
+            )
+
+            # Siradaki gorevi otomatik baslat
+            task_keys = [t["key"] for t in self._status["tasks"]]
+            try:
+                idx = task_keys.index(task_key)
+                if idx + 1 < len(task_keys):
+                    next_task = self._status["tasks"][idx + 1]
+                    next_task["status"] = "in_progress"
+                    next_agent = next_task["agent"]
+                    if next_agent in self._status["agents"]:
+                        self._status["agents"][next_agent]["status"] = "working"
+                        self._status["agents"][next_agent]["current_task"] = next_task["name"]
+                    self._add_log(f"{next_task['name']} baslatildi")
+            except ValueError:
+                pass
+
+            self._add_log(f"{task_name} tamamlandi")
+            self._save()
+
+    def finish(self):
+        with self._lock:
+            self._status["finished_at"] = datetime.now().isoformat()
+            for agent in self._status["agents"].values():
+                agent["status"] = "idle"
+                agent["current_task"] = None
+            self._add_log("Sprint tamamlandi!")
+            self._save()
+
+    def _add_log(self, message: str):
+        self._status["log"].append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "message": message,
+        })
+
+
+class _CORSHandler(SimpleHTTPRequestHandler):
+    """CORS header'lari ekleyen HTTP handler."""
+
+    def end_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        super().end_headers()
+
+    def log_message(self, format, *args):
+        pass  # Konsolu kirletmemek icin loglamayi kapat
+
+
+def start_dashboard_server(port: int = 8765) -> HTTPServer:
+    """Dashboard web sunucusunu ayri bir thread'de baslatir."""
+    web_dir = str(Path(__file__).parent / "web")
+    handler = partial(_CORSHandler, directory=web_dir)
+    server = HTTPServer(("0.0.0.0", port), handler)
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    return server
