@@ -14,40 +14,41 @@ from pathlib import Path
 
 
 TASK_DISPLAY_NAMES = {
-    "repo_discovery_task": "Repo Kesfetme",
-    "repo_dependency_analysis_task": "Bagimlilik Analizi",
-    "requirement_analysis_task": "Gereksinim Analizi",
-    "technical_design_task": "Teknik Tasarim",
-    "implementation_task": "Kod Gelistirme",
-    "code_review_task": "Kod Inceleme",
+    "requirements_analysis_task": "İş Analizi",
+    "discover_repos_task": "Repo Keşfetme",
+    "dependency_analysis_task": "Bağımlılık Analizi",
+    "technical_design_task": "Teknik Tasarım",
+    "create_branch_task": "Branch Oluşturma",
+    "implement_change_task": "Kod Yazma & Push",
+    "create_pr_task": "PR Oluşturma",
+    "review_pr_task": "Kod İnceleme",
     "test_planning_task": "Test Planlama",
-    "test_execution_task": "Test Yurutme",
-    "uat_preparation_task": "UAT Hazirlama",
-    "uat_execution_task": "UAT Yurutme",
+    "uat_task": "UAT Doğrulama",
     "completion_report_task": "Tamamlanma Raporu",
 }
 
 TASK_AGENTS = {
-    "repo_discovery_task": "software_architect",
-    "repo_dependency_analysis_task": "software_architect",
-    "requirement_analysis_task": "business_analyst",
+    "requirements_analysis_task": "business_analyst",
+    "discover_repos_task": "software_architect",
+    "dependency_analysis_task": "software_architect",
     "technical_design_task": "software_architect",
-    "implementation_task": "senior_developer",
-    "code_review_task": "software_architect",
+    "create_branch_task": "senior_developer",
+    "implement_change_task": "senior_developer",
+    "create_pr_task": "senior_developer",
+    "review_pr_task": "code_reviewer",
     "test_planning_task": "qa_engineer",
-    "test_execution_task": "qa_engineer",
-    "uat_preparation_task": "uat_specialist",
-    "uat_execution_task": "uat_specialist",
-    "completion_report_task": "business_analyst",
+    "uat_task": "uat_specialist",
+    "completion_report_task": "scrum_master",
 }
 
 AGENT_AVATARS = {
     "scrum_master": "crown",
-    "business_analyst": "scroll",
+    "business_analyst": "chart",
     "software_architect": "blueprint",
     "senior_developer": "keyboard",
-    "qa_engineer": "bug",
+    "qa_engineer": "test",
     "uat_specialist": "checkmark",
+    "code_reviewer": "magnifier",
 }
 
 AGENT_DISPLAY_NAMES = {
@@ -57,6 +58,7 @@ AGENT_DISPLAY_NAMES = {
     "senior_developer": "Kidemli Gelistirici",
     "qa_engineer": "QA Muhendisi",
     "uat_specialist": "UAT Uzmani",
+    "code_reviewer": "Kod Inceleyici",
 }
 
 
@@ -74,7 +76,7 @@ class StatusTracker:
             "finished_at": "",
             "agents": {},
             "tasks": [],
-            "progress": {"completed": 0, "total": 11},
+            "progress": {"completed": 0, "total": len(TASK_DISPLAY_NAMES)},
             "log": [],
             "repo_map": None,
         }
@@ -87,20 +89,7 @@ class StatusTracker:
                 "avatar": AGENT_AVATARS.get(agent_key, "person"),
             }
 
-        task_order = [
-            "repo_discovery_task",
-            "repo_dependency_analysis_task",
-            "requirement_analysis_task",
-            "technical_design_task",
-            "implementation_task",
-            "code_review_task",
-            "test_planning_task",
-            "test_execution_task",
-            "uat_preparation_task",
-            "uat_execution_task",
-            "completion_report_task",
-        ]
-        for task_key in task_order:
+        for task_key in TASK_DISPLAY_NAMES:
             self._status["tasks"].append({
                 "key": task_key,
                 "name": TASK_DISPLAY_NAMES[task_key],
@@ -137,8 +126,14 @@ class StatusTracker:
         with self._lock:
             self._status["work_item_id"] = str(work_item_id)
             self._status["started_at"] = datetime.now().isoformat()
-            self._status["agents"]["scrum_master"]["status"] = "working"
-            self._status["agents"]["scrum_master"]["current_task"] = "Ekip Koordinasyonu"
+            # Ilk gorevi otomatik baslat
+            if self._status["tasks"]:
+                first_task = self._status["tasks"][0]
+                first_task["status"] = "in_progress"
+                agent_key = first_task["agent"]
+                if agent_key in self._status["agents"]:
+                    self._status["agents"][agent_key]["status"] = "working"
+                    self._status["agents"][agent_key]["current_task"] = first_task["name"]
             self._add_log("Sprint baslatildi")
             self._save()
 
@@ -164,6 +159,7 @@ class StatusTracker:
             agent_key = TASK_AGENTS.get(task_key, "")
             task_name = TASK_DISPLAY_NAMES.get(task_key, task_key)
 
+            # Mevcut gorevi tamamla
             for t in self._status["tasks"]:
                 if t["key"] == task_key:
                     t["status"] = "completed"
@@ -176,6 +172,21 @@ class StatusTracker:
             self._status["progress"]["completed"] = sum(
                 1 for t in self._status["tasks"] if t["status"] == "completed"
             )
+
+            # Siradaki gorevi otomatik baslat
+            task_keys = [t["key"] for t in self._status["tasks"]]
+            try:
+                idx = task_keys.index(task_key)
+                if idx + 1 < len(task_keys):
+                    next_task = self._status["tasks"][idx + 1]
+                    next_task["status"] = "in_progress"
+                    next_agent = next_task["agent"]
+                    if next_agent in self._status["agents"]:
+                        self._status["agents"][next_agent]["status"] = "working"
+                        self._status["agents"][next_agent]["current_task"] = next_task["name"]
+                    self._add_log(f"{next_task['name']} baslatildi")
+            except ValueError:
+                pass
 
             self._add_log(f"{task_name} tamamlandi")
             self._save()

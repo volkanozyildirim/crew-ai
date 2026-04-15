@@ -7,6 +7,13 @@ from agile_sdlc_crew.tools.azure_devops_browse_repo import AzureDevOpsBrowseRepo
 from agile_sdlc_crew.tools.azure_devops_search_code import AzureDevOpsSearchCodeTool
 from agile_sdlc_crew.tools.code_write_tool import CodeWriteTool
 from agile_sdlc_crew.tools.code_read_tool import CodeReadTool
+from agile_sdlc_crew.tools.azure_devops_git_write import (
+    AzureDevOpsCreateBranchTool,
+    AzureDevOpsPushChangesTool,
+    AzureDevOpsCreatePRTool,
+    AzureDevOpsPRReviewTool,
+    AzureDevOpsPRChangesTool,
+)
 
 __all__ = [
     "AzureDevOpsGetWorkItemTool",
@@ -18,4 +25,9 @@ __all__ = [
     "AzureDevOpsSearchCodeTool",
     "CodeWriteTool",
     "CodeReadTool",
+    "AzureDevOpsCreateBranchTool",
+    "AzureDevOpsPushChangesTool",
+    "AzureDevOpsCreatePRTool",
+    "AzureDevOpsPRReviewTool",
+    "AzureDevOpsPRChangesTool",
 ]

@@ -1,46 +1,120 @@
-"""Agile SDLC Crew - Azure DevOps entegrasyonlu yazilim gelistirme ekibi."""
+"""Agile SDLC Crew - Full pipeline with 7 agents."""
 
 import os
+import ssl
 
-from crewai import Agent, Crew, Process, Task, LLM
-from crewai.project import CrewBase, agent, crew, task
+# Kurumsal proxy self-signed sertifika - tum SSL dogrulamasini global kapat
+ssl._create_default_https_context = ssl._create_unverified_context
 
-from agile_sdlc_crew.dashboard import StatusTracker, TASK_DISPLAY_NAMES
-from agile_sdlc_crew.tools import (
+import httpx  # noqa: E402
+
+_orig_client = httpx.Client.__init__
+_orig_async_client = httpx.AsyncClient.__init__
+
+
+def _no_ssl_client(self, *a, **kw):
+    kw.setdefault("verify", False)
+    _orig_client(self, *a, **kw)
+
+
+def _no_ssl_async_client(self, *a, **kw):
+    kw.setdefault("verify", False)
+    _orig_async_client(self, *a, **kw)
+
+
+httpx.Client.__init__ = _no_ssl_client
+httpx.AsyncClient.__init__ = _no_ssl_async_client
+
+import litellm  # noqa: E402
+
+litellm.ssl_verify = False
+
+# Vertex AI Claude assistant prefill desteklemediginden,
+# litellm.completion cagrisindan once son assistant mesajini cikar
+_original_completion = litellm.completion
+
+
+def _patched_completion(*args, **kwargs):
+    model = kwargs.get("model", "")
+    # Prefill fix sadece vertex_ai/claude modelleri icin
+    if "claude" in model or "vertex_ai" in model:
+        messages = kwargs.get("messages", [])
+        if messages and messages[-1].get("role") == "assistant":
+            prefill = messages.pop()
+            content = prefill.get("content", "")
+            if content:
+                messages.append({"role": "user", "content": f"[Devam et]: {content}"})
+    return _original_completion(*args, **kwargs)
+
+
+litellm.completion = _patched_completion
+
+from crewai import Agent, Crew, Process, Task, LLM  # noqa: E402
+
+from agile_sdlc_crew.dashboard import StatusTracker, TASK_DISPLAY_NAMES  # noqa: E402
+from agile_sdlc_crew.tools import (  # noqa: E402
     AzureDevOpsGetWorkItemTool,
-    AzureDevOpsUpdateWorkItemTool,
     AzureDevOpsAddCommentTool,
     AzureDevOpsListWorkItemsTool,
     AzureDevOpsListReposTool,
     AzureDevOpsBrowseRepoTool,
     AzureDevOpsSearchCodeTool,
-    CodeWriteTool,
-    CodeReadTool,
+    AzureDevOpsCreateBranchTool,
+    AzureDevOpsPushChangesTool,
+    AzureDevOpsCreatePRTool,
+    AzureDevOpsPRReviewTool,
+    AzureDevOpsPRChangesTool,
 )
 
 
-def _create_llm() -> LLM:
-    """Ortam degiskenlerinden LLM olusturur."""
+def _create_llm(model_name: str | None = None, max_tokens: int = 2048) -> LLM:
+    """Proxy uzerinden LLM olusturur."""
+    model = model_name or os.environ.get("LITELLM_MODEL", "openai/gpt-4")
+    base_url = os.environ.get("LITELLM_BASE_URL")
+    if base_url and not model.startswith("openai/"):
+        model = f"openai/{model}"
     return LLM(
-        model=os.environ.get("LITELLM_MODEL", "openai/gpt-4"),
-        base_url=os.environ.get("LITELLM_BASE_URL"),
+        model=model,
+        base_url=base_url,
         api_key=os.environ.get("LITELLM_API_KEY"),
+        max_tokens=max_tokens,
     )
 
 
-# Task key -> method name mapping for callbacks
-TASK_KEYS = list(TASK_DISPLAY_NAMES.keys())
+# Architect: analiz ve plan - guclü model gerekli (repo okuma, plan olusturma)
+LLM_ARCHITECT = lambda: _create_llm("vertex_ai/claude-sonnet-4-6", max_tokens=8192)
+# Developer: kod yazma - guclü model + yuksek token (tam dosya ciktisi)
+LLM_DEVELOPER = lambda: _create_llm("vertex_ai/claude-sonnet-4-6", max_tokens=8192)
+# Reviewer: hizli model yeterli
+LLM_REVIEWER = lambda: _create_llm("o4-mini", max_tokens=4096)
+# Analyst: is kalemi analizi
+LLM_ANALYST = lambda: _create_llm("o4-mini", max_tokens=4096)
+# QA: test planlama
+LLM_QA = lambda: _create_llm("o4-mini", max_tokens=4096)
+# UAT: kabul testi
+LLM_UAT = lambda: _create_llm("o4-mini", max_tokens=4096)
+# Scrum Master: is yonetimi
+LLM_SCRUM = lambda: _create_llm("o4-mini", max_tokens=2048)
 
 
-@CrewBase
 class AgileSDLCCrew:
-    """Agile SDLC Crew - Hiyerarsik surecle Scrum Master yonetiminde."""
-
-    agents_config = "config/agents.yaml"
-    tasks_config = "config/tasks.yaml"
+    """Full Agile SDLC pipeline with 7 agents."""
 
     def __init__(self):
-        self.llm = _create_llm()
+        import yaml
+        from pathlib import Path
+        config_dir = Path(__file__).parent / "config"
+        with open(config_dir / "agents.yaml", encoding="utf-8") as f:
+            self.agents_config = yaml.safe_load(f)
+        with open(config_dir / "tasks.yaml", encoding="utf-8") as f:
+            self.tasks_config = yaml.safe_load(f)
+        self.llm_architect = LLM_ARCHITECT()
+        self.llm_developer = LLM_DEVELOPER()
+        self.llm_reviewer = LLM_REVIEWER()
+        self.llm_analyst = LLM_ANALYST()
+        self.llm_qa = LLM_QA()
+        self.llm_uat = LLM_UAT()
+        self.llm_scrum = LLM_SCRUM()
         self.status_tracker: StatusTracker | None = None
 
     def set_status_tracker(self, tracker: StatusTracker):
@@ -48,11 +122,11 @@ class AgileSDLCCrew:
 
     def _make_task_callback(self, task_key: str):
         """Gorev tamamlandiginda dashboard'u guncelleyen callback olusturur."""
-        tracker = self.status_tracker
+        crew_ref = self
 
         def callback(output):
-            if tracker:
-                tracker.task_completed(task_key)
+            if crew_ref.status_tracker:
+                crew_ref.status_tracker.task_completed(task_key)
 
         return callback
 
@@ -63,183 +137,191 @@ class AgileSDLCCrew:
 
     # ── Agents ──────────────────────────────────────────
 
-    @agent
+    def scrum_master(self) -> Agent:
+        return Agent(
+            config=self.agents_config["scrum_master"],
+            llm=self.llm_scrum,
+            verbose=True,
+            max_iter=50,
+            tools=[
+                AzureDevOpsGetWorkItemTool(),
+                AzureDevOpsListWorkItemsTool(),
+            ],
+        )
+
     def business_analyst(self) -> Agent:
         return Agent(
             config=self.agents_config["business_analyst"],
-            llm=self.llm,
+            llm=self.llm_analyst,
             verbose=True,
+            max_iter=50,
             tools=[
                 AzureDevOpsGetWorkItemTool(),
                 AzureDevOpsAddCommentTool(),
-                AzureDevOpsListWorkItemsTool(),
-                AzureDevOpsUpdateWorkItemTool(),
             ],
         )
 
-    @agent
     def software_architect(self) -> Agent:
         return Agent(
             config=self.agents_config["software_architect"],
-            llm=self.llm,
+            llm=self.llm_architect,
             verbose=True,
-            tools=[
-                AzureDevOpsListReposTool(),
-                AzureDevOpsBrowseRepoTool(),
-                AzureDevOpsSearchCodeTool(),
-                CodeReadTool(),
-            ],
-        )
-
-    @agent
-    def senior_developer(self) -> Agent:
-        return Agent(
-            config=self.agents_config["senior_developer"],
-            llm=self.llm,
-            verbose=True,
-            tools=[
-                AzureDevOpsBrowseRepoTool(),
-                AzureDevOpsSearchCodeTool(),
-                CodeWriteTool(),
-                CodeReadTool(),
-            ],
-        )
-
-    @agent
-    def qa_engineer(self) -> Agent:
-        return Agent(
-            config=self.agents_config["qa_engineer"],
-            llm=self.llm,
-            verbose=True,
-            tools=[
-                AzureDevOpsBrowseRepoTool(),
-                CodeReadTool(),
-            ],
-        )
-
-    @agent
-    def uat_specialist(self) -> Agent:
-        return Agent(
-            config=self.agents_config["uat_specialist"],
-            llm=self.llm,
-            verbose=True,
+            max_iter=50,
             tools=[
                 AzureDevOpsGetWorkItemTool(),
                 AzureDevOpsAddCommentTool(),
+                AzureDevOpsBrowseRepoTool(),
+                AzureDevOpsSearchCodeTool(),
+                AzureDevOpsListReposTool(),
             ],
         )
 
-    # ── Tasks ──────────────────────────────────────────
-
-    @task
-    def repo_discovery_task(self) -> Task:
-        self._notify_task_start("repo_discovery_task")
-        return Task(
-            config=self.tasks_config["repo_discovery_task"],
-            callback=self._make_task_callback("repo_discovery_task"),
-        )
-
-    @task
-    def repo_dependency_analysis_task(self) -> Task:
-        self._notify_task_start("repo_dependency_analysis_task")
-        return Task(
-            config=self.tasks_config["repo_dependency_analysis_task"],
-            callback=self._make_task_callback("repo_dependency_analysis_task"),
-        )
-
-    @task
-    def requirement_analysis_task(self) -> Task:
-        self._notify_task_start("requirement_analysis_task")
-        return Task(
-            config=self.tasks_config["requirement_analysis_task"],
-            callback=self._make_task_callback("requirement_analysis_task"),
-        )
-
-    @task
-    def technical_design_task(self) -> Task:
-        self._notify_task_start("technical_design_task")
-        return Task(
-            config=self.tasks_config["technical_design_task"],
-            callback=self._make_task_callback("technical_design_task"),
-        )
-
-    @task
-    def implementation_task(self) -> Task:
-        self._notify_task_start("implementation_task")
-        return Task(
-            config=self.tasks_config["implementation_task"],
-            callback=self._make_task_callback("implementation_task"),
-        )
-
-    @task
-    def code_review_task(self) -> Task:
-        self._notify_task_start("code_review_task")
-        return Task(
-            config=self.tasks_config["code_review_task"],
-            callback=self._make_task_callback("code_review_task"),
-        )
-
-    @task
-    def test_planning_task(self) -> Task:
-        self._notify_task_start("test_planning_task")
-        return Task(
-            config=self.tasks_config["test_planning_task"],
-            callback=self._make_task_callback("test_planning_task"),
-        )
-
-    @task
-    def test_execution_task(self) -> Task:
-        self._notify_task_start("test_execution_task")
-        return Task(
-            config=self.tasks_config["test_execution_task"],
-            callback=self._make_task_callback("test_execution_task"),
-        )
-
-    @task
-    def uat_preparation_task(self) -> Task:
-        self._notify_task_start("uat_preparation_task")
-        return Task(
-            config=self.tasks_config["uat_preparation_task"],
-            callback=self._make_task_callback("uat_preparation_task"),
-        )
-
-    @task
-    def uat_execution_task(self) -> Task:
-        self._notify_task_start("uat_execution_task")
-        return Task(
-            config=self.tasks_config["uat_execution_task"],
-            callback=self._make_task_callback("uat_execution_task"),
-        )
-
-    @task
-    def completion_report_task(self) -> Task:
-        self._notify_task_start("completion_report_task")
-        return Task(
-            config=self.tasks_config["completion_report_task"],
-            output_file="completion_report.md",
-            callback=self._make_task_callback("completion_report_task"),
-        )
-
-    # ── Crew ──────────────────────────────────────────
-
-    @crew
-    def crew(self) -> Crew:
-        """Hiyerarsik surecle Scrum Master yonetiminde crew olusturur."""
-
-        # Scrum Master manager agent olarak ayri olusturulur
-        # (agents listesinde olmamali - framework kisitlamasi)
-        scrum_master_agent = Agent(
-            config=self.agents_config["scrum_master"],
-            llm=self.llm,
+    def qa_engineer(self) -> Agent:
+        return Agent(
+            config=self.agents_config["qa_engineer"],
+            llm=self.llm_qa,
             verbose=True,
-            allow_delegation=True,
+            max_iter=50,
+            tools=[
+                AzureDevOpsBrowseRepoTool(),
+                AzureDevOpsSearchCodeTool(),
+                AzureDevOpsPRChangesTool(),
+            ],
         )
+
+    def uat_specialist(self) -> Agent:
+        return Agent(
+            config=self.agents_config["uat_specialist"],
+            llm=self.llm_uat,
+            verbose=True,
+            max_iter=50,
+            tools=[
+                AzureDevOpsGetWorkItemTool(),
+                AzureDevOpsAddCommentTool(),
+                AzureDevOpsPRChangesTool(),
+            ],
+        )
+
+    def senior_developer(self) -> Agent:
+        """Plana gore kod yazan agent."""
+        return Agent(
+            config=self.agents_config["senior_developer"],
+            llm=self.llm_developer,
+            verbose=True,
+            max_iter=50,
+            tools=[
+                AzureDevOpsBrowseRepoTool(),
+                AzureDevOpsSearchCodeTool(),
+            ],
+        )
+
+    def code_reviewer(self) -> Agent:
+        """PR'i inceleyen agent."""
+        return Agent(
+            config=self.agents_config["code_reviewer"],
+            llm=self.llm_reviewer,
+            verbose=True,
+            max_iter=50,
+            tools=[
+                AzureDevOpsGetWorkItemTool(),
+                AzureDevOpsAddCommentTool(),
+                AzureDevOpsBrowseRepoTool(),
+                AzureDevOpsPRChangesTool(),
+                AzureDevOpsPRReviewTool(),
+            ],
+        )
+
+    # ── Helpers ──────────────────────────────────
+
+    def _task(self, key: str, agent: Agent, context: list[Task] | None = None, **extra) -> Task:
+        """YAML config'den Task olusturur."""
+        cfg = self.tasks_config[key]
+        return Task(
+            description=cfg["description"],
+            expected_output=cfg["expected_output"],
+            agent=agent,
+            context=context,
+            callback=self._make_task_callback(key),
+            **extra,
+        )
+
+    # ── Crew Factories ──────────────────────────────────
+
+    def create_analysis_crew(self) -> Crew:
+        """Software Architect: is kalemini oku, repo'yu incele, teknik tasarim olustur."""
+        arch = self.software_architect()
+        t1 = self._task("technical_design_task", arch)
 
         return Crew(
-            agents=self.agents,  # Sadece 5 worker agent (@agent decorated)
-            tasks=self.tasks,
-            process=Process.hierarchical,
-            manager_agent=scrum_master_agent,
+            agents=[arch],
+            tasks=[t1],
+            process=Process.sequential,
             verbose=True,
-            memory=True,
+            memory=False,
         )
+
+    def create_code_crew(self) -> Crew:
+        """Developer: tek dosya icin degisiklik uygula."""
+        dev = self.senior_developer()
+        cfg = self.tasks_config["implement_change_task"]
+        t = Task(
+            description=cfg["description"],
+            expected_output=cfg["expected_output"],
+            agent=dev,
+        )
+        return Crew(
+            agents=[dev],
+            tasks=[t],
+            process=Process.sequential,
+            verbose=True,
+            memory=False,
+        )
+
+    def create_review_crew(self) -> Crew:
+        """Reviewer: PR'i is kalemiyle karsilastir."""
+        reviewer = self.code_reviewer()
+        t1 = self._task("review_pr_task", reviewer)
+
+        return Crew(
+            agents=[reviewer],
+            tasks=[t1],
+            process=Process.sequential,
+            verbose=True,
+            memory=False,
+        )
+
+    def create_repo_discovery_crew(self) -> Crew:
+        arch = self.software_architect()
+        t1 = self._task("discover_repos_task", arch)
+        return Crew(agents=[arch], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
+
+    def create_dependency_crew(self) -> Crew:
+        arch = self.software_architect()
+        t1 = self._task("dependency_analysis_task", arch)
+        return Crew(agents=[arch], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
+
+    def create_requirements_crew(self) -> Crew:
+        ba = self.business_analyst()
+        t1 = self._task("requirements_analysis_task", ba)
+        return Crew(agents=[ba], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
+
+    def create_test_crew(self) -> Crew:
+        qa = self.qa_engineer()
+        t1 = self._task("test_planning_task", qa)
+        return Crew(agents=[qa], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
+
+    def create_uat_crew(self) -> Crew:
+        uat = self.uat_specialist()
+        t1 = self._task("uat_task", uat)
+        return Crew(agents=[uat], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
+
+    def create_completion_crew(self) -> Crew:
+        sm = self.scrum_master()
+        t1 = self._task("completion_report_task", sm)
+        return Crew(agents=[sm], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
+
+    def create_scrum_review_crew(self) -> Crew:
+        """Scrum Master: bir adimin ciktisini incele, ONAY veya IYILESTIR."""
+        sm = self.scrum_master()
+        t1 = self._task("scrum_review_task", sm)
+        return Crew(agents=[sm], tasks=[t1], process=Process.sequential, verbose=True, memory=False)

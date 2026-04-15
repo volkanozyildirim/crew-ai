@@ -4,8 +4,12 @@ version = "0.1.0"
 description = "Azure DevOps entegrasyonlu Agile SDLC ekibi - CrewAI tabanli"
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "crewai[tools]>=1.12.0",
-    "requests>=2.31.0",
+    "crewai[tools]>=1.14.0",
+    "requests>=2.33.0",
+    "fastapi>=0.135.0",
+    "uvicorn>=0.44.0",
+    "pymysql>=1.1.2",
+    "python-dotenv>=1.1.0",
 ]
 
 [project.scripts]
@@ -14,6 +18,8 @@ run_crew = "agile_sdlc_crew.main:run"
 train = "agile_sdlc_crew.main:train"
 replay = "agile_sdlc_crew.main:replay"
 test_crew = "agile_sdlc_crew.main:test"
+serve = "agile_sdlc_crew.main:serve"
+agile_sdlc_crew_server = "agile_sdlc_crew.server:main"
 
 [build-system]
 requires = ["setuptools>=75.0"]
