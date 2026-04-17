@@ -131,17 +131,21 @@ def create_branch(repo_name: str, work_item_id: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def push_file(repo_name: str, branch: str, file_path: str, content: str, message: str) -> dict:
+def push_file(repo_name: str, branch: str, file_path: str, content: str, message: str, repo_mgr=None) -> dict:
     client = AzureDevOpsClient()
     try:
-        try:
-            client.get_file_content(repo_name, file_path, branch)
-            change_type = "edit"
-        except Exception:
-            change_type = "add"
+        # Dosya varlik kontrolu: local repo varsa filesystem'den, yoksa API'den
+        if repo_mgr:
+            change_type = "edit" if repo_mgr.file_exists(repo_name, file_path, branch) else "add"
+        else:
+            try:
+                client.get_file_content(repo_name, file_path, branch)
+                change_type = "edit"
+            except Exception:
+                change_type = "add"
         changes = [{"changeType": change_type, "path": file_path, "content": content}]
         result = client.push_changes(repo_name, branch, changes, message)
-        return {"success": True, "push_id": result.get("pushId", "?"), "change_type": change_type}
+        return {"success": True, "push_id": result.get("pushId", "?"), "change_type": change_type, "file": file_path}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

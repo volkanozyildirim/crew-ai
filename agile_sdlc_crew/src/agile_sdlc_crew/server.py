@@ -75,7 +75,7 @@ import re as _re
 
 class RunRequest(BaseModel):
     work_item_id: str
-    use_hal: bool = True
+    use_hal: bool = False
 
     def validate_wi(self) -> str | None:
         """Work item ID dogrulama. Sadece rakam kabul et."""
@@ -151,6 +151,30 @@ async def get_job(job_id: int):
             if s.get(k) and isinstance(s[k], datetime):
                 s[k] = s[k].isoformat()
     return JSONResponse(job)
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job(job_id: int):
+    """Hata alan bir isi yeniden kuyruga ekle (yeni job olarak)."""
+    job = db.get_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job bulunamadi"}, status_code=404)
+    if job["status"] not in ("failed", "completed"):
+        return JSONResponse(
+            {"error": f"Sadece failed/completed isler retry edilebilir (durum: {job['status']})"},
+            status_code=409,
+        )
+    new_job_id = db.create_job(
+        job["work_item_id"],
+        bool(job.get("use_hal", False)),
+        job.get("wi_title", ""),
+    )
+    _ensure_worker()
+    return JSONResponse({
+        "job_id": new_job_id,
+        "status": "queued",
+        "message": f"Job #{job_id} → #{new_job_id} olarak kuyruga eklendi",
+    }, status_code=202)
 
 
 @app.delete("/api/jobs/{job_id}")

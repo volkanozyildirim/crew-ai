@@ -185,16 +185,46 @@ def fail_step(job_id: int, step_key: str, error: str):
         )
 
 
-def skip_steps(job_id: int, step_keys: list[str]):
-    """HAL modunda atlanan adimlari isaretle."""
+def skip_steps(job_id: int, step_keys: list[str], reason: str = "Atlandı"):
+    """Atlanan adimlari isaretle."""
     with get_conn() as conn:
         cur = conn.cursor()
         for key in step_keys:
             cur.execute(
-                "UPDATE job_steps SET status='completed', output='HAL modu - otomatik tamamlandi', "
+                "UPDATE job_steps SET status='skipped', output=%s, "
                 "finished_at=%s WHERE job_id=%s AND step_key=%s",
-                (datetime.now(), job_id, key),
+                (reason, datetime.now(), job_id, key),
             )
+
+
+def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | None:
+    """Onceki completed job'lardan step output'u getir.
+    work_item_id verilirse o WI'ye ait son completed job'dan,
+    verilmezse herhangi bir completed job'dan alir."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        if work_item_id:
+            cur.execute(
+                "SELECT js.output FROM job_steps js "
+                "JOIN jobs j ON js.job_id = j.id "
+                "WHERE js.step_key = %s AND j.work_item_id = %s "
+                "AND j.status = 'completed' AND js.status = 'completed' "
+                "AND js.output IS NOT NULL AND js.output != '' "
+                "ORDER BY js.finished_at DESC LIMIT 1",
+                (step_key, work_item_id),
+            )
+        else:
+            cur.execute(
+                "SELECT js.output FROM job_steps js "
+                "JOIN jobs j ON js.job_id = j.id "
+                "WHERE js.step_key = %s "
+                "AND j.status = 'completed' AND js.status = 'completed' "
+                "AND js.output IS NOT NULL AND js.output != '' "
+                "ORDER BY js.finished_at DESC LIMIT 1",
+                (step_key,),
+            )
+        row = cur.fetchone()
+        return row["output"] if row else None
 
 
 def get_job(job_id: int) -> dict | None:

@@ -19,7 +19,7 @@ class AddCommentInput(BaseModel):
 
 
 class AzureDevOpsAddCommentTool(BaseTool):
-    name: str = "Azure DevOps Yorum Ekleme"
+    name: str = "add_wi_comment"
     description: str = (
         "Work item'a MARKDOWN formatinda yorum ekler. "
         "Yorum icerigi HTML'e cevrilir. Baslik, liste, kod blogu desteklenir."
