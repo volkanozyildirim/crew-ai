@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agile SDLC Crew - Modern Office Dashboard</title>
+<title>Agile SDLC Crew</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -18,8 +18,6 @@
   --danger: #e17055;
   --text: #f0f0f5;
   --text-dim: #8b8fa3;
-  --working-glow: rgba(108,92,231,0.4);
-  --success-glow: rgba(0,184,148,0.3);
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family:'Inter',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; overflow-x:hidden; }
@@ -28,112 +26,89 @@ body { font-family:'Inter',sans-serif; background:var(--bg); color:var(--text); 
 header {
   background: linear-gradient(135deg, #1a1d27 0%, #242736 100%);
   border-bottom: 1px solid var(--border);
-  padding: 16px 24px;
+  padding: 14px 24px;
   display: flex; align-items: center; justify-content: space-between;
 }
 .logo { display:flex; align-items:center; gap:12px; }
 .logo-icon {
-  width:40px; height:40px; border-radius:10px;
+  width:38px; height:38px; border-radius:10px;
   background: linear-gradient(135deg, var(--accent), #e17055);
   display:flex; align-items:center; justify-content:center;
-  font-size:20px; font-weight:800; color:white;
+  font-size:18px; font-weight:800; color:white;
 }
-.logo h1 { font-size:18px; font-weight:700; letter-spacing:-0.5px; }
-.logo .sub { font-size:11px; color:var(--text-dim); font-weight:400; }
-.header-badge {
-  background:var(--accent); color:white; padding:6px 16px;
-  border-radius:20px; font-size:12px; font-weight:600;
+.logo h1 { font-size:17px; font-weight:700; letter-spacing:-0.5px; }
+.header-right { display:flex; align-items:center; gap:14px; }
+.header-time { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--text-dim); }
+.trigger-bar { display:flex; align-items:center; gap:8px; }
+.trigger-input {
+  background:var(--bg); border:1px solid var(--border); color:var(--text);
+  padding:8px 14px; border-radius:8px; font-size:14px; font-family:'Inter',sans-serif;
+  width:140px; outline:none; transition:border-color 0.2s;
 }
-.header-right { display:flex; align-items:center; gap:16px; }
-.header-time { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text-dim); }
-.settings-btn {
-  background:var(--bg-elevated); border:1px solid var(--border);
-  color:var(--text); padding:6px 14px; border-radius:8px;
-  font-size:12px; cursor:pointer; font-family:'Inter',sans-serif;
-  transition: all 0.2s;
+.trigger-input:focus { border-color:var(--accent); }
+.trigger-input::placeholder { color:var(--text-dim); }
+.hal-toggle { font-size:13px; color:var(--text-dim); display:flex; align-items:center; gap:5px; cursor:pointer; }
+.hal-toggle input { accent-color:var(--accent); width:16px; height:16px; }
+.sm-btn {
+  background:var(--accent); color:white; border:none;
+  padding:8px 20px; border-radius:8px; font-size:13px;
+  font-weight:600; cursor:pointer; font-family:'Inter',sans-serif; transition:all 0.2s;
 }
-.settings-btn:hover { border-color:var(--accent); color:var(--accent); }
+.sm-btn:hover { background:var(--accent-light); }
+.sm-btn:disabled { opacity:0.5; cursor:not-allowed; }
+.sm-btn.ghost {
+  background:var(--bg-elevated); color:var(--text-dim); border:1px solid var(--border);
+}
+.sm-btn.ghost:hover { border-color:var(--accent); color:var(--accent); }
 
-/* ── View Toggle ── */
-.view-toggle { display:flex; gap:2px; background:var(--bg); border-radius:8px; padding:2px; }
-.view-btn {
-  background:none; border:none; color:var(--text-dim); padding:5px 14px;
-  border-radius:6px; font-size:11px; font-weight:600; cursor:pointer;
-  font-family:'Inter',sans-serif; transition:all 0.2s;
-}
-.view-btn.active { background:var(--accent); color:white; }
-.view-btn:hover:not(.active) { color:var(--text); }
+/* ── Main ── */
+.main { display:grid; grid-template-columns:1fr 380px; min-height:calc(100vh - 62px); }
 
-/* ── Agile Board View ── */
-.board-view { display:none; padding:20px; overflow-y:auto; }
-.board-view.active { display:block; }
-.office-scene.hidden { display:none; }
-
-.sprint-selector {
-  display:flex; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap;
-}
+/* ── Board ── */
+.board-area { padding:20px 24px; overflow-y:auto; }
+.sprint-selector { display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
 .sprint-select {
   background:var(--bg-elevated); border:1px solid var(--border);
   color:var(--text); padding:8px 14px; border-radius:8px;
   font-size:13px; font-family:'Inter',sans-serif; outline:none;
-  min-width:250px; cursor:pointer;
+  min-width:240px; cursor:pointer;
 }
 .sprint-select:focus { border-color:var(--accent); }
-.sprint-select option { background:var(--bg-card); color:var(--text); }
-.sprint-info { font-size:11px; color:var(--text-dim); }
+.sprint-select option { background:var(--bg-card); }
+.sprint-info { font-size:12px; color:var(--text-dim); }
 .sprint-badge {
-  display:inline-block; font-size:10px; font-weight:600; padding:3px 10px;
+  display:inline-block; font-size:11px; font-weight:600; padding:3px 10px;
   border-radius:12px; margin-left:6px;
 }
 .sprint-badge.current { background:rgba(0,184,148,0.2); color:var(--success); }
 .sprint-badge.future { background:rgba(108,92,231,0.2); color:var(--accent-light); }
 .sprint-badge.past { background:rgba(139,143,163,0.15); color:var(--text-dim); }
-.sprint-summary {
-  display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;
-}
+.sprint-summary { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
 .sprint-stat {
   background:var(--bg-card); border:1px solid var(--border); border-radius:10px;
-  padding:10px 18px; text-align:center; min-width:80px;
+  padding:10px 18px; text-align:center; min-width:70px;
 }
-.sprint-stat-val { font-size:20px; font-weight:700; }
+.sprint-stat-val { font-size:22px; font-weight:700; }
 .sprint-stat-lbl { font-size:10px; color:var(--text-dim); margin-top:2px; }
-
-.kanban-board {
-  display:grid; gap:14px;
-  min-height:400px; overflow-x:auto;
-  padding-bottom:8px;
-}
-.kanban-column {
-  background:var(--bg-card); border:1px solid var(--border);
-  border-radius:12px; overflow:hidden;
-}
+.kanban-board { display:grid; gap:12px; min-height:300px; overflow-x:auto; }
+.kanban-column { background:var(--bg-card); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
 .kanban-column-header {
   padding:12px 14px; border-bottom:1px solid var(--border);
   display:flex; align-items:center; justify-content:space-between;
 }
-/* Column border colors set dynamically via inline style */
-.kanban-column-title {
-  font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px;
-}
-.kanban-column-count {
-  font-size:11px; font-weight:600; background:var(--bg-elevated);
-  padding:2px 8px; border-radius:10px; color:var(--text-dim);
-}
-.kanban-column-body {
-  padding:8px; display:flex; flex-direction:column; gap:8px;
-  max-height:calc(100vh - 320px); overflow-y:auto;
-}
+.kanban-column-title { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
+.kanban-column-count { font-size:11px; font-weight:600; background:var(--bg-elevated); padding:3px 9px; border-radius:10px; color:var(--text-dim); }
+.kanban-column-body { padding:8px; display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 280px); overflow-y:auto; }
 
-/* ── Work Item Card ── */
+/* ── WI Card ── */
 .wi-card {
   background:var(--bg-elevated); border:1px solid var(--border);
   border-radius:8px; padding:12px; transition:all 0.2s; cursor:default;
 }
-.wi-card:hover { border-color:var(--accent); transform:translateY(-1px);
-  box-shadow:0 4px 12px rgba(0,0,0,0.3); }
-.wi-card-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.wi-card:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 4px 12px rgba(0,0,0,0.3); }
+.wi-card-header { display:flex; align-items:center; gap:7px; margin-bottom:6px; }
 .wi-type-icon {
-  width:18px; height:18px; border-radius:4px; flex-shrink:0;
+  width:20px; height:20px; border-radius:4px; flex-shrink:0;
   display:flex; align-items:center; justify-content:center;
   font-size:9px; font-weight:700; color:white;
 }
@@ -142,486 +117,163 @@ header {
 .wi-type-icon.task { background:#fdcb6e; color:#2d3436; }
 .wi-type-icon.feature { background:#6c5ce7; }
 .wi-type-icon.epic { background:#e84393; }
-.wi-id { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+.wi-id { font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
 .wi-link { text-decoration:none; transition:color 0.15s; }
 .wi-link:hover { color:var(--accent-light); text-decoration:underline; }
-.wi-priority { font-size:9px; margin-left:auto; font-weight:600; }
+.wi-priority { font-size:10px; margin-left:auto; font-weight:600; }
 .wi-priority[data-p="1"] { color:#e17055; }
 .wi-priority[data-p="2"] { color:#fdcb6e; }
 .wi-priority[data-p="3"] { color:#74b9ff; }
-.wi-priority[data-p="4"] { color:var(--text-dim); }
-.wi-title { font-size:11px; font-weight:500; line-height:1.4; margin-bottom:8px; color:var(--text); }
-.wi-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px; }
-.wi-assignee {
-  font-size:10px; color:var(--text-dim); display:flex; align-items:center; gap:4px;
-}
+.wi-title { font-size:13px; font-weight:500; line-height:1.4; margin-bottom:8px; }
+.wi-footer { display:flex; align-items:center; justify-content:space-between; gap:6px; }
+.wi-assignee { font-size:11px; color:var(--text-dim); display:flex; align-items:center; gap:5px; }
 .wi-assignee-dot {
-  width:18px; height:18px; border-radius:50%; background:var(--accent);
+  width:20px; height:20px; border-radius:50%; background:var(--accent);
   display:inline-flex; align-items:center; justify-content:center;
   font-size:8px; font-weight:700; color:white; flex-shrink:0;
 }
-.wi-tags { display:flex; flex-wrap:wrap; gap:3px; }
-.wi-tag {
-  font-size:8px; padding:2px 6px; border-radius:3px;
-  background:rgba(108,92,231,0.15); color:var(--accent-light);
-}
-/* ── Seçilebilir Work Item Kartları ── */
-.wi-card.selectable { cursor:pointer; position:relative; }
-.wi-card.selectable:hover { border-color:var(--accent); }
+.wi-tags { display:flex; flex-wrap:wrap; gap:4px; }
+.wi-tag { font-size:9px; padding:2px 8px; border-radius:4px; background:rgba(108,92,231,0.15); color:var(--accent-light); }
+.wi-card.selectable { cursor:pointer; }
 .wi-card.selected { border-color:var(--accent); background:rgba(108,92,231,0.12); }
 .wi-check {
   width:16px; height:16px; border-radius:4px; border:2px solid var(--border);
   background:none; cursor:pointer; flex-shrink:0; appearance:none;
-  display:flex; align-items:center; justify-content:center;
-  transition:all 0.15s;
+  display:flex; align-items:center; justify-content:center; transition:all 0.15s;
 }
-.wi-check:checked {
-  background:var(--accent); border-color:var(--accent);
-}
-.wi-check:checked::after {
-  content:'\2713'; color:white; font-size:10px; font-weight:700;
-}
+.wi-check:checked { background:var(--accent); border-color:var(--accent); }
+.wi-check:checked::after { content:'\2713'; color:white; font-size:10px; font-weight:700; }
+.board-loading,.board-empty { text-align:center; padding:50px 20px; color:var(--text-dim); font-size:14px; }
 
-/* ── Board Action Bar ── */
+/* ── Pipeline badge on WI card ── */
+.wi-pipeline {
+  display:flex; align-items:center; gap:5px; margin-top:6px;
+  padding:5px 8px; border-radius:5px; font-size:10px;
+  background:var(--bg); border:1px solid var(--border);
+}
+.wi-pipeline.running { border-color:var(--accent); background:rgba(108,92,231,0.08); }
+.wi-pipeline.completed { border-color:var(--success); background:rgba(0,184,148,0.08); }
+.wi-pipeline.failed { border-color:var(--danger); background:rgba(225,112,85,0.08); }
+.wi-pipeline.queued { border-color:var(--warning); background:rgba(253,203,110,0.08); }
+.wi-pipeline-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.wi-pipeline-dot.running { background:var(--accent); animation:pulse 1s infinite; }
+.wi-pipeline-dot.completed { background:var(--success); }
+.wi-pipeline-dot.failed { background:var(--danger); }
+.wi-pipeline-dot.queued { background:var(--warning); }
+.wi-pipeline-label { color:var(--text-dim); }
+.wi-pipeline-step { color:var(--text); font-weight:500; }
+.wi-pipeline-pr a { color:var(--accent-light); text-decoration:none; font-weight:500; }
+.wi-pipeline-pr a:hover { text-decoration:underline; }
+
+/* ── Floating Action Bar ── */
 .board-action-bar {
-  position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(100px);
-  background:linear-gradient(135deg, #242736 0%, #1a1d27 100%);
+  position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(80px);
+  background:linear-gradient(135deg, #242736, #1a1d27);
   border:1px solid var(--border);
-  padding:12px 24px; display:flex; align-items:center; justify-content:space-between;
-  gap:16px; z-index:100; opacity:0;
-  transition:all 0.3s cubic-bezier(0.4,0,0.2,1);
-  border-radius:12px;
-  box-shadow:0 8px 32px rgba(0,0,0,0.5);
-  min-width:320px;
+  padding:12px 24px; display:flex; align-items:center; gap:16px;
+  z-index:100; opacity:0; transition:all 0.3s; border-radius:12px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.5); min-width:300px;
 }
 .board-action-bar.visible { transform:translateX(-50%) translateY(0); opacity:1; }
-.board-action-bar-info {
-  font-size:13px; font-weight:600; color:var(--text);
-  display:flex; align-items:center; gap:8px;
-}
-.board-action-bar-count {
-  background:var(--accent); color:white; padding:2px 10px;
-  border-radius:12px; font-size:12px; font-weight:700;
-}
-.board-action-bar-btns { display:flex; gap:8px; }
-.board-queue-btn {
-  background:var(--accent); color:white; border:none;
-  padding:8px 20px; border-radius:8px; font-size:12px;
-  font-weight:600; cursor:pointer; font-family:'Inter',sans-serif;
-  transition:all 0.2s; display:flex; align-items:center; gap:6px;
-}
-.board-queue-btn:hover { background:#5a4bd1; transform:translateY(-1px); }
-.board-queue-btn:disabled { opacity:0.5; cursor:not-allowed; transform:none; }
-.board-clear-btn {
-  background:var(--bg-elevated); color:var(--text-dim); border:1px solid var(--border);
-  padding:8px 14px; border-radius:8px; font-size:12px;
-  cursor:pointer; font-family:'Inter',sans-serif; transition:all 0.2s;
-}
-.board-clear-btn:hover { color:var(--text); border-color:var(--accent); }
-
-.board-loading, .board-empty {
-  text-align:center; padding:60px 20px; color:var(--text-dim); font-size:13px;
-}
-
-@media(max-width:1100px) { .kanban-board { grid-template-columns:repeat(auto-fill,minmax(200px,1fr)) !important; } }
-@media(max-width:600px) { .kanban-board { grid-template-columns:1fr !important; } }
-
-/* ── Progress ── */
-.progress-section {
-  padding:12px 24px; background:var(--bg-card);
-  border-bottom:1px solid var(--border);
-  display:flex; align-items:center; gap:20px;
-}
-.progress-bar-wrap { flex:1; }
-.progress-bar-outer {
-  background:var(--bg); height:8px; border-radius:4px; overflow:hidden;
-}
-.progress-bar-inner {
-  height:100%; border-radius:4px;
-  background:linear-gradient(90deg, var(--accent), var(--success));
-  transition: width 0.6s cubic-bezier(0.4,0,0.2,1);
-  position:relative;
-}
-.progress-bar-inner::after {
-  content:''; position:absolute; top:0;right:0;bottom:0;left:0;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,0.15),transparent);
-  animation:shimmer 2s infinite;
-}
-@keyframes shimmer { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
-.progress-label { font-size:12px; color:var(--text-dim); white-space:nowrap; }
-.progress-pct { font-size:14px; font-weight:700; color:var(--accent-light); min-width:45px; text-align:right; }
-
-/* ── Main Layout ── */
-.main { display:grid; grid-template-columns:1fr 320px; min-height:calc(100vh - 110px); }
-
-/* ── Office Scene ── */
-.office-scene {
-  padding:20px; position:relative;
-  background:
-    radial-gradient(ellipse at 50% 120%, rgba(108,92,231,0.06) 0%, transparent 60%),
-    var(--bg);
-}
-.office-scene h2 { font-size:13px; color:var(--text-dim); font-weight:600; margin-bottom:16px; text-transform:uppercase; letter-spacing:1px; }
-
-/* Office Floor */
-.office-floor {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 24px;
-  min-height: 420px;
-  position: relative;
-  overflow: hidden;
-}
-.office-floor::before {
-  content:'';position:absolute;top:0;left:0;right:0;height:3px;
-  background:linear-gradient(90deg,var(--accent),var(--success),var(--warning),var(--danger));
-  border-radius:16px 16px 0 0;
-}
-
-/* Desk Grid */
-.desk-grid {
-  display:grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-top:8px;
-}
-
-/* Agent Desk */
-.agent-desk {
-  background:var(--bg-elevated);
-  border:2px solid var(--border);
-  border-radius:12px;
-  padding:16px;
-  position:relative;
-  transition:all 0.3s cubic-bezier(0.4,0,0.2,1);
-  cursor:default;
-  min-height: 170px;
-}
-.agent-desk:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }
-.agent-desk.working {
-  border-color:var(--accent);
-  box-shadow: 0 0 20px var(--working-glow);
-  animation:desk-pulse 2s ease-in-out infinite;
-}
-.agent-desk.done { border-color:var(--success); box-shadow:0 0 15px var(--success-glow); }
-@keyframes desk-pulse {
-  0%,100%{box-shadow:0 0 15px var(--working-glow)} 50%{box-shadow:0 0 30px var(--working-glow)}
-}
-
-/* Status dot */
-.status-dot {
-  position:absolute; top:12px; right:12px;
-  width:10px; height:10px; border-radius:50%;
-  background:var(--text-dim);
-}
-.status-dot.working { background:var(--accent); animation:dot-blink 1s infinite; }
-.status-dot.done { background:var(--success); }
-@keyframes dot-blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
-
-/* Character Container */
-.char-container {
-  display:flex; align-items:center; gap:12px; margin-bottom:10px;
-}
-
-/* Character SVG */
-.char-svg { width:48px; height:56px; flex-shrink:0; }
-.char-svg.working { animation:char-bounce 0.8s ease infinite; }
-@keyframes char-bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
-.char-svg.idle { opacity:0.5; filter:grayscale(0.4); }
-.char-svg.done .checkmark-overlay { display:block; }
-
-.agent-name { font-size:12px; font-weight:700; line-height:1.3; }
-.agent-role { font-size:10px; color:var(--text-dim); margin-top:2px; }
-
-/* Speech Bubble */
-.speech-bubble {
-  background:var(--bg); border:1px solid var(--border); border-radius:8px;
-  padding:8px 10px; font-size:10px; color:var(--accent-light);
-  margin-top:8px; position:relative; display:none; line-height:1.4;
-}
-.speech-bubble::before {
-  content:''; position:absolute; top:-6px; left:16px;
-  border-left:6px solid transparent; border-right:6px solid transparent;
-  border-bottom:6px solid var(--border);
-}
-.speech-bubble.visible { display:block; }
-
-/* Status Badge */
-.agent-badge {
-  display:inline-block; font-size:9px; font-weight:600;
-  padding:3px 8px; border-radius:4px; margin-top:6px; text-transform:uppercase;
-  letter-spacing:0.5px;
-}
-.agent-badge.idle { background:rgba(139,143,163,0.15); color:var(--text-dim); }
-.agent-badge.working { background:rgba(108,92,231,0.2); color:var(--accent-light); }
-.agent-badge.done { background:rgba(0,184,148,0.2); color:var(--success); }
-
-/* ── Repo Map ── */
-.repo-map-section {
-  padding:16px 20px; border-top:1px solid var(--border);
-  background:var(--bg-card); border-radius:0 0 16px 16px;
-  margin-top:16px;
-}
-.repo-map-section h3 {
-  font-size:12px; color:var(--text-dim); font-weight:600; margin-bottom:12px;
-  text-transform:uppercase; letter-spacing:0.8px;
-}
-.repo-grid { display:flex; flex-wrap:wrap; gap:8px; }
-.repo-card {
-  background:var(--bg-elevated); border:1px solid var(--border);
-  border-radius:8px; padding:10px 12px; min-width:140px; max-width:200px;
-  transition:all 0.2s; cursor:default; flex:1;
-}
-.repo-card:hover { border-color:var(--accent); transform:translateY(-1px); }
-.repo-card.affected { border-color:var(--warning); background:rgba(253,203,110,0.06); }
-.repo-name { font-size:11px; font-weight:600; margin-bottom:4px; display:flex; align-items:center; gap:4px; }
-.repo-name .lang-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
-.repo-detail { font-size:9px; color:var(--text-dim); line-height:1.4; }
-.repo-affected-tag {
-  font-size:8px; background:rgba(253,203,110,0.2); color:var(--warning);
-  padding:2px 6px; border-radius:3px; display:inline-block; margin-top:4px;
-  font-weight:600; text-transform:uppercase;
-}
-.repo-deps {
-  margin-top:10px; display:flex; flex-wrap:wrap; gap:4px;
-}
-.dep-arrow {
-  font-size:9px; color:var(--text-dim); background:var(--bg);
-  padding:2px 8px; border-radius:4px; border:1px solid var(--border);
-  white-space:nowrap;
-}
+.bar-info { font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px; }
+.bar-count { background:var(--accent); color:white; padding:3px 10px; border-radius:10px; font-size:12px; font-weight:700; }
 
 /* ── Right Panel ── */
 .right-panel {
-  background:var(--bg-card); border-left:1px solid var(--border);
-  display:flex; flex-direction:column; overflow:hidden;
+  border-left:1px solid var(--border); background:var(--bg-card);
+  display:flex; flex-direction:column; overflow-y:auto;
 }
-
-/* Board Section */
-.board-section { padding:16px; flex:1; overflow-y:auto; }
-.board-section h3 {
-  font-size:12px; color:var(--text-dim); font-weight:600; margin-bottom:12px;
-  text-transform:uppercase; letter-spacing:0.8px;
-}
-
-/* Task List */
-.task-list { display:flex; flex-direction:column; gap:6px; }
-.task-item {
-  display:flex; align-items:center; gap:10px;
-  padding:10px 12px; border-radius:8px;
-  background:var(--bg-elevated); border:1px solid transparent;
-  transition:all 0.2s;
-}
-.task-item.in_progress { border-color:var(--accent); background:rgba(108,92,231,0.08); }
-.task-item.completed { opacity:0.6; }
-
-.task-icon {
-  width:22px; height:22px; border-radius:6px; flex-shrink:0;
-  display:flex; align-items:center; justify-content:center; font-size:11px;
-}
-.task-icon.pending { background:rgba(139,143,163,0.15); color:var(--text-dim); }
-.task-icon.in_progress { background:var(--accent); color:white; }
-.task-icon.completed { background:var(--success); color:white; }
-
-.task-info { flex:1; min-width:0; }
-.task-title { font-size:11px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.task-agent { font-size:9px; color:var(--text-dim); margin-top:2px; }
-
-/* Queue Section */
-.queue-section {
-  padding:12px 16px; border-bottom:1px solid var(--border);
-  max-height:200px; overflow-y:auto;
-}
-.queue-section h3 {
-  font-size:12px; color:var(--text-dim); font-weight:600; margin-bottom:8px;
-  text-transform:uppercase; letter-spacing:0.8px;
-}
-.job-list { display:flex; flex-direction:column; gap:4px; }
-.job-item {
-  display:flex; align-items:center; gap:8px;
-  padding:6px 10px; border-radius:6px;
-  background:var(--bg-elevated); border:1px solid transparent;
-  font-size:11px; cursor:pointer; transition:all 0.2s;
-}
-.job-item:hover { border-color:var(--accent); }
-.job-item.running { border-color:var(--accent); background:rgba(108,92,231,0.08); }
-.job-item.completed { opacity:0.6; }
-.job-item.failed { border-color:var(--danger); opacity:0.7; }
-.job-item.queued { border-color:var(--warning); border-style:dashed; }
-.job-delete-btn {
-  background:none; border:none; color:var(--text-dim); font-size:14px;
-  cursor:pointer; padding:0 4px; line-height:1; flex-shrink:0;
-  opacity:0; transition:opacity 0.15s;
-}
-.job-item:hover .job-delete-btn { opacity:1; }
-.job-delete-btn:hover { color:var(--danger); }
-.job-dot {
-  width:8px; height:8px; border-radius:50%; flex-shrink:0;
-}
-.job-dot.queued { background:var(--warning); }
-.job-dot.running { background:var(--accent); animation:dot-blink 1s infinite; }
-.job-dot.completed { background:var(--success); }
-.job-dot.failed { background:var(--danger); }
-.job-wi { font-weight:600; min-width:55px; }
-.job-title { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-dim); }
-.job-step { font-size:9px; color:var(--accent-light); }
-
-/* Log Section */
-.log-section {
-  border-top:1px solid var(--border); padding:12px 16px;
-  max-height:200px; overflow-y:auto;
-}
-.log-section h3 {
-  font-size:11px; color:var(--text-dim); font-weight:600;
-  margin-bottom:8px; text-transform:uppercase; letter-spacing:0.8px;
-}
-.log-entry {
-  font-family:'JetBrains Mono',monospace; font-size:10px;
-  padding:3px 0; color:var(--text-dim); border-bottom:1px solid rgba(46,50,71,0.5);
-}
-.log-time { color:var(--success); margin-right:8px; }
-.log-msg { color:var(--text); }
-
-/* ── Job Detail Panel ── */
-.job-detail-panel { display:none; flex-direction:column; flex:1; overflow:hidden; }
-.job-detail-panel.open { display:flex; }
-.board-section.hidden-by-detail { display:none; }
-
-.job-detail-header {
-  padding:12px 16px; border-bottom:1px solid var(--border);
+.panel-header {
+  font-size:13px; font-weight:700; padding:14px 18px;
+  border-bottom:1px solid var(--border);
   display:flex; align-items:center; justify-content:space-between;
 }
-.job-detail-header h3 {
-  font-size:12px; font-weight:700; color:var(--text); margin:0;
+.panel-header .badge {
+  font-size:11px; font-weight:600; padding:3px 10px; border-radius:10px;
+  background:var(--bg-elevated); color:var(--text-dim);
+}
+
+/* ── Job List ── */
+.job-list { padding:8px 12px; }
+.job-item {
   display:flex; align-items:center; gap:8px;
+  padding:10px 10px; border-radius:8px; font-size:13px;
+  transition:all 0.2s; cursor:pointer; position:relative;
 }
-.job-detail-close {
-  background:none; border:1px solid var(--border); color:var(--text-dim);
-  padding:4px 10px; border-radius:6px; font-size:10px; cursor:pointer;
-  font-family:'Inter',sans-serif; transition:all 0.15s;
-}
-.job-detail-close:hover { border-color:var(--accent); color:var(--text); }
+.job-item:hover { background:var(--bg-elevated); }
+.job-item:hover .job-del, .job-item:hover .job-retry { opacity:1; }
+.job-item+.job-item { border-top:1px solid var(--border); }
+.jdot { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+.jdot.queued { background:var(--warning); }
+.jdot.running { background:var(--accent); animation:pulse 1s infinite; }
+.jdot.completed { background:var(--success); }
+.jdot.failed { background:var(--danger); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.jwi { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--accent-light); }
+.jtitle { flex:1; font-size:12px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.jstep { font-size:10px; color:var(--text-dim); background:var(--bg); padding:2px 8px; border-radius:4px; }
+.jmeta { font-size:10px; color:var(--text-dim); }
+.job-del { opacity:0; background:none; border:none; color:var(--danger); cursor:pointer; font-size:16px; padding:0 4px; }
+.job-retry { opacity:0; background:none; border:none; color:var(--accent-light); cursor:pointer; font-size:13px; padding:0 4px; transition:opacity 0.15s; }
+.job-retry:hover { color:var(--accent); }
 
-.job-meta {
-  padding:10px 16px; display:flex; flex-wrap:wrap; gap:8px;
-  border-bottom:1px solid var(--border); font-size:10px;
+/* ── Job Detail (replaces job list when open) ── */
+.job-detail { display:none; flex-direction:column; }
+.job-detail.open { display:flex; }
+.detail-header {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:14px 18px; border-bottom:1px solid var(--border);
 }
-.job-meta-tag {
-  background:var(--bg-elevated); padding:3px 10px; border-radius:6px;
-  color:var(--text-dim); display:flex; align-items:center; gap:4px;
+.detail-header h3 { font-size:13px; font-weight:700; }
+.detail-close { background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:13px; font-family:'Inter',sans-serif; }
+.detail-close:hover { color:var(--danger); }
+.detail-meta { padding:10px 18px; display:flex; flex-wrap:wrap; gap:8px; border-bottom:1px solid var(--border); }
+.meta-tag { font-size:11px; background:var(--bg-elevated); padding:4px 10px; border-radius:6px; color:var(--text-dim); }
+.meta-tag a { color:var(--accent-light); text-decoration:none; }
+.meta-tag a:hover { text-decoration:underline; }
+.step-list { padding:8px 18px; overflow-y:auto; flex:1; }
+.step-row {
+  display:flex; align-items:center; gap:8px; padding:8px 0;
+  border-bottom:1px solid var(--border); cursor:pointer;
 }
-.job-meta-tag a { color:var(--accent-light); text-decoration:none; }
-.job-meta-tag a:hover { text-decoration:underline; }
+.step-row:last-child { border:none; }
+.step-row:hover { opacity:0.85; }
+.si { font-size:13px; width:18px; text-align:center; flex-shrink:0; }
+.si.completed { color:var(--success); }
+.si.running { color:var(--accent); animation:pulse 1s infinite; }
+.si.failed { color:var(--danger); }
+.si.pending,.si.skipped { color:var(--text-dim); }
+.sn { font-size:12px; font-weight:500; flex:1; }
+.sa { font-size:10px; color:var(--text-dim); }
+.sd { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+.st { font-size:9px; color:var(--text-dim); transition:transform 0.2s; }
+.st.open { transform:rotate(90deg); }
+.step-out { display:none; padding:4px 0 8px 26px; }
+.step-out.open { display:block; }
+.step-out pre {
+  font-family:'JetBrains Mono',monospace; font-size:11px;
+  background:var(--bg); padding:10px; border-radius:6px;
+  max-height:220px; overflow-y:auto; white-space:pre-wrap; word-break:break-all;
+  color:var(--text-dim); line-height:1.5; margin:0;
+}
+.step-out pre.err { color:var(--danger); }
 
-.step-list { flex:1; overflow-y:auto; padding:8px 12px; }
+/* ── Activity Log ── */
+.log-area { border-top:1px solid var(--border); }
+#logContainer {
+  padding:8px 18px; max-height:180px; overflow-y:auto;
+  font-family:'JetBrains Mono',monospace; font-size:11px;
+}
+.log-entry { padding:2px 0; }
+.log-time { color:var(--success); margin-right:6px; }
+.log-msg { color:var(--text-dim); }
 
-.step-item {
-  border-radius:8px; margin-bottom:4px; overflow:hidden;
-  border:1px solid transparent; transition:all 0.15s;
-}
-.step-item-row {
-  display:flex; align-items:center; gap:8px;
-  padding:8px 10px; cursor:pointer; transition:background 0.15s;
-}
-.step-item-row:hover { background:rgba(255,255,255,0.03); }
-.step-icon {
-  width:18px; height:18px; border-radius:5px; flex-shrink:0;
-  display:flex; align-items:center; justify-content:center;
-  font-size:10px; font-weight:700;
-}
-.step-icon.completed { background:var(--success); color:white; }
-.step-icon.running { background:var(--accent); color:white; animation:dot-blink 1s infinite; }
-.step-icon.failed { background:var(--danger); color:white; }
-.step-icon.pending { background:rgba(139,143,163,0.15); color:var(--text-dim); }
-.step-icon.skipped { background:rgba(139,143,163,0.1); color:var(--text-dim); }
-.step-name { font-size:11px; font-weight:500; flex:1; }
-.step-agent { font-size:9px; color:var(--text-dim); }
-.step-duration {
-  font-size:9px; color:var(--text-dim); font-family:'JetBrains Mono',monospace;
-  background:var(--bg); padding:2px 6px; border-radius:4px;
-}
-.step-toggle {
-  font-size:10px; color:var(--text-dim); transition:transform 0.2s; width:14px; text-align:center;
-}
-.step-toggle.open { transform:rotate(90deg); }
-
-.step-output {
-  display:none; padding:0 10px 10px 36px;
-}
-.step-output.open { display:block; }
-.step-output-content {
-  font-family:'JetBrains Mono',monospace; font-size:10px;
-  color:var(--text-dim); line-height:1.5;
-  background:var(--bg); border-radius:6px; padding:10px 12px;
-  max-height:250px; overflow-y:auto; white-space:pre-wrap; word-break:break-word;
-}
-.step-output-content.error { color:var(--danger); border:1px solid rgba(225,112,85,0.2); }
-.step-item.failed { border-color:rgba(225,112,85,0.3); }
-
-/* ── Character Select Modal ── */
-.modal-overlay {
-  position:fixed; top:0;left:0;right:0;bottom:0;
-  background:rgba(0,0,0,0.7); backdrop-filter:blur(4px);
-  z-index:1000; display:none; align-items:center; justify-content:center;
-}
-.modal-overlay.open { display:flex; }
-.modal {
-  background:var(--bg-card); border:1px solid var(--border);
-  border-radius:16px; padding:24px; max-width:600px; width:90%;
-  max-height:80vh; overflow-y:auto;
-}
-.modal h2 { font-size:16px; margin-bottom:4px; }
-.modal .modal-sub { font-size:12px; color:var(--text-dim); margin-bottom:20px; }
-.modal-close {
-  position:absolute; top:16px; right:16px; background:none; border:none;
-  color:var(--text-dim); font-size:20px; cursor:pointer;
-}
-.char-grid {
-  display:grid; grid-template-columns:repeat(4,1fr); gap:12px;
-}
-.char-option {
-  background:var(--bg-elevated); border:2px solid var(--border);
-  border-radius:12px; padding:12px; text-align:center; cursor:pointer;
-  transition:all 0.2s;
-}
-.char-option:hover { border-color:var(--accent); transform:scale(1.05); }
-.char-option.selected { border-color:var(--accent); background:rgba(108,92,231,0.15); }
-.char-option svg { width:48px; height:48px; margin:0 auto 8px; display:block; }
-.char-option-name { font-size:10px; font-weight:600; }
-
-/* Trigger Bar */
-.trigger-bar {
-  display:flex; align-items:center; gap:8px;
-}
-.trigger-input {
-  background:var(--bg-elevated); border:1px solid var(--border);
-  color:var(--text); padding:6px 12px; border-radius:8px;
-  font-size:12px; font-family:'Inter',sans-serif; width:130px;
-  outline:none; transition:border-color 0.2s;
-}
-.trigger-input:focus { border-color:var(--accent); }
-.trigger-input::placeholder { color:var(--text-dim); }
-.hal-toggle {
-  font-size:11px; color:var(--text-dim); display:flex; align-items:center; gap:4px; cursor:pointer;
-}
-.hal-toggle input { accent-color:var(--accent); }
-.trigger-btn {
-  background:var(--accent); color:white; border:none;
-  padding:6px 16px; border-radius:8px; font-size:12px;
-  font-weight:600; cursor:pointer; font-family:'Inter',sans-serif;
-  transition:all 0.2s;
-}
-.trigger-btn:hover { background:var(--accent-light); }
-.trigger-btn:disabled { opacity:0.5; cursor:not-allowed; }
+.hidden { display:none !important; }
 
 /* Responsive */
-@media(max-width:900px) {
-  .main{grid-template-columns:1fr}
-  .right-panel{border-left:none;border-top:1px solid var(--border)}
-  .desk-grid{grid-template-columns:repeat(2,1fr)}
-}
-@media(max-width:500px) { .desk-grid{grid-template-columns:1fr} }
+@media(max-width:900px) { .main{grid-template-columns:1fr} .right-panel{border-left:none;border-top:1px solid var(--border)} }
+@media(max-width:1100px) { .kanban-board{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))!important} }
+@media(max-width:600px) { .kanban-board{grid-template-columns:1fr!important} }
 </style>
 </head>
 <body>
@@ -629,97 +281,58 @@ header {
 <header>
   <div class="logo">
     <div class="logo-icon">A</div>
-    <div>
-      <h1>Agile SDLC Crew</h1>
-      <div class="sub">Modern Office Sprint Dashboard</div>
-    </div>
+    <h1>Agile SDLC Crew</h1>
   </div>
   <div class="header-right">
-    <span class="header-badge" id="workItemBadge">WI #---</span>
     <div class="trigger-bar">
-      <input type="text" id="workItemInput" placeholder="Work Item ID" class="trigger-input" />
-      <label class="hal-toggle"><input type="checkbox" id="halMode" checked /> HAL</label>
-      <button class="trigger-btn" id="triggerBtn" onclick="triggerRun()">Başlat</button>
-      <button class="settings-btn" id="resetBtn" onclick="resetDashboard()" title="Dashboard sıfırla">Sıfırla</button>
+      <input type="text" id="wiInput" placeholder="Work Item ID" class="trigger-input" />
+      <label class="hal-toggle"><input type="checkbox" id="halMode" /> HAL</label>
+      <button class="sm-btn" onclick="triggerRun()">Başlat</button>
     </div>
-    <div class="view-toggle">
-      <button class="view-btn active" id="viewOffice" onclick="switchView('office')">Ofis</button>
-      <button class="view-btn" id="viewBoard" onclick="switchView('board')">Agile Board</button>
-    </div>
-    <span class="header-time" id="headerTime">--:--:--</span>
-    <button class="settings-btn" onclick="openCharSelect()">Karakterleri Seç</button>
+    <button class="sm-btn ghost" onclick="resetDashboard()">Sıfırla</button>
+    <span class="header-time" id="clock">--:--</span>
   </div>
 </header>
 
-<div class="progress-section">
-  <div class="progress-label" id="progressLabel">0/11 görev</div>
-  <div class="progress-bar-wrap">
-    <div class="progress-bar-outer">
-      <div class="progress-bar-inner" id="progressFill" style="width:0%"></div>
-    </div>
-  </div>
-  <div class="progress-pct" id="progressPct">0%</div>
-</div>
-
 <div class="main">
-  <!-- Office Scene -->
-  <div class="office-scene">
-    <h2>Ofis Görünümü</h2>
-    <div class="office-floor">
-      <div class="desk-grid" id="deskGrid"></div>
-    </div>
-
-    <!-- Repo Map -->
-    <div class="repo-map-section" id="repoMapSection" style="display:none">
-      <h3>Repo Haritası</h3>
-      <div class="repo-grid" id="repoGrid"></div>
-      <div class="repo-deps" id="repoDeps"></div>
-    </div>
-  </div>
-
-  <!-- Agile Board View -->
-  <div class="board-view" id="boardView">
+  <!-- Board -->
+  <div class="board-area">
     <div class="sprint-selector">
-      <label style="font-size:12px;color:var(--text-dim);font-weight:600;">TAKIM:</label>
-      <select class="sprint-select" id="teamSelect" onchange="onTeamChange()" style="min-width:220px">
-        <option value="">Takım seçin...</option>
-      </select>
-      <label style="font-size:12px;color:var(--text-dim);font-weight:600;margin-left:8px;">SPRINT:</label>
-      <select class="sprint-select" id="sprintSelect" onchange="loadSprintBoard()">
-        <option value="">Önce takım seçin...</option>
-      </select>
+      <label style="font-size:13px;color:var(--text-dim);font-weight:600;">TAKIM:</label>
+      <select class="sprint-select" id="teamSel" onchange="onTeamChange()"><option value="">Takım seçin...</option></select>
+      <label style="font-size:13px;color:var(--text-dim);font-weight:600;margin-left:4px;">SPRINT:</label>
+      <select class="sprint-select" id="sprintSel" onchange="loadBoard()"><option value="">Önce takım seçin...</option></select>
       <span class="sprint-info" id="sprintInfo"></span>
-      <button class="settings-btn" onclick="loadTeams()" title="Yenile" style="padding:6px 10px">&#8635;</button>
+      <button class="sm-btn ghost" onclick="loadTeams()" style="padding:4px 7px">&#8635;</button>
     </div>
-    <div class="sprint-summary" id="sprintSummary" style="display:none"></div>
-    <div id="kanbanContainer">
-      <div class="board-empty">Takım ve sprint seçerek Agile Board'u görüntüleyebilirsiniz.</div>
-    </div>
+    <div class="sprint-summary" id="summary" style="display:none"></div>
+    <div id="kanban"><div class="board-empty">Takım ve sprint seçerek board'u görüntüleyin.</div></div>
   </div>
 
   <!-- Right Panel -->
   <div class="right-panel">
-    <div class="queue-section">
-      <h3>İş Kuyruğu <span id="queueStats" style="font-weight:400;color:var(--text-dim)"></span></h3>
+    <!-- Jobs -->
+    <div id="jobsSection">
+      <div class="panel-header">İşler <span class="badge" id="qStats"></span></div>
       <div class="job-list" id="jobList"></div>
     </div>
-    <div class="board-section" id="boardSection">
-      <h3>Aktif İş - Sprint Board</h3>
-      <div class="task-list" id="taskList"></div>
-    </div>
 
-    <!-- Job Detail Panel (iş tıklanınca açılır) -->
-    <div class="job-detail-panel" id="jobDetailPanel">
-      <div class="job-detail-header">
-        <h3 id="jobDetailTitle">İş Detayı</h3>
-        <button class="job-detail-close" onclick="closeJobDetail()">✕ Kapat</button>
+    <!-- Job Detail (opens on click, replaces jobs) -->
+    <div class="job-detail" id="jobDetail">
+      <div class="detail-header">
+        <h3 id="detailTitle">İş Detayı</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="sm-btn" id="detailRetryBtn" onclick="retryCurrentJob()" style="display:none;padding:4px 12px;font-size:11px">↻ Tekrar Dene</button>
+          <button class="detail-close" onclick="closeDetail()">✕ Kapat</button>
+        </div>
       </div>
-      <div class="job-meta" id="jobDetailMeta"></div>
+      <div class="detail-meta" id="detailMeta"></div>
       <div class="step-list" id="stepList"></div>
     </div>
 
-    <div class="log-section">
-      <h3>Aktivite Günlüğü</h3>
+    <!-- Log -->
+    <div class="log-area">
+      <div class="panel-header">Aktivite</div>
       <div id="logContainer">
         <div class="log-entry"><span class="log-time">[--:--]</span><span class="log-msg">Bekliyor...</span></div>
       </div>
@@ -727,784 +340,275 @@ header {
   </div>
 </div>
 
-<!-- Character Select Modal -->
-<div class="modal-overlay" id="charModal">
-  <div class="modal">
-    <h2>Karakter Seçimi</h2>
-    <div class="modal-sub">Her ajan için bir karakter seçin. Seçim otomatik kaydedilir.</div>
-    <div id="charSelectContent"></div>
-    <div style="text-align:right;margin-top:16px">
-      <button class="settings-btn" onclick="closeCharSelect()" style="padding:8px 24px">Tamam</button>
-    </div>
-  </div>
-</div>
-
-<!-- Floating Action Bar (board seçim) -->
-<div class="board-action-bar" id="boardActionBar">
-  <div class="board-action-bar-info">
-    <span class="board-action-bar-count" id="selectedCount">0</span>
-    <span>iş seçildi</span>
-  </div>
-  <div class="board-action-bar-btns">
-    <button class="board-clear-btn" onclick="clearBoardSelection()">Temizle</button>
-    <button class="board-queue-btn" id="queueSelectedBtn" onclick="queueSelectedItems()">Kuyruğa Ekle ▶</button>
+<!-- Action Bar -->
+<div class="board-action-bar" id="actionBar">
+  <div class="bar-info"><span class="bar-count" id="selCount">0</span> iş seçildi</div>
+  <div style="display:flex;gap:5px">
+    <button class="sm-btn ghost" onclick="clearSel()">Temizle</button>
+    <button class="sm-btn" id="queueBtn" onclick="queueSel()">Kuyruğa Ekle ▶</button>
   </div>
 </div>
 
 <script>
-// ── Character Library ──
-const CHARACTERS = {
-  man_tie: { name:'Lider', svg:`<svg viewBox="0 0 48 56" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="mt_body" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#636e72"/><stop offset="100%" stop-color="#2d3436"/></linearGradient><filter id="mt_sh"><feDropShadow dx="1" dy="2" stdDeviation="1.5" flood-opacity="0.3"/></filter></defs><ellipse cx="24" cy="52" rx="12" ry="3" fill="#000" opacity="0.15"/><rect x="14" y="28" width="20" height="22" rx="4" fill="url(#mt_body)" filter="url(#mt_sh)"/><rect x="16" y="28" width="18" height="22" rx="3" fill="#4a5568" opacity="0.3"/><polygon points="24,30 22,38 24,48 26,38" fill="#e17055"/><circle cx="24" cy="14" r="11" fill="#f5deb3" filter="url(#mt_sh)"/><ellipse cx="24" cy="14" rx="11" ry="10.5" fill="#ffeaa7"/><circle cx="20" cy="12" r="1.5" fill="#2d3436"/><circle cx="28" cy="12" r="1.5" fill="#2d3436"/><ellipse cx="20" cy="12" rx="1.5" ry="1.3" fill="#2d3436"/><ellipse cx="28" cy="12" rx="1.5" ry="1.3" fill="#2d3436"/><path d="M21 17 Q24 20 27 17" stroke="#2d3436" stroke-width="1.3" fill="none" stroke-linecap="round"/><path d="M14 8 Q18 2 24 1 Q30 2 34 8" fill="#4a3728"/><path d="M14 8 Q18 3 24 2 Q30 3 34 8 L33 10 Q28 6 24 5 Q20 6 15 10 Z" fill="#5a4a3a"/></svg>` },
-  woman_chart: { name:'Analist', svg:`<svg viewBox="0 0 48 56" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="wc_body" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#55efc4"/><stop offset="100%" stop-color="#00b894"/></linearGradient><filter id="wc_sh"><feDropShadow dx="1" dy="2" stdDeviation="1.5" flood-opacity="0.3"/></filter></defs><ellipse cx="24" cy="52" rx="12" ry="3" fill="#000" opacity="0.15"/><rect x="14" y="28" width="20" height="22" rx="4" fill="url(#wc_body)" filter="url(#wc_sh)"/><rect x="16" y="28" width="18" height="22" rx="3" fill="rgba(255,255,255,0.15)"/><circle cx="24" cy="14" r="11" fill="#f5deb3" filter="url(#wc_sh)"/><ellipse cx="24" cy="14" rx="11" ry="10.5" fill="#ffeaa7"/><circle cx="20" cy="12" r="1.5" fill="#2d3436"/><circle cx="28" cy="12" r="1.5" fill="#2d3436"/><path d="M21.5 17 Q24 19 26.5 17" stroke="#2d3436" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M13 11 Q15 1 24 0 Q33 1 35 11" fill="#c0392b"/><path d="M13 11 Q11 20 15 22" fill="#e74c3c" opacity="0.7"/><path d="M35 11 Q37 20 33 22" fill="#e74c3c" opacity="0.7"/><rect x="36" y="34" width="8" height="6" rx="1.5" fill="#dfe6e9" filter="url(#wc_sh)"/><rect x="37.5" y="35.5" width="1.5" height="3" fill="#6c5ce7"/><rect x="39.5" y="36.5" width="1.5" height="2" fill="#e17055"/><rect x="41.5" y="35" width="1.5" height="3.5" fill="#00b894"/></svg>` },
-  woman_glasses: { name:'Mimar', svg:`<svg viewBox="0 0 48 56" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="wg_body" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#74b9ff"/><stop offset="100%" stop-color="#0984e3"/></linearGradient><filter id="wg_sh"><feDropShadow dx="1" dy="2" stdDeviation="1.5" flood-opacity="0.3"/></filter></defs><ellipse cx="24" cy="52" rx="12" ry="3" fill="#000" opacity="0.15"/><rect x="14" y="28" width="20" height="22" rx="4" fill="url(#wg_body)" filter="url(#wg_sh)"/><rect x="16" y="28" width="18" height="22" rx="3" fill="rgba(255,255,255,0.12)"/><circle cx="24" cy="14" r="11" fill="#f5deb3" filter="url(#wg_sh)"/><ellipse cx="24" cy="14" rx="11" ry="10.5" fill="#ffeaa7"/><rect x="16" y="9" width="6" height="5" rx="2.5" stroke="#555" stroke-width="1.8" fill="rgba(200,220,255,0.2)"/><rect x="26" y="9" width="6" height="5" rx="2.5" stroke="#555" stroke-width="1.8" fill="rgba(200,220,255,0.2)"/><line x1="22" y1="11.5" x2="26" y2="11.5" stroke="#555" stroke-width="1.2"/><circle cx="19" cy="11.5" r="1" fill="#2d3436"/><circle cx="29" cy="11.5" r="1" fill="#2d3436"/><path d="M21.5 17 Q24 19 26.5 17" stroke="#2d3436" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M13 9 Q17 1 24 0 Q31 1 35 9" fill="#2d3436"/><path d="M13 9 Q10 18 14 21" fill="#3d3d3d" opacity="0.6"/><path d="M35 9 Q38 18 34 21" fill="#3d3d3d" opacity="0.6"/></svg>` },
-  man_laptop: { name:'Gelistirici', svg:`<svg viewBox="0 0 48 56" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="ml_body" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e17055"/><stop offset="100%" stop-color="#d63031"/></linearGradient><filter id="ml_sh"><feDropShadow dx="1" dy="2" stdDeviation="1.5" flood-opacity="0.3"/></filter></defs><ellipse cx="24" cy="52" rx="12" ry="3" fill="#000" opacity="0.15"/><rect x="14" y="28" width="20" height="22" rx="4" fill="url(#ml_body)" filter="url(#ml_sh)"/><rect x="16" y="28" width="18" height="22" rx="3" fill="rgba(255,255,255,0.12)"/><circle cx="24" cy="14" r="11" fill="#f5deb3" filter="url(#ml_sh)"/><ellipse cx="24" cy="14" rx="11" ry="10.5" fill="#ffeaa7"/><circle cx="20" cy="12" r="1.5" fill="#2d3436"/><circle cx="28" cy="12" r="1.5" fill="#2d3436"/><path d="M21.5 17 Q24 19.5 26.5 17" stroke="#2d3436" stroke-width="1.3" fill="none" stroke-linecap="round"/><path d="M14 8 Q18 2 24 1 Q30 2 34 8" fill="#74543a"/><path d="M14 8 Q18 3 24 2 Q30 3 34 8 L33 10 Q28 6 24 5 Q20 6 15 10 Z" fill="#8B6914"/><rect x="12" y="46" width="24" height="5" rx="2" fill="#4a5568" filter="url(#ml_sh)"/><rect x="14" y="47" width="20" height="3" rx="1.5" fill="#74b9ff"/><rect x="14" y="47" width="20" height="1" rx="0.5" fill="rgba(255,255,255,0.3)"/></svg>` },
-  robot: { name:'Robot', svg:`<svg viewBox="0 0 48 56" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="rb_head" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#dfe6e9"/><stop offset="100%" stop-color="#b2bec3"/></linearGradient><linearGradient id="rb_body" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#636e72"/><stop offset="100%" stop-color="#2d3436"/></linearGradient><filter id="rb_sh"><feDropShadow dx="1" dy="2" stdDeviation="1.5" flood-opacity="0.3"/></filter></defs><ellipse cx="24" cy="52" rx="12" ry="3" fill="#000" opacity="0.15"/><rect x="14" y="30" width="20" height="18" rx="5" fill="url(#rb_body)" filter="url(#rb_sh)"/><rect x="16" y="30" width="18" height="18" rx="4" fill="rgba(255,255,255,0.08)"/><rect x="11" y="7" width="26" height="22" rx="7" fill="url(#rb_head)" filter="url(#rb_sh)"/><rect x="13" y="7" width="24" height="22" rx="6" fill="rgba(255,255,255,0.15)"/><rect x="16" y="13" width="6" height="5" rx="2.5" fill="#74b9ff"/><rect x="16" y="13" width="6" height="2" rx="1" fill="rgba(255,255,255,0.4)"/><rect x="26" y="13" width="6" height="5" rx="2.5" fill="#74b9ff"/><rect x="26" y="13" width="6" height="2" rx="1" fill="rgba(255,255,255,0.4)"/><rect x="19" y="22" width="10" height="2.5" rx="1.2" fill="#95a5a6"/><line x1="24" y1="1" x2="24" y2="7" stroke="#95a5a6" stroke-width="2.5"/><circle cx="24" cy="1" r="3" fill="#e17055"/><circle cx="24" cy="1" r="1.5" fill="#ff7675"/><circle cx="19" cy="38" r="2.5" fill="#6c5ce7"/><circle cx="24" cy="38" r="2.5" fill="#00b894"/><circle cx="29" cy="38" r="2.5" fill="#fdcb6e"/></svg>` },
-  man_coffee: { name:'Inceleyici', svg:`<svg viewBox="0 0 48 56" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="mc_body" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#a29bfe"/><stop offset="100%" stop-color="#6c5ce7"/></linearGradient><filter id="mc_sh"><feDropShadow dx="1" dy="2" stdDeviation="1.5" flood-opacity="0.3"/></filter></defs><ellipse cx="24" cy="52" rx="12" ry="3" fill="#000" opacity="0.15"/><rect x="14" y="28" width="20" height="22" rx="4" fill="url(#mc_body)" filter="url(#mc_sh)"/><rect x="16" y="28" width="18" height="22" rx="3" fill="rgba(255,255,255,0.12)"/><circle cx="24" cy="14" r="11" fill="#d5c4a1" filter="url(#mc_sh)"/><ellipse cx="24" cy="14" rx="11" ry="10.5" fill="#dfe6e9"/><circle cx="20" cy="12" r="1.5" fill="#2d3436"/><circle cx="28" cy="12" r="1.5" fill="#2d3436"/><path d="M22 17 L26 17" stroke="#2d3436" stroke-width="1.3" stroke-linecap="round"/><rect x="15" y="4" width="18" height="7" rx="3.5" fill="#2d3436" filter="url(#mc_sh)"/><rect x="16" y="4" width="16" height="6" rx="3" fill="#3d3d3d"/><rect x="38" y="36" width="7" height="9" rx="2.5" fill="#e17055" filter="url(#mc_sh)"/><rect x="39" y="37" width="5" height="7" rx="2" fill="#d63031"/><path d="M42 39 Q46 39 46 42 Q46 45 42 45" stroke="#c0392b" stroke-width="1.5" fill="none"/><path d="M40 36 Q41 33 42 36" stroke="rgba(255,255,255,0.4)" stroke-width="0.8" fill="none"/><path d="M42 35 Q43 32 44 35" stroke="rgba(255,255,255,0.3)" stroke-width="0.8" fill="none"/></svg>` },
-  woman_headset: { name:'UAT Uzmani', svg:`<svg viewBox="0 0 48 56" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="wh_body" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00cec9"/><stop offset="100%" stop-color="#00b894"/></linearGradient><filter id="wh_sh"><feDropShadow dx="1" dy="2" stdDeviation="1.5" flood-opacity="0.3"/></filter></defs><ellipse cx="24" cy="52" rx="12" ry="3" fill="#000" opacity="0.15"/><rect x="14" y="28" width="20" height="22" rx="4" fill="url(#wh_body)" filter="url(#wh_sh)"/><rect x="16" y="28" width="18" height="22" rx="3" fill="rgba(255,255,255,0.12)"/><circle cx="24" cy="14" r="11" fill="#f5deb3" filter="url(#wh_sh)"/><ellipse cx="24" cy="14" rx="11" ry="10.5" fill="#ffeaa7"/><circle cx="20" cy="12" r="1.5" fill="#2d3436"/><circle cx="28" cy="12" r="1.5" fill="#2d3436"/><path d="M21.5 17 Q24 19 26.5 17" stroke="#2d3436" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M13 11 Q15 1 24 0 Q33 1 35 11" fill="#2d3436"/><path d="M13 11 Q11 20 15 22" fill="#3d3d3d" opacity="0.6"/><path d="M35 11 Q37 20 33 22" fill="#3d3d3d" opacity="0.6"/><path d="M11 13 Q9 7 14 4" stroke="#636e72" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M37 13 Q39 7 34 4" stroke="#636e72" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="11" cy="14" r="3.5" fill="#636e72"/><circle cx="11" cy="14" r="2" fill="#4a5568"/><circle cx="37" cy="14" r="3.5" fill="#636e72"/><circle cx="37" cy="14" r="2" fill="#4a5568"/><path d="M11 17 Q9 22 13 24" stroke="#636e72" stroke-width="2" fill="none" stroke-linecap="round"/></svg>` },
-  ninja: { name:'Ninja', svg:`<svg viewBox="0 0 48 56" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="nj_body" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#4a5568"/><stop offset="100%" stop-color="#1a202c"/></linearGradient><filter id="nj_sh"><feDropShadow dx="1" dy="2" stdDeviation="1.5" flood-opacity="0.3"/></filter></defs><ellipse cx="24" cy="52" rx="12" ry="3" fill="#000" opacity="0.15"/><rect x="14" y="28" width="20" height="22" rx="4" fill="url(#nj_body)" filter="url(#nj_sh)"/><rect x="16" y="28" width="18" height="22" rx="3" fill="rgba(255,255,255,0.06)"/><circle cx="24" cy="14" r="11" fill="#1a202c" filter="url(#nj_sh)"/><ellipse cx="24" cy="14" rx="11" ry="10.5" fill="#2d3436"/><rect x="13" y="10" width="22" height="6" rx="3" fill="#4a5568"/><rect x="14" y="11" width="20" height="4" rx="2" fill="#636e72"/><circle cx="20" cy="13" r="2" fill="#fff"/><circle cx="20" cy="13" r="1" fill="#e74c3c"/><circle cx="28" cy="13" r="2" fill="#fff"/><circle cx="28" cy="13" r="1" fill="#e74c3c"/><path d="M6 34 L12 30 L12 38 Z" fill="#636e72" filter="url(#nj_sh)"/><path d="M42 34 L36 30 L36 38 Z" fill="#636e72" filter="url(#nj_sh)"/></svg>` },
-};
+const AD={scrum_master:'SM',business_analyst:'BA',software_architect:'Mimar',senior_developer:'Dev',qa_engineer:'QA',code_reviewer:'Review',uat_specialist:'UAT'};
 
-const DEFAULT_CHARS = {
-  scrum_master: 'man_tie',
-  business_analyst: 'woman_chart',
-  software_architect: 'woman_glasses',
-  senior_developer: 'man_laptop',
-  qa_engineer: 'robot',
-  code_reviewer: 'man_coffee',
-  uat_specialist: 'woman_headset',
-};
+// Clock
+setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString('tr-TR')},1000);
 
-const AGENT_DISPLAY = {
-  scrum_master:       { name:'Scrum Master',       role:'Sprint Yönetimi' },
-  business_analyst:   { name:'İş Analisti',         role:'Gereksinim Analizi' },
-  software_architect: { name:'Yazılım Mimarı',      role:'Teknik Tasarım' },
-  senior_developer:   { name:'Sr. Developer',       role:'Kod Geliştirme' },
-  qa_engineer:        { name:'QA Mühendisi',        role:'Test & Kalite' },
-  code_reviewer:      { name:'Kod İnceleyici',      role:'PR Review' },
-  uat_specialist:     { name:'UAT Uzmanı',          role:'Kabul Testi' },
-};
-
-const AGENT_ORDER = ['scrum_master','business_analyst','software_architect','senior_developer','qa_engineer','code_reviewer','uat_specialist'];
-
-// Load saved character selections
-let charSelections = JSON.parse(localStorage.getItem('agile_chars') || 'null') || {...DEFAULT_CHARS};
-
-// ── Render Functions ──
-function getCharSvg(agentKey, statusClass) {
-  const charKey = charSelections[agentKey] || DEFAULT_CHARS[agentKey];
-  const char = CHARACTERS[charKey];
-  return char ? char.svg : CHARACTERS.man_laptop.svg;
+// ── Status polling → log only ──
+async function fetchStatus(){
+  try{const r=await fetch('/api/status?t='+Date.now());if(r.ok){const d=await r.json();renderLog(d.log)}}catch(e){}
+}
+function renderLog(log){
+  const c=document.getElementById('logContainer');
+  if(!log||!log.length)return;
+  c.innerHTML=log.map(e=>`<div class="log-entry"><span class="log-time">[${e.time}]</span> <span class="log-msg">${e.message}</span></div>`).join('');
+  c.scrollTop=c.scrollHeight;
 }
 
-function renderDesks(data) {
-  const grid = document.getElementById('deskGrid');
-  let html = '';
-  for (const key of AGENT_ORDER) {
-    const agent = data?.agents?.[key];
-    const status = agent?.status || 'idle';
-    const statusClass = status === 'working' ? 'working' : (status === 'completed' ? 'done' : '');
-    const charSvgClass = status === 'working' ? 'working' : (status === 'idle' ? 'idle' : 'done');
-    const display = AGENT_DISPLAY[key];
-    const badgeLabel = {idle:'Bekliyor',working:'Çalışıyor',completed:'Tamamlandı'}[status]||status;
-    const badgeClass = status === 'working' ? 'working' : (status === 'completed' ? 'done' : 'idle');
+// ── Jobs ──
+async function fetchJobs(){
+  try{const r=await fetch('/api/jobs?t='+Date.now());if(r.ok){const jobs=await r.json();updateJobsByWi(jobs);renderJobs(jobs)}}catch(e){}
+}
+function renderJobs(jobs){
+  const list=document.getElementById('jobList'),st=document.getElementById('qStats');
+  if(!jobs||!jobs.length){list.innerHTML='<div style="font-size:10px;color:var(--text-dim);padding:8px">Kuyruk boş</div>';st.textContent='';return}
+  const run=jobs.filter(j=>j.status==='running').length,q=jobs.filter(j=>j.status==='queued').length;
+  st.textContent=run?`${run} aktif`:q?`${q} kuyrukta`:`${jobs.length} iş`;
+  list.innerHTML=jobs.slice(0,20).map(j=>{
+    let dur='';
+    if(j.started_at){const s=new Date(j.started_at),e=j.finished_at?new Date(j.finished_at):new Date(),sec=Math.floor((e-s)/1000);dur=sec>=60?Math.floor(sec/60)+'dk':sec+'sn'}
+    return `<div class="job-item" onclick="viewJob(${j.id})">
+      <div class="jdot ${j.status}"></div>
+      <span class="jwi">#${j.work_item_id}</span>
+      <span class="jtitle">${esc(j.wi_title||j.repo_name||j.status)}</span>
+      ${j.current_step?`<span class="jstep">${j.current_step.replace('_task','')}</span>`:''}
+      ${dur?`<span class="jmeta">${dur}</span>`:''}
+      ${j.pr_url?`<span class="jmeta"><a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()" style="color:var(--accent-light)">PR</a></span>`:''}
+      ${(j.status==='failed'||j.status==='completed')?`<button class="job-retry" onclick="event.stopPropagation();retryJob(${j.id})" title="Tekrar dene">↻</button>`:''}
+      <button class="job-del" onclick="event.stopPropagation();delJob(${j.id},'${j.status}')">&times;</button>
+    </div>`}).join('');
+}
+async function delJob(id,s){
+  if(!confirm(s==='running'?'Çalışan işi zorla sil?':'İşi sil?'))return;
+  await fetch('/api/jobs/'+id+(s==='running'?'?force=true':''),{method:'DELETE'});fetchJobs();
+}
+async function retryJob(id){
+  if(!confirm('Bu işi yeniden kuyruğa ekle?'))return;
+  try{
+    const r=await fetch('/api/jobs/'+id+'/retry',{method:'POST'});
+    const d=await r.json();
+    if(r.ok){fetchJobs();}
+    else{alert('Hata: '+(d.error||'Bilinmeyen'));}
+  }catch(e){alert('Bağlantı hatası: '+e.message);}
+}
 
-    html += `
-      <div class="agent-desk ${statusClass}" ondblclick="openCharSelectFor('${key}')">
-        <div class="status-dot ${statusClass}"></div>
-        <div class="char-container">
-          <div class="char-svg ${charSvgClass}">${getCharSvg(key, charSvgClass)}</div>
-          <div>
-            <div class="agent-name">${display.name}</div>
-            <div class="agent-role">${display.role}</div>
-            <div class="agent-badge ${badgeClass}">${badgeLabel}</div>
-          </div>
-        </div>
-        <div class="speech-bubble ${agent?.current_task ? 'visible' : ''}">${agent?.current_task || ''}</div>
-      </div>`;
+// ── Job Detail ──
+let _jid=null,_jpoll=null,_open={};
+function viewJob(id){
+  _jid=id;_open={};
+  document.getElementById('jobsSection').classList.add('hidden');
+  document.getElementById('jobDetail').classList.add('open');
+  refreshDetail();clearInterval(_jpoll);_jpoll=setInterval(refreshDetail,3000);
+}
+function closeDetail(){
+  _jid=null;clearInterval(_jpoll);
+  document.getElementById('jobDetail').classList.remove('open');
+  document.getElementById('jobsSection').classList.remove('hidden');
+}
+async function refreshDetail(){
+  if(!_jid)return;
+  try{const r=await fetch('/api/jobs/'+_jid+'?t='+Date.now());if(!r.ok)return;const j=await r.json();renderDetail(j);if(j.status==='completed'||j.status==='failed')clearInterval(_jpoll)}catch(e){}
+}
+function renderDetail(j){
+  const sl={queued:'Kuyrukta',running:'Çalışıyor',completed:'Tamamlandı',failed:'Başarısız'};
+  const sc={queued:'var(--warning)',running:'var(--accent)',completed:'var(--success)',failed:'var(--danger)'};
+  document.getElementById('detailTitle').innerHTML=`#${j.id} WI#${j.work_item_id} <span style="font-size:9px;padding:2px 6px;border-radius:5px;background:${sc[j.status]||'gray'}20;color:${sc[j.status]||'gray'}">${sl[j.status]||j.status}</span>`;
+
+  let m='';
+  if(j.wi_title)m+=`<div class="meta-tag" style="flex-basis:100%">${esc(j.wi_title)}</div>`;
+  if(j.started_at){const s=new Date(j.started_at),e=j.finished_at?new Date(j.finished_at):new Date(),sec=Math.floor((e-s)/1000);m+=`<div class="meta-tag">⏱ ${sec>=60?Math.floor(sec/60)+'dk '+(sec%60)+'sn':sec+'sn'}</div>`}
+  // PR URL'den repo base URL'ini cikar: .../_git/{repo}/pullrequest/X → .../_git/{repo}
+  let repoBase='';
+  if(j.pr_url){
+    const mm=j.pr_url.match(/^(.*?\/_git\/[^\/]+)/);
+    if(mm)repoBase=mm[1];
   }
-  grid.innerHTML = html;
-}
-
-function renderTasks(tasks) {
-  const list = document.getElementById('taskList');
-  if (!tasks || !tasks.length) { list.innerHTML='<div style="font-size:11px;color:var(--text-dim);padding:12px">Görev bekliyor...</div>'; return; }
-  let html = '';
-  for (const t of tasks) {
-    const icon = t.status==='completed' ? '&#10003;' : (t.status==='in_progress' ? '&#9654;' : '&#9679;');
-    const agentName = AGENT_DISPLAY[t.agent]?.name || t.agent;
-    html += `
-      <div class="task-item ${t.status}">
-        <div class="task-icon ${t.status}">${icon}</div>
-        <div class="task-info">
-          <div class="task-title">${t.name}</div>
-          <div class="task-agent">${agentName}</div>
-        </div>
-      </div>`;
+  if(j.repo_name){
+    if(repoBase)m+=`<div class="meta-tag">📦 <a href="${esc(repoBase)}" target="_blank" onclick="event.stopPropagation()">${esc(j.repo_name)}</a></div>`;
+    else m+=`<div class="meta-tag">📦 ${esc(j.repo_name)}</div>`;
   }
-  list.innerHTML = html;
-}
-
-function renderLog(log) {
-  const container = document.getElementById('logContainer');
-  if (!log || !log.length) return;
-  let html = '';
-  for (const e of log) {
-    html += `<div class="log-entry"><span class="log-time">[${e.time}]</span> <span class="log-msg">${e.message}</span></div>`;
+  if(j.branch_name){
+    if(repoBase)m+=`<div class="meta-tag">🌿 <a href="${esc(repoBase)}?version=GB${encodeURIComponent(j.branch_name)}" target="_blank" onclick="event.stopPropagation()">${esc(j.branch_name)}</a></div>`;
+    else m+=`<div class="meta-tag">🌿 ${esc(j.branch_name)}</div>`;
   }
-  container.innerHTML = html;
-  container.scrollTop = container.scrollHeight;
+  if(j.pr_url)m+=`<div class="meta-tag">PR <a href="${esc(j.pr_url)}" target="_blank">#${esc(j.pr_id||'')}</a></div>`;
+  if(j.error_message&&j.status==='failed')m+=`<div class="meta-tag" style="color:var(--danger);flex-basis:100%">⚠ ${esc(j.error_message)}</div>`;
+  document.getElementById('detailMeta').innerHTML=m;
+
+  // Retry butonunu failed/completed durumlarda goster
+  document.getElementById('detailRetryBtn').style.display=(j.status==='failed'||j.status==='completed')?'inline-block':'none';
+
+  const ic={completed:'✓',running:'▶',failed:'✕',pending:'●',skipped:'─'};
+  document.getElementById('stepList').innerHTML=(j.steps||[]).map(s=>{
+    const has=s.output||s.error_message,op=_open[s.id];
+    let d='';if(s.started_at){const ds=Math.floor(((s.finished_at?new Date(s.finished_at):new Date())-new Date(s.started_at))/1000);d=ds>=60?Math.floor(ds/60)+'dk '+(ds%60)+'sn':ds+'sn'}
+    return `<div>
+      <div class="step-row" onclick="toggleS(${s.id})">
+        <div class="si ${s.status}">${ic[s.status]||'●'}</div>
+        <span class="sn">${esc(s.step_name)}</span>
+        <span class="sa">${esc(s.agent||'')}</span>
+        ${d?`<span class="sd">${d}</span>`:''}
+        ${has?`<span class="st ${op?'open':''}">▶</span>`:''}
+      </div>
+      ${has?`<div class="step-out ${op?'open':''}">
+        ${s.output?`<pre>${esc(s.output)}</pre>`:''}
+        ${s.error_message?`<pre class="err">${esc(s.error_message)}</pre>`:''}
+      </div>`:''}
+    </div>`}).join('');
+}
+function toggleS(id){_open[id]=!_open[id];refreshDetail()}
+async function retryCurrentJob(){
+  if(!_jid)return;
+  if(!confirm('Bu işi yeniden kuyruğa ekle?'))return;
+  try{
+    const r=await fetch('/api/jobs/'+_jid+'/retry',{method:'POST'});
+    const d=await r.json();
+    if(r.ok){closeDetail();fetchJobs();}
+    else{alert('Hata: '+(d.error||'Bilinmeyen'));}
+  }catch(e){alert('Bağlantı hatası: '+e.message);}
 }
 
-// Language color mapping
-const LANG_COLORS = {
-  'C#':     '#178600', 'csharp': '#178600', '.NET': '#178600',
-  'Java':   '#b07219', 'Kotlin': '#A97BFF',
-  'Python': '#3572A5', 'Flask':  '#3572A5', 'Django': '#3572A5',
-  'JavaScript': '#f1e05a', 'TypeScript': '#3178c6', 'React': '#61dafb',
-  'Go':     '#00ADD8', 'Rust':   '#dea584', 'Ruby':  '#701516',
-  'PHP':    '#4F5D95', 'Swift':  '#F05138', 'Dart':  '#00B4AB',
-  'SQL':    '#e38c00', 'Shell':  '#89e051', 'Docker': '#384d54',
-  'unknown':'#636e72',
-};
-
-function renderRepoMap(repoMap) {
-  const section = document.getElementById('repoMapSection');
-  const grid = document.getElementById('repoGrid');
-  const deps = document.getElementById('repoDeps');
-
-  if (!repoMap || (!repoMap.repos && !repoMap.dependencies)) {
-    section.style.display = 'none';
-    return;
-  }
-
-  section.style.display = 'block';
-  let html = '';
-
-  if (repoMap.repos) {
-    for (const repo of repoMap.repos) {
-      const langColor = LANG_COLORS[repo.language] || LANG_COLORS.unknown;
-      const isAffected = repo.affected ? 'affected' : '';
-      html += `
-        <div class="repo-card ${isAffected}">
-          <div class="repo-name">
-            <span class="lang-dot" style="background:${langColor}"></span>
-            ${repo.name || '?'}
-          </div>
-          <div class="repo-detail">
-            ${repo.language || '?'} ${repo.framework ? '/ '+repo.framework : ''}
-            <br>${repo.purpose || ''}
-          </div>
-          ${repo.affected ? '<div class="repo-affected-tag">Etkileniyor</div>' : ''}
-        </div>`;
-    }
-  }
-  grid.innerHTML = html;
-
-  // Dependencies
-  let depHtml = '';
-  if (repoMap.dependencies) {
-    for (const dep of repoMap.dependencies) {
-      depHtml += `<span class="dep-arrow">${dep.from} → ${dep.to} (${dep.type || 'api'})</span>`;
-    }
-  }
-  deps.innerHTML = depHtml;
+// ── Trigger ──
+async function triggerRun(){
+  const wi=document.getElementById('wiInput').value.trim();
+  if(!wi){alert('Work Item ID giriniz.');return}
+  try{
+    const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:wi,use_hal:document.getElementById('halMode').checked})});
+    const d=await r.json();if(d.status==='queued'){document.getElementById('wiInput').value='';fetchJobs()}
+  }catch(e){alert('Hata: '+e.message)}
+}
+async function resetDashboard(){
+  if(!confirm('Sıfırlansın mı?'))return;
+  try{await fetch('/api/reset',{method:'POST'});fetchStatus()}catch(e){}
 }
 
-function updateDashboard(data) {
-  document.getElementById('workItemBadge').textContent = `WI #${data.work_item_id||'---'}`;
-  const p = data.progress || {completed:0,total:11};
-  const pct = Math.round((p.completed/p.total)*100);
-  document.getElementById('progressFill').style.width = pct+'%';
-  document.getElementById('progressLabel').textContent = `${p.completed}/${p.total} görev`;
-  document.getElementById('progressPct').textContent = pct+'%';
-  renderDesks(data);
-  renderTasks(data.tasks);
-  renderLog(data.log);
-  renderRepoMap(data.repo_map);
-}
+setInterval(fetchStatus,2000);setInterval(fetchJobs,3000);fetchStatus();fetchJobs();
 
-// ── Character Selection ──
-let selectingFor = null;
-
-function openCharSelect() {
-  const content = document.getElementById('charSelectContent');
-  let html = '';
-  for (const agentKey of AGENT_ORDER) {
-    const display = AGENT_DISPLAY[agentKey];
-    html += `<div style="margin-bottom:16px">
-      <div style="font-size:12px;font-weight:600;margin-bottom:8px">${display.name} <span style="color:var(--text-dim);font-weight:400">${display.role}</span></div>
-      <div class="char-grid">`;
-    for (const [charKey, char] of Object.entries(CHARACTERS)) {
-      const selected = charSelections[agentKey] === charKey ? 'selected' : '';
-      html += `<div class="char-option ${selected}" onclick="selectChar('${agentKey}','${charKey}',this)">
-        ${char.svg}
-        <div class="char-option-name">${char.name}</div>
-      </div>`;
-    }
-    html += `</div></div>`;
-  }
-  content.innerHTML = html;
-  document.getElementById('charModal').classList.add('open');
-}
-
-function openCharSelectFor(agentKey) {
-  selectingFor = agentKey;
-  openCharSelect();
-}
-
-function closeCharSelect() {
-  document.getElementById('charModal').classList.remove('open');
-  selectingFor = null;
-  renderDesks(lastData);
-}
-
-function selectChar(agentKey, charKey, el) {
-  charSelections[agentKey] = charKey;
-  localStorage.setItem('agile_chars', JSON.stringify(charSelections));
-  // Update UI
-  const parent = el.closest('.char-grid');
-  parent.querySelectorAll('.char-option').forEach(o => o.classList.remove('selected'));
-  el.classList.add('selected');
-}
-
-// ── Clock ──
-function updateClock() {
-  const now = new Date();
-  document.getElementById('headerTime').textContent = now.toLocaleTimeString('tr-TR');
-}
-setInterval(updateClock, 1000);
-updateClock();
-
-// ── Polling ──
-let lastData = {agents:{},tasks:[],progress:{completed:0,total:11},log:[],repo_map:null};
-
-// Initialize with default empty state
-renderDesks(lastData);
-
-// ── Job Queue ──
-async function fetchJobs() {
-  try {
-    const r = await fetch('/api/jobs?t='+Date.now());
-    if (r.ok) {
-      const jobs = await r.json();
-      renderJobs(jobs);
-    }
-  } catch(e) {}
-}
-
-function renderJobs(jobs) {
-  const list = document.getElementById('jobList');
-  const stats = document.getElementById('queueStats');
-  if (!jobs || !jobs.length) {
-    list.innerHTML='<div style="font-size:10px;color:var(--text-dim);padding:4px">Kuyruk boş</div>';
-    stats.textContent = '';
-    return;
-  }
-  const running = jobs.filter(j=>j.status==='running').length;
-  const queued = jobs.filter(j=>j.status==='queued').length;
-  stats.textContent = running ? `(${running} aktif, ${queued} kuyrukta)` : queued ? `(${queued} kuyrukta)` : '';
-
-  let html = '';
-  for (const j of jobs.slice(0, 20)) {
-    const step = j.current_step || '';
-    const title = j.wi_title || '';
-    html += `
-      <div class="job-item ${j.status}" title="${title}">
-        <div class="job-dot ${j.status}"></div>
-        <div class="job-wi" onclick="viewJob(${j.id})">#${j.work_item_id}</div>
-        <div class="job-title" onclick="viewJob(${j.id})">${title || j.status}</div>
-        ${step ? `<div class="job-step">${step}</div>` : ''}
-        <button class="job-delete-btn" onclick="event.stopPropagation();deleteJob(${j.id},'${j.status}')" title="Sil">&times;</button>
-      </div>`;
-  }
-  list.innerHTML = html;
-}
-
-async function deleteJob(jobId, status) {
-  const isRunning = status === 'running';
-  const msg = isRunning
-    ? 'Bu iş çalışıyor olarak görünüyor ama takılmış olabilir. Zorla silmek istiyor musunuz?'
-    : 'Bu işi silmek istediğinize emin misiniz?';
-  if (!confirm(msg)) return;
-  try {
-    const url = '/api/jobs/' + jobId + (isRunning ? '?force=true' : '');
-    const r = await fetch(url, {method: 'DELETE'});
-    const data = await r.json();
-    if (!r.ok) alert(data.error || 'Silme hatası');
-    fetchJobs();
-  } catch (e) {
-    alert('Bağlantı hatası: ' + e.message);
+// ── Pipeline → Board eşleştirme ──
+let _jobsByWi={};  // work_item_id → job bilgisi
+function updateJobsByWi(jobs){
+  _jobsByWi={};
+  if(!jobs)return;
+  for(const j of jobs){
+    const wi=String(j.work_item_id);
+    // Her WI icin en guncel job'u tut
+    if(!_jobsByWi[wi]||j.id>_jobsByWi[wi].id) _jobsByWi[wi]=j;
   }
 }
-
-// ── Job Detail Panel ──
-let _activeJobId = null;
-let _jobPollTimer = null;
-let _openSteps = {};
-
-async function viewJob(jobId) {
-  _activeJobId = jobId;
-  _openSteps = {};
-  document.getElementById('boardSection').classList.add('hidden-by-detail');
-  document.getElementById('jobDetailPanel').classList.add('open');
-  await refreshJobDetail();
-  // Canlı güncelleme başlat
-  clearInterval(_jobPollTimer);
-  _jobPollTimer = setInterval(refreshJobDetail, 3000);
-}
-
-function closeJobDetail() {
-  _activeJobId = null;
-  clearInterval(_jobPollTimer);
-  document.getElementById('jobDetailPanel').classList.remove('open');
-  document.getElementById('boardSection').classList.remove('hidden-by-detail');
-}
-
-async function refreshJobDetail() {
-  if (!_activeJobId) return;
-  try {
-    const r = await fetch('/api/jobs/' + _activeJobId + '?t=' + Date.now());
-    if (!r.ok) return;
-    const job = await r.json();
-    renderJobDetail(job);
-    // İş bittiyse poll'u durdur
-    if (job.status === 'completed' || job.status === 'failed') {
-      clearInterval(_jobPollTimer);
-    }
-  } catch(e) {}
-}
-
-function renderJobDetail(job) {
-  // Başlık
-  const statusLabels = {queued:'Kuyrukta', running:'Çalışıyor', completed:'Tamamlandı', failed:'Başarısız'};
-  const statusColors = {queued:'var(--warning)', running:'var(--accent-light)', completed:'var(--success)', failed:'var(--danger)'};
-  document.getElementById('jobDetailTitle').innerHTML =
-    'İş #' + job.id + ' <span style="color:var(--text-dim)">WI #' + job.work_item_id + '</span> ' +
-    '<span style="font-size:10px;padding:2px 8px;border-radius:8px;background:' +
-    (statusColors[job.status]||'var(--text-dim)') + '20;color:' +
-    (statusColors[job.status]||'var(--text-dim)') + '">' +
-    (statusLabels[job.status]||job.status) + '</span>';
-
-  // Meta bilgi
-  const meta = document.getElementById('jobDetailMeta');
-  let metaHtml = '';
-  if (job.wi_title) metaHtml += '<div class="job-meta-tag" style="flex-basis:100%">' + escHtml(job.wi_title) + '</div>';
-  if (job.started_at) {
-    let dur = '';
-    const start = new Date(job.started_at);
-    const end = job.finished_at ? new Date(job.finished_at) : new Date();
-    const secs = Math.floor((end - start) / 1000);
-    if (secs >= 60) dur = Math.floor(secs/60) + 'dk ' + (secs%60) + 'sn';
-    else dur = secs + 'sn';
-    metaHtml += '<div class="job-meta-tag">⏱ ' + dur + '</div>';
-  }
-  if (job.repo_name) metaHtml += '<div class="job-meta-tag">📦 ' + escHtml(job.repo_name) + '</div>';
-  if (job.branch_name) metaHtml += '<div class="job-meta-tag">🌿 ' + escHtml(job.branch_name) + '</div>';
-  if (job.pr_url) metaHtml += '<div class="job-meta-tag">PR <a href="' + escHtml(job.pr_url) + '" target="_blank" rel="noopener">#' + escHtml(job.pr_id||'') + '</a></div>';
-  if (job.error_message && job.status==='failed') metaHtml += '<div class="job-meta-tag" style="color:var(--danger);flex-basis:100%">⚠ ' + escHtml(job.error_message) + '</div>';
-  meta.innerHTML = metaHtml;
-
-  // Step listesi
-  const list = document.getElementById('stepList');
-  let html = '';
-  for (const s of (job.steps || [])) {
-    const icons = {completed:'\u2713', running:'\u25B6', failed:'\u2717', pending:'\u25CF', skipped:'\u2012'};
-    const icon = icons[s.status] || '\u25CF';
-    const hasOutput = s.output || s.error_message;
-    const isOpen = _openSteps[s.id];
-    let dur = '';
-    if (s.started_at && s.finished_at) {
-      const ds = Math.floor((new Date(s.finished_at) - new Date(s.started_at)) / 1000);
-      dur = ds >= 60 ? Math.floor(ds/60) + 'dk ' + (ds%60) + 'sn' : ds + 'sn';
-    } else if (s.started_at && s.status === 'running') {
-      const ds = Math.floor((new Date() - new Date(s.started_at)) / 1000);
-      dur = ds >= 60 ? Math.floor(ds/60) + 'dk ' + (ds%60) + 'sn' : ds + 'sn';
-    }
-
-    html += '<div class="step-item ' + s.status + '">';
-    html += '<div class="step-item-row" onclick="toggleStepOutput(' + s.id + ')">';
-    html += '<div class="step-icon ' + s.status + '">' + icon + '</div>';
-    html += '<span class="step-name">' + escHtml(s.step_name) + '</span>';
-    html += '<span class="step-agent">' + escHtml(s.agent||'') + '</span>';
-    if (dur) html += '<span class="step-duration">' + dur + '</span>';
-    if (hasOutput) html += '<span class="step-toggle ' + (isOpen?'open':'') + '">\u25B6</span>';
-    html += '</div>';
-
-    if (hasOutput) {
-      html += '<div class="step-output ' + (isOpen?'open':'') + '">';
-      if (s.output) html += '<div class="step-output-content">' + escHtml(s.output) + '</div>';
-      if (s.error_message) html += '<div class="step-output-content error" style="margin-top:6px">' + escHtml(s.error_message) + '</div>';
-      html += '</div>';
-    }
-    html += '</div>';
-  }
-  list.innerHTML = html;
-}
-
-function toggleStepOutput(stepId) {
-  _openSteps[stepId] = !_openSteps[stepId];
-  // DOM'da direkt toggle (re-render yerine)
-  const items = document.querySelectorAll('.step-item');
-  for (const item of items) {
-    const row = item.querySelector('.step-item-row');
-    if (!row) continue;
-    const toggle = item.querySelector('.step-toggle');
-    const output = item.querySelector('.step-output');
-    if (!output) continue;
-    // stepId eşleşmesi onclick üzerinden geldiği için refresh'te korunur
-  }
-  // Basitçe refresh edelim ki state korunsun
-  refreshJobDetail();
-}
-
-async function fetchStatus() {
-  try {
-    const r = await fetch('/api/status?t='+Date.now());
-    if (r.ok) {
-      lastData = await r.json();
-      updateDashboard(lastData);
-    }
-  } catch(e) {
-    try {
-      const r2 = await fetch('/status.json?t='+Date.now());
-      if (r2.ok) { lastData = await r2.json(); updateDashboard(lastData); }
-    } catch(e2) {}
-  }
-}
-
-async function triggerRun() {
-  const wiId = document.getElementById('workItemInput').value.trim();
-  const useHal = document.getElementById('halMode').checked;
-  if (!wiId) { alert('Work Item ID giriniz.'); return; }
-
-  try {
-    const resp = await fetch('/api/run', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({work_item_id: wiId, use_hal: useHal}),
-    });
-    const data = await resp.json();
-    if (data.status === 'queued') {
-      document.getElementById('workItemInput').value = '';
-      fetchJobs();
-    }
-  } catch(e) {
-    alert('Bağlantı hatası: ' + e.message);
-  }
-}
-async function resetDashboard() {
-  if (!confirm('Dashboard sıfırlansın mı?')) return;
-  try {
-    await fetch('/api/reset', {method:'POST'});
-    document.getElementById('triggerBtn').disabled = false;
-    document.getElementById('triggerBtn').textContent = 'Başlat';
-    fetchStatus();
-  } catch(e) {
-    alert('Sıfırlama hatası: ' + e.message);
-  }
-}
-
-setInterval(fetchStatus, 2000);
-setInterval(fetchJobs, 3000);
-fetchStatus();
-fetchJobs();
+function getJobForWi(wiId){return _jobsByWi[String(wiId)]||null}
 
 // ── Agile Board ──
-let currentView = 'office';
-let teamsData = [];
-let sprintsData = [];
-let boardWorkItems = [];
-
-function switchView(view) {
-  currentView = view;
-  document.getElementById('viewOffice').classList.toggle('active', view === 'office');
-  document.getElementById('viewBoard').classList.toggle('active', view === 'board');
-  document.querySelector('.office-scene').classList.toggle('hidden', view === 'board');
-  document.getElementById('boardView').classList.toggle('active', view === 'board');
-  if (view === 'board' && teamsData.length === 0) loadTeams();
+let teams=[],sprints=[],items=[];
+async function loadTeams(){
+  const s=document.getElementById('teamSel');s.innerHTML='<option>Yükleniyor...</option>';
+  try{const r=await fetch('/api/teams?t='+Date.now());teams=await r.json();if(teams.error)throw new Error(teams.error);
+  s.innerHTML='<option value="">Takım seçin...</option>'+teams.map(t=>`<option value="${esc(t.name)}">${esc(t.name)}</option>`).join('');
+  // Kayitli takim varsa sec
+  const saved=localStorage.getItem('sdlc_team');
+  if(saved&&[...s.options].some(o=>o.value===saved)){s.value=saved;onTeamChange()}}
+  catch(e){s.innerHTML='<option>Yüklenemedi</option>'}
+}
+async function onTeamChange(){
+  const t=document.getElementById('teamSel').value;
+  localStorage.setItem('sdlc_team',t);
+  document.getElementById('sprintInfo').innerHTML='';document.getElementById('summary').style.display='none';
+  document.getElementById('kanban').innerHTML='<div class="board-empty">Sprint seçin...</div>';
+  if(!t){document.getElementById('sprintSel').innerHTML='<option>Önce takım seçin...</option>';return}
+  const s=document.getElementById('sprintSel');s.innerHTML='<option>Yükleniyor...</option>';
+  try{const r=await fetch('/api/sprints?team='+encodeURIComponent(t)+'&t='+Date.now());sprints=await r.json();
+  if(!sprints.length){s.innerHTML='<option>Sprint yok</option>';return}
+  const savedSp=localStorage.getItem('sdlc_sprint');
+  s.innerHTML='<option value="">Sprint seçin...</option>'+sprints.map(sp=>{
+    const sel=(savedSp&&sp.path===savedSp)?'selected':((!savedSp&&sp.timeFrame==='current')?'selected':'');
+    return `<option value="${esc(sp.path)}" ${sel}>${esc(sp.name)}${sp.timeFrame==='current'?' ● Aktif':''}</option>`;
+  }).join('');
+  if(s.value)loadBoard()}catch(e){s.innerHTML='<option>Hata</option>'}
+}
+async function loadBoard(){
+  const p=document.getElementById('sprintSel').value,c=document.getElementById('kanban'),info=document.getElementById('sprintInfo'),sum=document.getElementById('summary');
+  localStorage.setItem('sdlc_sprint',p);
+  if(!p){c.innerHTML='<div class="board-empty">Sprint seçin...</div>';info.innerHTML='';sum.style.display='none';return}
+  const sp=sprints.find(s=>s.path===p);
+  if(sp){const sd=sp.startDate?new Date(sp.startDate).toLocaleDateString('tr-TR'):'?',ed=sp.finishDate?new Date(sp.finishDate).toLocaleDateString('tr-TR'):'?',tf=sp.timeFrame||'past';
+  info.innerHTML=`${sd} - ${ed} <span class="sprint-badge ${tf}">${{current:'Aktif',future:'Gelecek',past:'Geçmiş'}[tf]||''}</span>`}
+  c.innerHTML='<div class="board-loading">Yükleniyor...</div>';
+  try{const r=await fetch('/api/board/workitems?iteration_path='+encodeURIComponent(p)+'&t='+Date.now());items=await r.json();if(items.error)throw new Error(items.error);
+  // Summary
+  const bs={};for(const i of items)bs[i.state]=(bs[i.state]||0)+1;
+  const sts=Object.keys(bs).sort((a,b)=>so(a)-so(b));
+  sum.innerHTML=`<div class="sprint-stat"><div class="sprint-stat-val">${items.length}</div><div class="sprint-stat-lbl">Toplam</div></div>`+sts.map(s=>`<div class="sprint-stat"><div class="sprint-stat-val" style="color:${sc(s)}">${bs[s]}</div><div class="sprint-stat-lbl">${esc(s)}</div></div>`).join('');
+  sum.style.display='flex';
+  // Kanban
+  const gr={};for(const i of items){if(!gr[i.state])gr[i.state]=[];gr[i.state].push(i)}
+  const cols=Object.keys(gr).sort((a,b)=>so(a)-so(b));
+  c.innerHTML=`<div class="kanban-board" style="grid-template-columns:repeat(${cols.length},minmax(210px,1fr))">`+cols.map(s=>`<div class="kanban-column"><div class="kanban-column-header" style="border-top:3px solid ${sc(s)}"><span class="kanban-column-title">${esc(s)}</span><span class="kanban-column-count">${gr[s].length}</span></div><div class="kanban-column-body">${gr[s].map(wiCard).join('')}</div></div>`).join('')+'</div>';
+  }catch(e){c.innerHTML=`<div class="board-empty">Hata: ${esc(e.message)}</div>`;sum.style.display='none'}
 }
 
-async function loadTeams() {
-  const select = document.getElementById('teamSelect');
-  select.innerHTML = '<option value="">Yükleniyor...</option>';
-  try {
-    const r = await fetch('/api/teams?t=' + Date.now());
-    if (!r.ok) throw new Error('API hatası');
-    teamsData = await r.json();
-    if (teamsData.error) throw new Error(teamsData.error);
-    let html = '<option value="">Takım seçin...</option>';
-    for (const t of teamsData) {
-      html += '<option value="' + escHtml(t.name) + '">' + escHtml(t.name) + '</option>';
-    }
-    select.innerHTML = html;
-  } catch (e) {
-    select.innerHTML = '<option value="">Takımlar yüklenemedi</option>';
-  }
+const SO=['New','Backlog','To Do','Active','Committed','In Progress','Blocked','Code Review','QA To Do','QA','Testing','UAT','Resolved','Ready for Production','Done','Closed','Canceled','Removed'];
+const SC={'New':'#6c5ce7','Backlog':'#6c5ce7','To Do':'#a29bfe','Active':'#74b9ff','Committed':'#74b9ff','In Progress':'#0984e3','Blocked':'#d63031','Code Review':'#fdcb6e','QA To Do':'#ffeaa7','QA':'#e17055','Testing':'#e17055','UAT':'#fd79a8','Resolved':'#00cec9','Ready for Production':'#55efc4','Done':'#00b894','Closed':'#00b894','Canceled':'#636e72','Removed':'#636e72'};
+function sc(s){return SC[s]||'#8b8fa3'}function so(s){const i=SO.indexOf(s);return i>=0?i:999}
+
+const QS=['New','Backlog','To Do'];
+function wiCard(it){
+  const tm={Bug:{i:'B',c:'bug'},'User Story':{i:'U',c:'userstory'},Task:{i:'T',c:'task'},Feature:{i:'F',c:'feature'},Epic:{i:'E',c:'epic'}};
+  const t=tm[it.type]||{i:'?',c:'task'};
+  const ini=it.assignedTo?it.assignedTo.split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase():'?';
+  const pl={1:'P1!!',2:'P2!',3:'P3',4:''};
+  const tags=it.tags?it.tags.split(';').map(s=>s.trim()).filter(Boolean):[];
+  const q=QS.includes(it.state);
+  return `<div class="wi-card${q?' selectable':''}" ${q?`onclick="togCard(event,${it.id})"`:''}>
+    <div class="wi-card-header">
+      ${q?`<input type="checkbox" class="wi-check" data-id="${it.id}" onchange="updSel()"/>`:''}
+      <div class="wi-type-icon ${t.c}">${t.i}</div>
+      ${it.url?`<a class="wi-id wi-link" href="${esc(it.url)}" target="_blank" onclick="event.stopPropagation()">#${it.id}</a>`:`<span class="wi-id">#${it.id}</span>`}
+      <span class="wi-priority" data-p="${it.priority}">${pl[it.priority]||''}</span>
+    </div>
+    <div class="wi-title">${esc(it.title)}</div>
+    <div class="wi-footer">
+      <div class="wi-assignee"><span class="wi-assignee-dot">${ini}</span>${esc(it.assignedTo||'—')}</div>
+      ${tags.length?`<div class="wi-tags">${tags.slice(0,2).map(t=>`<span class="wi-tag">${esc(t)}</span>`).join('')}</div>`:''}
+    </div>${wiPipelineBadge(it.id)}</div>`;
+}
+function wiPipelineBadge(wiId){
+  const j=getJobForWi(wiId);
+  if(!j)return '';
+  const sl={queued:'Kuyrukta',running:'Çalışıyor',completed:'Tamamlandı',failed:'Başarısız'};
+  const step=j.current_step?j.current_step.replace(/_task$/,'').replace(/_/g,' '):'';
+  let info=sl[j.status]||j.status;
+  if(j.status==='running'&&step)info=step;
+  let pr='';
+  if(j.pr_url)pr=`<span class="wi-pipeline-pr"><a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()">PR#${esc(j.pr_id||'')}</a></span>`;
+  return `<div class="wi-pipeline ${j.status}">
+    <span class="wi-pipeline-dot ${j.status}"></span>
+    <span class="wi-pipeline-step">${esc(info)}</span>
+    ${pr}
+  </div>`;
+}
+function togCard(e,id){if(e.target.classList.contains('wi-check'))return;const cb=e.currentTarget.querySelector('.wi-check');if(cb){cb.checked=!cb.checked;updSel()}}
+function updSel(){let n=0;document.querySelectorAll('.wi-check').forEach(cb=>{const c=cb.closest('.wi-card');if(cb.checked){n++;c.classList.add('selected')}else c.classList.remove('selected')});document.getElementById('selCount').textContent=n;document.getElementById('actionBar').classList.toggle('visible',n>0)}
+function clearSel(){document.querySelectorAll('.wi-check').forEach(cb=>{cb.checked=false;cb.closest('.wi-card').classList.remove('selected')});updSel()}
+async function queueSel(){
+  const cbs=document.querySelectorAll('.wi-check:checked');if(!cbs.length)return;
+  const btn=document.getElementById('queueBtn');btn.disabled=true;btn.textContent='Ekleniyor...';
+  const hal=document.getElementById('halMode').checked;let ok=0,fail=0;
+  for(const cb of cbs){try{const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:cb.dataset.id,use_hal:hal})});const d=await r.json();if(d.status==='queued')ok++;else fail++}catch(e){fail++}}
+  btn.disabled=false;btn.textContent='Kuyruğa Ekle ▶';clearSel();fetchJobs();if(fail)alert(`${ok} eklendi, ${fail} başarısız.`);
 }
 
-async function onTeamChange() {
-  const teamSelect = document.getElementById('teamSelect');
-  const team = teamSelect.value;
-  const sprintSelect = document.getElementById('sprintSelect');
-  document.getElementById('sprintInfo').innerHTML = '';
-  document.getElementById('sprintSummary').style.display = 'none';
-  document.getElementById('kanbanContainer').innerHTML = '<div class="board-empty">Sprint seçerek Agile Board\'u görüntüleyebilirsiniz.</div>';
-  if (!team) {
-    sprintSelect.innerHTML = '<option value="">Önce takım seçin...</option>';
-    sprintsData = [];
-    return;
-  }
-  await loadSprints(team);
-}
-
-async function loadSprints(team) {
-  const select = document.getElementById('sprintSelect');
-  select.innerHTML = '<option value="">Yükleniyor...</option>';
-  try {
-    const r = await fetch('/api/sprints?team=' + encodeURIComponent(team) + '&t=' + Date.now());
-    if (!r.ok) throw new Error('API hatası');
-    sprintsData = await r.json();
-    if (sprintsData.error) throw new Error(sprintsData.error);
-    if (sprintsData.length === 0) {
-      select.innerHTML = '<option value="">Bu takımda sprint bulunamadı</option>';
-      return;
-    }
-    let html = '<option value="">Sprint seçin...</option>';
-    for (const s of sprintsData) {
-      const tf = s.timeFrame;
-      const badge = tf === 'current' ? ' \u25CF Aktif' : tf === 'future' ? ' \u25CB Gelecek' : '';
-      const selected = tf === 'current' ? 'selected' : '';
-      html += '<option value="' + escHtml(s.path) + '" ' + selected + '>' + escHtml(s.name) + badge + '</option>';
-    }
-    select.innerHTML = html;
-    if (select.value) loadSprintBoard();
-  } catch (e) {
-    select.innerHTML = '<option value="">Sprint yüklenemedi: ' + escHtml(e.message) + '</option>';
-  }
-}
-
-async function loadSprintBoard() {
-  const select = document.getElementById('sprintSelect');
-  const iterationPath = select.value;
-  const container = document.getElementById('kanbanContainer');
-  const info = document.getElementById('sprintInfo');
-  const summary = document.getElementById('sprintSummary');
-
-  if (!iterationPath) {
-    container.innerHTML = '<div class="board-empty">Sprint seçerek Agile Board\'u görüntüleyebilirsiniz.</div>';
-    info.innerHTML = '';
-    summary.style.display = 'none';
-    return;
-  }
-
-  const sprint = sprintsData.find(s => s.path === iterationPath);
-  if (sprint) {
-    const start = sprint.startDate ? new Date(sprint.startDate).toLocaleDateString('tr-TR') : '?';
-    const end = sprint.finishDate ? new Date(sprint.finishDate).toLocaleDateString('tr-TR') : '?';
-    const tfClass = sprint.timeFrame || 'past';
-    const tfLabel = {current:'Aktif Sprint', future:'Gelecek', past:'Geçmiş'}[tfClass] || '';
-    info.innerHTML = start + ' - ' + end + ' <span class="sprint-badge ' + tfClass + '">' + tfLabel + '</span>';
-  }
-
-  container.innerHTML = '<div class="board-loading">Work item\'lar yükleniyor...</div>';
-
-  try {
-    const r = await fetch('/api/board/workitems?iteration_path=' + encodeURIComponent(iterationPath) + '&t=' + Date.now());
-    if (!r.ok) throw new Error('API hatası');
-    boardWorkItems = await r.json();
-    if (boardWorkItems.error) throw new Error(boardWorkItems.error);
-    renderBoardSummary(boardWorkItems);
-    renderKanbanBoard(boardWorkItems);
-  } catch (e) {
-    container.innerHTML = '<div class="board-empty">Work item\'lar yüklenemedi: ' + escHtml(e.message) + '</div>';
-    summary.style.display = 'none';
-  }
-}
-
-// State sıralama önceliği (board'da soldan sağa akar)
-const STATE_ORDER = [
-  'New', 'Backlog', 'To Do',
-  'Active', 'Committed', 'In Progress', 'Blocked',
-  'Code Review', 'QA To Do', 'QA', 'Testing', 'UAT', 'Resolved',
-  'Ready for Production', 'Done', 'Closed', 'Canceled', 'Removed',
-];
-
-// State renkleri
-const STATE_COLORS = {
-  'New': '#6c5ce7', 'Backlog': '#6c5ce7', 'To Do': '#a29bfe',
-  'Active': '#74b9ff', 'Committed': '#74b9ff', 'In Progress': '#0984e3', 'Blocked': '#d63031',
-  'Code Review': '#fdcb6e', 'QA To Do': '#ffeaa7', 'QA': '#e17055', 'Testing': '#e17055',
-  'UAT': '#fd79a8', 'Resolved': '#00cec9',
-  'Ready for Production': '#55efc4', 'Done': '#00b894', 'Closed': '#00b894',
-  'Canceled': '#636e72', 'Removed': '#636e72',
-};
-
-function getStateColor(state) {
-  return STATE_COLORS[state] || '#8b8fa3';
-}
-
-function getStateOrder(state) {
-  const idx = STATE_ORDER.indexOf(state);
-  return idx >= 0 ? idx : 999;
-}
-
-function renderBoardSummary(items) {
-  const summary = document.getElementById('sprintSummary');
-  const total = items.length;
-  // State bazinda say
-  const byState = {};
-  for (const item of items) byState[item.state] = (byState[item.state] || 0) + 1;
-  const states = Object.keys(byState).sort((a, b) => getStateOrder(a) - getStateOrder(b));
-
-  let html = '<div class="sprint-stat"><div class="sprint-stat-val">' + total + '</div><div class="sprint-stat-lbl">Toplam</div></div>';
-  for (const state of states) {
-    html += '<div class="sprint-stat"><div class="sprint-stat-val" style="color:' + getStateColor(state) + '">' + byState[state] + '</div><div class="sprint-stat-lbl">' + escHtml(state) + '</div></div>';
-  }
-  summary.innerHTML = html;
-  summary.style.display = 'flex';
-}
-
-function renderKanbanBoard(items) {
-  const container = document.getElementById('kanbanContainer');
-  if (!items || items.length === 0) {
-    container.innerHTML = '<div class="board-empty">Bu sprintte work item bulunamadı.</div>';
-    return;
-  }
-
-  // Her state icin ayri kolon
-  const grouped = {};
-  for (const item of items) {
-    if (!grouped[item.state]) grouped[item.state] = [];
-    grouped[item.state].push(item);
-  }
-  const states = Object.keys(grouped).sort((a, b) => getStateOrder(a) - getStateOrder(b));
-
-  const colCount = states.length;
-  let html = '<div class="kanban-board" style="grid-template-columns:repeat(' + colCount + ',minmax(220px,1fr))">';
-  for (const state of states) {
-    const colItems = grouped[state];
-    const color = getStateColor(state);
-    html += '<div class="kanban-column" data-state="' + escHtml(state) + '">' +
-      '<div class="kanban-column-header" style="border-top:3px solid ' + color + '">' +
-      '<span class="kanban-column-title">' + escHtml(state) + '</span>' +
-      '<span class="kanban-column-count">' + colItems.length + '</span>' +
-      '</div><div class="kanban-column-body">';
-    for (const item of colItems) html += renderWiCard(item);
-    html += '</div></div>';
-  }
-  html += '</div>';
-  container.innerHTML = html;
-}
-
-// Kuyruğa eklenebilir state'ler
-const QUEUEABLE_STATES = ['New', 'Backlog', 'To Do'];
-
-function renderWiCard(item) {
-  const typeMap = {
-    'Bug': { icon: 'B', cls: 'bug' },
-    'User Story': { icon: 'U', cls: 'userstory' },
-    'Task': { icon: 'T', cls: 'task' },
-    'Feature': { icon: 'F', cls: 'feature' },
-    'Epic': { icon: 'E', cls: 'epic' },
-  };
-  const typeInfo = typeMap[item.type] || { icon: '?', cls: 'task' };
-  const initials = item.assignedTo
-    ? item.assignedTo.split(' ').map(w => w[0]).join('').substring(0, 2).toUpperCase()
-    : '?';
-  const pLabels = { 1: 'P1 !!', 2: 'P2 !', 3: 'P3', 4: 'P4' };
-  const tags = item.tags ? item.tags.split(';').map(t => t.trim()).filter(Boolean) : [];
-  const isQueueable = QUEUEABLE_STATES.includes(item.state);
-  const cardCls = 'wi-card' + (isQueueable ? ' selectable' : '');
-  const checkHtml = isQueueable
-    ? '<input type="checkbox" class="wi-check" data-wi-id="' + item.id + '" data-wi-title="' + escHtml(item.title) + '" onchange="updateBoardSelection()" />'
-    : '';
-
-  return '<div class="' + cardCls + '"' + (isQueueable ? ' onclick="toggleCardCheck(event,' + item.id + ')"' : '') + '>' +
-    '<div class="wi-card-header">' +
-    checkHtml +
-    '<div class="wi-type-icon ' + typeInfo.cls + '">' + typeInfo.icon + '</div>' +
-    (item.url
-      ? '<a class="wi-id wi-link" href="' + escHtml(item.url) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">#' + item.id + '</a>'
-      : '<span class="wi-id">#' + item.id + '</span>') +
-    '<span class="wi-priority" data-p="' + item.priority + '">' + (pLabels[item.priority] || '') + '</span>' +
-    '</div>' +
-    '<div class="wi-title">' + escHtml(item.title) + '</div>' +
-    '<div class="wi-footer">' +
-    '<div class="wi-assignee">' +
-    '<span class="wi-assignee-dot">' + initials + '</span>' +
-    '<span>' + escHtml(item.assignedTo || 'Atanmamış') + '</span>' +
-    '</div>' +
-    (tags.length > 0 ? '<div class="wi-tags">' + tags.slice(0, 3).map(t => '<span class="wi-tag">' + escHtml(t) + '</span>').join('') + '</div>' : '') +
-    '</div></div>';
-}
-
-// Kart tıklandığında checkbox'ı toggle et
-function toggleCardCheck(e, wiId) {
-  // Checkbox'ın kendi tıklamasını engelleme
-  if (e.target.classList.contains('wi-check')) return;
-  const card = e.currentTarget;
-  const cb = card.querySelector('.wi-check');
-  if (!cb) return;
-  cb.checked = !cb.checked;
-  updateBoardSelection();
-}
-
-// Seçim durumunu güncelle, action bar'ı göster/gizle
-function updateBoardSelection() {
-  const checks = document.querySelectorAll('.wi-check');
-  let count = 0;
-  checks.forEach(cb => {
-    const card = cb.closest('.wi-card');
-    if (cb.checked) { count++; card.classList.add('selected'); }
-    else { card.classList.remove('selected'); }
-  });
-  const bar = document.getElementById('boardActionBar');
-  document.getElementById('selectedCount').textContent = count;
-  bar.classList.toggle('visible', count > 0);
-}
-
-// Seçimi temizle
-function clearBoardSelection() {
-  document.querySelectorAll('.wi-check').forEach(cb => {
-    cb.checked = false;
-    cb.closest('.wi-card').classList.remove('selected');
-  });
-  updateBoardSelection();
-}
-
-// Seçili iş öğelerini kuyruğa ekle
-async function queueSelectedItems() {
-  const checks = document.querySelectorAll('.wi-check:checked');
-  if (checks.length === 0) return;
-  const btn = document.getElementById('queueSelectedBtn');
-  btn.disabled = true;
-  btn.textContent = 'Ekleniyor...';
-  const useHal = document.getElementById('halMode').checked;
-  let ok = 0, fail = 0;
-  for (const cb of checks) {
-    const wiId = cb.getAttribute('data-wi-id');
-    try {
-      const resp = await fetch('/api/run', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({work_item_id: wiId, use_hal: useHal}),
-      });
-      const data = await resp.json();
-      if (data.status === 'queued') ok++;
-      else fail++;
-    } catch (e) { fail++; }
-  }
-  btn.disabled = false;
-  btn.textContent = 'Kuyruğa Ekle \u25B6';
-  clearBoardSelection();
-  fetchJobs();
-  if (fail > 0) alert(ok + ' iş kuyruğa eklendi, ' + fail + ' başarısız.');
-}
-
-function escHtml(s) {
-  if (!s) return '';
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
+function esc(s){return s?s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'):''}
+loadTeams();
 </script>
 </body>
 </html>

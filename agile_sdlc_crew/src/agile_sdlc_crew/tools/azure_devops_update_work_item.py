@@ -19,7 +19,7 @@ class UpdateWorkItemInput(BaseModel):
 
 
 class AzureDevOpsUpdateWorkItemTool(BaseTool):
-    name: str = "Azure DevOps Work Item Guncelleme"
+    name: str = "update_work_item"
     description: str = (
         "Azure DevOps'taki bir work item'in alanlarini gunceller. "
         "Durum, atama, oncelik gibi alanlari degistirebilir. "

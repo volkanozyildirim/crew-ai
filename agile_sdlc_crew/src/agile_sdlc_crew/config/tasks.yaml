@@ -5,7 +5,7 @@
 discover_repos_task:
   description: >
     GOREV: {work_item_id} is kalemi icin ilgili Azure DevOps repolarini kesfet.
-    "Repo Listele" aracini kullanarak projedeki tum repolari listele.
+    "list_repos" aracini kullanarak projedeki tum repolari listele.
     Is kalemindeki bilgilere dayanarak hangi repo(lar)da calisma yapilacagini belirle.
 
     ONCEKI ADIM CIKTILARI:
@@ -17,7 +17,7 @@ discover_repos_task:
 dependency_analysis_task:
   description: >
     GOREV: Belirlenen repo(lar)in yapisini incele.
-    "Repo Gezgini" aracini kullanarak dizin yapisini, ana dosyalari ve
+    "browse_repo" aracini kullanarak dizin yapisini, ana dosyalari ve
     bagimliliklari (import, config dosyalari) analiz et.
 
     ONCEKI ADIM CIKTILARI:
@@ -33,7 +33,7 @@ dependency_analysis_task:
 requirements_analysis_task:
   description: >
     GOREV: {work_item_id} idli isin sadece aciklamasini oku ve kabul kriterlerini belirle.
-    "Azure DevOps Work Item Getir" aracini kullanarak is kalemini oku.
+    "get_work_item" aracini kullanarak is kalemini oku.
     Description alanini dikkatlice incele ve kabul kriterlerini cikar.
 
     {scrum_master_feedback}
@@ -48,8 +48,13 @@ technical_design_task:
   description: >
     GOREV: Azure DevOps is kalemi #{work_item_id} icin gelistirme plani olustur.
 
+    ⚠️ KRITIK: Final ciktin MUTLAKA JSON plan olacak (work_item_id, repo_name,
+    summary, changes[], acceptance_criteria alanlari ile). Tool cagrilarini
+    TAMAMLADIKTAN SONRA, topladigin bilgilerle JSON uret. Tool cagrisi formatini
+    asla "final answer" olarak yazma.
+
     ADIM 1 - IS KALEMINI OKU:
-    "Azure DevOps Work Item Getir" aracini kullanarak {work_item_id} is kalemini oku.
+    "get_work_item" aracini kullanarak {work_item_id} is kalemini oku.
     Description alaninin TAMAMINI dikkatlice incele. Asagidakileri bul:
     - Hangi repository uzerinde calisilacak (Repository: veya repo adi)
     - Ne yapilmasi isteniyor (translate, refactor, yeni endpoint, fix vb.)
@@ -57,7 +62,7 @@ technical_design_task:
     - Ornek dosya veya pattern referansi varsa not al
 
     ADIM 2 - DEGISECEK DOSYALARI OKU:
-    Description'da belirtilen HEDEF dosyayi "Repo Gezgini" araci ile oku.
+    Description'da belirtilen HEDEF dosyayi "browse_repo" araci ile oku.
     Araç parametreleri: repo_name="{target_repo}", path="dosya/yolu", include_content=true
     Dosyanin TAMAMINІ goruntule, sadece ilgili metodlari degil.
 
@@ -119,6 +124,11 @@ implement_change_task:
   description: >
     GOREV: Asagidaki degisiklik planini BIREBIR uygula.
 
+    ⚠️ KRITIK: Ciktiniz dosyanin TAM icerigi olmali.
+    Sadece degisen metodu/bolumu donmek YANLIS — push edildiginde dosyadaki
+    onceki tum kod silinir. Dosyayi TAM olarak, degisiklik uygulanmis haliyle dondur.
+    Orijinal dosya kac satirsa ciktin o kadar satir olmali (+- degisiklik kadar).
+
     PLAN:
     Repo: {target_repo}
     Dosya: {target_file}
@@ -135,13 +145,14 @@ implement_change_task:
     ```
 
     ADIMLARIN:
-    1. Once {target_file} dosyasini "Repo Gezgini" araci ile oku
+    1. Once {target_file} dosyasini "browse_repo" araci ile oku — tam icerigini al
     2. Plandaki current_code boluumunu dosyada bul
     3. current_code bolumunu new_code ile degistir
-    4. Dosyanin TAMAMINI (degisiklik uygulanmis haliyle) dondur
+    4. Dosyanin TAMAMINI (degisiklik uygulanmis haliyle) dondur — bastan sona her satir
 
     KESIN KURALLAR:
-    - Dosyanin TAMAMINI dondur, sadece degisen bolumu degil
+    - Dosyanin TAMAMINI dondur — orijinal 1000 satirsa sen de ~1000 satir donmelisin
+    - Asla sadece degisen metodu/fonksiyonu donme — tum dosya lazim
     - Planda OLMAYAN degisiklik YAPMA
     - Mevcut import'lara, namespace'lere, indentation'a DOKUNMA
     - Yeni import gerekiyorsa SADECE planda belirtilenleri ekle
@@ -149,9 +160,10 @@ implement_change_task:
     - Dosyayi okumadan ASLA kod dondurme
   expected_output: >
     Dosyanin DEGISIKLIK UYGULANMIS TAMAMINI tek bir kod blogu icinde dondur.
+    Orijinal dosya kac satirsa cikti da o kadar satir olmali (+- degisiklik).
     Kod blogu disinda HICBIR METIN YAZMA.
     ```
-    [dosyanin tamami]
+    [dosyanin tamami — bastan sona her satir]
     ```
   agent: senior_developer
 
@@ -171,7 +183,7 @@ review_pr_task:
     Repo: {target_repo}
 
     ADIMLARIN:
-    1. "Azure DevOps PR Degisiklikleri" araci ile PR'daki degisen dosyalari listele
+    1. "get_pr_changes" araci ile PR'daki degisen dosyalari listele
     2. Her degisen dosyayi "Repo Gezgini" ile oku (branch: {target_branch})
     3. Asagidaki kontrol listesini uygula:
 
@@ -194,7 +206,7 @@ review_pr_task:
     - [ ] Performans etkisi (N+1 query, gereksiz dongu, buyuk bellek kullanimi) var mi?
     - [ ] Syntax hatasi veya eksik import var mi?
 
-    4. Sonucu "Azure DevOps PR Review" araci ile PR'a yorum olarak ekle
+    4. Sonucu "add_pr_comment" araci ile PR'a yorum olarak ekle
     5. Ayrica is kalemine ({work_item_id}) yorum olarak da ekle
 
     {scrum_master_feedback}
@@ -248,13 +260,13 @@ uat_task:
     GOREV: {work_item_id} is kalemi icin kullanici kabul testi yap.
 
     ADIM 1 - KABUL KRITERLERINI CIKAR:
-    "Azure DevOps Work Item Getir" aracini kullanarak {work_item_id} is kalemini oku.
+    "get_work_item" aracini kullanarak {work_item_id} is kalemini oku.
     Description ve Acceptance Criteria alanlarindan kabul kriterlerini cikar.
     Acikca belirtilmemis ancak is kaleminden cikarilabilecek ek kriterleri de ekle.
     Her kriteri numaralandir.
 
     ADIM 2 - PR DEGISIKLIKLERINI INCELE:
-    "Azure DevOps PR Degisiklikleri" araci ile PR'daki degisiklikleri incele.
+    "get_pr_changes" araci ile PR'daki degisiklikleri incele.
     Her degisikligin hangi kabul kriterine karsilik geldigini belirle.
 
     ADIM 3 - DEGERLENDIRME:

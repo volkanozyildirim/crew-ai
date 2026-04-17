@@ -20,7 +20,7 @@ class CreateBranchInput(BaseModel):
 
 
 class AzureDevOpsCreateBranchTool(BaseTool):
-    name: str = "Azure DevOps Branch Olustur"
+    name: str = "create_branch"
     description: str = (
         "Bir repoda yeni branch olusturur. "
         "ONEMLI: repo_name repo listeleme aracindaki Ad kolonuyla BIREBIR ayni olmali."
@@ -51,7 +51,7 @@ class PushChangesInput(BaseModel):
 
 
 class AzureDevOpsPushChangesTool(BaseTool):
-    name: str = "Azure DevOps Kod Push"
+    name: str = "push_code"
     description: str = (
         "Bir branch'e dosya push eder. content dosyanin TAM icerigi olmali. "
         "Yeni dosya: change_type='add', mevcut dosya: change_type='edit'."
@@ -93,7 +93,7 @@ class CreatePRInput(BaseModel):
 
 
 class AzureDevOpsCreatePRTool(BaseTool):
-    name: str = "Azure DevOps PR Olustur"
+    name: str = "create_pr"
     description: str = (
         "Pull request olusturur. Work item ID verilirse PR'a baglar. "
         "Oncesinde branch olusturulmus ve kod push edilmis olmali."
@@ -136,7 +136,7 @@ class PRCommentInput(BaseModel):
 
 
 class AzureDevOpsPRReviewTool(BaseTool):
-    name: str = "Azure DevOps PR Review"
+    name: str = "add_pr_comment"
     description: str = (
         "PR'a review yorumu ekler. pull_request_id onceki adimda olusturulan GERCEK PR numarasi olmali."
     )
@@ -168,7 +168,7 @@ class PRChangesInput(BaseModel):
 
 
 class AzureDevOpsPRChangesTool(BaseTool):
-    name: str = "Azure DevOps PR Degisiklikleri"
+    name: str = "get_pr_changes"
     description: str = (
         "PR'daki dosya degisikliklerini listeler. pull_request_id GERCEK olmali."
     )

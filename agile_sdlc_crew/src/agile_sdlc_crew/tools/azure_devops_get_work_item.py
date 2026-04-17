@@ -5,14 +5,15 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+from agile_sdlc_crew.tools.tool_cache import CachedToolMixin
 
 
 class GetWorkItemInput(BaseModel):
     work_item_id: int = Field(..., description="Azure DevOps work item ID numarasi")
 
 
-class AzureDevOpsGetWorkItemTool(BaseTool):
-    name: str = "Azure DevOps Work Item Okuma"
+class AzureDevOpsGetWorkItemTool(CachedToolMixin, BaseTool):
+    name: str = "get_work_item"
     description: str = (
         "Azure DevOps'tan bir work item'in detaylarini okur. "
         "Work item ID'si verilerek baslik, aciklama, durum, atanan kisi, "
@@ -21,6 +22,9 @@ class AzureDevOpsGetWorkItemTool(BaseTool):
     args_schema: type[BaseModel] = GetWorkItemInput
 
     def _run(self, work_item_id: int, **kwargs: Any) -> str:
+        return self._cached_wrap(self._run_inner, work_item_id)
+
+    def _run_inner(self, work_item_id: int, **kwargs: Any) -> str:
         try:
             client = AzureDevOpsClient()
             data = client.get_work_item(work_item_id)

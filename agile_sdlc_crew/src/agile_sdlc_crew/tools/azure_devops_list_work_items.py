@@ -19,7 +19,7 @@ class ListWorkItemsInput(BaseModel):
 
 
 class AzureDevOpsListWorkItemsTool(BaseTool):
-    name: str = "Azure DevOps Work Item Listeleme"
+    name: str = "list_work_items"
     description: str = (
         "WIQL sorgusu kullanarak Azure DevOps'tan work item listesi getirir. "
         "Aktif, bekleyen veya belirli kriterlere uyan is kalemlerini listelemek "

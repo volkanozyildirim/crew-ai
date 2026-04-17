@@ -4,6 +4,7 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+from agile_sdlc_crew.tools.tool_cache import CachedToolMixin
 
 
 class AzureDevOpsListReposInput(BaseModel):
@@ -13,8 +14,8 @@ class AzureDevOpsListReposInput(BaseModel):
     )
 
 
-class AzureDevOpsListReposTool(BaseTool):
-    name: str = "Azure DevOps Repo Listeleme"
+class AzureDevOpsListReposTool(CachedToolMixin, BaseTool):
+    name: str = "list_repos"
     description: str = (
         "Azure DevOps projelerindeki Git repolarini listeler. "
         "Kompakt format: ad | proje | dal | boyut"
@@ -22,6 +23,9 @@ class AzureDevOpsListReposTool(BaseTool):
     args_schema: type[BaseModel] = AzureDevOpsListReposInput
 
     def _run(self, dummy: str = "list") -> str:
+        return self._cached_wrap(self._run_inner, dummy)
+
+    def _run_inner(self, dummy: str = "list") -> str:
         try:
             client = AzureDevOpsClient()
             repos = client.list_repositories()
