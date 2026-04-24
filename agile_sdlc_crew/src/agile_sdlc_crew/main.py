@@ -46,25 +46,55 @@ def _parse_architect_output(raw_output: str) -> dict:
     """Software Architect agent ciktisini JSON olarak parse eder."""
     text = raw_output.strip()
 
-    json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    # Code fence strip — acik code fence (kapanmamis ```) icin de destek
+    json_match = re.search(r'```(?:json)?\s*\n?(.*?)(?:\n?```|$)', text, re.DOTALL)
     if json_match:
         text = json_match.group(1).strip()
 
-    try:
-        plan = json.loads(text)
-    except json.JSONDecodeError:
+    # Tool halusinasyonu temizle — tool'suz architect bazen <tool_call> uretir
+    if "<tool_call>" in text:
+        # JSON kismi <tool_call>'dan once olabilir
+        before_tool = text.split("<tool_call>")[0].strip()
+        if "{" in before_tool:
+            text = before_tool
+
+    def _try_parse(s: str) -> dict | None:
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            return None
+
+    def _try_fix_truncated(s: str) -> dict | None:
+        """max_tokens yuzunden ortasinda kesilen JSON'u kurtarmayi dene.
+        Strateji: son gecerli changes[] elemanina kadar kes ve kapat."""
+        if not s.strip().startswith("{"):
+            return None
+        # changes listesindeki son tamam olan elemani bul
+        last_good = None
+        for m in re.finditer(r'"new_code"\s*:\s*"(?:[^"\\]|\\.)*"', s, re.DOTALL):
+            last_good = m.end()
+        if not last_good:
+            return None
+        # Son iyi noktadan sonra }]} ile kapat
+        truncated = s[:last_good]
+        # Acik string/object'leri kapat
+        for closer in ["}]}", "]}",  "}"]:
+            candidate = truncated.rstrip().rstrip(",") + closer
+            parsed = _try_parse(candidate)
+            if parsed and "changes" in parsed:
+                return parsed
+        return None
+
+    plan = _try_parse(text)
+    if plan is None:
         brace_match = re.search(r'\{.*\}', text, re.DOTALL)
         if brace_match:
-            try:
-                plan = json.loads(brace_match.group(0))
-            except json.JSONDecodeError:
-                raise ValueError(
-                    f"Architect ciktisi JSON formatinda degil.\n"
-                    f"Cikti:\n{raw_output[:500]}"
-                )
-        else:
+            plan = _try_parse(brace_match.group(0))
+        if plan is None:
+            plan = _try_fix_truncated(text)
+        if plan is None:
             raise ValueError(
-                f"Architect ciktisinda JSON bulunamadi.\n"
+                f"Architect ciktisi JSON formatinda degil.\n"
                 f"Cikti:\n{raw_output[:500]}"
             )
 
@@ -102,6 +132,114 @@ def _extract_code_from_output(raw_output: str) -> str:
     if code_match:
         return code_match.group(1)
     return text
+
+
+def _try_direct_edit(full_content: str, current_code: str, new_code: str, min_fuzzy_ratio: float = 0.80) -> str | None:
+    """Plan'daki current_code -> new_code degistirmesini LLM ÇAĞIRMADAN yap.
+    Dort katman match:
+      1) Birebir substring
+      2) Trimmed substring
+      3) Satir-bazi normalize (her satir strip edilmis) sliding window
+      4) difflib fuzzy — en yakin blok (ratio >= min_fuzzy_ratio, default 0.80)
+    Bulursa indentation'i koruyarak replace eder, None dönerse LLM'e dusulur."""
+    if not full_content or not current_code or not new_code:
+        return None
+
+    # 1) Birebir
+    if current_code in full_content:
+        return full_content.replace(current_code, new_code, 1)
+
+    # 2) Trimmed
+    cc_strip = current_code.strip()
+    if cc_strip and cc_strip in full_content:
+        return full_content.replace(cc_strip, new_code.strip(), 1)
+
+    # 3) Line-by-line normalize (whitespace tolerant)
+    fc_lines = full_content.splitlines()
+    cc_lines_raw = cc_strip.splitlines()
+    cc_norm = [l.strip() for l in cc_lines_raw if l.strip()]
+    if cc_norm:
+        m = len(cc_norm)
+        n = len(fc_lines)
+        for i in range(n):
+            if fc_lines[i].strip() != cc_norm[0]:
+                continue
+            j = i
+            k = 0
+            while j < n and k < m:
+                if not fc_lines[j].strip():
+                    j += 1
+                    continue
+                if fc_lines[j].strip() != cc_norm[k]:
+                    break
+                j += 1
+                k += 1
+            if k == m:
+                first_line = fc_lines[i]
+                indent_len = len(first_line) - len(first_line.lstrip())
+                indent = first_line[:indent_len]
+                new_body = new_code.strip().splitlines()
+                indented_new = [indent + nl if nl.strip() else nl for nl in new_body]
+                out_lines = fc_lines[:i] + indented_new + fc_lines[j:]
+                result = "\n".join(out_lines)
+                if full_content.endswith("\n"):
+                    result += "\n"
+                return result
+
+    # 4) difflib fuzzy — en yakin satir aralığini bul
+    import difflib
+    cc_lines_clean = [l for l in cc_strip.splitlines() if l.strip()]
+    if not cc_lines_clean:
+        return None
+    target_len = len(cc_lines_clean)
+    if target_len == 0 or target_len > len(fc_lines):
+        return None
+
+    best_ratio = 0.0
+    best_start = -1
+    best_end = -1
+    # Sliding window — target_len civarinda (±%20 esnek)
+    min_w = max(1, int(target_len * 0.7))
+    max_w = min(len(fc_lines), int(target_len * 1.5) + 2)
+    cc_joined = "\n".join(l.strip() for l in cc_lines_clean)
+
+    for w in range(min_w, max_w + 1):
+        for i in range(0, len(fc_lines) - w + 1):
+            window = fc_lines[i:i + w]
+            window_joined = "\n".join(l.strip() for l in window if l.strip())
+            if not window_joined:
+                continue
+            # SequenceMatcher fiyatli — önce hizli char-based ratio
+            sm = difflib.SequenceMatcher(None, cc_joined, window_joined, autojunk=False)
+            # Quick ratio olarak hizli filtre
+            if sm.real_quick_ratio() < min_fuzzy_ratio:
+                continue
+            if sm.quick_ratio() < min_fuzzy_ratio:
+                continue
+            r = sm.ratio()
+            if r > best_ratio:
+                best_ratio = r
+                best_start = i
+                best_end = i + w
+                if r >= 0.98:
+                    break
+        if best_ratio >= 0.98:
+            break
+
+    if best_start < 0 or best_ratio < min_fuzzy_ratio:
+        return None
+
+    # Fuzzy match bulundu — indent koru, replace et
+    matched_first = fc_lines[best_start]
+    indent_len = len(matched_first) - len(matched_first.lstrip())
+    indent = matched_first[:indent_len]
+    new_body = new_code.strip().splitlines()
+    indented_new = [indent + nl if nl.strip() else nl for nl in new_body]
+    out_lines = fc_lines[:best_start] + indented_new + fc_lines[best_end:]
+    result = "\n".join(out_lines)
+    if full_content.endswith("\n"):
+        result += "\n"
+    return result
 
 
 def _validate_code(code: str, file_path: str, original_content: str, description: str, repo_name: str = "") -> tuple[bool, str]:
@@ -302,20 +440,38 @@ def _check_with_ollama(code: str, file_path: str, original_content: str, descrip
 
 
 def _fix_with_ollama(code: str, file_path: str, issues: list[str], original_content: str) -> str | None:
-    """Ollama ile hatalı kodu düzelt. None = başarısız."""
+    """Ollama ile hatali kodu duzelt. None = basarisiz veya cok kisa donus.
+
+    ONEMLI: LLM sadece degisen bolumu donerse dosya kisalir. Min length check
+    ile yarim donusleri reddet."""
     issues_text = "\n".join(f"- {i}" for i in issues[:5])
+    original_length = len(code)
+
     prompt = (
-        f"Fix these syntax errors in {file_path}:\n{issues_text}\n\n"
-        f"Return ONLY the fixed complete file content, no explanation.\n\n"
-        f"```\n{code[:6000]}\n```"
+        f"Sen bir {file_path.split('.')[-1] if '.' in file_path else 'kod'} linter'isin. "
+        f"Asagidaki kodda syntax hatalari var, duzelt.\n\n"
+        f"⚠️ KRITIK KURALLAR:\n"
+        f"1. TUM dosyayi dondur — bastan sona her satir. Orijinal {original_length} karakterse "
+        f"cevabin da ~{original_length} karakter civari olmali.\n"
+        f"2. Sadece syntax hatasini duzelt, baska degisiklik YAPMA.\n"
+        f"3. Cevabi ``` ile sarmala, icinde SADECE kod olmali. Aciklama/'Thought:' YAZMA.\n"
+        f"4. Orijinal dosyadaki tum fonksiyon, class, import, comment'i koru.\n\n"
+        f"HATALAR:\n{issues_text}\n\n"
+        f"HATALI KOD:\n```\n{code[:12000]}\n```\n\n"
+        f"DUZELTILMIS TAM DOSYA (tum kod bastan sona):"
     )
 
     try:
         import requests
         resp = requests.post(
             "http://localhost:11434/api/generate",
-            json={"model": "qwen2.5-coder:7b", "prompt": prompt, "stream": False},
-            timeout=60,
+            json={
+                "model": "qwen2.5-coder:7b",
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_predict": 8192, "temperature": 0.1},
+            },
+            timeout=120,
         )
         if resp.status_code != 200:
             return None
@@ -323,12 +479,22 @@ def _fix_with_ollama(code: str, file_path: str, issues: list[str], original_cont
         # Kod blogunu cikar
         code_match = re.search(r'```(?:\w+)?\s*\n(.*?)\n```', text, re.DOTALL)
         if code_match:
-            return code_match.group(1)
-        # Kod blogu yoksa tum ciktiyi dondur (sadece kod oldugunu varsay)
-        if text.strip():
-            return text.strip()
-        return None
-    except Exception:
+            result = code_match.group(1)
+        elif text.strip():
+            result = text.strip()
+        else:
+            return None
+
+        # Cok kisa donusleri reddet — muhtemelen sadece degisen kisim
+        if len(result) < max(50, original_length * 0.5):
+            _log(
+                f"    Ollama duzeltme cok kisa ({len(result)}/{original_length} char), "
+                f"reddedildi"
+            )
+            return None
+        return result
+    except Exception as e:
+        _log(f"    Ollama fix hatasi: {e}")
         return None
 
 

@@ -15,10 +15,12 @@ from pathlib import Path
 
 TASK_DISPLAY_NAMES = {
     "requirements_analysis_task": "İş Analizi",
+    "kickoff_meeting_task": "Kickoff Toplantısı",
     "discover_repos_task": "Repo Keşfetme",
     "dependency_analysis_task": "Bağımlılık Analizi",
     "technical_design_task": "Teknik Tasarım",
     "create_branch_task": "Branch Oluşturma",
+    "code_embedding_task": "Kod Tabanı Analizi",
     "implement_change_task": "Kod Yazma & Push",
     "create_pr_task": "PR Oluşturma",
     "review_pr_task": "Kod İnceleme",
@@ -29,10 +31,12 @@ TASK_DISPLAY_NAMES = {
 
 TASK_AGENTS = {
     "requirements_analysis_task": "business_analyst",
+    "kickoff_meeting_task": "scrum_master",
     "discover_repos_task": "software_architect",
     "dependency_analysis_task": "software_architect",
     "technical_design_task": "software_architect",
     "create_branch_task": "senior_developer",
+    "code_embedding_task": "software_architect",
     "implement_change_task": "senior_developer",
     "create_pr_task": "senior_developer",
     "review_pr_task": "code_reviewer",
@@ -134,7 +138,7 @@ class StatusTracker:
                 if agent_key in self._status["agents"]:
                     self._status["agents"][agent_key]["status"] = "working"
                     self._status["agents"][agent_key]["current_task"] = first_task["name"]
-            self._add_log("Sprint baslatildi")
+            self._add_log(f"Pipeline baslatildi — WI #{work_item_id}")
             self._save()
 
     def task_started(self, task_key: str):
@@ -197,7 +201,7 @@ class StatusTracker:
             for agent in self._status["agents"].values():
                 agent["status"] = "idle"
                 agent["current_task"] = None
-            self._add_log("Sprint tamamlandi!")
+            self._add_log("Pipeline tamamlandi")
             self._save()
 
     def _add_log(self, message: str):

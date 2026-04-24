@@ -16,7 +16,7 @@ try:
 except ImportError:
     pass
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -85,6 +85,12 @@ class RunRequest(BaseModel):
         return None
 
 
+class PRFixRequest(BaseModel):
+    repo_name: str
+    pr_id: int
+    work_item_id: str = ""  # opsiyonel — PR'dan da cikarilabilir
+
+
 # ── API Routes ──
 
 @app.get("/")
@@ -122,6 +128,35 @@ async def queue_job(req: RunRequest):
         "job_id": job_id,
         "status": "queued",
         "message": f"#{req.work_item_id} kuyruga eklendi",
+    }, status_code=202)
+
+
+@app.post("/api/pr-fix")
+async def pr_fix(req: PRFixRequest):
+    """PR yorumlarindaki geri bildirimlere gore kodu duzelt.
+    Mevcut branch'teki kodu okur, sadece eksikleri tamamlar, push eder."""
+    job_id = db.create_job(req.work_item_id or f"PR#{req.pr_id}", use_hal=False)
+    # PR fix bilgisini job metadata olarak sakla
+    db.update_job(job_id, pr_id=str(req.pr_id), repo_name=req.repo_name)
+
+    def _run_pr_fix():
+        try:
+            db.start_job(job_id)
+            from agile_sdlc_crew.pr_fix import run_pr_fix
+            result = run_pr_fix(req.repo_name, req.pr_id, req.work_item_id)
+            db.complete_job(job_id)
+            pipeline_log.info(f"PR-fix #{job_id} (PR #{req.pr_id}) tamamlandi: {result}")
+        except Exception as e:
+            db.fail_job(job_id, str(e))
+            pipeline_log.error(f"PR-fix #{job_id} (PR #{req.pr_id}) basarisiz: {e}")
+
+    fix_thread = threading.Thread(target=_run_pr_fix, daemon=True)
+    fix_thread.start()
+
+    return JSONResponse({
+        "job_id": job_id,
+        "status": "started",
+        "message": f"PR #{req.pr_id} fix basladi",
     }, status_code=202)
 
 
@@ -214,6 +249,89 @@ async def reset_status():
     except OSError:
         pass
     return JSONResponse({"status": "ok", "message": "Dashboard sifirlandi"})
+
+
+# ── Config API (Agent / Task YAML) ──
+
+CONFIG_DIR = Path(__file__).parent / "config"
+
+@app.get("/api/config/env")
+async def get_env_config_route():
+    """Pipeline ile ilgili env degiskenlerini dondurur."""
+    import os
+    env_keys = [
+        "CREW_USE_LOCAL_LLM", "CREW_LOCAL_LLM_MODEL", "CREW_LOCAL_CODER_MODEL",
+        "OLLAMA_BASE_URL", "OLLAMA_CODER_BASE_URL",
+        "CREW_KICKOFF_MEETING", "CREW_MAX_JOB_COST",
+        "CREW_ARCHITECT_MAX_ITER", "CREW_REVIEW_MAX_RETRIES",
+        "CREW_DEV_CONTEXT_BUDGET", "CREW_DEV_CONTEXT_PER_FILE",
+        "CREW_MIN_WI_CONTENT_CHARS", "CREW_SM_REVIEW",
+        "CREW_WORK_ITEM_PROVIDER", "CREW_SCM_PROVIDER",
+    ]
+    env_vals = {}
+    for k in env_keys:
+        v = os.environ.get(k, "")
+        env_vals[k] = v
+    return JSONResponse(env_vals)
+
+
+@app.get("/api/config/{config_name}")
+async def get_config(config_name: str):
+    """YAML config dosyasini oku. config_name: 'agents' veya 'tasks'."""
+    if config_name not in ("agents", "tasks"):
+        return JSONResponse({"error": "Gecersiz config: agents veya tasks"}, status_code=400)
+    config_file = CONFIG_DIR / f"{config_name}.yaml"
+    if not config_file.exists():
+        return JSONResponse({"error": f"{config_name}.yaml bulunamadi"}, status_code=404)
+    content = config_file.read_text(encoding="utf-8")
+    return JSONResponse({"name": config_name, "content": content})
+
+
+@app.put("/api/config/{config_name}")
+async def update_config(config_name: str, request: Request):
+    """YAML config dosyasini guncelle. Body: {"content": "yaml string"}
+    Sonraki job otomatik olarak yeni config'i kullanir."""
+    if config_name not in ("agents", "tasks"):
+        return JSONResponse({"error": "Gecersiz config: agents veya tasks"}, status_code=400)
+
+    body = await request.json()
+    content = body.get("content", "")
+    if not content.strip():
+        return JSONResponse({"error": "Bos icerik gonderilemez"}, status_code=400)
+
+    # YAML syntax kontrolu
+    import yaml
+    try:
+        parsed = yaml.safe_load(content)
+        if not isinstance(parsed, dict):
+            return JSONResponse({"error": "YAML bir dict olmali"}, status_code=400)
+    except yaml.YAMLError as e:
+        return JSONResponse({"error": f"YAML syntax hatasi: {e}"}, status_code=400)
+
+    # tasks.yaml icin zorunlu degisken kontrolu
+    if config_name == "tasks":
+        required_vars = ["{work_item_id}"]
+        for var in required_vars:
+            if var not in content:
+                return JSONResponse({
+                    "error": f"tasks.yaml icinde '{var}' degiskeni zorunlu"
+                }, status_code=400)
+
+    # Yedek al + kaydet
+    config_file = CONFIG_DIR / f"{config_name}.yaml"
+    backup_file = CONFIG_DIR / f"{config_name}.yaml.bak"
+    if config_file.exists():
+        backup_file.write_text(config_file.read_text(encoding="utf-8"), encoding="utf-8")
+    config_file.write_text(content, encoding="utf-8")
+
+    pipeline_log.info(f"Config guncellendi: {config_name}.yaml ({len(content)} char)")
+    return JSONResponse({
+        "status": "ok",
+        "message": f"{config_name}.yaml guncellendi. Sonraki job yeni config'i kullanacak.",
+        "backup": str(backup_file),
+    })
+
+
 
 
 # ── Sprint / Board API ──
@@ -319,6 +437,10 @@ def _queue_worker():
 @app.on_event("startup")
 async def startup():
     db.init_db()
+    # Orphan running job'lari temizle (sunucu restart oncesinde takili kalmislar)
+    orphan = db.fail_orphan_running_jobs()
+    if orphan:
+        pipeline_log.info(f"Sunucu baslatildi: {orphan} takili kalmis is failed olarak isaretlendi")
     _ensure_worker()
 
 
@@ -342,7 +464,9 @@ def main():
         "backupCount": 3,
         "formatter": "access",
     }
-    log_config["loggers"]["uvicorn.access"]["handlers"] = ["access", "access_file"]
+    # Access loglarini SADECE dosyaya yaz — console'a dusmesin
+    # (crew_server.log'u kirletiyordu)
+    log_config["loggers"]["uvicorn.access"]["handlers"] = ["access_file"]
 
     uvicorn.run(app, host="0.0.0.0", port=8765, log_level="info", log_config=log_config)
 

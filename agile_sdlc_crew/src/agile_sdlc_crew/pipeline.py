@@ -133,21 +133,35 @@ def create_branch(repo_name: str, work_item_id: str) -> dict:
 
 def push_file(repo_name: str, branch: str, file_path: str, content: str, message: str, repo_mgr=None) -> dict:
     client = AzureDevOpsClient()
+
+    # Remote branch'teki gercek durum — API'den kesin sorgu.
+    # Local filesystem yetersiz: onceki API push'lari local branch'i guncellemiyor.
+    # Bu yuzden her zaman remote'dan sor (tek extra GET calisi, 400 retry'dan ucuz).
     try:
-        # Dosya varlik kontrolu: local repo varsa filesystem'den, yoksa API'den
-        if repo_mgr:
-            change_type = "edit" if repo_mgr.file_exists(repo_name, file_path, branch) else "add"
-        else:
-            try:
-                client.get_file_content(repo_name, file_path, branch)
-                change_type = "edit"
-            except Exception:
-                change_type = "add"
+        client.get_file_content(repo_name, file_path, branch)
+        change_type = "edit"
+    except Exception:
+        change_type = "add"
+
+    try:
         changes = [{"changeType": change_type, "path": file_path, "content": content}]
         result = client.push_changes(repo_name, branch, changes, message)
         return {"success": True, "push_id": result.get("pushId", "?"), "change_type": change_type, "file": file_path}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        error_str = str(e)
+        # 400: changeType hâlâ yanliss → swap et ve bir kez daha dene.
+        # Ornek: get_file_content 404 verdi ama dosya aslinda vardı (race condition /
+        # cache) → add yerine edit ile tekrar.
+        alt_type = "edit" if change_type == "add" else "add"
+        if "400" in error_str:
+            try:
+                changes = [{"changeType": alt_type, "path": file_path, "content": content}]
+                result = client.push_changes(repo_name, branch, changes, message)
+                log.info(f"    Push retry ({change_type}→{alt_type}) basarili")
+                return {"success": True, "push_id": result.get("pushId", "?"), "change_type": alt_type, "file": file_path}
+            except Exception as e2:
+                return {"success": False, "error": f"retry ({alt_type}) da basarisiz: {e2}"}
+        return {"success": False, "error": error_str}
 
 
 def create_pull_request(repo_name: str, branch: str, work_item_id: str, title: str, description: str) -> dict:

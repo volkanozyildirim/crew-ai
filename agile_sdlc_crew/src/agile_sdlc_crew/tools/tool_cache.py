@@ -36,20 +36,30 @@ class CachedToolMixin:
     _call_count: dict = {}
 
     def _cached_wrap(self, original_run, *args, **kwargs):
-        """Orijinal _run metodunu sar: cache kontrolu yap."""
+        """Orijinal _run metodunu sar: cache + limit kontrolu.
+        - 1. cagri: calistir
+        - 2-3. cagri: cache'den, uyari yok
+        - 4. cagri: uyari ile cache
+        - 5+ cagri: HARD BLOCK — agent'a cevap yok, baska yaklasim dene"""
         key = (self.__class__.__name__, _hash_args(args, kwargs))
         count = self._call_count.get(key, 0) + 1
         self._call_count[key] = count
 
         if key in self._cache:
             cached = self._cache[key]
-            if count >= 3:
+            if count >= 5:
+                log.warning(f"  Tool BLOCKED: {self.__class__.__name__} {count}x ayni argumanla — hard block")
+                return (
+                    f"🛑 BLOKE: Bu tool'u bu argumanlarla {count} kez cagirdin. "
+                    f"Ayni sonucu aliyorsun. DUR ve dusun: farkli bir sorgu dene "
+                    f"veya elindeki bilgiyle kararini ver. BU TOOL'U AYNI ARGUMANLARLA "
+                    f"TEKRAR CAGIRMA — cevap donmeyecek."
+                )
+            if count >= 4:
                 log.warning(f"  Tool limit: {self.__class__.__name__} {count}x ayni argumanla")
                 return (
-                    f"[UYARI: Bu tool'u bu argumanlarla {count} kez cagirdin. "
-                    f"Sonuc AYNI kalacak, farkli bir sorgu/yaklasim dene "
-                    f"veya elindeki bilgiyle kararini ver.]\n\n"
-                    f"{cached}"
+                    f"[UYARI: {count}. kez ayni argumanla cagirdin. Sonuc AYNI kalacak. "
+                    f"Farkli bir yaklasim dene.]\n\n{cached}"
                 )
             return f"[Cache, {count}. cagri]\n{cached}"
 
