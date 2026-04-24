@@ -52,6 +52,12 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
+    def download_attachment(self, url: str, timeout: int = 30) -> bytes:
+        """Azure DevOps attachment veya iç kaynak URL'sini PAT ile indir."""
+        resp = requests.get(url, headers=self._headers, timeout=timeout, verify=False)
+        resp.raise_for_status()
+        return resp.content
+
     def update_work_item(self, work_item_id: int, operations: list[dict]) -> dict:
         url = f"{self._base_api_url}/wit/workitems/{work_item_id}"
         params = {"api-version": self.API_VERSION}
@@ -60,6 +66,23 @@ class AzureDevOpsClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def get_work_item_comments(self, work_item_id: int) -> list[dict]:
+        """Bir work item'in yorumlarini getirir."""
+        url = f"{self._base_api_url}/wit/workitems/{work_item_id}/comments"
+        params = {"api-version": "7.1-preview.4"}
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        comments = resp.json().get("comments", [])
+        return [
+            {
+                "id": c.get("id"),
+                "yazar": c.get("createdBy", {}).get("displayName", ""),
+                "tarih": c.get("createdDate", ""),
+                "metin": c.get("text", ""),
+            }
+            for c in comments
+        ]
 
     def add_comment(self, work_item_id: int, text: str) -> dict:
         url = f"{self._base_api_url}/wit/workitems/{work_item_id}/comments"
@@ -367,6 +390,100 @@ class AzureDevOpsClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def reply_to_pr_thread(
+        self,
+        repo_id_or_name: str,
+        pull_request_id: int,
+        thread_id: int,
+        content: str,
+    ) -> dict:
+        """Mevcut bir PR thread'ine yanit yazar."""
+        url = (
+            f"{self._repo_api_url(repo_id_or_name)}/pullrequests/"
+            f"{pull_request_id}/threads/{thread_id}/comments"
+        )
+        params = {"api-version": self.API_VERSION}
+        body = {"content": content, "commentType": "text"}
+        resp = requests.post(url, headers=self._headers, json=body, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def resolve_pr_thread(
+        self,
+        repo_id_or_name: str,
+        pull_request_id: int,
+        thread_id: int,
+    ) -> dict:
+        """PR thread'ini 'fixed' olarak isaretler."""
+        url = (
+            f"{self._repo_api_url(repo_id_or_name)}/pullrequests/"
+            f"{pull_request_id}/threads/{thread_id}"
+        )
+        params = {"api-version": self.API_VERSION}
+        body = {"status": "fixed"}
+        resp = requests.patch(url, headers=self._headers, json=body, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_pull_request(
+        self,
+        repo_id_or_name: str,
+        pull_request_id: int,
+    ) -> dict:
+        """PR detaylarini getirir (baslik, branch, status, work items)."""
+        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}"
+        params = {"api-version": self.API_VERSION}
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_pr_threads(
+        self,
+        repo_id_or_name: str,
+        pull_request_id: int,
+    ) -> list[dict]:
+        """PR'daki tum yorum thread'lerini getirir.
+        Her thread: id, status, comments[], threadContext (dosya/satir bilgisi)."""
+        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}/threads"
+        params = {"api-version": self.API_VERSION}
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("value", [])
+
+    def get_pr_comments_text(
+        self,
+        repo_id_or_name: str,
+        pull_request_id: int,
+    ) -> list[dict]:
+        """PR yorumlarini okunabilir formatta dondurur.
+        Returns: [{"author": str, "content": str, "file_path": str|None, "date": str}]"""
+        threads = self.get_pr_threads(repo_id_or_name, pull_request_id)
+        comments = []
+        for thread in threads:
+            # Sistem thread'lerini atla (merge, status update vb.)
+            if thread.get("properties", {}).get("CodeReviewThreadType"):
+                continue
+            file_path = None
+            ctx = thread.get("threadContext")
+            if ctx:
+                file_path = ctx.get("filePath")
+            for comment in thread.get("comments", []):
+                # Sistem yorumlarini atla
+                if comment.get("commentType") == "system":
+                    continue
+                content = comment.get("content", "").strip()
+                if not content:
+                    continue
+                author = comment.get("author", {}).get("displayName", "")
+                date = comment.get("publishedDate", "")
+                comments.append({
+                    "author": author,
+                    "content": content,
+                    "file_path": file_path,
+                    "date": date,
+                })
+        return comments
 
     def get_pull_request_changes(
         self,

@@ -257,6 +257,68 @@ header {
   color:var(--text-dim); line-height:1.5; margin:0;
 }
 .step-out pre.err { color:var(--danger); }
+.step-expand {
+  display:inline-block; margin-top:6px; font-size:10px; color:var(--accent-light);
+  background:rgba(108,92,231,0.12); border:1px solid rgba(108,92,231,0.3);
+  border-radius:4px; padding:2px 10px; cursor:pointer; transition:all 0.15s;
+  font-family:'Inter',sans-serif;
+}
+.step-expand:hover { background:rgba(108,92,231,0.25); }
+
+/* ── Step Detail Modal ── */
+#stepModal {
+  display:none; position:fixed; inset:0; z-index:1000;
+  background:rgba(0,0,0,0.7); backdrop-filter:blur(4px);
+  align-items:center; justify-content:center;
+}
+#stepModal.open { display:flex; }
+.modal-box {
+  background:var(--bg-card); border:1px solid var(--border);
+  border-radius:14px; width:min(900px,96vw); max-height:90vh;
+  display:flex; flex-direction:column; box-shadow:0 24px 64px rgba(0,0,0,0.6);
+}
+.modal-header {
+  padding:16px 20px; border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:10px;
+}
+.modal-header h2 { font-size:15px; font-weight:700; flex:1; }
+.modal-meta { display:flex; gap:8px; align-items:center; }
+.modal-badge {
+  font-size:10px; font-weight:600; padding:3px 10px; border-radius:10px;
+}
+.modal-close {
+  background:none; border:none; color:var(--text-dim); cursor:pointer;
+  font-size:18px; line-height:1; padding:0 4px; transition:color 0.15s;
+}
+.modal-close:hover { color:var(--danger); }
+.modal-body {
+  flex:1; overflow-y:auto; padding:20px;
+}
+/* Markdown-like rendering inside modal */
+.modal-md h1,.modal-md h2,.modal-md h3 {
+  color:var(--text); font-weight:700; margin:16px 0 8px;
+  padding-bottom:4px; border-bottom:1px solid var(--border);
+}
+.modal-md h1 { font-size:16px; }
+.modal-md h2 { font-size:14px; }
+.modal-md h3 { font-size:13px; border:none; color:var(--accent-light); }
+.modal-md p { font-size:13px; color:var(--text-dim); line-height:1.7; margin:6px 0; }
+.modal-md ul,.modal-md ol { padding-left:20px; margin:6px 0; }
+.modal-md li { font-size:13px; color:var(--text-dim); line-height:1.7; margin:2px 0; }
+.modal-md code {
+  font-family:'JetBrains Mono',monospace; font-size:11px;
+  background:var(--bg); padding:1px 5px; border-radius:3px; color:var(--accent-light);
+}
+.modal-md pre {
+  font-family:'JetBrains Mono',monospace; font-size:11px;
+  background:var(--bg); padding:12px; border-radius:6px;
+  white-space:pre-wrap; word-break:break-all; color:var(--text-dim);
+  line-height:1.5; margin:8px 0; border:1px solid var(--border);
+  overflow-x:auto;
+}
+.modal-md strong { color:var(--text); font-weight:600; }
+.modal-md hr { border:none; border-top:1px solid var(--border); margin:12px 0; }
+.modal-md.err { color:var(--danger); font-family:'JetBrains Mono',monospace; font-size:12px; white-space:pre-wrap; }
 
 /* ── Activity Log ── */
 .log-area { border-top:1px solid var(--border); }
@@ -290,6 +352,7 @@ header {
       <button class="sm-btn" onclick="triggerRun()">Başlat</button>
     </div>
     <button class="sm-btn ghost" onclick="resetDashboard()">Sıfırla</button>
+    <button class="sm-btn ghost" onclick="openSettings()" title="Pipeline Ayarları" style="font-size:20px;padding:4px 10px">&#9881;</button>
     <span class="header-time" id="clock">--:--</span>
   </div>
 </header>
@@ -339,6 +402,62 @@ header {
     </div>
   </div>
 </div>
+
+<!-- Step Detail Modal -->
+<div id="stepModal" onclick="modalBgClick(event)">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="si" id="modalIcon" style="font-size:16px;width:22px;text-align:center"></div>
+      <h2 id="modalTitle">Adım Detayı</h2>
+      <div class="modal-meta">
+        <span class="modal-badge" id="modalAgent" style="background:rgba(108,92,231,0.15);color:var(--accent-light)"></span>
+        <span class="modal-badge" id="modalDur" style="background:var(--bg-elevated);color:var(--text-dim)"></span>
+      </div>
+      <button class="modal-close" onclick="closeModal()" title="Kapat (Esc)">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="modalContent"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div id="settingsModal" style="display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);" onclick="if(event.target===this)closeSettings()">
+  <div style="position:absolute;top:3%;left:5%;right:5%;bottom:3%;background:var(--bg-card);border-radius:16px;border:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="font-size:18px">&#9881;</span>
+        <h2 style="font-size:16px;font-weight:700">Pipeline Ayarlari</h2>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <div id="settingsSaveStatus" style="font-size:12px;color:var(--success);display:none">Kaydedildi</div>
+        <button onclick="closeSettings()" style="background:none;border:none;color:var(--text-dim);font-size:20px;cursor:pointer">&times;</button>
+      </div>
+    </div>
+    <div style="display:flex;border-bottom:1px solid var(--border)">
+      <button class="cfg-tab active" data-cfg="agents" onclick="switchCfgTab('agents')">Agentlar</button>
+      <button class="cfg-tab" data-cfg="tasks" onclick="switchCfgTab('tasks')">Gorevler</button>
+      <button class="cfg-tab" data-cfg="env" onclick="switchCfgTab('env')">Ortam Degiskenleri</button>
+    </div>
+    <div style="flex:1;overflow:auto;position:relative">
+      <textarea id="cfgEditor" spellcheck="false" style="width:100%;height:100%;background:var(--bg);color:#e6db74;border:none;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;resize:none;outline:none;tab-size:2"></textarea>
+      <div id="cfgEnvView" style="display:none;padding:16px 20px"></div>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-top:1px solid var(--border);background:var(--bg-elevated)">
+      <div style="font-size:11px;color:var(--text-dim)" id="cfgInfo">agents.yaml</div>
+      <div style="display:flex;gap:8px">
+        <button onclick="reloadCfg()" class="sm-btn ghost" style="font-size:12px;padding:6px 14px">Yenile</button>
+        <button onclick="saveCfg()" class="sm-btn" style="font-size:12px;padding:6px 14px;background:var(--accent)">Kaydet</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+.cfg-tab{background:none;border:none;color:var(--text-dim);padding:10px 20px;font-size:13px;font-family:'Inter',sans-serif;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s}
+.cfg-tab:hover{color:var(--text)}
+.cfg-tab.active{color:var(--accent-light);border-bottom-color:var(--accent)}
+</style>
 
 <!-- Action Bar -->
 <div class="board-action-bar" id="actionBar">
@@ -404,9 +523,9 @@ async function retryJob(id){
 }
 
 // ── Job Detail ──
-let _jid=null,_jpoll=null,_open={};
+let _jid=null,_jpoll=null,_open={},_stepCache={};
 function viewJob(id){
-  _jid=id;_open={};
+  _jid=id;_open={};_stepCache={};
   document.getElementById('jobsSection').classList.add('hidden');
   document.getElementById('jobDetail').classList.add('open');
   refreshDetail();clearInterval(_jpoll);_jpoll=setInterval(refreshDetail,3000);
@@ -418,7 +537,7 @@ function closeDetail(){
 }
 async function refreshDetail(){
   if(!_jid)return;
-  try{const r=await fetch('/api/jobs/'+_jid+'?t='+Date.now());if(!r.ok)return;const j=await r.json();renderDetail(j);if(j.status==='completed'||j.status==='failed')clearInterval(_jpoll)}catch(e){}
+  try{const r=await fetch('/api/jobs/'+_jid+'?t='+Date.now());if(!r.ok)return;const j=await r.json();_stepCache={};(j.steps||[]).forEach(s=>{_stepCache[s.id]=s});renderDetail(j);if(j.status==='completed'||j.status==='failed')clearInterval(_jpoll)}catch(e){}
 }
 function renderDetail(j){
   const sl={queued:'Kuyrukta',running:'Çalışıyor',completed:'Tamamlandı',failed:'Başarısız'};
@@ -428,25 +547,13 @@ function renderDetail(j){
   let m='';
   if(j.wi_title)m+=`<div class="meta-tag" style="flex-basis:100%">${esc(j.wi_title)}</div>`;
   if(j.started_at){const s=new Date(j.started_at),e=j.finished_at?new Date(j.finished_at):new Date(),sec=Math.floor((e-s)/1000);m+=`<div class="meta-tag">⏱ ${sec>=60?Math.floor(sec/60)+'dk '+(sec%60)+'sn':sec+'sn'}</div>`}
-  // PR URL'den repo base URL'ini cikar: .../_git/{repo}/pullrequest/X → .../_git/{repo}
   let repoBase='';
-  if(j.pr_url){
-    const mm=j.pr_url.match(/^(.*?\/_git\/[^\/]+)/);
-    if(mm)repoBase=mm[1];
-  }
-  if(j.repo_name){
-    if(repoBase)m+=`<div class="meta-tag">📦 <a href="${esc(repoBase)}" target="_blank" onclick="event.stopPropagation()">${esc(j.repo_name)}</a></div>`;
-    else m+=`<div class="meta-tag">📦 ${esc(j.repo_name)}</div>`;
-  }
-  if(j.branch_name){
-    if(repoBase)m+=`<div class="meta-tag">🌿 <a href="${esc(repoBase)}?version=GB${encodeURIComponent(j.branch_name)}" target="_blank" onclick="event.stopPropagation()">${esc(j.branch_name)}</a></div>`;
-    else m+=`<div class="meta-tag">🌿 ${esc(j.branch_name)}</div>`;
-  }
+  if(j.pr_url){const mm=j.pr_url.match(/^(.*?\/_git\/[^\/]+)/);if(mm)repoBase=mm[1];}
+  if(j.repo_name){if(repoBase)m+=`<div class="meta-tag">📦 <a href="${esc(repoBase)}" target="_blank" onclick="event.stopPropagation()">${esc(j.repo_name)}</a></div>`;else m+=`<div class="meta-tag">📦 ${esc(j.repo_name)}</div>`;}
+  if(j.branch_name){if(repoBase)m+=`<div class="meta-tag">🌿 <a href="${esc(repoBase)}?version=GB${encodeURIComponent(j.branch_name)}" target="_blank" onclick="event.stopPropagation()">${esc(j.branch_name)}</a></div>`;else m+=`<div class="meta-tag">🌿 ${esc(j.branch_name)}</div>`;}
   if(j.pr_url)m+=`<div class="meta-tag">PR <a href="${esc(j.pr_url)}" target="_blank">#${esc(j.pr_id||'')}</a></div>`;
   if(j.error_message&&j.status==='failed')m+=`<div class="meta-tag" style="color:var(--danger);flex-basis:100%">⚠ ${esc(j.error_message)}</div>`;
   document.getElementById('detailMeta').innerHTML=m;
-
-  // Retry butonunu failed/completed durumlarda goster
   document.getElementById('detailRetryBtn').style.display=(j.status==='failed'||j.status==='completed')?'inline-block':'none';
 
   const ic={completed:'✓',running:'▶',failed:'✕',pending:'●',skipped:'─'};
@@ -454,20 +561,75 @@ function renderDetail(j){
     const has=s.output||s.error_message,op=_open[s.id];
     let d='';if(s.started_at){const ds=Math.floor(((s.finished_at?new Date(s.finished_at):new Date())-new Date(s.started_at))/1000);d=ds>=60?Math.floor(ds/60)+'dk '+(ds%60)+'sn':ds+'sn'}
     return `<div>
-      <div class="step-row" onclick="toggleS(${s.id})">
+      <div class="step-row" onclick="${has?`openModal(${s.id})`:''}">
         <div class="si ${s.status}">${ic[s.status]||'●'}</div>
         <span class="sn">${esc(s.step_name)}</span>
         <span class="sa">${esc(s.agent||'')}</span>
         ${d?`<span class="sd">${d}</span>`:''}
-        ${has?`<span class="st ${op?'open':''}">▶</span>`:''}
+        ${has?`<span class="st">↗</span>`:''}
       </div>
-      ${has?`<div class="step-out ${op?'open':''}">
-        ${s.output?`<pre>${esc(s.output)}</pre>`:''}
-        ${s.error_message?`<pre class="err">${esc(s.error_message)}</pre>`:''}
-      </div>`:''}
     </div>`}).join('');
 }
 function toggleS(id){_open[id]=!_open[id];refreshDetail()}
+
+// ── Step Modal ──
+function openModal(stepId){
+  const s=_stepCache[stepId];if(!s)return;
+  const ic={completed:'✓',running:'▶',failed:'✕',pending:'●',skipped:'─'};
+  const sc={completed:'var(--success)',running:'var(--accent)',failed:'var(--danger)',pending:'var(--text-dim)',skipped:'var(--text-dim)'};
+  document.getElementById('modalIcon').textContent=ic[s.status]||'●';
+  document.getElementById('modalIcon').style.color=sc[s.status]||'gray';
+  document.getElementById('modalTitle').textContent=s.step_name||'Adım';
+  document.getElementById('modalAgent').textContent=s.agent||'';
+  let d='';if(s.started_at){const ds=Math.floor(((s.finished_at?new Date(s.finished_at):new Date())-new Date(s.started_at))/1000);d=ds>=60?Math.floor(ds/60)+'dk '+(ds%60)+'sn':ds+'sn'}
+  document.getElementById('modalDur').textContent=d;
+  const content=document.getElementById('modalContent');
+  if(s.error_message){
+    content.innerHTML=`<div class="modal-md err">${esc(s.error_message)}</div>`;
+  } else if(s.output){
+    content.innerHTML=`<div class="modal-md">${mdToHtml(s.output)}</div>`;
+  } else {
+    content.innerHTML=`<p style="color:var(--text-dim);font-size:13px">Çıktı yok.</p>`;
+  }
+  document.getElementById('stepModal').classList.add('open');
+  content.scrollTop=0;
+}
+function closeModal(){document.getElementById('stepModal').classList.remove('open')}
+function modalBgClick(e){if(e.target===document.getElementById('stepModal'))closeModal()}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
+
+// Minimal markdown → HTML
+function mdToHtml(text){
+  if(!text)return '';
+  const lines=text.split('\n');
+  let html='',inPre=false,inList=false;
+  for(let i=0;i<lines.length;i++){
+    let l=lines[i];
+    if(l.startsWith('```')){
+      if(inPre){html+='</pre>';inPre=false;}
+      else{if(inList){html+='</ul>';inList=false;}html+='<pre>';inPre=true;}
+      continue;
+    }
+    if(inPre){html+=esc(l)+'\n';continue;}
+    if(l.startsWith('### ')){if(inList){html+='</ul>';inList=false;}html+=`<h3>${esc(l.slice(4))}</h3>`;continue;}
+    if(l.startsWith('## ')){if(inList){html+='</ul>';inList=false;}html+=`<h2>${esc(l.slice(3))}</h2>`;continue;}
+    if(l.startsWith('# ')){if(inList){html+='</ul>';inList=false;}html+=`<h1>${esc(l.slice(2))}</h1>`;continue;}
+    if(l.startsWith('---')){if(inList){html+='</ul>';inList=false;}html+='<hr>';continue;}
+    if(l.match(/^[-*] /)){if(!inList){html+='<ul>';inList=true;}html+=`<li>${inlineMd(esc(l.slice(2)))}</li>`;continue;}
+    if(l.match(/^\d+\. /)){if(!inList){html+='<ul>';inList=true;}html+=`<li>${inlineMd(esc(l.replace(/^\d+\. /,'')))}</li>`;continue;}
+    if(inList&&!l.trim()){html+='</ul>';inList=false;}
+    if(!l.trim()){html+='<br>';continue;}
+    html+=`<p>${inlineMd(esc(l))}</p>`;
+  }
+  if(inPre)html+='</pre>';
+  if(inList)html+='</ul>';
+  return html;
+}
+function inlineMd(s){
+  return s
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/`(.+?)`/g,'<code>$1</code>');
+}
 async function retryCurrentJob(){
   if(!_jid)return;
   if(!confirm('Bu işi yeniden kuyruğa ekle?'))return;
@@ -521,16 +683,25 @@ async function loadTeams(){
 }
 async function onTeamChange(){
   const t=document.getElementById('teamSel').value;
+  const prevTeam=localStorage.getItem('sdlc_team');
+  const teamChanged=(t!==prevTeam);
   localStorage.setItem('sdlc_team',t);
+  // Takim degistiyse saved sprint'i temizle — yeni takim icin aktif sprint'e dus
+  if(teamChanged) localStorage.removeItem('sdlc_sprint');
   document.getElementById('sprintInfo').innerHTML='';document.getElementById('summary').style.display='none';
   document.getElementById('kanban').innerHTML='<div class="board-empty">Sprint seçin...</div>';
   if(!t){document.getElementById('sprintSel').innerHTML='<option>Önce takım seçin...</option>';return}
   const s=document.getElementById('sprintSel');s.innerHTML='<option>Yükleniyor...</option>';
   try{const r=await fetch('/api/sprints?team='+encodeURIComponent(t)+'&t='+Date.now());sprints=await r.json();
   if(!sprints.length){s.innerHTML='<option>Sprint yok</option>';return}
-  const savedSp=localStorage.getItem('sdlc_sprint');
+  const savedSp=teamChanged?null:localStorage.getItem('sdlc_sprint');
+  // Oncelik: saved sprint (ayni takim) → current (aktif) → ilk sprint
+  const validSaved=savedSp&&sprints.some(sp=>sp.path===savedSp);
+  const hasCurrent=sprints.some(sp=>sp.timeFrame==='current');
   s.innerHTML='<option value="">Sprint seçin...</option>'+sprints.map(sp=>{
-    const sel=(savedSp&&sp.path===savedSp)?'selected':((!savedSp&&sp.timeFrame==='current')?'selected':'');
+    let sel='';
+    if(validSaved&&sp.path===savedSp) sel='selected';
+    else if(!validSaved&&hasCurrent&&sp.timeFrame==='current') sel='selected';
     return `<option value="${esc(sp.path)}" ${sel}>${esc(sp.name)}${sp.timeFrame==='current'?' ● Aktif':''}</option>`;
   }).join('');
   if(s.value)loadBoard()}catch(e){s.innerHTML='<option>Hata</option>'}
@@ -608,6 +779,78 @@ async function queueSel(){
 }
 
 function esc(s){return s?s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'):''}
+
+// ── Settings Modal ──
+let _cfgTab='agents';
+function openSettings(){
+  document.getElementById('settingsModal').style.display='block';
+  loadCfg('agents');
+}
+function closeSettings(){document.getElementById('settingsModal').style.display='none'}
+function switchCfgTab(name){
+  _cfgTab=name;
+  document.querySelectorAll('.cfg-tab').forEach(t=>t.classList.toggle('active',t.dataset.cfg===name));
+  if(name==='env'){
+    document.getElementById('cfgEditor').style.display='none';
+    document.getElementById('cfgEnvView').style.display='block';
+    loadEnv();
+  }else{
+    document.getElementById('cfgEditor').style.display='block';
+    document.getElementById('cfgEnvView').style.display='none';
+    loadCfg(name);
+  }
+}
+async function loadCfg(name){
+  const editor=document.getElementById('cfgEditor');
+  const info=document.getElementById('cfgInfo');
+  editor.value='Yukleniyor...';
+  info.textContent=name+'.yaml';
+  try{
+    const r=await fetch('/api/config/'+name);
+    if(r.ok){const d=await r.json();editor.value=d.content||'';info.textContent=name+'.yaml ('+editor.value.length+' char)'}
+    else{const e=await r.json();editor.value='Hata: '+(e.error||r.status)}
+  }catch(e){editor.value='Baglanti hatasi: '+e}
+}
+async function loadEnv(){
+  const view=document.getElementById('cfgEnvView');
+  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  try{
+    const r=await fetch('/api/config/env');
+    if(r.ok){
+      const d=await r.json();
+      let html='<table style="width:100%;font-size:13px;border-collapse:collapse">';
+      html+='<tr style="color:var(--text-dim);font-size:11px;text-align:left"><th style="padding:6px 8px">Degisken</th><th style="padding:6px 8px">Deger</th></tr>';
+      for(const[k,v]of Object.entries(d)){
+        html+=`<tr style="border-top:1px solid var(--border)"><td style="padding:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent-light)">${esc(k)}</td><td style="padding:8px;font-family:'JetBrains Mono',monospace;font-size:12px">${esc(v)||'<span style="color:var(--text-dim)">(bos)</span>'}</td></tr>`;
+      }
+      html+='</table><div style="margin-top:12px;font-size:11px;color:var(--text-dim)">Env degiskenleri .env dosyasindan okunur. Degistirmek icin .env dosyasini duzenleyin ve sunucuyu yeniden baslatin.</div>';
+      view.innerHTML=html;
+    }
+  }catch(e){view.innerHTML='Hata: '+e}
+}
+function reloadCfg(){if(_cfgTab==='env')loadEnv();else loadCfg(_cfgTab)}
+async function saveCfg(){
+  if(_cfgTab==='env'){alert('Env degiskenleri .env dosyasindan yonetilir.');return}
+  const editor=document.getElementById('cfgEditor');
+  const content=editor.value;
+  if(!content.trim()){alert('Bos icerik kaydedilemez');return}
+  try{
+    const r=await fetch('/api/config/'+_cfgTab,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({content})});
+    const d=await r.json();
+    if(r.ok){
+      const st=document.getElementById('settingsSaveStatus');
+      st.style.display='inline';st.textContent='Kaydedildi';
+      setTimeout(()=>st.style.display='none',3000);
+      document.getElementById('cfgInfo').textContent=_cfgTab+'.yaml ('+content.length+' char) — kaydedildi';
+    }else{alert('Hata: '+(d.error||'Bilinmeyen hata'))}
+  }catch(e){alert('Baglanti hatasi: '+e)}
+}
+// Tab key in editor
+document.getElementById('cfgEditor').addEventListener('keydown',function(e){
+  if(e.key==='Tab'){e.preventDefault();const s=this.selectionStart,end=this.selectionEnd;this.value=this.value.substring(0,s)+'  '+this.value.substring(end);this.selectionStart=this.selectionEnd=s+2}
+  if(e.key==='s'&&(e.ctrlKey||e.metaKey)){e.preventDefault();saveCfg()}
+});
+
 loadTeams();
 </script>
 </body>

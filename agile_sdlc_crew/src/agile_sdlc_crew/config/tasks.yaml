@@ -1,4 +1,289 @@
 # ══════════════════════════════════════════════════════════════
+# FAZ 0: Kickoff - Sanal Odak Grup (Design Review Simulasyonu)
+# ══════════════════════════════════════════════════════════════
+
+kickoff_sm_open_task:
+  description: >
+    GOREV: #{work_item_id} is kalemi icin "Sanal Odak Grup" toplantisini ac.
+    Moderator olarak toplantıyı yönet.
+
+    "get_work_item" aracını kullanarak is kalemini oku.
+    Is kalemini ekibe sun: baslik, aciklama, kabul kriterleri ve yorumlar.
+    Yorumlar varsa mutlaka dahil et — ek bagiam, karar gecmisi veya degisiklik
+    talepleri icerebilir.
+
+    TOPLANTI YAPISI:
+    Bu toplantıda 4 uzman kendi perspektifinden 3 kritik soru/endise dile getirecek,
+    ardindan birbirlerinin görüşlerine yanıt verecek.
+    Son olarak bir "Kritik Tasarim Gozden Gecirme" tutanagi hazırlanacak.
+
+    UZMANLAR:
+    - Analist (Deniz): İş kuralları, mantıksal boşluklar, kullanıcı deneyimi — belirsizliği sevmez
+    - Developer (Baris): Nasil kodlanir, karmasiklik, teknoloji uyumu, teknik borc riski
+    - Team Lead (Can): Zaman cizelgesi, ekip kapasitesi, diger sistemlerle entegrasyon — pragmatik dengeleyici
+    - QA/Tester (Ece): Hata senaryolari, "bu sistem nerede patlar?", nasil test edilir
+
+    ONCEKI BAGLAM:
+    {previous_context}
+  expected_output: >
+    ## Sanal Odak Grup — Acilis
+
+    **Is Kalemi:** #{work_item_id}
+    **Baslik:** [baslik]
+    **Ozet:** [1-2 cumle]
+    **Mevcut Kabul Kriterleri:** [WI'den okunan liste, eksikse "Tanimsiz"]
+    **Yorumlar:** [varsa yazar + icerik, yoksa "Yorum yok"]
+    **Toplanti Gundem:** Uzmanlar sira ile 3 kritik soru/endise paylaşacak, ardindan cros-tartisma yapilacak.
+  agent: scrum_master
+
+kickoff_ba_task:
+  description: >
+    GOREV: Analist (Deniz) perspektifini ustlen. Odak grup toplantisina katki ver.
+
+    Is kurallarına, mantıksal boşluklara ve kullanıcı deneyimine odaklan.
+    Belirsizliği sevmezsin — her muğlak noktayı işaretle.
+
+    IS BILGISI VE BAGLAM:
+    {previous_context}
+
+    ADIM 1 — 3 KRİTİK SORU / ENDİŞE (Deniz olarak):
+    Yukaridaki is bilgilerine gore seni en cok endişelendiren 3 noktayı dile getir:
+    a) Hangi iş kuralı net değil veya eksik? (Örn: "X durumunda Y mi yapılacak Z mi?")
+    b) Hangi mantıksal boşluk var? (Örn: "Edge case'ler tanımlanmamış")
+    c) Kullanıcı deneyimi nasıl etkilenecek? Geriye dönük uyumluluk?
+
+    ADIM 2 — WI'DEN CEVAPLANABİLEN NOKTALARI YANIT:
+    Her soruyu yukaridaki is bilgilerine dayanarak yanıtla. Yanıtlanamayan → "ACIK SORU" işaretle.
+
+    ADIM 3 — KABUL KRİTERLERİNİ DOĞRULA:
+    Yukaridaki kabul kriterleri ölçülebilir ve test edilebilir mi?
+    Eksik veya muğlak kriter varsa net, somut hale getir ve öner.
+
+    IS KALEMI: #{work_item_id}
+  expected_output: >
+    ## Analist (Deniz) — Perspektif
+
+    **3 Kritik Soru/Endişe:**
+    1. [Endişe] — [WI'den cevap veya "AÇIK SORU"]
+    2. [Endişe] — [WI'den cevap veya "AÇIK SORU"]
+    3. [Endişe] — [WI'den cevap veya "AÇIK SORU"]
+
+    **Kabul Kriterlerine Deniz'in Değerlendirmesi:**
+    - [Kriter 1]: Ölçülebilir / Muğlak — [öneri]
+    - [Kriter 2]: Ölçülebilir / Muğlak — [öneri]
+
+    **Açık Kalan Sorular:** [liste veya "Yok"]
+    **Önerilen Ek Kabul Kriterleri:** [liste veya "Yok"]
+  agent: business_analyst
+
+kickoff_arch_task:
+  description: >
+    GOREV: Team Lead (Can) perspektifini ustlen. Odak gruba katki ver.
+
+    IS BILGISI VE BAGLAM:
+    {previous_context}
+
+    Zaman cizelgesi, ekip kapasitesi ve diger sistemlerle entegrasyon risklerine bak.
+    Pragmatik bir dengeleyicisin — ideali değil, uygulanabiliri savunursun.
+
+    ADIM 1 — Analist'in Endişelerini Yanıtla:
+    Deniz'in (Analist) dile getirdiği açık sorulara Team Lead perspektifinden yanıt ver.
+    Hangi endişeler teknik/entegrasyon açısından onaylanıyor, hangisi abartılı?
+
+    ADIM 2 — 3 KRİTİK SORU / ENDİŞE (Can olarak):
+    a) Hangi mevcut sistem/modül etkilenecek? Entegrasyon riski nerede?
+    b) Bu değişiklik hangi başka ekibe/servise bağımlı? Koordinasyon gerekiyor mu?
+    c) Scope creep riski var mı? Kapsam netleştirilmeli mi?
+
+    ADIM 3 — TAHMINI REPO / MODÜL:
+    Context'teki HEDEF REPO ve dosya yapısı bilgisine dayanarak değişikliğin hangi modüllerde yapılacağını belirt.
+
+    IS KALEMI: #{work_item_id}
+  expected_output: >
+    ## Team Lead (Can) — Perspektif
+
+    **Deniz'in Endişelerine Yanıt:** [her açık soruya kısa yanıt]
+
+    **3 Kritik Soru/Endişe:**
+    1. [Entegrasyon/bağımlılık endişesi]
+    2. [Koordinasyon veya ekip kapasitesi endişesi]
+    3. [Kapsam/scope endişesi]
+
+    **Tahmini Etkilenen Repo/Modül:** [isim veya "Belirsiz"]
+    **Entegrasyon Riskleri:** [liste veya "Yok"]
+    **Kapsam Sınırı Önerisi:** [net sınır veya "Mevcut kapsam yeterli"]
+  agent: software_architect
+
+kickoff_dev_task:
+  description: >
+    GOREV: Developer (Baris) perspektifini ustlen. Odak gruba katki ver.
+
+    IS BILGISI VE BAGLAM:
+    {previous_context}
+
+    "Nasıl kodlarız?" diye bakarsın. Karmaşıklık, teknoloji uyumu ve teknik borç
+    yaratma riskine odaklanırsın.
+
+    ADIM 1 — Analist ve Team Lead'in Endişelerini Yanıtla:
+    Deniz ve Can'ın dile getirdiği noktalara Developer gözünden yanıt ver.
+    Teknik açıdan doğrulanan, yanlış anlanan veya daha da riskli bulunan noktalar?
+
+    ADIM 2 — 3 KRİTİK SORU / ENDİŞE (Barış olarak):
+    a) Bu değişiklik mevcut kod tabanıyla uyumlu mu? Yeniden yazma riski var mı?
+    b) Hangi edge case'ler koda yansıtılmak zorunda? (Örn: null check, race condition)
+    c) Bu geliştirme teknik borç bırakır mı? Hangi kısayollardan kaçınmalıyız?
+
+    ADIM 3 — KARMAŞıKLıK TAHMİNİ:
+    Geliştirme karmaşıklığını Düşük / Orta / Yüksek olarak puanla ve gerekçele.
+
+    IS KALEMI: #{work_item_id}
+  expected_output: >
+    ## Developer (Barış) — Perspektif
+
+    **Deniz ve Can'ın Endişelerine Yanıt:** [teknik perspektiften değerlendirme]
+
+    **3 Kritik Soru/Endişe:**
+    1. [Kod uyumluluğu / yeniden yazma riski]
+    2. [Edge case'ler — kodda ele alınması zorunlu]
+    3. [Teknik borç riski]
+
+    **Karmaşıklık:** Düşük / Orta / Yüksek — [gerekçe]
+    **Dikkat Edilmesi Gereken Kod Noktaları:** [liste]
+    **Önerilen Teknik Yaklaşım:** [kısa açıklama]
+  agent: senior_developer
+
+kickoff_qa_task:
+  description: >
+    GOREV: QA/Tester (Ece) perspektifini ustlen. Odak gruba katki ver.
+
+    Hata senaryolarını düşünürsün. "Bu sistem nerede patlar?" ve "Nasıl test ederiz?"
+    sorularını sorarsın.
+
+    ADIM 1 — Tüm Ekibin Endişelerini Test Perspektifinden Değerlendir:
+    Deniz'in mantıksal boşlukları, Can'ın entegrasyon riskleri ve Barış'ın edge
+    case'leri QA gözünden nasıl görünüyor? Her birinin test edilebilirliği nedir?
+
+    ADIM 2 — 3 KRİTİK SORU / ENDİŞE (Ece olarak):
+    a) Hangi negatif senaryo (hata yolu) test edilmeden üretim riski oluşturur?
+    b) Bu değişiklik mevcut özellikleri bozabilir mi? Regresyon riski nerede?
+    c) Performans / yük testi gerekiyor mu? Hangi eşikler kritik?
+
+    ADIM 3 — TEST SENARYOLARI:
+    Geliştirilmesi gereken temel test senaryolarını listele (happy path + hata yolları).
+
+    IS KALEMI: #{work_item_id}
+  expected_output: >
+    ## QA/Tester (Ece) — Perspektif
+
+    **Ekibin Endişelerinin Test Edilebilirliği:**
+    - Deniz'in [boşluk]: Test edilebilir / Test edilemez — [açıklama]
+    - Can'ın [risk]: Test edilebilir / Test edilemez — [açıklama]
+    - Barış'ın [edge case]: Test senaryosu: [açıklama]
+
+    **3 Kritik Soru/Endişe:**
+    1. [Kritik negatif senaryo]
+    2. [Regresyon riski]
+    3. [Performans/yük endişesi]
+
+    **Temel Test Senaryoları:**
+    - [ ] Happy path: [açıklama]
+    - [ ] Hata yolu 1: [açıklama]
+    - [ ] Hata yolu 2: [açıklama]
+    - [ ] Edge case: [açıklama]
+
+    **Regresyon Riski:** Düşük / Orta / Yüksek
+  agent: qa_engineer
+
+kickoff_uat_task:
+  description: >
+    GOREV: UAT Specialist olarak son kullanici kabulunu degerlendir.
+
+    Tum ekibin perspektiflerini (Deniz/Can/Baris/Ece) dikkate alarak
+    kullanici kabul testi acisindan degerlendirme yap.
+
+    - Kabul kriterleri son kullanici perspektifinden test edilebilir mi?
+    - Hangi kabul kriterleri "teknik dogru ama is hatasi" olarak gecilebilir?
+    - Is kurali ihlali riski olan noktalari isaretla.
+
+    IS KALEMI: #{work_item_id}
+  expected_output: >
+    ## UAT Perspektifi
+
+    **Kabul Kriterlerinin Son Kullanici Degerlemesi:**
+    - [Kriter 1]: UAT'ta test edilebilir / Edilemez — [aciklama]
+
+    **Is Kurali Riskleri:** [liste veya "Yok"]
+    **Son Kullanici Etkisi:** [aciklama]
+  agent: uat_specialist
+
+kickoff_sm_close_task:
+  description: >
+    GOREV: Odak grup toplantisini kapat. "Kritik Tasarim Gozden Gecirme" tutanagini hazirla.
+
+    IS BILGISI VE BAGLAM:
+    {previous_context}
+
+    Tum uzmanların (Deniz/Can/Barış) katkılarını derle.
+    Bu tutanak tüm pipeline boyunca tek referans kaynağı olacak.
+
+    TUTANAK YAPISI (4 bölüm):
+
+    1. TOPLANTI ÖZETİ
+       Fikrin/değişikliğin genel uygulanabilirliği. Ekip konsensüsü. Kapsam sınırı.
+
+    2. DİSİPLİN BAZLI ANALİZ
+       Her uzmanın ana bulgusunu (1-2 madde) disiplin başlığı altında özetle:
+       - Analiz (Deniz): İş kuralı/mantıksal bulgular
+       - Yazılım (Barış): Teknik yaklaşım ve kodlama uyarıları
+       - Yönetim (Can): Entegrasyon/kapsam kararları
+       - Test: Diger uzmanlarin ciktilarina dayanarak kritik test senaryolari ve hata yollari
+
+    3. KRİTİK RİSK TABLOSU
+       Tüm ekibin dile getirdiği riskleri şu formatta listele:
+       | Risk | Etki Seviyesi (Yüksek/Orta/Düşük) | Önerilen Önlem |
+
+    4. BACKLOG ADAYLARI
+       - Açık kalan sorular için kullanıcı hikayeleri veya teknik görevler
+       - Kabul kriterleri listesi (nihai, net, ölçülebilir)
+       - Teknik tasarımın kesinlikle ele alması gereken edge case'ler
+
+    IS KALEMI: #{work_item_id}
+  expected_output: >
+    ## Kritik Tasarim Gozden Gecirme — Tutanak
+
+    **Is Kalemi:** #{work_item_id}
+
+    ### 1. Toplanti Ozeti
+    [Genel uygulanabilirlik degerlendirmesi, ekip konsensüsü, kapsam siniri]
+
+    ### 2. Disiplin Bazli Analiz
+    **Analiz (Deniz):** [ana bulgular]
+    **Yazilim (Baris):** [teknik yaklasim + uyarilar]
+    **Yonetim (Can):** [entegrasyon/kapsam kararlari]
+    **Test (Ece):** [kritik test senaryolari]
+
+    ### 3. Kritik Risk Tablosu
+    | Risk | Etki | Onlem |
+    |------|------|-------|
+    | [risk 1] | Yuksek/Orta/Dusuk | [onlem] |
+    | [risk 2] | Yuksek/Orta/Dusuk | [onlem] |
+
+    ### 4. Backlog Adaylari
+    **Nihai Kabul Kriterleri:**
+    - [ ] [Kriter 1 — olculebilir, test edilebilir]
+    - [ ] [Kriter 2 — olculebilir, test edilebilir]
+
+    **Teknik Tasarimin Ele Almasi Gereken Edge Case'ler:**
+    - [edge case 1]
+    - [edge case 2]
+
+    **Acik Gorevler / Hikayeler:**
+    - [varsa]
+
+    *Tum takim #{work_item_id} is kalemine hazir.*
+  agent: scrum_master
+
+# ══════════════════════════════════════════════════════════════
 # FAZ 0: Scrum Master - Repo Kesfetme ve Bagimlilik Analizi
 # ══════════════════════════════════════════════════════════════
 
@@ -32,16 +317,57 @@ dependency_analysis_task:
 
 requirements_analysis_task:
   description: >
-    GOREV: {work_item_id} idli isin sadece aciklamasini oku ve kabul kriterlerini belirle.
-    "get_work_item" aracini kullanarak is kalemini oku.
-    Description alanini dikkatlice incele ve kabul kriterlerini cikar.
+    GOREV: {work_item_id} idli is kalemini analiz et ve yapilandirilmis JSON cikti uret.
+
+    Context'te "WORK ITEM DETAYI" basligiyla is kalemi bilgisi hazir. Oku ve analiz et.
+    get_work_item araci ile de okuyabilirsin — ama context'te varsa tekrar okuma.
+
+    CALISMA AKISI:
+    1. Is kaleminin baslik + aciklama + kabul kriterlerini oku
+    2. Fonksiyonel gereksinimleri cikar (FR1, FR2, ...)
+    3. Teknik gereksinimleri cikar (TR1, TR2, ...)
+    4. Kabul kriterlerini numarala (AC1, AC2, ...)
+    5. Kapsam disi maddeleri belirle
+    6. Varsayimlari "ASSUMPTION:" ile isaretle
+    7. Belirsiz noktalari open_questions'a ekle
+
+    ONEMLI: Onceki bagiamda "Kickoff Toplantisi Ozeti" varsa dikkate al.
+    PR yorumlari varsa onlari da gereksinimlere yansit.
+
+    Her durumda analizi tamamla — eldeki bilgilerle devam et.
 
     {scrum_master_feedback}
 
     ONCEKI ADIM CIKTILARI:
     {previous_context}
   expected_output: >
-    Is kaleminin aciklamasi ve belirlenen kabul kriterleri listesi.
+    SADECE gecerli JSON dondur. Serbest metin YAZMA.
+
+    ```json
+    {
+      "summary": "is kaleminin tek cumlede ozeti",
+      "functional_requirements": [
+        {"id": "FR1", "desc": "..."},
+        {"id": "FR2", "desc": "..."}
+      ],
+      "technical_requirements": [
+        {"id": "TR1", "desc": "..."}
+      ],
+      "acceptance_criteria": [
+        {"id": "AC1", "desc": "..."},
+        {"id": "AC2", "desc": "..."}
+      ],
+      "out_of_scope": ["..."],
+      "assumptions": ["ASSUMPTION: ..."],
+      "open_questions": ["..."]
+    }
+    ```
+
+    KURALLAR:
+    - Her FR/TR/AC benzersiz id alir
+    - Description'da yer almayan sey UYDURMA
+    - Eksik bilgiyi open_questions'a ekle
+    - JSON disinda HICBIR metin yazma
   agent: business_analyst
 
 technical_design_task:
@@ -53,24 +379,64 @@ technical_design_task:
     TAMAMLADIKTAN SONRA, topladigin bilgilerle JSON uret. Tool cagrisi formatini
     asla "final answer" olarak yazma.
 
-    ADIM 1 - IS KALEMINI OKU:
-    "get_work_item" aracini kullanarak {work_item_id} is kalemini oku.
-    Description alaninin TAMAMINI dikkatlice incele. Asagidakileri bul:
-    - Hangi repository uzerinde calisilacak (Repository: veya repo adi)
+    🚨 YETERSIZLIK KONTROLU (kod yazma perspektifinden):
+    Eger is kalemi YAZILIM GELISTIRME ICIN YETERSIZ ise, JSON yerine ciktinin
+    en basina su marker'i yaz:
+
+    YETERSIZ: <gelistirici icin eksik olan kritik bilgileri kisaca listele>
+
+    YETERSIZ demen icin gecerli sebepler:
+    - Hangi fonksiyonelite eklenecek/degisecek belirsiz (agent repo'yu inceledikten sonra bile)
+    - Beklenen input/output, veri yapisi, API contract bilinmiyor
+    - Degisecek dosyalarin tahmini bile mumkun degil
+    - Kabul kriterleri test edilebilir halde degil (olçulemez)
+    - Is kuralı veya flow tarif edilmemis (edge case'ler dahil)
+    - Tool'larla arastirdigin halde yeterli teknik baglam bulamadin
+
+    YETERSIZ DEGIL (bunlari tahmin/kesfet):
+    - Repo adi: tool'larla keşfet
+    - Tam dosya yolu: kod tabaninda ara
+    - Kucuk belirsizlikler: en makul varsayimla devam et
+
+    Eger YETERSIZ degilse DIREKT JSON uret, marker yazma.
+
+    ⚡ MALİYET OPTIMIZASYONU — TOOL KULLANIMI:
+    Context'te asagidaki bilgiler HAZIR:
+    - "WORK ITEM DETAYI" basligi altinda: baslik, aciklama, kabul kriterleri
+    - "DOSYA ICERIGI: /yol/dosya.php" basligiyla dosya icerikleri (varsa)
+    - "Kickoff Toplantisi Ozeti" basligi altinda: takim analizi
+    - "ONERILEN REPOLAR" basligi altinda: hedef repo
+
+    KURAL: Context'te var olan bilgi icin HICBIR TOOL CAGIRMA.
+    - get_work_item CAGIRMA — WI detayi zaten "WORK ITEM DETAYI" altinda
+    - Dosya context'teyse browse_repo CAGIRMA — dosya icerigi zaten var
+    - Repo biliniyorsa list_repos CAGIRMA
+
+    Tool sadece context'te OLMAYAN bilgi icin kullan:
+    - Context'te bulunmayan bir dosyayi okumak gerekiyorsa → browse_repo
+    - Kod arama gerekiyorsa → search_code
+
+    ADIM 1 - KABUL KRİTERLERİNİ ANLA:
+    Context'te "Kabul Kriterleri" başlığı varsa oku ve not al.
+    Bu kriterler BA tarafından belirlenmiş olup teknik planın HER birini karşılaması zorunludur.
+    Planın `acceptance_criteria` JSON alanı bu listenin tam karşılığı olmalıdır.
+
+    ADIM 2 - IS KALEMINI ANLA:
+    Context'teki "WORK ITEM DETAYI" bolumunu oku. Asagidakileri belirle:
+    - Hangi repository uzerinde calisilacak ("ONERILEN REPOLAR" veya aciklamadan)
     - Ne yapilmasi isteniyor (translate, refactor, yeni endpoint, fix vb.)
     - Hangi dosya/endpoint/route degisecek
     - Ornek dosya veya pattern referansi varsa not al
 
-    ADIM 2 - DEGISECEK DOSYALARI OKU:
-    Description'da belirtilen HEDEF dosyayi "browse_repo" araci ile oku.
-    Araç parametreleri: repo_name="{target_repo}", path="dosya/yolu", include_content=true
-    Dosyanin TAMAMINІ goruntule, sadece ilgili metodlari degil.
+    ADIM 3 - DEGISECEK DOSYAYI BUL:
+    Context'te "DOSYA ICERIGI: /yol/dosya.php" varsa onu kullan.
+    YOKSA browse_repo ile hedef dosyayi bul ve oku.
 
-    ADIM 3 - ORNEK DOSYAYI OKU (varsa):
-    Description'da ornek dosya/pattern belirtilmisse, o dosyayi da oku.
+    ADIM 4 - ORNEK DOSYAYI OKU (varsa, context'te yoksa):
+    Description'da ornek dosya/pattern belirtilmisse ve context'te yoksa oku.
     Ornek dosyadaki pattern'i anla - ayni yapiyi hedef dosyaya uygulayacaksin.
 
-    ADIM 4 - DEGISIKLIK PLANINI YAZ:
+    ADIM 5 - DEGISIKLIK PLANINI YAZ:
     Asagidaki JSON formatinda ciktini olustur.
     HER dosya icin mevcut kodu ve yeni kodu GOSTER.
     Tahminde bulunma - sadece okudugu kodlara dayali plan yaz.
@@ -100,20 +466,31 @@ technical_design_task:
           "change_type": "edit",
           "description": "Bu dosyada ne degisecek (tek cumle)",
           "current_code": "dosyadan okunan MEVCUT ilgili kod bolumu",
-          "new_code": "uygulanmasi gereken YENİ kod bolumu",
-          "start_marker": "degisikligin basladigi satirdaki unique string",
-          "end_marker": "degisikligin bittigi satirdaki unique string"
+          "new_code": "uygulanmasi gereken YENI kod bolumu",
+          "covers_requirements": ["FR1", "AC2"],
+          "risk": "low"
         }
       ],
-      "acceptance_criteria": ["kriter 1", "kriter 2"]
+      "acceptance_criteria": [
+        {"id": "AC1", "desc": "kriter 1"},
+        {"id": "AC2", "desc": "kriter 2"}
+      ],
+      "alternatives_considered": [
+        {"option": "...", "tradeoff": "...", "chosen": true}
+      ],
+      "breaking_changes": [],
+      "migration_notes": "",
+      "security_perf_notes": ""
     }
     ```
 
     KURALLAR:
     - current_code alani GERCEK dosyadan okunmus olmali, uydurmali degil
     - new_code alani derlenebilir/calisabilir olmali
-    - start_marker ve end_marker dosyada gercekten var olan satirlar olmali
+    - Her change en az bir FR/TR/AC id'sine baglanmali (covers_requirements)
+    - covers_requirements bos olan change YAZMA
     - Sadece is kaleminde istenen degisiklikleri icerir
+    - acceptance_criteria BA ciktisindaki AC listesiyle uyumlu olmali
   agent: software_architect
 
 # ══════════════════════════════════════════════════════════════
@@ -134,6 +511,9 @@ implement_change_task:
     Dosya: {target_file}
     Degisiklik: {change_description}
 
+    TUM PLAN VE DIGER DOSYALAR (entegrasyon icin referans):
+    {previous_context}
+
     MEVCUT KOD (planda belirtilen):
     ```
     {current_code}
@@ -148,6 +528,7 @@ implement_change_task:
     1. Once {target_file} dosyasini "browse_repo" araci ile oku — tam icerigini al
     2. Plandaki current_code boluumunu dosyada bul
     3. current_code bolumunu new_code ile degistir
+    4. Diger dosyalardaki API yollarini, interface'leri ve import'lari kontrol et
     4. Dosyanin TAMAMINI (degisiklik uygulanmis haliyle) dondur — bastan sona her satir
 
     KESIN KURALLAR:
@@ -182,10 +563,27 @@ review_pr_task:
     PR: {pr_url}
     Repo: {target_repo}
 
+    ⚠️ KRITIK KARAR KURALI:
+    - PR'daki degisiklikler is kalemindeki ISTEMLERLE BIREBIR eslesmiyorsa
+      → KARAR: DEGISIKLIK GEREKLI
+    - Plan'da 6 dosya degisecek ama PR'da 1 dosya varsa → DEGISIKLIK GEREKLI
+    - PR'daki kod sadece yuzeysel (bir satir, bir alan) ve is kalemi koklu
+      degisiklik isteyen bir is ise → DEGISIKLIK GEREKLI
+    - Kabul kriterleri karsilanmamissa → DEGISIKLIK GEREKLI
+    - Syntax hatasi, acik bug varsa → DEGISIKLIK GEREKLI
+
+    Sahte ONAY verme — PR eksikse acikca belirt. Pipeline senin kararina gore durur.
+
     ADIMLARIN:
     1. "get_pr_changes" araci ile PR'daki degisen dosyalari listele
     2. Her degisen dosyayi "Repo Gezgini" ile oku (branch: {target_branch})
     3. Asagidaki kontrol listesini uygula:
+
+    KABUL KRİTERLERİ KONTROL LİSTESİ (ÖNCE BU):
+    Context'te "Kabul Kriterleri" başlığı varsa her birini tek tek kontrol et:
+    - [ ] Her kabul kriteri PR'daki kodda karşılanmış mı?
+    - [ ] Karşılanmayan kriter varsa → KARAR: DEGISIKLIK GEREKLI
+    Bu kriterler BA ve teknik tasarım sürecinde belirlenmiş olup bağlayıcıdır.
 
     IS UYUMU KONTROL LISTESI:
     - [ ] PR sadece is kaleminde istenen dosyalari mi degistirmis?
@@ -218,6 +616,10 @@ review_pr_task:
 
     **Karar:** ONAY / DEGISIKLIK GEREKLI
 
+    **Kabul Kriterleri Kontrolü:**
+    - [Kriter 1]: KARSILANDI / EKSİK - [açıklama]
+    - [Kriter 2]: KARSILANDI / EKSİK - [açıklama]
+
     **Is Uyumu:**
     - Karsilanan gereksinimler: [liste]
     - Eksik gereksinimler: [liste veya "Yok"]
@@ -240,6 +642,10 @@ test_planning_task:
     GOREV: {work_item_id} is kalemi icin yapilan degisikliklerin test planini olustur.
     PR'daki degisiklikleri incele, {target_repo} reposundaki {target_branch} branch'ini oku.
 
+    ONEMLI: Onceki baglamda "Kickoff Toplantisi Ozeti" varsa QA perspektifini dikkate al.
+    Kickoff'ta QA mühendisi test senaryolarini ve regresyon riskini zaten degerlendirdi.
+    O bulgulari baslangic noktasi olarak al, uzerine tamamla ve genis.
+
     Test planinda su bolumleri icermeli:
     - Basarili senaryolar (happy path)
     - Hata senaryolari (error cases)
@@ -259,17 +665,21 @@ uat_task:
   description: >
     GOREV: {work_item_id} is kalemi icin kullanici kabul testi yap.
 
-    ADIM 1 - KABUL KRITERLERINI CIKAR:
-    "get_work_item" aracini kullanarak {work_item_id} is kalemini oku.
-    Description ve Acceptance Criteria alanlarindan kabul kriterlerini cikar.
-    Acikca belirtilmemis ancak is kaleminden cikarilabilecek ek kriterleri de ekle.
-    Her kriteri numaralandir.
+    ADIM 0 - KABUL KRİTERLERİNİ HAZIRLA:
+    Context'te "Kabul Kriterleri (Pipeline Boyunca Bagleyici)" başlığı varsa
+    ORADAN AL — get_work_item çağırma, kriterler zaten belirlenmiş.
+    Bu kriterler BA tarafından analiz aşamasında, teknik tasarımdan ÖNCE belirlendi
+    ve tüm pipeline boyunca bağlayıcı tek kaynaktır.
 
-    ADIM 2 - PR DEGISIKLIKLERINI INCELE:
+    Context'te kabul kriteri yoksa "get_work_item" ile WI'yi oku ve çıkar.
+
+    Kickoff Toplantısı Özeti varsa UAT perspektifini de dikkate al.
+
+    ADIM 1 - PR DEGISIKLIKLERINI INCELE:
     "get_pr_changes" araci ile PR'daki degisiklikleri incele.
     Her degisikligin hangi kabul kriterine karsilik geldigini belirle.
 
-    ADIM 3 - DEGERLENDIRME:
+    ADIM 2 - DEGERLENDIRME:
     Her kabul kriteri icin GECTI veya KALDI karari ver.
     KALDI olanlar icin ne eksik oldugunu acikla.
 
