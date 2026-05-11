@@ -46,6 +46,11 @@ class AzureDevOpsGetWorkItemTool(CachedToolMixin, BaseTool):
                 "iterasyon_yolu": fields.get("System.IterationPath", ""),
             }
 
+            try:
+                result["yorumlar"] = client.get_work_item_comments(data.get("id"))
+            except Exception:
+                result["yorumlar"] = []
+
             return json.dumps(result, ensure_ascii=False, indent=2)
 
         except Exception as e:

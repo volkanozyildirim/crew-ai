@@ -1,6 +1,12 @@
 """Azure DevOps provider — mevcut AzureDevOpsClient'i provider interface'ine sarar.
 
 Hem WorkItemProvider hem SCMProvider'i implement eder (Azure DevOps ikisini de saglar).
+Modul-seviye sabitleri:
+    NAME             : registry adi
+    CREDS_SCHEMA     : work_item credentials sema (UI dashboard tarafindan kullanilir)
+    SCM_CREDS_SCHEMA : scm credentials sema (bos — work_item ile paylasili)
+    build_work_item  : registry factory
+    build_scm        : registry factory
 """
 
 import re
@@ -9,6 +15,60 @@ from agile_sdlc_crew.providers.base import (
     WorkItem, Repository, PullRequest, PRComment,
 )
 from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+
+
+NAME = "azure_devops"
+
+# Work Item credentials sema. AzureDevOpsClient bu degerleri
+# ("work_item", "azure_devops", <field>) namespace'inden okur.
+CREDS_SCHEMA = [
+    {
+        "name": "org_url",
+        "label": "Organization URL",
+        "secret": False,
+        "env_fallback": "AZURE_DEVOPS_ORG_URL",
+        "placeholder": "https://dev.azure.com/myorg",
+    },
+    {
+        "name": "pat",
+        "label": "Personal Access Token",
+        "secret": True,
+        "env_fallback": "AZURE_DEVOPS_PAT",
+    },
+    {
+        "name": "project",
+        "label": "Project",
+        "secret": False,
+        "env_fallback": "AZURE_DEVOPS_PROJECT",
+    },
+    {
+        "name": "repo_projects",
+        "label": "Repo Projects (CSV, opsiyonel)",
+        "secret": False,
+        "env_fallback": "AZURE_DEVOPS_REPO_PROJECTS",
+        "placeholder": "ProjectA,ProjectB",
+    },
+    {
+        "name": "team",
+        "label": "Team (opsiyonel)",
+        "secret": False,
+        "env_fallback": "AZURE_DEVOPS_TEAM",
+    },
+]
+
+# SCM tarafi: ayni Azure DevOps ornegi work_item credentials'larini kullanir,
+# duplicate yazimdan kacinmak icin SCM sema bos.
+SCM_CREDS_SCHEMA: list[dict] = []
+
+
+def build_work_item(**kwargs) -> WorkItemProvider:
+    """Registry factory."""
+    return AzureDevOpsWorkItemProvider()
+
+
+def build_scm(**kwargs) -> SCMProvider:
+    """Registry factory."""
+    return AzureDevOpsSCMProvider()
 
 
 class AzureDevOpsWorkItemProvider(WorkItemProvider):

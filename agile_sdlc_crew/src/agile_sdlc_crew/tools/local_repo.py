@@ -96,6 +96,357 @@ class LocalRepoManager:
 
         return repo_dir
 
+    def get_vendor_allowlist(self, repo_name: str) -> set[str]:
+        """Vendor allowlist — composer.json/package.json/go.mod'dan + env override.
+
+        Returns: relative path prefix set (orn: 'vendor/butterfly/framework',
+        'node_modules/react', 'vendor/laravel/framework').
+
+        Vector store bu prefix'lere uyan dosyalari index'e dahil eder.
+        """
+        repo_dir = self._get_repo_dir(repo_name)
+        allow: set[str] = set()
+
+        # composer.json
+        cj = repo_dir / "composer.json"
+        if cj.exists():
+            try:
+                import json as _json
+                data = _json.loads(cj.read_text(encoding="utf-8", errors="replace"))
+                req = data.get("require", {}) or {}
+                req_dev = data.get("require-dev", {}) or {}
+                for pkg in {**req, **req_dev}:
+                    if not pkg or pkg in ("php",) or pkg.startswith("ext-"):
+                        continue
+                    allow.add(f"vendor/{pkg}")
+            except Exception as e:
+                log.warning(f"  composer.json parse hatasi ({repo_name}): {e}")
+
+        # package.json
+        pj = repo_dir / "package.json"
+        if pj.exists():
+            try:
+                import json as _json
+                data = _json.loads(pj.read_text(encoding="utf-8", errors="replace"))
+                deps = {**(data.get("dependencies") or {}), **(data.get("devDependencies") or {})}
+                for pkg in deps:
+                    if pkg:
+                        allow.add(f"node_modules/{pkg}")
+            except Exception as e:
+                log.warning(f"  package.json parse hatasi ({repo_name}): {e}")
+
+        # go.mod — vendor/ olusturulmussa modules.txt'ten direkt path alinabilir
+        gomod = repo_dir / "vendor" / "modules.txt"
+        if gomod.exists():
+            try:
+                for line in gomod.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if line.startswith("# "):
+                        # "# github.com/user/pkg v1.2.3"
+                        parts = line[2:].split()
+                        if parts:
+                            allow.add(f"vendor/{parts[0]}")
+            except Exception:
+                pass
+
+        # User env override — comma-separated allowlist patterns
+        extra = os.environ.get("CREW_VENDOR_INCLUDE", "")
+        if extra:
+            for pat in extra.split(","):
+                pat = pat.strip()
+                if pat:
+                    allow.add(pat)
+
+        return allow
+
+    @staticmethod
+    def _parse_required_php(repo_dir: Path) -> str | None:
+        """composer.json + composer.lock'tan gerekli PHP versiyonunu (X.Y) cikar.
+
+        Oncelik:
+          1. composer.json: config.platform.php (kesin)
+          2. composer.json: require.php (project constraint)
+          3. composer.lock: paketlerden en strict php constraint
+        """
+        import json as _json
+        import re as _re_php
+
+        cj_path = repo_dir / "composer.json"
+        if cj_path.exists():
+            try:
+                cj = _json.loads(cj_path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                cj = {}
+
+            platform = (cj.get("config") or {}).get("platform", {})
+            if isinstance(platform, dict):
+                p = platform.get("php")
+                if p:
+                    m = _re_php.match(r"^(\d+\.\d+)", str(p))
+                    if m:
+                        return m.group(1)
+
+            req = cj.get("require", {}) or {}
+            p = req.get("php")
+            if p:
+                m = _re_php.search(r"(\d+\.\d+)", str(p))
+                if m:
+                    return m.group(1)
+
+        # composer.lock — paketlerden PHP constraint topla
+        lock_path = repo_dir / "composer.lock"
+        if lock_path.exists():
+            try:
+                lock = _json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
+                versions = []
+                for pkg in (lock.get("packages") or []) + (lock.get("packages-dev") or []):
+                    php_req = (pkg.get("require") or {}).get("php")
+                    if php_req:
+                        # '^8.4', '>=8.2 <9.0' vb. ilk X.Y'i al
+                        m = _re_php.search(r"(\d+\.\d+)", str(php_req))
+                        if m:
+                            try:
+                                major, minor = m.group(1).split(".")
+                                versions.append((int(major), int(minor)))
+                            except ValueError:
+                                continue
+                if versions:
+                    # En yuksek minimum'u sec — strict constraint kazanir
+                    versions.sort(reverse=True)
+                    return f"{versions[0][0]}.{versions[0][1]}"
+            except Exception:
+                pass
+
+        return None
+
+    @staticmethod
+    def _parse_php_version_from_error(stderr: str) -> str | None:
+        """Composer error mesajinda 'requires php ^8.4' / 'php >=8.2' gibi
+        constraint'lerden X.Y'i cikarir."""
+        import re as _re_err
+        # Birkac yaygin pattern
+        patterns = [
+            r"requires php\s+[\^~]?(\d+\.\d+)",
+            r"requires\s+php\s+[\^~]?>?=?\s*(\d+\.\d+)",
+            r"php\s+[\^~](\d+\.\d+)",
+        ]
+        for pat in patterns:
+            m = _re_err.search(pat, stderr, _re_err.IGNORECASE)
+            if m:
+                return m.group(1)
+        return None
+
+    @staticmethod
+    def _find_php_binary(version: str) -> str | None:
+        """X.Y PHP versiyonu icin executable bul. Brew ya da sistem php."""
+        import glob as _glob
+        candidates = [
+            f"/opt/homebrew/opt/php@{version}/bin/php",
+            f"/usr/local/opt/php@{version}/bin/php",
+            f"/opt/homebrew/Cellar/php@{version}/*/bin/php",
+            f"/opt/homebrew/Cellar/php/{version}.*/bin/php",
+        ]
+        for cand in candidates:
+            if "*" in cand:
+                for m in _glob.glob(cand):
+                    if os.path.isfile(m):
+                        return m
+            elif os.path.isfile(cand):
+                return cand
+
+        # Sistem php versiyonu uyuyor mu?
+        try:
+            r = subprocess.run(
+                ["php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip() == version:
+                return "php"
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _try_brew_install_php(version: str) -> bool:
+        """brew ile php@X.Y yuklemeyi dene. Returns True if successful."""
+        log.info(f"  PHP {version} brew ile yukleniyor (5-10dk surebilir)...")
+        try:
+            r = subprocess.run(
+                ["brew", "install", f"php@{version}"],
+                capture_output=True, text=True, timeout=900,
+            )
+            if r.returncode == 0:
+                log.info(f"  PHP {version} kuruldu")
+                return True
+            log.warning(f"  brew install php@{version} hatasi: {(r.stderr or r.stdout)[-300:]}")
+            return False
+        except FileNotFoundError:
+            log.warning("  brew PATH'te yok — PHP versiyonu otomatik yuklenmedi")
+            return False
+        except subprocess.TimeoutExpired:
+            log.warning(f"  brew install php@{version} timeout")
+            return False
+
+    def install_dependencies(self, repo_name: str, *, force: bool = False) -> dict:
+        """Repo yapisina gore deps install et — vendor/ klasorunu olusturur.
+
+        Detect:
+          composer.json -> `composer install --no-dev --no-interaction --no-progress`
+                           (PHP versiyonu composer.json'dan tespit edilir;
+                            yoksa brew ile yuklenmeye calisilir)
+          go.mod        -> `go mod vendor` (vendor/ olusturur)
+          package.json  -> `npm install --silent --no-audit --no-fund`
+          requirements.txt -> opsiyonel (default skip — sistem genelinde etkili)
+
+        force=False ise zaten vendor/node_modules varsa atlar.
+        Returns: {success, manager, elapsed_s, message, php_version?}
+        """
+        import shutil as _shutil
+        import time as _t
+        repo_dir = self._get_repo_dir(repo_name)
+
+        # composer (PHP)
+        if (repo_dir / "composer.json").exists():
+            if not force and (repo_dir / "vendor").exists():
+                return {"success": True, "manager": "composer", "elapsed_s": 0, "message": "vendor/ zaten var"}
+
+            # PHP versiyon tespiti
+            required_php = self._parse_required_php(repo_dir)
+            php_bin = None
+            php_msg = ""
+            if required_php:
+                log.info(f"  composer.json PHP {required_php} bekliyor")
+                php_bin = self._find_php_binary(required_php)
+                if not php_bin:
+                    log.info(f"  PHP {required_php} bulunamadi, brew install deneniyor")
+                    if self._try_brew_install_php(required_php):
+                        php_bin = self._find_php_binary(required_php)
+                if php_bin:
+                    php_msg = f" PHP={required_php} ({php_bin})"
+                else:
+                    log.warning(f"  PHP {required_php} yuklenemedi — sistem php ile devam (--ignore-platform-reqs)")
+
+            # Composer cagrisi: dogru PHP versiyonu varsa onunla, yoksa default
+            composer_path = _shutil.which("composer")
+            if not composer_path:
+                return {"success": False, "manager": "composer", "elapsed_s": 0,
+                        "message": "'composer' PATH'te yok"}
+
+            if php_bin and php_bin != "php":
+                cmd = [
+                    php_bin, composer_path, "install",
+                    "--no-dev", "--no-interaction", "--no-progress", "--prefer-dist",
+                ]
+            else:
+                # Sistem php — versiyon uyumsuzlugu olabilir, ignore-platform-reqs ile geç
+                cmd = [
+                    "composer", "install",
+                    "--no-dev", "--no-interaction", "--no-progress", "--prefer-dist",
+                    "--ignore-platform-reqs",
+                ]
+
+            log.info(f"  composer install: {repo_name} (vendor olusturuluyor){php_msg}")
+            t0 = _t.time()
+            # Buyuk projeler (private packagist + SSH git repo) 10dk'dan uzun
+            # surebilir. 30dk timeout — pipeline yine de cok takilirsa knob ile kontrol edilir.
+            COMPOSER_TIMEOUT = int(os.environ.get("CREW_COMPOSER_TIMEOUT", "1800"))
+
+            def _run_composer(c):
+                return subprocess.run(c, cwd=repo_dir, capture_output=True, text=True, timeout=COMPOSER_TIMEOUT)
+
+            try:
+                result = _run_composer(cmd)
+
+                # Hata + PHP version sebebi mi?
+                if result.returncode != 0:
+                    full_err = (result.stderr or "") + "\n" + (result.stdout or "")
+                    detected_php = self._parse_php_version_from_error(full_err)
+                    if detected_php and (not required_php or detected_php != required_php):
+                        log.info(f"  composer error -> PHP {detected_php} bekleniyor, retry deneniyor")
+                        retry_php_bin = self._find_php_binary(detected_php)
+                        if not retry_php_bin:
+                            log.info(f"  PHP {detected_php} brew ile yukleniyor")
+                            if self._try_brew_install_php(detected_php):
+                                retry_php_bin = self._find_php_binary(detected_php)
+                        if retry_php_bin:
+                            cmd = [
+                                retry_php_bin, composer_path, "install",
+                                "--no-dev", "--no-interaction", "--no-progress", "--prefer-dist",
+                            ]
+                            log.info(f"  composer install retry: PHP={detected_php} ({retry_php_bin})")
+                            result = _run_composer(cmd)
+                            required_php = detected_php
+                            php_msg = f" PHP={detected_php} ({retry_php_bin})"
+
+                elapsed = _t.time() - t0
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout)[-400:]
+                    log.warning(f"  composer install hatasi ({repo_name}): {err[:200]}")
+                    return {"success": False, "manager": "composer", "elapsed_s": elapsed,
+                            "message": err[:400], "php_version": required_php}
+                log.info(f"  composer install OK ({elapsed:.0f}s){php_msg}")
+                return {"success": True, "manager": "composer", "elapsed_s": elapsed,
+                        "message": f"vendor/ olusturuldu{php_msg}", "php_version": required_php}
+            except FileNotFoundError:
+                return {"success": False, "manager": "composer", "elapsed_s": 0,
+                        "message": "'composer' calistirilamadi"}
+            except subprocess.TimeoutExpired:
+                return {"success": False, "manager": "composer", "elapsed_s": COMPOSER_TIMEOUT,
+                        "message": f"timeout ({COMPOSER_TIMEOUT}s) — CREW_COMPOSER_TIMEOUT ile artir"}
+
+        # Go modules
+        if (repo_dir / "go.mod").exists():
+            if not force and (repo_dir / "vendor").exists():
+                return {"success": True, "manager": "go", "elapsed_s": 0, "message": "vendor/ zaten var"}
+            log.info(f"  go mod vendor: {repo_name}")
+            t0 = _t.time()
+            try:
+                result = subprocess.run(
+                    ["go", "mod", "vendor"],
+                    cwd=repo_dir, capture_output=True, text=True, timeout=600,
+                )
+                elapsed = _t.time() - t0
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout)[-300:]
+                    log.warning(f"  go mod vendor hatasi ({repo_name}): {err[:200]}")
+                    return {"success": False, "manager": "go", "elapsed_s": elapsed, "message": err[:300]}
+                log.info(f"  go mod vendor OK ({elapsed:.0f}s)")
+                return {"success": True, "manager": "go", "elapsed_s": elapsed, "message": "vendor/ olusturuldu"}
+            except FileNotFoundError:
+                return {"success": False, "manager": "go", "elapsed_s": 0, "message": "'go' PATH'te yok"}
+            except subprocess.TimeoutExpired:
+                return {"success": False, "manager": "go", "elapsed_s": 600, "message": "timeout"}
+
+        # npm/yarn
+        if (repo_dir / "package.json").exists():
+            if not force and (repo_dir / "node_modules").exists():
+                return {"success": True, "manager": "npm", "elapsed_s": 0, "message": "node_modules/ zaten var"}
+            log.info(f"  npm install: {repo_name} (node_modules olusturuluyor)")
+            t0 = _t.time()
+            try:
+                # yarn.lock varsa yarn, yoksa npm
+                use_yarn = (repo_dir / "yarn.lock").exists()
+                cmd = ["yarn", "install", "--silent"] if use_yarn else \
+                      ["npm", "install", "--silent", "--no-audit", "--no-fund"]
+                result = subprocess.run(
+                    cmd, cwd=repo_dir, capture_output=True, text=True, timeout=900,
+                )
+                elapsed = _t.time() - t0
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout)[-300:]
+                    log.warning(f"  {cmd[0]} install hatasi ({repo_name}): {err[:200]}")
+                    return {"success": False, "manager": cmd[0], "elapsed_s": elapsed, "message": err[:300]}
+                log.info(f"  {cmd[0]} install OK ({elapsed:.0f}s)")
+                return {"success": True, "manager": cmd[0], "elapsed_s": elapsed, "message": "node_modules/ olusturuldu"}
+            except FileNotFoundError:
+                return {"success": False, "manager": "npm", "elapsed_s": 0, "message": "'npm/yarn' PATH'te yok"}
+            except subprocess.TimeoutExpired:
+                return {"success": False, "manager": "npm", "elapsed_s": 900, "message": "timeout (15dk)"}
+
+        # requirements.txt — sistem-wide etkili oldugu icin opsiyonel/skip
+        # Pipeline'in calistigi venv'i kirletir. Eger gerekirse force ile manuel calistir.
+
+        return {"success": True, "manager": "none", "elapsed_s": 0, "message": "Bilinen package manager bulunamadi"}
+
     def checkout(self, repo_name: str, branch: str) -> Path:
         """Branch'e switch et. Remote'da varsa tracking branch olustur."""
         repo_dir = self._get_repo_dir(repo_name)

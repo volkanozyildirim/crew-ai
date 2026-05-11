@@ -1,0 +1,98 @@
+# =============================================================================
+# LLM Profiles — agent-LLM eslesmesi
+#
+# Cozumleme onceligi:
+#   1. CREW_LLM_PROFILE_<AGENT_KEY_UPPER>  env override (orn:
+#      CREW_LLM_PROFILE_SENIOR_DEVELOPER=developer_cli)
+#   2. agents.yaml icindeki `llm_profile:` alani
+#   3. Bu dosyadaki `agent_defaults` mapping'i
+#   4. Geriye uyumluluk: CREW_USE_LOCAL_LLM / CREW_LOCAL_DEVELOPER env'leri
+#
+# Provider ekleme: src/agile_sdlc_crew/llm/providers/ altina yeni modul yaz,
+# registry._bootstrap_builtin_providers icine ekle.
+# =============================================================================
+
+profiles:
+  # ── Premium (high-quality, cloud) ─────────────────────────────
+  architect_premium:
+    provider: litellm
+    model: vertex_ai/claude-sonnet-4-6
+    max_tokens: 32768
+
+  developer_premium:
+    provider: litellm
+    model: vertex_ai/claude-sonnet-4-6
+    max_tokens: 8192
+
+  reviewer_premium:
+    provider: litellm
+    model: vertex_ai/claude-sonnet-4-6
+    max_tokens: 16384
+
+  # ── Reasoning (orta seviye, cloud) ────────────────────────────
+  reasoning_remote:
+    provider: litellm
+    model: o4-mini
+    max_tokens: 4096
+
+  scrum_remote:
+    provider: litellm
+    model: o4-mini
+    max_tokens: 2048
+
+  # ── Local (Ollama) ────────────────────────────────────────────
+  reasoning_local:
+    provider: ollama
+    model: qwen3:8b
+    max_tokens: 4096
+
+  scrum_local:
+    provider: ollama
+    model: qwen3:8b
+    max_tokens: 2048
+
+  developer_local_coder:
+    provider: ollama
+    model: qwen2.5-coder:7b
+    max_tokens: 8192
+    base_url_env: OLLAMA_CODER_BASE_URL  # coder modeli farkli sunucudaysa
+
+  kickoff_local:
+    provider: ollama
+    model: qwen3:8b
+    max_tokens: 4096
+
+  # ── Claude CLI (OAuth, API key gerektirmez) ───────────────────
+  developer_cli:
+    provider: claude_cli
+    model: sonnet
+    max_tokens: 8192
+
+  architect_cli:
+    provider: claude_cli
+    model: opus
+    max_tokens: 32768
+
+  reasoning_cli:
+    provider: claude_cli
+    model: sonnet
+    max_tokens: 4096
+
+  # ── Anthropic API (direkt) ────────────────────────────────────
+  developer_anthropic:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    max_tokens: 8192
+
+
+# Agent → default profile.
+# CREW_USE_LOCAL_LLM=1 ise resolver otomatik olarak `*_local` veya
+# developer_local_coder'a duser; bu mapping bu fallback yokken kullanilir.
+agent_defaults:
+  software_architect: architect_premium
+  senior_developer: developer_premium
+  business_analyst: reasoning_remote
+  qa_engineer: reasoning_remote
+  uat_specialist: reasoning_remote
+  code_reviewer: reasoning_remote
+  scrum_master: scrum_remote

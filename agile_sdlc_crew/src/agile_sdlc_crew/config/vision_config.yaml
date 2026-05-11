@@ -1,0 +1,5 @@
+# Dashboard tarafindan yonetilir — vision (image-to-text) ayarlari.
+# Resolver onceligi: BU DOSYA > CREW_VISION_* env > CREW_USE_LOCAL_VISION (eski) > default openai
+
+model: vertex_ai/claude-sonnet-4-6
+provider: openai

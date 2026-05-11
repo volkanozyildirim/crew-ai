@@ -28,9 +28,12 @@ CODE_EXTENSIONS = {
 }
 
 SKIP_DIRS = {
-    ".git", "node_modules", "vendor", ".idea", ".vscode", "__pycache__",
+    ".git", ".idea", ".vscode", "__pycache__",
     "dist", "build", ".next", "storage", "cache", "logs",
 }
+# vendor / node_modules — varsayilan olarak SKIP, ama allowlist ile secili
+# alt paketleri index'e dahil edebiliyoruz (3rd-party framework kodunu okumak icin).
+VENDOR_ROOTS = {"vendor", "node_modules"}
 
 # Test dosyalari agent icin kod okuma degerine katki saglamiyor,
 # embed etmiyoruz (Ollama 500 hatalarinin cogunlugu test dosyalarindan geliyor)
@@ -50,11 +53,21 @@ CHUNK_OVERLAP = 15
 MAX_CHUNK_CHARS = 3500
 MAX_CHUNKS_PER_REPO = 5000
 
-# Ollama embedding
-# mxbai-embed-large: nomic-embed-text'e gore cok daha iyi semantic ayirt etme
-# (nomic'te alakasiz metinler bile 0.65 skor aliyordu, mxbai'de alakali 0.72 vs alakasiz 0.42)
-EMBED_MODEL = os.environ.get("CREW_EMBED_MODEL", "mxbai-embed-large")
-EMBED_DIM = 1024  # mxbai-embed-large 1024 boyutlu, nomic 768
+# Embedding configuration delegated to agile_sdlc_crew.embed package
+from agile_sdlc_crew.embed import (  # noqa: E402
+    KNOWN_EMBED_DIMS,
+    embed_text as _registry_embed,
+    get_api_key as get_embed_api_key,
+    get_base_url as get_embed_base_url,
+    get_dim as get_embed_dim,
+    get_model as get_embed_model,
+    get_provider as get_embed_provider,
+    save_config as save_embed_config,
+)
+
+# Geriye uyumluluk shim'leri
+EMBED_MODEL = get_embed_model()
+EMBED_DIM = get_embed_dim()
 
 
 def _chunk_file(content: str, file_path: str) -> list[dict]:
@@ -109,26 +122,30 @@ def _extract_focused_sections(md_content: str, repo_name: str) -> str:
 
 
 def _embed_text(text: str, retries: int = 4) -> list[float]:
-    """Ollama mxbai-embed-large ile embedding uret. 500 hatasinda retry.
-    LLM cagrisi YOK — sadece HTTP POST.
-    Ollama model yuklerken veya concurrent istek limitinde 500 verebilir,
-    4 retry + exponential backoff (1s, 2s, 4s, 8s) ile cogu gecici hatadan kurtulur."""
+    """Embedding registry uzerinden vector uret.
+
+    Provider/model/base_url/api_key degerleri embed/resolver.py tarafindan
+    config'ten okunur. 500 ve baglanti hatalarinda exponential backoff retry."""
     import time as _time
-    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    provider = get_embed_provider()
+    model = get_embed_model()
+    base_url = get_embed_base_url()
+    api_key = get_embed_api_key()
+
     last_err = None
     for attempt in range(retries + 1):
         try:
-            resp = requests.post(
-                f"{base_url}/api/embeddings",
-                json={"model": EMBED_MODEL, "prompt": text[:MAX_CHUNK_CHARS]},
-                timeout=90,
+            return _registry_embed(
+                provider=provider,
+                text=text[:MAX_CHUNK_CHARS],
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
             )
-            resp.raise_for_status()
-            return resp.json()["embedding"]
         except requests.HTTPError as e:
             last_err = e
-            if e.response.status_code == 500 and attempt < retries:
-                _time.sleep(1.0 * (2 ** attempt))  # backoff: 1s, 2s, 4s, 8s
+            if e.response is not None and e.response.status_code == 500 and attempt < retries:
+                _time.sleep(1.0 * (2 ** attempt))
                 continue
             raise
         except Exception as e:
@@ -152,14 +169,51 @@ class VectorStore:
 
     @property
     def storage(self):
-        """Lazy init — direct LanceDBStorage, LLM YOK."""
+        """Lazy init — direct LanceDBStorage, LLM YOK.
+
+        Mevcut tablo dim'i ile config'in dim'i uyusmuyorsa tabloyu drop eder.
+        Aksi halde LanceDB eski semayi korur, sorgu/ekleme hata verir."""
         if self._storage is None:
             from crewai.memory.storage.lancedb_storage import LanceDBStorage
+            self._reset_table_if_dim_mismatch(get_embed_dim())
             self._storage = LanceDBStorage(
                 path=self._db_path,
-                vector_dim=EMBED_DIM,
+                vector_dim=get_embed_dim(),
             )
         return self._storage
+
+    def _reset_table_if_dim_mismatch(self, expected_dim: int) -> None:
+        """Diskteki LanceDB tablosunun vector dim'ini config ile karsilastir,
+        uyusmazsa tabloyu drop et — yeni dim ile temiz baslangic.
+
+        Bilinen senaryo: Embedding modeli degistirildi (orn. 384 → 1024).
+        Eski tabloyu yeni vector_dim parametresiyle acmak LanceDB'de etkisiz;
+        tablo silmeden yeni embed'ler eklenmiyor."""
+        try:
+            import lancedb
+        except ImportError:
+            return
+        if not Path(self._db_path).exists():
+            return
+        try:
+            db = lancedb.connect(self._db_path)
+            tables_resp = db.list_tables()
+            # lancedb yeni surumlerde ListTablesResponse objesi donduruyor
+            # (.tables attr); eski surumlerde direkt list. Iki durumu da destekle.
+            tnames = getattr(tables_resp, "tables", None) or list(tables_resp)
+            for tname in tnames:
+                t = db.open_table(tname)
+                for field in t.schema:
+                    if field.name == "vector" and hasattr(field.type, "list_size"):
+                        actual = field.type.list_size
+                        if actual != expected_dim:
+                            log.warning(
+                                f"  Vector DB dim uyusmazligi: tablo '{tname}' "
+                                f"dim={actual}, config dim={expected_dim} — tablo siliniyor"
+                            )
+                            db.drop_table(tname)
+        except Exception as e:
+            log.warning(f"  Vector DB dim kontrol hatasi: {e}")
 
     # Uyumluluk icin — bazi kodlar self._memory kontrol ediyor olabilir
     @property
@@ -244,9 +298,12 @@ class VectorStore:
 
     # ── Repo Kodu ──────────────────────────────────
 
-    def index_repo(self, repo_name: str, repo_path):
+    def index_repo(self, repo_name: str, repo_path, vendor_allowlist: set[str] | None = None):
         """Tum repo'yu embed et. Dikkat: buyuk repolarda uzun surer ve gereksiz olabilir.
-        Targeted embed icin index_plan_files() kullan."""
+        Targeted embed icin index_plan_files() kullan.
+
+        vendor_allowlist verilirse listedeki vendor paketleri de index'e dahil edilir
+        (default: vendor/ tamamen skip)."""
         repo_path = Path(repo_path)
         if not repo_path.exists():
             return
@@ -267,15 +324,24 @@ class VectorStore:
             pass
 
         log.info(f"  Tum repo indeksleniyor: {repo_name}")
+        if vendor_allowlist:
+            log.info(f"  Vendor allowlist: {len(vendor_allowlist)} paket")
         chunk_count, failed = self._index_files(
             repo_name, repo_path,
             files=[f for f in repo_path.rglob("*") if f.is_file()],
             scope=scope,
+            vendor_allowlist=vendor_allowlist,
         )
         self._indexed_repos.add(repo_name)
         log.info(f"  Repo indekslendi: {repo_name} ({chunk_count} chunk, {failed} hata)")
 
-    def index_plan_files(self, repo_name: str, repo_path, plan_file_paths: list[str]):
+    def index_plan_files(
+        self,
+        repo_name: str,
+        repo_path,
+        plan_file_paths: list[str],
+        vendor_allowlist: set[str] | None = None,
+    ):
         """HEDEF ODAKLI embed: plan'daki dosyalarin parent dizinlerindeki kodlari embed et.
         Cok daha hizli, agent yine de semantic arama yapabilir ama dar kapsamda."""
         repo_path = Path(repo_path)
@@ -317,13 +383,28 @@ class VectorStore:
             f"  Hedef odakli embed: {repo_name} "
             f"({len(target_dirs)} dizin, {len(files)} dosya aday, max {MAX_PLAN_FILES})"
         )
-        chunk_count, failed = self._index_files(repo_name, repo_path, files, scope)
+        chunk_count, failed = self._index_files(
+            repo_name, repo_path, files, scope, vendor_allowlist=vendor_allowlist,
+        )
         self._indexed_repos.add(repo_name)
         log.info(f"  Hedef embed tamam: {chunk_count} chunk, {failed} hata")
 
-    def _index_files(self, repo_name: str, repo_path: Path, files: list, scope: str) -> tuple[int, int]:
+    def _index_files(
+        self,
+        repo_name: str,
+        repo_path: Path,
+        files: list,
+        scope: str,
+        vendor_allowlist: set[str] | None = None,
+    ) -> tuple[int, int]:
         """Ortak dosya→chunk→embed loop'u. (chunk_count, failed, skipped) raporlar.
-        DEDUP: scope'ta ayni (file_path, hash) zaten varsa chunk yeniden embed edilmez."""
+        DEDUP: scope'ta ayni (file_path, hash) zaten varsa chunk yeniden embed edilmez.
+
+        vendor_allowlist: vendor/X/Y veya node_modules/Y formatinda relative path
+        prefix listesi. Verilirse vendor altindan SADECE bu path'lere uyan dosyalar
+        index'e dahil edilir. None/bos ise vendor tamamen skip.
+        """
+        vendor_allowlist = vendor_allowlist or set()
         chunk_count = 0
         failed = 0
         skipped = 0
@@ -345,6 +426,11 @@ class VectorStore:
         except Exception as e:
             log.debug(f"  Dedup icin list_records atlandi: {e}")
 
+        # Vendor paket basina chunk limiti — tek bir buyuk paket repo budget'ini
+        # tuketmesin diye. Default 300 chunk/paket.
+        MAX_VENDOR_CHUNKS_PER_PACKAGE = 300
+        vendor_pkg_count: dict[str, int] = {}
+
         file_idx = 0
         total_files = len(files)
         for fpath in sorted(files):
@@ -356,6 +442,26 @@ class VectorStore:
                 continue
             if any(skip in fpath.parts for skip in SKIP_DIRS):
                 continue
+            # Vendor / node_modules — allowlist filter
+            try:
+                rel_parts = fpath.relative_to(repo_path).parts
+            except ValueError:
+                rel_parts = fpath.parts
+            if rel_parts and rel_parts[0] in VENDOR_ROOTS:
+                if not vendor_allowlist:
+                    continue  # vendor disabled
+                rel_str = "/".join(rel_parts)
+                # Allowlist match: dosya yolu allowlist prefix'lerinden biriyle basliyor mu?
+                pkg_key = None
+                for allow in vendor_allowlist:
+                    if rel_str == allow or rel_str.startswith(allow.rstrip("/") + "/"):
+                        pkg_key = allow
+                        break
+                if not pkg_key:
+                    continue
+                # Per-package cap
+                if vendor_pkg_count.get(pkg_key, 0) >= MAX_VENDOR_CHUNKS_PER_PACKAGE:
+                    continue
             if fpath.name.endswith(SKIP_FILE_SUFFIXES):
                 continue
             if fpath.stat().st_size > MAX_FILE_SIZE:
@@ -408,6 +514,13 @@ class VectorStore:
                     )
                     chunk_count += 1
                     existing_hashes.add((fp_key, chunk_hash))
+                    # Vendor paket sayacini guncelle (allowlist match'in olduysa)
+                    if rel_parts and rel_parts[0] in VENDOR_ROOTS:
+                        rel_str = "/".join(rel_parts)
+                        for allow in vendor_allowlist:
+                            if rel_str == allow or rel_str.startswith(allow.rstrip("/") + "/"):
+                                vendor_pkg_count[allow] = vendor_pkg_count.get(allow, 0) + 1
+                                break
                 except Exception as e:
                     failed += 1
                     if failed <= 3:

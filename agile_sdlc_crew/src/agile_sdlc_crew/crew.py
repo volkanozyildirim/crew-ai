@@ -36,8 +36,12 @@ _original_completion = litellm.completion
 
 def _patched_completion(*args, **kwargs):
     model = kwargs.get("model", "")
-    # Prefill fix sadece vertex_ai/claude modelleri icin
-    if "claude" in model or "vertex_ai" in model:
+    # Prefill fix SADECE Vertex AI / Anthropic API claude modelleri icin.
+    # claude_cli/* (subprocess provider) HARIC — kendi prompt birlestirme
+    # mantigi var; bu patch tool call JSON'una "[Devam et]:" enjekte ediyordu
+    # ve agent maximum iterations'a kilidiyordu.
+    is_claude_cli = "claude-cli/" in model or model.startswith("claude_cli/")
+    if not is_claude_cli and ("vertex_ai" in model or "anthropic/" in model):
         messages = kwargs.get("messages", [])
         if messages and messages[-1].get("role") == "assistant":
             prefill = messages.pop()
@@ -95,6 +99,7 @@ from agile_sdlc_crew.tools import (  # noqa: E402
     AzureDevOpsListWorkItemsTool,
     AzureDevOpsListReposTool,
     AzureDevOpsBrowseRepoTool,
+    AzureDevOpsReadFileTool,
     AzureDevOpsSearchCodeTool,
     AzureDevOpsCreateBranchTool,
     AzureDevOpsPushChangesTool,
@@ -104,180 +109,76 @@ from agile_sdlc_crew.tools import (  # noqa: E402
 )
 
 
+# ── LLM seçimi: agile_sdlc_crew/llm/ paketine devredildi ────────────
+# Yeni mimari: provider registry (litellm/anthropic/claude_cli/ollama/lmstudio)
+# + isimli profiller (config/llm_profiles.yaml) + agent->profile resolver.
+# Agent bazli override: agents.yaml `llm_profile:` alani veya
+# CREW_LLM_PROFILE_<AGENT_UPPER> env degiskeni.
+from agile_sdlc_crew.llm import build_for_agent  # noqa: E402
+from agile_sdlc_crew.llm.resolver import build_for_profile  # noqa: E402
+
+
 def _create_llm(model_name: str | None = None, max_tokens: int = 2048) -> LLM:
-    """LLM olusturur. CREW_LLM_PROVIDER env ile provider secilir:
-    - litellm (default): LITELLM_BASE_URL + LITELLM_API_KEY uzerinden
-    - anthropic: ANTHROPIC_API_KEY ile direkt Anthropic API
-    - claude-cli: Claude CLI OAuth session uzerinden (API key gerektirmez)
-    """
+    """Geriye uyumlu wrapper — eskiden litellm/anthropic/claude-cli secimini
+    burada yapiyorduk. Artik registry uzerinden gidiyor.
+
+    Kullanim onerisi: yeni kod `build_for_agent(agent_key)` veya
+    `build_for_profile(profile_name)` cagirsin."""
+    from agile_sdlc_crew.llm.registry import build_llm
+
     provider = os.environ.get("CREW_LLM_PROVIDER", "litellm")
 
     if provider == "claude-cli":
-        # Claude CLI — subprocess uzerinden, litellm custom callback ile
-        _register_claude_cli_provider()
-        model = "claude-cli/sonnet"
-        return LLM(
-            model=model,
-            max_tokens=max_tokens,
-        )
+        return build_llm("claude_cli", model="sonnet", max_tokens=max_tokens)
 
     if provider == "anthropic":
-        model = model_name or "claude-sonnet-4-20250514"
-        if not model.startswith("anthropic/"):
-            if "claude" in model:
-                clean = model.split("/")[-1]
-                model = f"anthropic/{clean}"
-            else:
-                model = f"anthropic/{model}"
-        return LLM(
-            model=model,
-            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        return build_llm(
+            "anthropic",
+            model=model_name or "claude-sonnet-4-20250514",
             max_tokens=max_tokens,
         )
 
-    # Default: litellm proxy
-    model = model_name or os.environ.get("LITELLM_MODEL", "openai/gpt-4")
-    base_url = os.environ.get("LITELLM_BASE_URL")
-    if base_url and not model.startswith("openai/"):
-        model = f"openai/{model}"
-    return LLM(
-        model=model,
-        base_url=base_url,
-        api_key=os.environ.get("LITELLM_API_KEY"),
+    return build_llm(
+        "litellm",
+        model=model_name or os.environ.get("LITELLM_MODEL", "openai/gpt-4"),
         max_tokens=max_tokens,
     )
 
 
-_claude_cli_registered = False
-
-def _register_claude_cli_provider():
-    """Claude CLI'i litellm custom provider olarak kaydet."""
-    global _claude_cli_registered
-    if _claude_cli_registered:
-        return
-    import litellm
-    from agile_sdlc_crew.tools.claude_cli_llm import claude_cli_completion
-
-    class ClaudeCLIHandler(litellm.CustomLLM):
-        def completion(self, model, messages, **kwargs):
-            # Messages'i tek prompt'a cevir
-            prompt_parts = []
-            for msg in messages:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-                if role == "system":
-                    prompt_parts.append(f"[System]: {content}")
-                elif role == "assistant":
-                    prompt_parts.append(f"[Assistant]: {content}")
-                else:
-                    prompt_parts.append(content)
-            prompt = "\n\n".join(prompt_parts)
-
-            max_tokens = kwargs.get("max_tokens", 4096)
-            result = claude_cli_completion(prompt, max_tokens=max_tokens)
-
-            from litellm import ModelResponse, Choices, Message, Usage
-            return ModelResponse(
-                choices=[Choices(
-                    message=Message(role="assistant", content=result),
-                    index=0,
-                    finish_reason="stop",
-                )],
-                model="claude-cli/sonnet",
-                usage=Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0),
-            )
-
-    handler = ClaudeCLIHandler()
-    litellm.custom_provider_map = [
-        {"provider": "claude-cli", "custom_handler": handler},
-    ]
-    _claude_cli_registered = True
-
-
 def _create_local_llm(max_tokens: int = 4096, model_override: str | None = None) -> LLM:
-    """Local LLM olusturur. Ollama veya LM Studio (OpenAI-compatible) destekler.
+    """Geriye uyumlu wrapper — Ollama veya LM Studio (base_url'de /v1 varsa).
 
-    OLLAMA_CODER_BASE_URL: coder modeli farkli makinede (LM Studio vb.) calisiyorsa
-    ayri URL. URL '/v1' iceriyorsa LM Studio (openai/) prefix kullanilir,
-    degilse Ollama (ollama/) prefix kullanilir."""
+    Kickoff crew gibi yerlerde dogrudan model adi gerektigi icin kalir."""
+    from agile_sdlc_crew.llm.registry import build_llm
+
     model = model_override or os.environ.get("CREW_LOCAL_LLM_MODEL", "qwen3:8b")
-    # Coder modeli farkli makinede olabilir
     coder_model = os.environ.get("CREW_LOCAL_CODER_MODEL", "qwen2.5-coder:7b")
     is_coder = (model == coder_model or "coder" in model.lower())
-
-    if is_coder:
-        base_url = os.environ.get("OLLAMA_CODER_BASE_URL") or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    else:
-        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-
-    # LM Studio: OpenAI-compatible API (/v1 endpoint)
-    # Ollama: kendi API formatı
-    if "/v1" in base_url:
-        # LM Studio — openai/ prefix, model adi: "qwen/qwen2.5-coder-14b" formatinda
-        # Ollama model adi (qwen2.5-coder:14b) → LM Studio formatina cevir
-        lms_model = model.replace(":", "-")  # qwen2.5-coder:14b → qwen2.5-coder-14b
-        # LM Studio genelde "vendor/model" formatinda — /v1/models'tan kontrol ederiz
-        # ama basit heuristic yeterli
-        if "/" not in lms_model:
-            lms_model = f"qwen/{lms_model}"  # default vendor
-        return LLM(
-            model=f"openai/{lms_model}",
-            base_url=base_url,
-            api_key="lm-studio",  # LM Studio API key gerektirmez ama litellm ister
-            max_tokens=max_tokens,
-        )
-    else:
-        # Ollama
-        return LLM(
-            model=f"ollama/{model}",
-            base_url=base_url,
-            max_tokens=max_tokens,
-        )
-
-
-def _use_local() -> bool:
-    """Basit agent'lar (BA/QA/UAT/Reviewer/SM) local LLM kullansin mi?"""
-    return os.environ.get("CREW_USE_LOCAL_LLM", "").lower() in ("1", "true", "yes")
+    base_url = (
+        os.environ.get("OLLAMA_CODER_BASE_URL") or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        if is_coder
+        else os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    )
+    provider = "lmstudio" if "/v1" in base_url else "ollama"
+    return build_llm(provider, model=model, max_tokens=max_tokens)
 
 
 def _local_reasoning_model() -> str:
-    """BA/SM/Reviewer/QA/UAT icin muhakeme modeli — Turkce instruct.
-    CREW_LOCAL_LLM_MODEL env'i (default qwen3:8b)."""
     return os.environ.get("CREW_LOCAL_LLM_MODEL", "qwen3:8b")
 
 
 def _local_coder_model() -> str:
-    """Developer icin kod modeli — kod generation icin optimize edilmis.
-    CREW_LOCAL_CODER_MODEL env'i (default qwen2.5-coder:7b)."""
     return os.environ.get("CREW_LOCAL_CODER_MODEL", "qwen2.5-coder:7b")
 
 
-# Architect: geliştirme plani DAIMA Claude Sonnet — yuksek kaliteli tasarim
-# karari gerekli, local model yetmez (kullanici onayi)
-LLM_ARCHITECT = lambda: _create_llm("vertex_ai/claude-sonnet-4-6", max_tokens=32768)
-# Developer: kod yazma — CODER modeli kullanir (qwen2.5-coder:7b default).
-# CREW_USE_LOCAL_LLM=1 ile local'e duser.
-# CREW_LOCAL_DEVELOPER=0 ile devre disi birakilabilir (Sonnet'e geri dusurulur).
-def _use_local_developer() -> bool:
-    if os.environ.get("CREW_LOCAL_DEVELOPER", "1").lower() in ("0", "false", "no"):
-        return False
-    return _use_local()
-
-LLM_DEVELOPER = lambda: (
-    _create_local_llm(8192, model_override=_local_coder_model())
-    if _use_local_developer()
-    else _create_llm("vertex_ai/claude-sonnet-4-6", max_tokens=8192)
-)
-# BA/SM/Reviewer/QA/UAT — reasoning modeli (qwen3:8b default, Turkce instruct).
-# Coder modeli yerine instruct model kullanilir — YETERSIZ keyword kopyalama vb.
-# sorunlari engellemek icin.
-LLM_REVIEWER = lambda: _create_local_llm(4096, _local_reasoning_model()) if _use_local() else _create_llm("o4-mini", max_tokens=4096)
-LLM_ANALYST = lambda: _create_local_llm(4096, _local_reasoning_model()) if _use_local() else _create_llm("o4-mini", max_tokens=4096)
-LLM_QA = lambda: _create_local_llm(4096, _local_reasoning_model()) if _use_local() else _create_llm("o4-mini", max_tokens=4096)
-LLM_UAT = lambda: _create_local_llm(4096, _local_reasoning_model()) if _use_local() else _create_llm("o4-mini", max_tokens=4096)
-LLM_SCRUM = lambda: _create_local_llm(2048, _local_reasoning_model()) if _use_local() else _create_llm("o4-mini", max_tokens=2048)
+# Agent-bazli LLM factory'leri — resolver agent_key'i profile'a cevirir.
+LLM_ARCHITECT = lambda: build_for_agent("software_architect")
+LLM_DEVELOPER = lambda: build_for_agent("senior_developer")
+LLM_REVIEWER = lambda: build_for_agent("code_reviewer")
+LLM_ANALYST = lambda: build_for_agent("business_analyst")
+LLM_QA = lambda: build_for_agent("qa_engineer")
+LLM_UAT = lambda: build_for_agent("uat_specialist")
+LLM_SCRUM = lambda: build_for_agent("scrum_master")
 
 
 class AgileSDLCCrew:
@@ -334,6 +235,9 @@ class AgileSDLCCrew:
         brace'leri angle bracket'a cevir — sadece agent backstory icin."""
         import re as _re
         cfg = dict(self.agents_config[agent_key])
+        # llm_profile resolver tarafindan okunur, CrewAI Agent config'ine
+        # sizdirma — bilinmeyen alan hatasina neden olabilir.
+        cfg.pop("llm_profile", None)
         extra = []
         for name in knowledge_names:
             content = load_knowledge(name)
@@ -393,9 +297,9 @@ class AgileSDLCCrew:
             tools.append(AzureDevOpsListReposTool())
         # max_iter=15 → 10: Architect 67 repolu ortamda her iterasyonda
         # browse_repo ile buyuk dosyalar okuyordu; 15 iterasyon = cok fazla
-        # input token birikimi. 10 yeterli, gerekirse env ile override edilebilir.
-        import os as _os
-        max_iter = int(_os.environ.get("CREW_ARCHITECT_MAX_ITER", "10"))
+        # input token birikimi. 10 yeterli, dashboard veya env ile override edilebilir.
+        from agile_sdlc_crew import pipeline_config as _pc
+        max_iter = _pc.get("CREW_ARCHITECT_MAX_ITER")
         return Agent(
             config=self._agent_config_with_knowledge(
                 "software_architect", "backend_tech_design", "frontend_nextjs"
@@ -467,6 +371,7 @@ class AgileSDLCCrew:
                 AzureDevOpsGetWorkItemTool(),
                 AzureDevOpsAddCommentTool(),
                 AzureDevOpsBrowseRepoTool(local_repo_mgr=self.local_repo_mgr),
+                AzureDevOpsReadFileTool(local_repo_mgr=self.local_repo_mgr),
                 AzureDevOpsPRChangesTool(),
                 AzureDevOpsPRReviewTool(),
             ],
@@ -491,38 +396,39 @@ class AgileSDLCCrew:
     def create_kickoff_crew(self) -> Crew:
         """Kickoff toplantisi — Sanal Odak Grup / Design Review simulasyonu.
 
-        Tum agentlar LOCAL Ollama modeli kullanir (bulut maliyeti yok).
+        Her agent dashboard'da configure ettigi LLM'i kullanir (resolver uzerinden).
         Architect browse_repo + search_code ile GERCEK KOD okur — kör analiz degil.
         Context'te 'HEDEF REPO' ve dosya yapisi zaten var (flow.py tarafindan eklendi),
         agent dogrudan ilgili dosyalara gidebilir.
-        """
-        local_llm = _create_local_llm(4096, _local_reasoning_model())
 
+        NOT: Cost-sensitivity istiyorsan dashboard'dan kickoff icin kullanilan
+        agent'lara ayri bir profile/inline ata (orn. lokal model). Kickoff 4 task,
+        toplam token kullanimi yuksek.
+        """
         # 4 agent: BA, Architect, Developer, SM (tutanak)
-        # SM acilis, QA, UAT ayrı task olarak gereksiz — her biri ~100s suruyordu,
+        # SM acilis, QA, UAT ayrı task olmak zorunda degil — her biri ~100s suruyordu,
         # toplam 700s > timeout. 4 task ile ~300-400s hedefi.
         sm = Agent(
             config=self._agent_config_with_knowledge("scrum_master", "agile_facilitation"),
-            llm=local_llm,
+            llm=build_for_agent("scrum_master"),
             verbose=True,
             max_iter=2,
             tools=[],
         )
         ba = Agent(
             config=self._agent_config_with_knowledge("business_analyst", "requirements_analysis"),
-            llm=local_llm,
+            llm=build_for_agent("business_analyst"),
             verbose=True,
             max_iter=2,
             tools=[],
         )
 
-        # Architect — yerel model + browse_repo (context'te repo yapisi var ama
-        # spesifik dosya okumasi gerekebilir). max_iter=3: 1-2 tool call + final answer.
+        # Architect — dashboard'da secilen model + browse_repo. max_iter=3: 1-2 tool call + final answer.
         arch = Agent(
             config=self._agent_config_with_knowledge(
                 "software_architect", "backend_tech_design", "frontend_nextjs"
             ),
-            llm=local_llm,
+            llm=build_for_agent("software_architect"),
             verbose=True,
             max_iter=3,
             tools=[
@@ -535,7 +441,7 @@ class AgileSDLCCrew:
             config=self._agent_config_with_knowledge(
                 "senior_developer", "backend_feature_dev", "frontend_nextjs"
             ),
-            llm=_create_local_llm(4096, _local_coder_model()),
+            llm=build_for_agent("senior_developer"),
             verbose=True,
             max_iter=2,
             tools=[],
@@ -544,6 +450,8 @@ class AgileSDLCCrew:
         # Her kickoff task'ina log callback ekle — hangi agent ne zaman bitti gorunsun
         import logging as _logging
         import time as _time
+        from datetime import datetime as _dt
+        from pathlib import Path as _KPath
         _kickoff_log = _logging.getLogger("pipeline")
         _kickoff_start = _time.time()
 
@@ -554,13 +462,37 @@ class AgileSDLCCrew:
             "kickoff_sm_close_task": "SM Tutanak",
         }
 
+        # Kickoff ciktilarini diske yaz: /tmp/kickoff_<wi>_<timestamp>.md
+        # WI ID'ye state.work_item_id ile erisemiyoruz (crew tarafi state bilmiyor),
+        # bunun yerine dosya adina ozellik koymadan timestamp ile ayri tutarız.
+        _kickoff_log_dir = _KPath("/tmp/crew_kickoff")
+        _kickoff_log_dir.mkdir(parents=True, exist_ok=True)
+        _kickoff_log_file = _kickoff_log_dir / f"kickoff_{_dt.now().strftime('%Y%m%d_%H%M%S')}.md"
+        try:
+            _kickoff_log_file.write_text(
+                f"# Kickoff Toplantisi Ciktilari\n"
+                f"**Tarih**: {_dt.now().isoformat()}\n\n",
+                encoding="utf-8",
+            )
+            _kickoff_log.info(f"  Kickoff ciktilari dosyaya yaziliyor: {_kickoff_log_file}")
+        except Exception as e:
+            _kickoff_log.warning(f"  Kickoff log dosyasi acilamadi: {e}")
+
         def _make_kickoff_cb(task_key):
             orig_cb = self._make_task_callback(task_key)
             label = _task_names.get(task_key, task_key)
             def cb(output):
                 elapsed = _time.time() - _kickoff_start
-                raw = (output.raw or "")[:120] if hasattr(output, "raw") else str(output)[:120]
+                full = output.raw if hasattr(output, "raw") else str(output)
+                full = full or ""
+                raw = full[:120]
                 _kickoff_log.info(f"  ✅ Kickoff [{label}] tamamlandi ({elapsed:.0f}s) — {raw}")
+                # Tam ciktiyi diske ekle
+                try:
+                    with open(_kickoff_log_file, "a", encoding="utf-8") as _f:
+                        _f.write(f"\n---\n\n## {label} ({elapsed:.0f}s)\n\n{full}\n")
+                except Exception as _e:
+                    _kickoff_log.warning(f"  Kickoff log yazma hatasi ({label}): {_e}")
                 orig_cb(output)
             return cb
 

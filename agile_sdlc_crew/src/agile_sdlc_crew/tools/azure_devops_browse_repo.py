@@ -71,8 +71,8 @@ class AzureDevOpsBrowseRepoTool(CachedToolMixin, BaseTool):
             for fpath in files[:5]:
                 try:
                     content = mgr.get_file_content(repo_name, fpath, branch=branch)
-                    if len(content) > 5000:
-                        content = content[:5000] + "\n... (truncated)"
+                    if len(content) > 30000:
+                        content = content[:30000] + "\n... (truncated, tam icerik icin read_file kullanin)"
                     lines.append(f"\n--- {fpath} ---")
                     lines.append(content)
                 except Exception:
@@ -109,8 +109,8 @@ class AzureDevOpsBrowseRepoTool(CachedToolMixin, BaseTool):
             for fpath in files[:5]:
                 try:
                     content = client.get_file_content(repo_name, fpath, branch=branch)
-                    if len(content) > 5000:
-                        content = content[:5000] + "\n... (truncated)"
+                    if len(content) > 30000:
+                        content = content[:30000] + "\n... (truncated, tam icerik icin read_file kullanin)"
                     lines.append(f"\n--- {fpath} ---")
                     lines.append(content)
                 except Exception:

@@ -1,0 +1,4 @@
+# Dashboard tarafindan yonetilir — aktif work_item provider.
+# Resolver onceligi: BU DOSYA > CREW_WORK_ITEM_PROVIDER env > 'azure_devops'
+
+provider: azure_devops

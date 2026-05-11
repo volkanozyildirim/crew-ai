@@ -1,0 +1,36 @@
+# Dashboard tarafindan yonetilir — agent -> LLM override.
+# Deger formatlari:
+#   <agent_key>: <profile_name>                   (profil referansi)
+#   <agent_key>: { profile: <profile_name> }      (profil referansi)
+#   <agent_key>: { provider: ..., model: ..., max_tokens: ... }  (inline)
+# Resolver onceligi: env > BU DOSYA > agents.yaml > CREW_USE_LOCAL_LLM > agent_defaults
+
+agents:
+  business_analyst:
+    max_tokens: 4096
+    model: sonnet
+    provider: claude_cli
+  code_reviewer:
+    max_tokens: 4096
+    model: sonnet
+    provider: claude_cli
+  qa_engineer:
+    max_tokens: 4096
+    model: sonnet
+    provider: claude_cli
+  scrum_master:
+    max_tokens: 4096
+    model: sonnet
+    provider: claude_cli
+  senior_developer:
+    max_tokens: 32768
+    model: opus
+    provider: claude_cli
+  software_architect:
+    max_tokens: 32768
+    model: opus
+    provider: claude_cli
+  uat_specialist:
+    max_tokens: 4096
+    model: sonnet
+    provider: claude_cli
