@@ -60,6 +60,12 @@ header {
   background:var(--bg-elevated); color:var(--text-dim); border:1px solid var(--border);
 }
 .sm-btn.ghost:hover { border-color:var(--accent); color:var(--accent); }
+.sm-btn.settings-btn {
+  background:linear-gradient(135deg, var(--accent), var(--accent-light));
+  color:white; padding:8px 16px; display:inline-flex; align-items:center; gap:6px;
+  box-shadow:0 2px 8px rgba(108,92,231,0.3);
+}
+.sm-btn.settings-btn:hover { box-shadow:0 4px 12px rgba(108,92,231,0.5); transform:translateY(-1px); }
 
 /* ── Main ── */
 .main { display:grid; grid-template-columns:1fr 380px; min-height:calc(100vh - 62px); }
@@ -352,7 +358,9 @@ header {
       <button class="sm-btn" onclick="triggerRun()">Başlat</button>
     </div>
     <button class="sm-btn ghost" onclick="resetDashboard()">Sıfırla</button>
-    <button class="sm-btn ghost" onclick="openSettings()" title="Pipeline Ayarları" style="font-size:20px;padding:4px 10px">&#9881;</button>
+    <button class="sm-btn settings-btn" onclick="openSettings()" title="Pipeline Ayarları (agentlar, gorevler, LLM, env)">
+      <span style="font-size:16px;line-height:1">&#9881;</span> Ayarlar
+    </button>
     <span class="header-time" id="clock">--:--</span>
   </div>
 </header>
@@ -437,17 +445,29 @@ header {
     <div style="display:flex;border-bottom:1px solid var(--border)">
       <button class="cfg-tab active" data-cfg="agents" onclick="switchCfgTab('agents')">Agentlar</button>
       <button class="cfg-tab" data-cfg="tasks" onclick="switchCfgTab('tasks')">Gorevler</button>
+      <button class="cfg-tab" data-cfg="llm" onclick="switchCfgTab('llm')">LLM</button>
+      <button class="cfg-tab" data-cfg="llm_profiles" onclick="switchCfgTab('llm_profiles')">Profiller</button>
+      <button class="cfg-tab" data-cfg="embed" onclick="switchCfgTab('embed')">Embedding</button>
+      <button class="cfg-tab" data-cfg="vision" onclick="switchCfgTab('vision')">Vision</button>
+      <button class="cfg-tab" data-cfg="pipeline" onclick="switchCfgTab('pipeline')">Pipeline</button>
+      <button class="cfg-tab" data-cfg="creds" onclick="switchCfgTab('creds')">Kimlik Bilgileri</button>
       <button class="cfg-tab" data-cfg="env" onclick="switchCfgTab('env')">Ortam Degiskenleri</button>
     </div>
     <div style="flex:1;overflow:auto;position:relative">
       <textarea id="cfgEditor" spellcheck="false" style="width:100%;height:100%;background:var(--bg);color:#e6db74;border:none;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;resize:none;outline:none;tab-size:2"></textarea>
       <div id="cfgEnvView" style="display:none;padding:16px 20px"></div>
+      <div id="cfgLlmView" style="display:none;padding:16px 20px"></div>
+      <div id="cfgEmbedView" style="display:none;padding:16px 20px"></div>
+      <div id="cfgVisionView" style="display:none;padding:16px 20px"></div>
+      <div id="cfgPipelineView" style="display:none;padding:16px 20px"></div>
+      <div id="cfgCredsView" style="display:none;padding:16px 20px"></div>
+      <div id="cfgToast" style="position:absolute;top:14px;right:14px;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:600;display:none;z-index:500;box-shadow:0 6px 20px rgba(0,0,0,0.5);pointer-events:none;transition:opacity .25s"></div>
     </div>
     <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-top:1px solid var(--border);background:var(--bg-elevated)">
       <div style="font-size:11px;color:var(--text-dim)" id="cfgInfo">agents.yaml</div>
       <div style="display:flex;gap:8px">
         <button onclick="reloadCfg()" class="sm-btn ghost" style="font-size:12px;padding:6px 14px">Yenile</button>
-        <button onclick="saveCfg()" class="sm-btn" style="font-size:12px;padding:6px 14px;background:var(--accent)">Kaydet</button>
+        <button id="cfgSaveBtn" onclick="saveCfg()" class="sm-btn" style="font-size:12px;padding:6px 14px;background:var(--accent)">Kaydet</button>
       </div>
     </div>
   </div>
@@ -457,6 +477,20 @@ header {
 .cfg-tab{background:none;border:none;color:var(--text-dim);padding:10px 20px;font-size:13px;font-family:'Inter',sans-serif;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s}
 .cfg-tab:hover{color:var(--text)}
 .cfg-tab.active{color:var(--accent-light);border-bottom-color:var(--accent)}
+
+/* Combobox (LLM tab model selector) */
+.combo{position:relative;display:inline-block;min-width:280px}
+.combo>input{width:100%;box-sizing:border-box;padding-right:32px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 32px 6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace}
+.combo>input:focus{outline:none;border-color:var(--accent)}
+.combo>button.combo-toggle{position:absolute;right:1px;top:1px;bottom:1px;width:26px;background:transparent;border:none;border-left:1px solid var(--border);color:var(--text-dim);cursor:pointer;font-size:10px;padding:0;border-radius:0 6px 6px 0}
+.combo>button.combo-toggle:hover{color:var(--accent-light);background:var(--bg-elevated)}
+.combo-list{position:absolute;top:calc(100% + 2px);left:0;right:0;z-index:300;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;max-height:240px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.5);display:none}
+.combo-list.open{display:block}
+.combo-item{padding:7px 12px;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer;color:var(--text);border-bottom:1px solid var(--border)}
+.combo-item:last-child{border-bottom:none}
+.combo-item:hover{background:var(--bg-elevated);color:var(--accent-light)}
+.combo-item.current{background:rgba(108,92,231,0.12);color:var(--accent-light);font-weight:600}
+.combo-empty{padding:10px 12px;color:var(--text-dim);font-style:italic;font-size:12px;text-align:center}
 </style>
 
 <!-- Action Bar -->
@@ -790,15 +824,29 @@ function closeSettings(){document.getElementById('settingsModal').style.display=
 function switchCfgTab(name){
   _cfgTab=name;
   document.querySelectorAll('.cfg-tab').forEach(t=>t.classList.toggle('active',t.dataset.cfg===name));
-  if(name==='env'){
-    document.getElementById('cfgEditor').style.display='none';
-    document.getElementById('cfgEnvView').style.display='block';
-    loadEnv();
-  }else{
-    document.getElementById('cfgEditor').style.display='block';
-    document.getElementById('cfgEnvView').style.display='none';
-    loadCfg(name);
-  }
+  const ed=document.getElementById('cfgEditor');
+  const env=document.getElementById('cfgEnvView');
+  const llm=document.getElementById('cfgLlmView');
+  const emb=document.getElementById('cfgEmbedView');
+  const vis=document.getElementById('cfgVisionView');
+  const pip=document.getElementById('cfgPipelineView');
+  const creds=document.getElementById('cfgCredsView');
+  const saveBtn=document.getElementById('cfgSaveBtn');
+  ed.style.display='none'; env.style.display='none'; llm.style.display='none';
+  emb.style.display='none'; vis.style.display='none'; pip.style.display='none'; creds.style.display='none';
+  // Footer Kaydet etiketini sekmeye gore degistir
+  if(name==='env'||name==='embed'||name==='vision'||name==='creds'){saveBtn.style.display='none'}
+  else if(name==='llm'){saveBtn.style.display='inline-block';saveBtn.textContent='Tumunu Kaydet'}
+  else if(name==='pipeline'){saveBtn.style.display='inline-block';saveBtn.textContent='Tumunu Kaydet'}
+  else{saveBtn.style.display='inline-block';saveBtn.textContent='Kaydet'}
+  if(name==='env'){env.style.display='block';loadEnv()}
+  else if(name==='llm'){llm.style.display='block';loadLlm()}
+  else if(name==='embed'){emb.style.display='block';loadEmbed()}
+  else if(name==='vision'){vis.style.display='block';loadVision()}
+  else if(name==='pipeline'){pip.style.display='block';loadPipeline()}
+  else if(name==='creds'){creds.style.display='block';loadCreds()}
+  else if(name==='llm_profiles'){ed.style.display='block';loadCfg('llm_profiles')}
+  else{ed.style.display='block';loadCfg(name)}
 }
 async function loadCfg(name){
   const editor=document.getElementById('cfgEditor');
@@ -828,9 +876,753 @@ async function loadEnv(){
     }
   }catch(e){view.innerHTML='Hata: '+e}
 }
-function reloadCfg(){if(_cfgTab==='env')loadEnv();else loadCfg(_cfgTab)}
+// Provider model cache: { provider: {models, source, error?} }
+const _llmModelCache={};
+async function _fetchModels(provider){
+  if(_llmModelCache[provider])return _llmModelCache[provider];
+  try{
+    const r=await fetch('/api/llm/models?provider='+encodeURIComponent(provider));
+    const d=await r.json();
+    _llmModelCache[provider]=d;
+    return d;
+  }catch(e){
+    const d={provider,models:[],source:'error',error:String(e)};
+    _llmModelCache[provider]=d;
+    return d;
+  }
+}
+async function loadLlm(){
+  const view=document.getElementById('cfgLlmView');
+  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  try{
+    const r=await fetch('/api/llm/state?t='+Date.now());
+    if(!r.ok){view.innerHTML='Hata: '+r.status;return}
+    const d=await r.json();
+    window._llmState=d;
+    const providers=d.providers||[];
+    const sourceLbl={env:'Env',dashboard:'Dashboard',['agents.yaml']:'agents.yaml',backwards_compat:'Eski env',default:'Default'};
+    const sourceColor={env:'#f9c74f',dashboard:'var(--accent-light)','agents.yaml':'#90be6d',backwards_compat:'#f8961e',default:'var(--text-dim)'};
+
+    let html='<div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">Her agent icin <b>provider</b> ve <b>model</b> sec. Degisiklikler <code style="color:var(--accent-light)">config/agent_llm_overrides.yaml</code> dosyasina yazilir; sonraki job kullanir.</div>';
+    html+='<table style="width:100%;border-collapse:collapse;font-size:13px">';
+    html+='<thead><tr style="color:var(--text-dim);font-size:11px;text-align:left;border-bottom:1px solid var(--border)">'
+      +'<th style="padding:8px">Agent</th>'
+      +'<th style="padding:8px">Provider</th>'
+      +'<th style="padding:8px">Model</th>'
+      +'<th style="padding:8px;width:90px">Max Tokens</th>'
+      +'<th style="padding:8px">Kaynak</th>'
+      +'<th style="padding:8px;text-align:right"></th></tr></thead><tbody>';
+
+    for(const a of (d.agents||[])){
+      const src=a.source||'';
+      const srcStyle=`background:${sourceColor[src]||'var(--bg-elevated)'};color:#000;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600`;
+      const isOverride=src==='dashboard';
+      const clearBtn=isOverride?`<button onclick="clearAgentLlm('${esc(a.agent_key)}')" class="sm-btn ghost" style="font-size:11px;padding:4px 10px" title="Override sil">Sifirla</button>`:'';
+      const err=a.error?`<div style="color:#ef4444;font-size:11px">${esc(a.error)}</div>`:'';
+      const profileTag=a.profile?`<div style="font-size:10px;color:var(--text-dim);margin-top:2px">profil: <code>${esc(a.profile)}</code></div>`:'';
+      const provOpts=providers.map(p=>`<option value="${esc(p)}"${p===a.provider?' selected':''}>${esc(p)}</option>`).join('');
+      html+=`<tr style="border-bottom:1px solid var(--border)" data-agent="${esc(a.agent_key)}">
+        <td style="padding:8px;vertical-align:top">
+          <div style="font-weight:600">${esc(a.display_name||a.agent_key)}</div>
+          <div style="font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace">${esc(a.agent_key)}</div>
+          ${profileTag}${err}
+        </td>
+        <td style="padding:8px;vertical-align:top">
+          <select class="llm-prov" data-agent="${esc(a.agent_key)}" onchange="onProviderChange(this)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;min-width:120px">${provOpts}</select>
+        </td>
+        <td style="padding:8px;vertical-align:top">
+          <div class="combo" data-agent="${esc(a.agent_key)}">
+            <input class="llm-model" data-agent="${esc(a.agent_key)}" value="${esc(a.model||'')}" placeholder="model adi"
+              oninput="comboFilter(this)" onfocus="comboOpen(this)" onkeydown="comboKey(event,this)"
+              onblur="autoSaveLlm(this)" autocomplete="off" />
+            <button type="button" class="combo-toggle" onclick="comboToggle(this)" title="Modelleri goster">&#9662;</button>
+            <div class="combo-list"></div>
+          </div>
+          <div class="llm-models-hint" data-agent="${esc(a.agent_key)}" style="font-size:10px;color:var(--text-dim);margin-top:3px"></div>
+        </td>
+        <td style="padding:8px;vertical-align:top">
+          <input class="llm-mt" data-agent="${esc(a.agent_key)}" type="number" min="64" max="200000" step="64" value="${a.max_tokens||4096}"
+            onchange="autoSaveLlm(this)" onblur="autoSaveLlm(this)"
+            style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 8px;border-radius:6px;font-size:12px;width:80px;font-family:'JetBrains Mono',monospace" />
+        </td>
+        <td style="padding:8px;vertical-align:top"><span style="${srcStyle}">${esc(sourceLbl[src]||src)}</span></td>
+        <td style="padding:8px;vertical-align:top;text-align:right;white-space:nowrap">
+          <button class="sm-btn" data-agent="${esc(a.agent_key)}" onclick="saveAgentLlm('${esc(a.agent_key)}')" style="font-size:11px;padding:5px 12px;margin-right:4px">Kaydet</button>
+          ${clearBtn}
+        </td>
+      </tr>`;
+    }
+    html+='</tbody></table>';
+    html+=`<div style="margin-top:16px;font-size:11px;color:var(--text-dim);line-height:1.6">Cozumleme onceligi: <b>Env</b> &gt; <b>Dashboard</b> &gt; <b>agents.yaml</b> &gt; <b>Eski env</b> (CREW_USE_LOCAL_LLM) &gt; <b>Default</b><br>Provider'lar: ${providers.map(p=>`<code>${esc(p)}</code>`).join(', ')}. Hazir profiller "Profiller" sekmesinde duzenlenebilir.<br><b>Tip:</b> alanı düzenleyince otomatik kaydolur (toast bildirim çıkar). Tüm satırları zorla yeniden yazmak için "Tumunu Kaydet".</div>`;
+    view.innerHTML=html;
+
+    // Initial state'i _llmSaved cache'ine yaz — boylece blur sirasinda
+    // degismeyen alanlar tekrar PUT atmaz
+    for(const a of (d.agents||[])){
+      _llmSaved[a.agent_key]=JSON.stringify({
+        provider:a.provider,
+        model:a.model||'',
+        max_tokens:a.max_tokens||4096,
+      });
+      _populateModels(a.agent_key, a.provider);
+    }
+  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+}
+async function _populateModels(agent_key, provider){
+  if(!provider)return;
+  const combo=document.querySelector(`.combo[data-agent="${agent_key}"]`);
+  const hint=document.querySelector(`.llm-models-hint[data-agent="${agent_key}"]`);
+  if(!combo)return;
+  if(hint)hint.textContent='Yukleniyor...';
+  const list=combo.querySelector('.combo-list');
+  list.innerHTML='<div class="combo-empty">Yukleniyor...</div>';
+  const d=await _fetchModels(provider);
+  combo.dataset.models=JSON.stringify(d.models||[]);
+  _renderComboItems(combo);
+  if(hint){
+    if(d.error){hint.textContent='⚠ '+d.error;hint.style.color='#ef4444'}
+    else if(d.source==='dynamic'){hint.textContent=`${(d.models||[]).length} model bulundu (canli)`;hint.style.color='var(--text-dim)'}
+    else if(d.source==='static'){hint.textContent=`${(d.models||[]).length} bilinen model`;hint.style.color='var(--text-dim)'}
+    else{hint.textContent='';}
+  }
+}
+function _renderComboItems(combo){
+  const list=combo.querySelector('.combo-list');
+  const input=combo.querySelector('input');
+  const all=JSON.parse(combo.dataset.models||'[]');
+  const cur=(input.value||'').trim();
+  const q=cur.toLowerCase();
+  const filtered=q?all.filter(m=>m.toLowerCase().includes(q)):all;
+  if(!filtered.length){
+    list.innerHTML=`<div class="combo-empty">${all.length?'Eslesen model yok — yazdiginiz deger kullanilir':'Model listesi bos'}</div>`;
+    return;
+  }
+  list.innerHTML=filtered.map(m=>{
+    const cls=m===cur?'combo-item current':'combo-item';
+    return `<div class="${cls}" onmousedown="comboPick(this,this.textContent)">${esc(m)}</div>`;
+  }).join('');
+}
+function onProviderChange(sel){
+  const agent=sel.dataset.agent;
+  _populateModels(agent, sel.value);
+  // Provider degisince model alanini temizle (eski model yeni provider'da yok olabilir)
+  const input=document.querySelector(`.combo[data-agent="${agent}"] input`);
+  if(input){input.value='';}
+}
+function comboOpen(input){
+  const combo=input.closest('.combo');
+  // Diger acik kutulari kapat
+  document.querySelectorAll('.combo-list.open').forEach(l=>{if(l!==combo.querySelector('.combo-list'))l.classList.remove('open')});
+  _renderComboItems(combo);
+  combo.querySelector('.combo-list').classList.add('open');
+}
+function comboFilter(input){
+  const combo=input.closest('.combo');
+  _renderComboItems(combo);
+  combo.querySelector('.combo-list').classList.add('open');
+}
+function comboToggle(btn){
+  const combo=btn.closest('.combo');
+  const list=combo.querySelector('.combo-list');
+  if(list.classList.contains('open')){list.classList.remove('open');return}
+  // Diger acik kutulari kapat
+  document.querySelectorAll('.combo-list.open').forEach(l=>l.classList.remove('open'));
+  _renderComboItems(combo);
+  list.classList.add('open');
+  combo.querySelector('input').focus();
+  combo.querySelector('input').select();
+}
+function comboPick(item,value){
+  const combo=item.closest('.combo');
+  combo.querySelector('input').value=value;
+  combo.querySelector('.combo-list').classList.remove('open');
+}
+function comboKey(e,input){
+  const list=input.closest('.combo').querySelector('.combo-list');
+  if(e.key==='Escape'){list.classList.remove('open')}
+  else if(e.key==='Enter'){e.preventDefault();list.classList.remove('open')}
+  else if(e.key==='ArrowDown'){e.preventDefault();comboOpen(input);list.scrollTop=0}
+}
+// Disari tiklayinca tum combo dropdown'lari kapat
+document.addEventListener('click',function(e){
+  if(!e.target.closest('.combo'))document.querySelectorAll('.combo-list.open').forEach(l=>l.classList.remove('open'));
+});
+function showToast(msg, kind){
+  const t=document.getElementById('cfgToast');
+  if(!t)return;
+  const colors={success:['#1abc9c','#000'],error:['#ef4444','#fff'],info:['#6c5ce7','#fff']};
+  const [bg,fg]=colors[kind||'success'];
+  t.textContent=msg; t.style.background=bg; t.style.color=fg;
+  t.style.display='block'; t.style.opacity='1';
+  clearTimeout(t._timer);
+  t._timer=setTimeout(()=>{t.style.opacity='0';setTimeout(()=>t.style.display='none',250)},2200);
+}
+// Track son kaydedilen state'i — gereksiz tekrar PUT yapma
+const _llmSaved={};
+async function _putAgentLlm(agent_key, body){
+  const r=await fetch('/api/llm/agents/'+encodeURIComponent(agent_key),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await r.json().catch(()=>({}));
+  return {ok:r.ok, status:r.status, data:d};
+}
+function _readRow(agent_key){
+  const provEl=document.querySelector(`.llm-prov[data-agent="${agent_key}"]`);
+  const modelEl=document.querySelector(`.llm-model[data-agent="${agent_key}"]`);
+  const mtEl=document.querySelector(`.llm-mt[data-agent="${agent_key}"]`);
+  if(!provEl||!modelEl||!mtEl)return null;
+  return {
+    provider:provEl.value,
+    model:(modelEl.value||'').trim(),
+    max_tokens:parseInt(mtEl.value)||4096,
+  };
+}
+async function saveAgentLlm(agent_key, opts){
+  opts=opts||{};
+  const row=_readRow(agent_key);
+  if(!row)return false;
+  if(!row.model){
+    if(!opts.silent)showToast(`${agent_key}: model adi bos`, 'error');
+    return false;
+  }
+  // Ayni deger ise tekrar gonderme
+  const key=JSON.stringify(row);
+  if(_llmSaved[agent_key]===key && !opts.force) return true;
+  const res=await _putAgentLlm(agent_key, row);
+  if(!res.ok){
+    showToast(`${agent_key}: ${res.data.error||res.status}`, 'error');
+    return false;
+  }
+  _llmSaved[agent_key]=key;
+  if(!opts.silent)showToast(`✓ ${agent_key} kaydedildi (${row.provider}/${row.model})`,'success');
+  if(!opts.skipReload)loadLlm();
+  return true;
+}
+async function autoSaveLlm(field){
+  const agent=field.dataset.agent;
+  if(!agent)return;
+  const row=_readRow(agent);
+  if(!row||!row.model)return;  // model bos -> auto-save yapma
+  const key=JSON.stringify(row);
+  if(_llmSaved[agent]===key)return;  // degismedi
+  await saveAgentLlm(agent, {skipReload:true});
+}
+async function saveAllLlm(){
+  const rows=document.querySelectorAll('#cfgLlmView tr[data-agent]');
+  if(!rows.length){showToast('Kaydedilecek satir yok','info');return}
+  let ok=0, skip=0, fail=0;
+  for(const row of rows){
+    const agent=row.dataset.agent;
+    const r=_readRow(agent);
+    if(!r){fail++;continue}
+    if(!r.model){skip++;continue}
+    const success=await saveAgentLlm(agent,{silent:true,skipReload:true,force:true});
+    if(success)ok++; else fail++;
+  }
+  let msg=`${ok} agent kaydedildi`;
+  if(skip)msg+=`, ${skip} atlandi (model bos)`;
+  if(fail)msg+=`, ${fail} hata`;
+  showToast(msg, fail?'error':(ok?'success':'info'));
+  loadLlm();
+}
+async function clearAgentLlm(agent_key){
+  if(!confirm('Override silinsin mi? Default mantiga doner.'))return;
+  const res=await _putAgentLlm(agent_key,{profile:null});
+  if(!res.ok){showToast(`${agent_key}: ${res.data.error||res.status}`,'error');return}
+  delete _llmSaved[agent_key];
+  showToast(`✓ ${agent_key} sifirlandi`,'success');
+  loadLlm();
+}
+
+// ── Embedding tab ──
+function _fmtBytes(n){
+  if(!n)return '0 B';
+  const u=['B','KB','MB','GB']; let i=0;
+  while(n>=1024 && i<u.length-1){n/=1024;i++}
+  return n.toFixed(i?1:0)+' '+u[i];
+}
+// Embedding state cache
+window._embedKnownDims={};
+async function loadEmbed(){
+  const view=document.getElementById('cfgEmbedView');
+  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  try{
+    const r=await fetch('/api/embed/state?t='+Date.now());
+    if(!r.ok){view.innerHTML='Hata: '+r.status;return}
+    const d=await r.json();
+    window._embedKnownDims=d.known_dims||{};
+    const providers=d.providers||['ollama','openai'];
+
+    const dbKb=_fmtBytes(d.db.size_bytes);
+    const dbStatus=d.db.exists
+      ? `<span style="color:var(--success)">●</span> Var (${dbKb}, ${d.db.tables} tablo)`
+      : `<span style="color:var(--text-dim)">○</span> Olusturulmadi`;
+
+    const provOpts=providers.map(p=>`<option value="${esc(p)}"${p===d.provider?' selected':''}>${esc(p)}</option>`).join('');
+    const cfg=d.config||{};
+    const apiKeyEnv=cfg.api_key_env||'';
+
+    let html=`<div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">REPO_SUMMARY ve kod chunk'lari secilen embedding provider'a gonderilip vector DB'de saklanir. <b>Provider/model/dim degistirirsen DB temizlenmeli.</b></div>`;
+    html+='<div style="display:grid;grid-template-columns:140px 1fr;gap:12px 16px;font-size:13px;align-items:center">';
+
+    html+=`<label>Provider</label>`;
+    html+=`<select id="embedProviderInput" onchange="onEmbedProviderChange()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;min-width:160px">${provOpts}</select>`;
+
+    html+=`<label>Model</label>`;
+    html+=`<div class="combo" data-agent="__embed">
+      <input id="embedModelInput" class="llm-model" data-agent="__embed" value="${esc(d.model||'')}" placeholder="model adi"
+        oninput="comboFilter(this)" onfocus="comboOpen(this)" onkeydown="comboKey(event,this)" autocomplete="off"
+        onchange="onEmbedModelChange()" />
+      <button type="button" class="combo-toggle" onclick="comboToggle(this)" title="Modelleri goster">&#9662;</button>
+      <div class="combo-list"></div>
+    </div>`;
+
+    html+=`<label>Boyut (dim)</label>`;
+    html+=`<div><input id="embedDimInput" type="number" min="32" max="8192" step="1" value="${d.dimension}" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;width:100px;font-family:'JetBrains Mono',monospace" /> <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Bilinen modeller icin otomatik bulunur. Manuel override icin degistir.</span></div>`;
+
+    html+=`<label>Base URL</label>`;
+    html+=`<input id="embedUrlInput" type="text" value="${esc(d.base_url)}" placeholder="provider default" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace" />`;
+
+    html+=`<label>API Key (env adi)</label>`;
+    html+=`<div><input id="embedApiKeyEnvInput" type="text" value="${esc(apiKeyEnv)}" placeholder="orn: LITELLM_API_KEY (openai-uyumlu icin)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace;min-width:240px" /> <span style="font-size:11px;color:var(--text-dim);margin-left:8px">.env'deki anahtarın <b>adi</b> (degeri DEGIL).</span></div>`;
+
+    html+=`<label>Vector DB</label>`;
+    html+=`<div style="font-family:'JetBrains Mono',monospace;font-size:12px"><code>${esc(d.db.path)}</code><div style="margin-top:4px;font-size:11px">${dbStatus}</div></div>`;
+
+    html+='</div>';
+    html+=`<div style="margin-top:18px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="sm-btn" onclick="saveEmbed()" style="font-size:13px;padding:8px 18px">Kaydet</button>
+      <button class="sm-btn ghost" onclick="testEmbed()" style="font-size:13px;padding:8px 18px">Test Et</button>
+      <button class="sm-btn ghost" onclick="clearEmbedDb()" style="font-size:13px;padding:8px 18px;color:#ef4444;border-color:#ef4444">Vector DB Temizle</button>
+    </div>`;
+    html+=`<div id="embedTestResult" style="margin-top:14px;font-size:12px;font-family:'JetBrains Mono',monospace"></div>`;
+    html+=`<div style="margin-top:24px;border-top:1px solid var(--border);padding-top:14px;font-size:11px;color:var(--text-dim);line-height:1.6"><b>Provider'lar:</b> ${providers.map(p=>`<code>${esc(p)}</code>`).join(', ')} &nbsp; — &nbsp; <b>Bilinen modeller:</b> `;
+    for(const [m,dim] of Object.entries(d.known_dims||{})){
+      html+=`<code>${esc(m)}</code>(${dim}d) `;
+    }
+    html+=`</div>`;
+    view.innerHTML=html;
+
+    // Provider'a gore model listesini doldur
+    await _populateEmbedModelList(d.provider, d.model);
+  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+}
+async function _populateEmbedModelList(provider, currentModel){
+  const combo=document.querySelector('.combo[data-agent="__embed"]');
+  if(!combo)return;
+  // Provider'a gore model listesi al
+  let models=[];
+  try{
+    const r=await fetch('/api/llm/models?provider='+encodeURIComponent(provider==='openai'?'litellm':provider));
+    if(r.ok){const d=await r.json();models=d.models||[]}
+  }catch(e){/* ignore */}
+  // Embedding modellerini one al
+  const known=Object.keys(window._embedKnownDims||{});
+  const isEmbed=m=>known.some(k=>m.startsWith(k))||m.toLowerCase().includes('embed');
+  const embedFirst=models.filter(isEmbed);
+  const rest=models.filter(m=>!isEmbed(m));
+  combo.dataset.models=JSON.stringify([...embedFirst, ...rest]);
+  _renderComboItems(combo);
+}
+async function onEmbedProviderChange(){
+  const prov=document.getElementById('embedProviderInput').value;
+  // Model alanini temizle, listesini yeniden yukle
+  document.getElementById('embedModelInput').value='';
+  await _populateEmbedModelList(prov, '');
+}
+function onEmbedModelChange(){
+  // Model degistiginde bilinen modelin dim'ini auto-set et
+  const input=document.getElementById('embedModelInput');
+  const dimInput=document.getElementById('embedDimInput');
+  if(!input||!dimInput)return;
+  const model=input.value.trim();
+  const base=model.split(':')[0];
+  const known=window._embedKnownDims||{};
+  const dim=known[model]||known[base];
+  if(dim)dimInput.value=dim;
+}
+async function saveEmbed(){
+  const provider=document.getElementById('embedProviderInput').value;
+  const model=document.getElementById('embedModelInput').value.trim();
+  const dim=parseInt(document.getElementById('embedDimInput').value)||0;
+  const url=document.getElementById('embedUrlInput').value.trim();
+  const keyEnv=document.getElementById('embedApiKeyEnvInput').value.trim();
+  if(!provider){showToast('Provider secilmedi','error');return}
+  if(!model){showToast('Model adi bos olamaz','error');return}
+  try{
+    const body={provider, model};
+    if(dim)body.dimension=dim;
+    if(url)body.base_url=url;
+    if(keyEnv)body.api_key_env=keyEnv;
+    const r=await fetch('/api/embed/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
+    showToast(`✓ Embedding ayari kaydedildi (${provider}/${model}, ${dim}d)`,'success');
+    loadEmbed();
+  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+}
+async function testEmbed(){
+  const out=document.getElementById('embedTestResult');
+  out.innerHTML='<span style="color:var(--text-dim)">Test ediliyor...</span>';
+  try{
+    const r=await fetch('/api/embed/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    const d=await r.json();
+    if(d.status==='ok'){
+      out.innerHTML=`<span style="color:var(--success)">✓ Basarili</span> — ${d.dimension}d, ${d.elapsed_ms}ms (model: <code>${esc(d.model)}</code>)`;
+      showToast(`✓ Embedding calisiyor (${d.dimension}d, ${d.elapsed_ms}ms)`,'success');
+    }else{
+      out.innerHTML=`<span style="color:#ef4444">✗ Hata</span><br><pre style="background:var(--bg);padding:8px;border-radius:6px;margin-top:6px;white-space:pre-wrap">${esc(d.error||'?')}</pre>`;
+      showToast('Embedding hatasi','error');
+    }
+  }catch(e){
+    out.innerHTML=`<span style="color:#ef4444">✗ Baglanti hatasi:</span> ${esc(String(e))}`;
+    showToast('Baglanti hatasi','error');
+  }
+}
+async function clearEmbedDb(){
+  if(!confirm('Vector DB tamamen silinecek. Bir sonraki job calisirken yeniden olusturulur. Devam?'))return;
+  try{
+    const r=await fetch('/api/embed/clear',{method:'POST'});
+    const d=await r.json();
+    if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
+    showToast('✓ Vector DB silindi','success');
+    loadEmbed();
+  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+}
+
+// ── Vision tab ──
+window._visionKnownModels={};
+async function loadVision(){
+  const view=document.getElementById('cfgVisionView');
+  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  try{
+    const r=await fetch('/api/vision/state?t='+Date.now());
+    if(!r.ok){view.innerHTML='Hata: '+r.status;return}
+    const d=await r.json();
+    window._visionKnownModels=d.known_models||{};
+    const providers=d.providers||['ollama','openai'];
+    const cfg=d.config||{};
+    const apiKeyEnv=cfg.api_key_env||'';
+
+    const provOpts=providers.map(p=>`<option value="${esc(p)}"${p===d.provider?' selected':''}>${esc(p)}</option>`).join('');
+
+    let html=`<div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">WI description'undaki gorseller (mockup, ekran goruntusu, akis diyagrami) bu modele gonderilip Türkçe textual açıklamaya çevrilir; sonra BA agent'ın context'ine eklenir.<br><b>Toggle:</b> Pipeline tab → "WI Görsel/Link Analizi". <b>Dosya:</b> <code style="color:var(--accent-light)">config/vision_config.yaml</code>.</div>`;
+
+    html+='<div style="display:grid;grid-template-columns:140px 1fr;gap:12px 16px;font-size:13px;align-items:center">';
+    html+=`<label>Provider</label>`;
+    html+=`<select id="visionProviderInput" onchange="onVisionProviderChange()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;min-width:160px">${provOpts}</select>`;
+
+    html+=`<label>Model</label>`;
+    html+=`<div class="combo" data-agent="__vision">
+      <input id="visionModelInput" class="llm-model" data-agent="__vision" value="${esc(d.model||'')}" placeholder="model adi"
+        oninput="comboFilter(this)" onfocus="comboOpen(this)" onkeydown="comboKey(event,this)" autocomplete="off" />
+      <button type="button" class="combo-toggle" onclick="comboToggle(this)" title="Modelleri goster">&#9662;</button>
+      <div class="combo-list"></div>
+    </div>`;
+
+    html+=`<label>Base URL</label>`;
+    html+=`<input id="visionUrlInput" type="text" value="${esc(d.base_url)}" placeholder="provider default" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace" />`;
+
+    html+=`<label>API Key (env adi)</label>`;
+    html+=`<div><input id="visionApiKeyEnvInput" type="text" value="${esc(apiKeyEnv)}" placeholder="orn: LITELLM_API_KEY (openai-uyumlu icin)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace;min-width:240px" /> <span style="font-size:11px;color:var(--text-dim);margin-left:8px">.env'deki anahtarın <b>adi</b> (degeri DEGIL).</span></div>`;
+    html+='</div>';
+
+    html+=`<div style="margin-top:18px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="sm-btn" onclick="saveVision()" style="font-size:13px;padding:8px 18px">Kaydet</button>
+      <button class="sm-btn ghost" onclick="testVision()" style="font-size:13px;padding:8px 18px">Test Et</button>
+    </div>`;
+    html+=`<div id="visionTestResult" style="margin-top:14px;font-size:12px;font-family:'JetBrains Mono',monospace"></div>`;
+    html+=`<div style="margin-top:24px;border-top:1px solid var(--border);padding-top:14px;font-size:11px;color:var(--text-dim);line-height:1.6"><b>Bilinen vision modelleri:</b> `;
+    for(const [m,p] of Object.entries(d.known_models||{})){
+      html+=`<code>${esc(m)}</code>(${esc(p)}) `;
+    }
+    html+=`</div>`;
+    view.innerHTML=html;
+
+    await _populateVisionModelList(d.provider);
+  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+}
+async function _populateVisionModelList(provider){
+  const combo=document.querySelector('.combo[data-agent="__vision"]');
+  if(!combo)return;
+  let models=[];
+  try{
+    // openai => litellm proxy modelleri ; ollama => /api/tags
+    const llmProvider = provider==='openai'?'litellm':'ollama';
+    const r=await fetch('/api/llm/models?provider='+encodeURIComponent(llmProvider));
+    if(r.ok){const d=await r.json();models=d.models||[]}
+  }catch(e){}
+  // Vision modelleri one al
+  const known=Object.keys(window._visionKnownModels||{});
+  const isVision=m=>known.some(k=>m===k||m.startsWith(k.split(':')[0]+':'))||m.includes('vl')||m.includes('vision')||m.includes('llava')||m.includes('claude')||m.includes('gpt-4');
+  const visionFirst=models.filter(isVision);
+  const rest=models.filter(m=>!isVision(m));
+  combo.dataset.models=JSON.stringify([...visionFirst, ...rest]);
+  _renderComboItems(combo);
+}
+async function onVisionProviderChange(){
+  const prov=document.getElementById('visionProviderInput').value;
+  document.getElementById('visionModelInput').value='';
+  await _populateVisionModelList(prov);
+}
+async function saveVision(){
+  const provider=document.getElementById('visionProviderInput').value;
+  const model=document.getElementById('visionModelInput').value.trim();
+  const url=document.getElementById('visionUrlInput').value.trim();
+  const keyEnv=document.getElementById('visionApiKeyEnvInput').value.trim();
+  if(!provider){showToast('Provider secilmedi','error');return}
+  if(!model){showToast('Model bos olamaz','error');return}
+  try{
+    const body={provider, model};
+    if(url)body.base_url=url;
+    if(keyEnv)body.api_key_env=keyEnv;
+    const r=await fetch('/api/vision/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
+    showToast(`✓ Vision ayari kaydedildi (${provider}/${model})`,'success');
+    loadVision();
+  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+}
+async function testVision(){
+  const out=document.getElementById('visionTestResult');
+  out.innerHTML='<span style="color:var(--text-dim)">Test ediliyor...</span>';
+  try{
+    const r=await fetch('/api/vision/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    const d=await r.json();
+    if(d.status==='ok'){
+      out.innerHTML=`<span style="color:var(--success)">✓ Basarili</span> — ${d.elapsed_ms}ms (${esc(d.provider)}/${esc(d.model)})<br><pre style="background:var(--bg);padding:8px;border-radius:6px;margin-top:6px;white-space:pre-wrap">${esc(d.response||'')}</pre>`;
+      showToast(`✓ Vision calisiyor (${d.elapsed_ms}ms)`,'success');
+    }else{
+      out.innerHTML=`<span style="color:#ef4444">✗ Hata</span><br><pre style="background:var(--bg);padding:8px;border-radius:6px;margin-top:6px;white-space:pre-wrap">${esc(d.error||'?')}</pre>`;
+      showToast('Vision hatasi','error');
+    }
+  }catch(e){
+    out.innerHTML=`<span style="color:#ef4444">✗ Baglanti hatasi:</span> ${esc(String(e))}`;
+    showToast('Baglanti hatasi','error');
+  }
+}
+
+// ── Provider Credentials tab ──
+const _credsRawCache={};  // namespace/provider -> raw values (edit modu)
+async function loadCreds(){
+  const view=document.getElementById('cfgCredsView');
+  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  try{
+    const r=await fetch('/api/providers/credentials?t='+Date.now());
+    if(!r.ok){view.innerHTML='Hata: '+r.status;return}
+    const d=await r.json();
+    let html=`<div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">Provider'larin API key + base URL bilgileri. <b>Cozumleme onceligi:</b> bu kayit > env (.env) > provider default. <b>Dosya:</b> <code style="color:var(--accent-light)">config/provider_credentials.yaml</code> (gitignore'da).</div>`;
+
+    const NS_ORDER=['llm','embedding','vision','work_item','scm'];
+    const NS_TITLES={llm:'LLM Providerlar',embedding:'Embedding Providerlar',vision:'Vision (Görsel Analizi) Providerlar',work_item:'İş Yönetimi Providerlar',scm:'Kaynak Kod (SCM) Providerlar'};
+    const _nsRank=k=>{const i=NS_ORDER.indexOf(k);return i===-1?999:i};
+    const nsKeys=Object.keys(d).sort((a,b)=>_nsRank(a)-_nsRank(b));
+    for(const ns of nsKeys){
+      const nsTitle=NS_TITLES[ns]||ns;
+      html+=`<h3 style="margin:18px 0 10px;font-size:14px;color:var(--accent-light)">${nsTitle}</h3>`;
+      const provs=d[ns]||{};
+      const provKeys=Object.keys(provs).sort();
+      if(!provKeys.length){html+='<div style="color:var(--text-dim);font-size:12px">(provider yok)</div>';continue}
+      html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">';
+      for(const prov of provKeys){
+        const data=provs[prov];
+        const fields=data.fields||[];
+        if(!fields.length){
+          html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg)">
+            <div style="font-weight:600;font-family:'JetBrains Mono',monospace;color:var(--accent-light);margin-bottom:6px">${esc(prov)}</div>
+            <div style="font-size:11px;color:var(--text-dim)">Credential gerektirmiyor</div>
+          </div>`;
+          continue;
+        }
+        html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg)" data-ns="${ns}" data-prov="${esc(prov)}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div style="font-weight:600;font-family:'JetBrains Mono',monospace;color:var(--accent-light)">${esc(prov)}</div>
+            <button class="sm-btn ghost" onclick="clearProviderCreds('${ns}','${esc(prov)}')" style="font-size:10px;padding:2px 8px;color:#ef4444;border-color:#ef4444">Sil</button>
+          </div>`;
+        for(const f of fields){
+          const inputId=`crd_${ns}_${prov}_${f.name}`;
+          const inputType=f.secret?'password':'text';
+          // value: maskelenmis ya da bos. Edit klikleyince raw cek.
+          const val=f.value||'';
+          const placeholder=f.placeholder||'';
+          const envHint=f.env_fallback?` <span style="font-size:10px;color:var(--text-dim)" title="Env fallback">[env: ${esc(f.env_fallback)}${f.env_present?' ●':''}]</span>`:'';
+          const visTglBtn=f.secret?`<button type="button" class="sm-btn ghost" style="padding:2px 8px;font-size:10px" onclick="toggleCredVis('${inputId}','${ns}','${esc(prov)}','${esc(f.name)}',this)">${val?'Düzenle':'Goster'}</button>`:'';
+          html+=`<div style="margin-bottom:8px">
+            <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">${esc(f.label||f.name)}${envHint}</label>
+            <div style="display:flex;gap:4px">
+              <input id="${esc(inputId)}" type="${inputType}" data-secret="${f.secret?'1':'0'}" data-loaded="${val?'masked':'empty'}" placeholder="${esc(placeholder)}" value="${esc(val)}" ${f.secret&&val?'readonly':''} style="flex:1;background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace" />
+              ${visTglBtn}
+            </div>
+          </div>`;
+        }
+        html+=`<div style="display:flex;gap:6px;margin-top:10px">
+          <button class="sm-btn" onclick="saveProviderCreds('${ns}','${esc(prov)}')" style="font-size:12px;padding:6px 14px">Kaydet</button>
+        </div></div>`;
+      }
+      html+='</div>';
+    }
+    view.innerHTML=html;
+  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+}
+async function toggleCredVis(inputId, ns, provider, fieldName, btn){
+  const input=document.getElementById(inputId);
+  if(!input)return;
+  if(input.dataset.loaded==='masked'){
+    // Raw cek
+    try{
+      const r=await fetch(`/api/providers/credentials/${ns}/${encodeURIComponent(provider)}/raw`);
+      const d=await r.json();
+      if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
+      input.value=d.values[fieldName]||'';
+      input.dataset.loaded='raw';
+      input.readOnly=false;
+      input.type='text';
+      btn.textContent='Gizle';
+    }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+  }else{
+    input.type=input.type==='password'?'text':'password';
+    btn.textContent=input.type==='password'?'Goster':'Gizle';
+  }
+}
+async function saveProviderCreds(ns, provider){
+  const card=document.querySelector(`[data-ns="${ns}"][data-prov="${provider}"]`);
+  if(!card)return;
+  const inputs=card.querySelectorAll('input[id^="crd_"]');
+  const body={};
+  for(const inp of inputs){
+    const fieldName=inp.id.split('_').slice(3).join('_');
+    // Eger maskeli ise (yani kullanici degistirmedi), o alani gondermeyiz
+    if(inp.dataset.loaded==='masked')continue;
+    body[fieldName]=inp.value.trim();
+  }
+  if(!Object.keys(body).length){
+    showToast('Degisiklik yok','info');
+    return;
+  }
+  try{
+    const r=await fetch(`/api/providers/credentials/${ns}/${encodeURIComponent(provider)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
+    showToast(`✓ ${provider} kaydedildi (${(d.fields||[]).length} alan)`,'success');
+    loadCreds();
+  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+}
+async function clearProviderCreds(ns, provider){
+  if(!confirm(`${provider} icin kayitli tum credential'ler silinecek. Devam?`))return;
+  try{
+    const r=await fetch(`/api/providers/credentials/${ns}/${encodeURIComponent(provider)}`,{method:'DELETE'});
+    const d=await r.json();
+    if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
+    showToast(`✓ ${provider} credential'leri silindi`,'success');
+    loadCreds();
+  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+}
+
+// ── Pipeline Behavior tab ──
+const _pipelineSaved={};  // key -> string of value (degismedi-mi tespiti)
+async function loadPipeline(){
+  const view=document.getElementById('cfgPipelineView');
+  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  try{
+    const r=await fetch('/api/pipeline/state?t='+Date.now());
+    if(!r.ok){view.innerHTML='Hata: '+r.status;return}
+    const d=await r.json();
+    const fields=d.fields||[];
+    const sourceLbl={dashboard:'Dashboard',env:'Env',default:'Default'};
+    const sourceColor={dashboard:'var(--accent-light)',env:'#f9c74f',default:'var(--text-dim)'};
+
+    let html=`<div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">Pipeline davranis ayarlari. <b>Degisiklikler aninda kaydolur</b> (toast bildirim cikar). <b>Cozumleme onceligi:</b> Dashboard > Env (.env) > Schema default. <b>Dosya:</b> <code style="color:var(--accent-light)">config/pipeline_config.yaml</code>.</div>`;
+
+    html+='<div style="display:grid;grid-template-columns:1fr;gap:10px">';
+    for(const f of fields){
+      _pipelineSaved[f.key]=JSON.stringify(f.value);
+      const src=f.source||'default';
+      const srcStyle=`background:${sourceColor[src]||'var(--bg-elevated)'};color:#000;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600`;
+      const envHint=f.env_present?` <span style="font-size:10px;color:#f9c74f" title="Env degeri var">[env]</span>`:'';
+      let inputHtml='';
+      if(f.type==='bool'){
+        const checked=f.value?' checked':'';
+        inputHtml=`<label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" data-key="${esc(f.key)}" data-type="bool"${checked} onchange="autoSavePipeline(this)" style="accent-color:var(--accent);width:18px;height:18px" />
+          <span style="font-size:12px;color:var(--text-dim)">${f.value?'Aktif':'Devre dışı'}</span>
+        </label>`;
+      }else{
+        const minAttr=('min' in f)?` min="${f.min}"`:'';
+        const step=f.type==='float'?'0.1':'1';
+        inputHtml=`<input type="number" data-key="${esc(f.key)}" data-type="${esc(f.type)}" value="${f.value}" step="${step}"${minAttr}
+          onchange="autoSavePipeline(this)" onblur="autoSavePipeline(this)"
+          style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;width:140px;font-family:'JetBrains Mono',monospace" />`;
+      }
+      html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;background:var(--bg)" data-pipekey="${esc(f.key)}">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;gap:12px">
+          <div style="flex:1">
+            <div style="font-weight:600;font-size:13px">${esc(f.label)}${envHint}</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:'JetBrains Mono',monospace">${esc(f.key)} <span style="${srcStyle};margin-left:6px">${esc(sourceLbl[src]||src)}</span></div>
+          </div>
+          <div style="flex-shrink:0">${inputHtml}</div>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);line-height:1.4">${esc(f.desc||'')}</div>
+      </div>`;
+    }
+    html+='</div>';
+    view.innerHTML=html;
+  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+}
+function _readPipelineField(field){
+  const key=field.dataset.key;
+  const type=field.dataset.type;
+  if(type==='bool')return {key, value:field.checked};
+  const num=type==='float'?parseFloat(field.value):parseInt(field.value);
+  if(isNaN(num))return null;
+  return {key, value:num};
+}
+async function autoSavePipeline(field){
+  const r=_readPipelineField(field);
+  if(!r)return;
+  const sig=JSON.stringify(r.value);
+  if(_pipelineSaved[r.key]===sig)return;
+  try{
+    const resp=await fetch('/api/pipeline/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({[r.key]:r.value})});
+    const d=await resp.json();
+    if(!resp.ok){showToast(`${r.key}: ${d.error||resp.status}`,'error');return}
+    _pipelineSaved[r.key]=sig;
+    showToast(`✓ ${r.key} = ${r.value}`,'success');
+    // Bool icin label'i guncelle
+    if(field.type==='checkbox'){
+      const lbl=field.parentElement.querySelector('span');
+      if(lbl)lbl.textContent=field.checked?'Aktif':'Devre dışı';
+    }
+    // Source rozeti yenile (artik dashboard kaynaklı)
+    const card=field.closest('[data-pipekey]');
+    if(card){
+      const badge=card.querySelector('[style*="border-radius:10px"]');
+      if(badge){badge.textContent='Dashboard';badge.style.background='var(--accent-light)'}
+    }
+  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+}
+async function saveAllPipeline(){
+  const inputs=document.querySelectorAll('#cfgPipelineView [data-key]');
+  if(!inputs.length){showToast('Kaydedilecek alan yok','info');return}
+  const body={};
+  for(const inp of inputs){
+    const r=_readPipelineField(inp);
+    if(r)body[r.key]=r.value;
+  }
+  try{
+    const resp=await fetch('/api/pipeline/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await resp.json();
+    if(!resp.ok){showToast('Hata: '+(d.error||resp.status),'error');return}
+    showToast(`✓ ${Object.keys(body).length} alan kaydedildi`,'success');
+    loadPipeline();
+  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+}
+function reloadCfg(){
+  if(_cfgTab==='env')loadEnv();
+  else if(_cfgTab==='llm')loadLlm();
+  else loadCfg(_cfgTab);
+}
 async function saveCfg(){
   if(_cfgTab==='env'){alert('Env degiskenleri .env dosyasindan yonetilir.');return}
+  if(_cfgTab==='llm'){return saveAllLlm()}
+  if(_cfgTab==='pipeline'){return saveAllPipeline()}
   const editor=document.getElementById('cfgEditor');
   const content=editor.value;
   if(!content.trim()){alert('Bos icerik kaydedilemez');return}

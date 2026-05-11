@@ -14,7 +14,18 @@ log = logging.getLogger("pipeline")
 
 
 def claude_cli_completion(prompt: str, max_tokens: int = 4096, model: str = "") -> str:
-    """Claude CLI ile tek prompt calistir, sonucu string olarak dondur."""
+    """Claude CLI ile tek prompt calistir, sonucu string olarak dondur.
+
+    Timeout pipeline_config'dan okunur (CREW_CLAUDE_CLI_TIMEOUT, default 300s).
+    Dashboard veya env override edebilir."""
+    # Lazy import — pipeline_config import zinciri claude_cli_llm'i geri import ederse
+    # circular dependency olmasin diye
+    try:
+        from agile_sdlc_crew import pipeline_config as _pc
+        timeout_s = int(_pc.get("CREW_CLAUDE_CLI_TIMEOUT"))
+    except Exception:
+        timeout_s = int(os.environ.get("CREW_CLAUDE_CLI_TIMEOUT", "300"))
+
     cmd = ["claude", "-p", prompt]
     if model:
         cmd.extend(["--model", model])
@@ -24,7 +35,7 @@ def claude_cli_completion(prompt: str, max_tokens: int = 4096, model: str = "") 
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout_s,
             env={**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"},
         )
         if result.returncode != 0:
@@ -33,7 +44,7 @@ def claude_cli_completion(prompt: str, max_tokens: int = 4096, model: str = "") 
             return ""
         return result.stdout.strip()
     except subprocess.TimeoutExpired:
-        log.warning("  Claude CLI timeout (120s)")
+        log.warning(f"  Claude CLI timeout ({timeout_s}s)")
         return ""
     except FileNotFoundError:
         log.warning("  Claude CLI bulunamadi (PATH'te 'claude' yok)")

@@ -1,0 +1,7 @@
+# Dashboard tarafindan yonetilir — embedding ayarlari.
+# Resolver onceligi: BU DOSYA > CREW_EMBED_* env > provider default
+# Modeli/dim'i degistirirsen vector DB temizlenmeli.
+
+dimension: 1024
+model: intfloat/multilingual-e5-large
+provider: fastembed

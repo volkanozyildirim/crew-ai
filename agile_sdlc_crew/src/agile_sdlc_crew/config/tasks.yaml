@@ -499,12 +499,21 @@ technical_design_task:
 
 implement_change_task:
   description: >
-    GOREV: Asagidaki degisiklik planini BIREBIR uygula.
+    GOREV: Asagidaki degisiklik planini BIREBIR uygula. Ciktin dosyanin
+    DEGISIKLIK UYGULANMIS TAM HALI olacak — bastan sona her satir.
 
-    ⚠️ KRITIK: Ciktiniz dosyanin TAM icerigi olmali.
-    Sadece degisen metodu/bolumu donmek YANLIS — push edildiginde dosyadaki
-    onceki tum kod silinir. Dosyayi TAM olarak, degisiklik uygulanmis haliyle dondur.
-    Orijinal dosya kac satirsa ciktin o kadar satir olmali (+- degisiklik kadar).
+    ╔══════════════════════════════════════════════════════════════╗
+    ║ KRITIK: TAM DOSYA SOZLESMESI                                 ║
+    ║                                                              ║
+    ║ Ciktinin tamami dogrudan dosyaya YAZILACAK. Push edildigi    ║
+    ║ andan itibaren dosya = senin ciktin. Eksik bir karakter      ║
+    ║ uretim sistemini KIRAR.                                      ║
+    ║                                                              ║
+    ║ ORIGINAL_LINES (orjinal dosya satir sayisi) -> NEW_LINES     ║
+    ║ Kabul edilebilir aralik: NEW_LINES = ORIGINAL_LINES ± 30%    ║
+    ║ Bu araligin disinda olan cikti push edilmeden REDDEDILIR ve  ║
+    ║ Pipeline tekrar denemek zorunda kalir.                       ║
+    ╚══════════════════════════════════════════════════════════════╝
 
     PLAN:
     Repo: {target_repo}
@@ -514,38 +523,86 @@ implement_change_task:
     TUM PLAN VE DIGER DOSYALAR (entegrasyon icin referans):
     {previous_context}
 
-    MEVCUT KOD (planda belirtilen):
+    MEVCUT KOD (planda belirtilen — dosyada bulunan blok):
     ```
     {current_code}
     ```
 
-    YENI KOD (planda belirtilen):
+    YENI KOD (planda belirtilen — yukaridakinin yerine yazilacak blok):
     ```
     {new_code}
     ```
 
-    ADIMLARIN:
-    1. Once {target_file} dosyasini "browse_repo" araci ile oku — tam icerigini al
-    2. Plandaki current_code boluumunu dosyada bul
-    3. current_code bolumunu new_code ile degistir
-    4. Diger dosyalardaki API yollarini, interface'leri ve import'lari kontrol et
-    4. Dosyanin TAMAMINI (degisiklik uygulanmis haliyle) dondur — bastan sona her satir
+    ZORUNLU ADIMLAR (sirasi degistirilemez):
 
-    KESIN KURALLAR:
-    - Dosyanin TAMAMINI dondur — orijinal 1000 satirsa sen de ~1000 satir donmelisin
-    - Asla sadece degisen metodu/fonksiyonu donme — tum dosya lazim
-    - Planda OLMAYAN degisiklik YAPMA
-    - Mevcut import'lara, namespace'lere, indentation'a DOKUNMA
-    - Yeni import gerekiyorsa SADECE planda belirtilenleri ekle
-    - Kod blogu disinda HICBIR ACIKLAMA YAZMA, sadece kod dondur
-    - Dosyayi okumadan ASLA kod dondurme
+    ADIM 1 — DOSYAYI BASTAN SONA OKU:
+    "browse_repo" araci ile {target_file} dosyasini oku. Dosyanin BIRINCI
+    satirindan SON satirina kadar tam icerigi al. Orta dosya/large dosya
+    olsa bile tamamini iste.
+
+    ADIM 2 — DOSYAYI ZIHNINDE OLC:
+    Okudugun dosyanin satir sayisini sayar gibi zihninde tut:
+      ORIG_LINES = <orjinal dosya satir sayisi>
+      Plan etkisi: +<eklenen> / -<silinen> satir
+      EXPECTED_NEW_LINES = ORIG_LINES + ekleme - silme
+
+    ADIM 3 — DEGISIKLIGI UYGULA:
+    Plan'daki current_code blogunu dosyada bul, new_code ile degistir.
+    Diger HICBIR satira dokunma — formatlama, naming, comment, import
+    sirasi, whitespace HICBIRI degismez.
+
+    ADIM 4 — TAM DOSYAYI DONDUR:
+    Dosyanin BIRINCI satirindan (orn. PHP icin "<?php"), SON satirina kadar
+    tum icerigi tek bir kod blogu olarak dondur. Hicbir kismini atlama.
+
+    ADIM 5 — SELF-CHECK (cikti uretirken):
+    Dondurmeden once kendine sor:
+      [ ] Cikti dosyanin gercek ilk satiri ile mi basliyor? (orn: <?php)
+      [ ] Cikti dosyanin gercek son satiri ile mi bitiyor?
+      [ ] Cikti satir sayisi EXPECTED_NEW_LINES'a yakin mi?
+      [ ] "..." veya "// (rest unchanged)" gibi kisaltma marker'i YOK mu?
+      [ ] Plan disi degisiklik YOK mu?
+    Herhangi bir cevap "HAYIR" ise CIKTIYI DONDURME — yeniden olustur.
+
+    MUTLAK YASAKLAR:
+    - "..." / "// kalan kod ayni" / "/* original code */" kisaltmalar
+    - Sadece degisen metodu/fonksiyonu donmek (dosya birden fazla method
+      iceriyorsa hepsini orijinal halde tekrar yaz)
+    - Plan'da olmayan dosyalara dokunmak
+    - Mevcut import'lari/namespace'leri silmek
+    - Kod blogu disinda aciklama, "Iste guncel dosya:" gibi giris cumlesi
+    - Dosyayi okumadan tahminle kod uretmek
+
+    BUYUK DOSYA UYARISI (>500 satir):
+    Dosya buyukse "tahminen aynisi" diye dusunup atlama. Orijinal kodu
+    dikkatli copy + sadece plan'daki degisiklik. max_tokens limitin yeterli;
+    yetmiyorsa yine tum dosyayi dondur, hata mesaji ile dur — KISMI cikti
+    uretme.
+
   expected_output: >
     Dosyanin DEGISIKLIK UYGULANMIS TAMAMINI tek bir kod blogu icinde dondur.
-    Orijinal dosya kac satirsa cikti da o kadar satir olmali (+- degisiklik).
-    Kod blogu disinda HICBIR METIN YAZMA.
+
+    KESIN KURALLAR:
+    - Cikti dosyanin BIRINCI satiri ile basliyor (orn. <?php, package main,
+      from xyz import vb.)
+    - Cikti dosyanin SON satiri ile bitiyor (kapanis tag, son fonksiyon
+      kapanisi vb.)
+    - Cikti satir sayisi orijinal dosya satir sayisinin %70-130'u arasinda
+      (orjinal 1000 satir ise cikti 700-1300 arasi olmali)
+    - Kod blogu disinda HICBIR METIN YAZMA — ne giris cumlesi, ne ozet,
+      ne "burada degisiklikler:" tarzi aciklama
+    - Markdown ``` opsiyonel ama tek bir kod blogu olmali
+
+    Cikti formati:
     ```
-    [dosyanin tamami — bastan sona her satir]
+    [dosyanin BIRINCI satiri]
+    [...orijinal kodun degisiklik uygulanmis hali...]
+    [dosyanin SON satiri]
     ```
+
+    PIPELINE GUVENLIK KONTROLU: Cikti orijinalin %50'sinden kisa olursa
+    push otomatik IPTAL edilir. Kisaltma uretirsen pipeline yeniden
+    deneyecek; bu hem zaman hem maliyet kaybi.
   agent: senior_developer
 
 # ══════════════════════════════════════════════════════════════

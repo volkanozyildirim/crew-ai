@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS job_steps (
 """
 
 STEP_DEFINITIONS = [
+    ("kickoff_meeting_task", "Kickoff Toplantısı", "scrum_master"),
     ("requirements_analysis_task", "İş Analizi", "business_analyst"),
     ("discover_repos_task", "Repo Keşfetme", "software_architect"),
     ("dependency_analysis_task", "Bağımlılık Analizi", "software_architect"),
@@ -158,6 +159,29 @@ def fail_job(job_id: int, error: str):
     update_job(job_id, status="failed", finished_at=datetime.now(), error_message=error[:2000])
 
 
+def fail_orphan_running_jobs(reason: str = "Sunucu yeniden baslatildi, is yarida kaldi") -> int:
+    """Sunucu restart sonrasi 'running' statusunde kalan job/step'leri failed yap.
+    Process oldugu icin aslinda calismiyorlar. Sayi dondurur."""
+    now = datetime.now()
+    count = 0
+    with get_conn() as conn:
+        cur = conn.cursor()
+        # Once running step'leri failed yap
+        cur.execute(
+            "UPDATE job_steps SET status='failed', finished_at=%s, "
+            "error_message=%s WHERE status='running'",
+            (now, reason[:5000]),
+        )
+        # Running job'lari failed yap
+        cur.execute(
+            "UPDATE jobs SET status='failed', finished_at=%s, "
+            "error_message=%s WHERE status='running'",
+            (now, reason[:2000]),
+        )
+        count = cur.rowcount
+    return count
+
+
 def start_step(job_id: int, step_key: str):
     with get_conn() as conn:
         cur = conn.cursor()
@@ -225,6 +249,22 @@ def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | Non
             )
         row = cur.fetchone()
         return row["output"] if row else None
+
+
+def clear_cached_step_output(step_key: str, work_item_id: str) -> int:
+    """Bozuk (truncate edilmis, parse edilemeyen) cache kayitlarini sil.
+    Ayni WI + step_key icin tum completed step_output'larini NULL'lar."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE job_steps js "
+            "JOIN jobs j ON js.job_id = j.id "
+            "SET js.output = NULL "
+            "WHERE js.step_key = %s AND j.work_item_id = %s "
+            "AND j.status = 'completed' AND js.status = 'completed'",
+            (step_key, work_item_id),
+        )
+        return cur.rowcount
 
 
 def get_job(job_id: int) -> dict | None:

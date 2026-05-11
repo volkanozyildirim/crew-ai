@@ -3,6 +3,7 @@
 import json
 import logging
 import logging.handlers
+import os
 import threading
 import time
 from datetime import datetime
@@ -257,29 +258,41 @@ CONFIG_DIR = Path(__file__).parent / "config"
 
 @app.get("/api/config/env")
 async def get_env_config_route():
-    """Pipeline ile ilgili env degiskenlerini dondurur."""
-    import os
+    """Pipeline ile ilgili env degiskenleri (read-only diagnostic).
+
+    Not: Asagidaki anahtarlarin cogu artik dashboard'dan da yonetilebilir.
+    Dashboard tarafi bu env'lere göre fallback yapar."""
     env_keys = [
+        # MySQL
+        "MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_DATABASE",
+        # Repo / vector DB paths
+        "CREW_REPOS_DIR", "CREW_VECTOR_DB",
+        # Dashboard tarafindan yonetilenler (diagnostic icin)
         "CREW_USE_LOCAL_LLM", "CREW_LOCAL_LLM_MODEL", "CREW_LOCAL_CODER_MODEL",
         "OLLAMA_BASE_URL", "OLLAMA_CODER_BASE_URL",
         "CREW_KICKOFF_MEETING", "CREW_MAX_JOB_COST",
         "CREW_ARCHITECT_MAX_ITER", "CREW_REVIEW_MAX_RETRIES",
         "CREW_DEV_CONTEXT_BUDGET", "CREW_DEV_CONTEXT_PER_FILE",
         "CREW_MIN_WI_CONTENT_CHARS", "CREW_SM_REVIEW",
+        "CREW_ANALYZE_WI_MEDIA",
+        "CREW_PRICE_INPUT_USD_PER_M", "CREW_PRICE_OUTPUT_USD_PER_M",
         "CREW_WORK_ITEM_PROVIDER", "CREW_SCM_PROVIDER",
     ]
-    env_vals = {}
-    for k in env_keys:
-        v = os.environ.get(k, "")
-        env_vals[k] = v
+    env_vals = {k: os.environ.get(k, "") for k in env_keys}
     return JSONResponse(env_vals)
+
+
+_EDITABLE_CONFIGS = {"agents", "tasks", "llm_profiles"}
 
 
 @app.get("/api/config/{config_name}")
 async def get_config(config_name: str):
-    """YAML config dosyasini oku. config_name: 'agents' veya 'tasks'."""
-    if config_name not in ("agents", "tasks"):
-        return JSONResponse({"error": "Gecersiz config: agents veya tasks"}, status_code=400)
+    """YAML config dosyasini oku. config_name: 'agents' | 'tasks' | 'llm_profiles'."""
+    if config_name not in _EDITABLE_CONFIGS:
+        return JSONResponse(
+            {"error": f"Gecersiz config: {sorted(_EDITABLE_CONFIGS)}"},
+            status_code=400,
+        )
     config_file = CONFIG_DIR / f"{config_name}.yaml"
     if not config_file.exists():
         return JSONResponse({"error": f"{config_name}.yaml bulunamadi"}, status_code=404)
@@ -291,8 +304,11 @@ async def get_config(config_name: str):
 async def update_config(config_name: str, request: Request):
     """YAML config dosyasini guncelle. Body: {"content": "yaml string"}
     Sonraki job otomatik olarak yeni config'i kullanir."""
-    if config_name not in ("agents", "tasks"):
-        return JSONResponse({"error": "Gecersiz config: agents veya tasks"}, status_code=400)
+    if config_name not in _EDITABLE_CONFIGS:
+        return JSONResponse(
+            {"error": f"Gecersiz config: {sorted(_EDITABLE_CONFIGS)}"},
+            status_code=400,
+        )
 
     body = await request.json()
     content = body.get("content", "")
@@ -317,6 +333,19 @@ async def update_config(config_name: str, request: Request):
                     "error": f"tasks.yaml icinde '{var}' degiskeni zorunlu"
                 }, status_code=400)
 
+    # llm_profiles icin profil yapisini dogrula
+    if config_name == "llm_profiles":
+        profiles = parsed.get("profiles") or {}
+        if not isinstance(profiles, dict) or not profiles:
+            return JSONResponse({
+                "error": "llm_profiles.yaml en az bir profile iceren 'profiles:' bloku icermeli",
+            }, status_code=400)
+        for name, p in profiles.items():
+            if not isinstance(p, dict) or not p.get("provider") or not p.get("model"):
+                return JSONResponse({
+                    "error": f"Profile {name!r} 'provider' ve 'model' alanlari icermeli",
+                }, status_code=400)
+
     # Yedek al + kaydet
     config_file = CONFIG_DIR / f"{config_name}.yaml"
     backup_file = CONFIG_DIR / f"{config_name}.yaml.bak"
@@ -324,12 +353,655 @@ async def update_config(config_name: str, request: Request):
         backup_file.write_text(config_file.read_text(encoding="utf-8"), encoding="utf-8")
     config_file.write_text(content, encoding="utf-8")
 
+    # Resolver cache'i invalidate et — yeni profil bilgisi sonraki job'da gecsin
+    if config_name in ("llm_profiles", "agents"):
+        try:
+            from agile_sdlc_crew.llm.resolver import reset_cache
+            reset_cache()
+        except Exception:
+            pass
+
     pipeline_log.info(f"Config guncellendi: {config_name}.yaml ({len(content)} char)")
     return JSONResponse({
         "status": "ok",
         "message": f"{config_name}.yaml guncellendi. Sonraki job yeni config'i kullanacak.",
         "backup": str(backup_file),
     })
+
+
+# ── LLM API ──
+
+_AGENT_KEYS = [
+    "scrum_master", "business_analyst", "software_architect",
+    "senior_developer", "code_reviewer", "qa_engineer", "uat_specialist",
+]
+_AGENT_DISPLAY = {
+    "scrum_master": "Scrum Master",
+    "business_analyst": "İş Analisti",
+    "software_architect": "Yazılım Mimarı",
+    "senior_developer": "Kıdemli Geliştirici",
+    "code_reviewer": "Kod İnceleyici",
+    "qa_engineer": "QA Mühendisi",
+    "uat_specialist": "UAT Uzmanı",
+}
+
+
+@app.get("/api/llm/state")
+async def llm_state():
+    """Mevcut LLM provider/profile/agent eslesmelerini dondurur."""
+    from agile_sdlc_crew.llm.registry import list_providers
+    from agile_sdlc_crew.llm.resolver import _load_profiles_doc, resolve_spec_with_source
+
+    profiles_doc = _load_profiles_doc()
+    profiles = profiles_doc.get("profiles") or {}
+    defaults = profiles_doc.get("agent_defaults") or {}
+
+    agents_info = []
+    for key in _AGENT_KEYS:
+        info = {"agent_key": key, "display_name": _AGENT_DISPLAY.get(key, key)}
+        try:
+            spec, source = resolve_spec_with_source(key)
+            info.update({
+                "profile": spec.get("_profile"),  # None ise inline override
+                "provider": spec.get("provider", ""),
+                "model": spec.get("model", ""),
+                "max_tokens": int(spec.get("max_tokens", 0)),
+                "source": source,
+            })
+        except Exception as e:
+            info["error"] = str(e)
+        agents_info.append(info)
+
+    return JSONResponse({
+        "providers": list_providers(),
+        "profiles": profiles,
+        "agent_defaults": defaults,
+        "agents": agents_info,
+    })
+
+
+@app.get("/api/llm/models")
+async def llm_models(provider: str = ""):
+    """Bir provider icin onerilen model listesi. Static ya da dinamik (canli sunucudan).
+
+    Yanit: {provider, models: [name,...], source: 'static'|'dynamic'|'error', error?}
+    """
+    if not provider:
+        return JSONResponse({"error": "provider parametresi gerekli"}, status_code=400)
+
+    from agile_sdlc_crew.llm.registry import list_providers
+    if provider not in list_providers():
+        return JSONResponse(
+            {"error": f"Bilinmeyen provider: {provider}", "valid": list_providers()},
+            status_code=400,
+        )
+
+    static_lists = {
+        "claude_cli": ["sonnet", "opus", "haiku"],
+        "anthropic": [
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-1-20250805",
+            "claude-haiku-4-5-20251001",
+            "claude-3-5-sonnet-20241022",
+        ],
+    }
+    if provider in static_lists:
+        return JSONResponse({
+            "provider": provider,
+            "models": static_lists[provider],
+            "source": "static",
+        })
+
+    # Dinamik: ollama / lmstudio / litellm — endpoint'lere sor
+    import os
+    import requests
+
+    try:
+        if provider == "ollama":
+            base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+            r = requests.get(f"{base.rstrip('/')}/api/tags", timeout=5, verify=False)
+            r.raise_for_status()
+            data = r.json()
+            models = sorted({m.get("name", "") for m in data.get("models", []) if m.get("name")})
+            return JSONResponse({"provider": provider, "models": models, "source": "dynamic"})
+
+        if provider == "lmstudio":
+            base = (
+                os.environ.get("LMSTUDIO_BASE_URL")
+                or os.environ.get("OLLAMA_BASE_URL")
+                or "http://localhost:1234/v1"
+            )
+            url = base.rstrip("/")
+            if not url.endswith("/v1"):
+                url += "/v1"
+            r = requests.get(f"{url}/models", timeout=5, verify=False)
+            r.raise_for_status()
+            data = r.json()
+            models = sorted({m.get("id", "") for m in data.get("data", []) if m.get("id")})
+            return JSONResponse({"provider": provider, "models": models, "source": "dynamic"})
+
+        if provider == "litellm":
+            base = os.environ.get("LITELLM_BASE_URL", "")
+            if not base:
+                return JSONResponse({
+                    "provider": provider, "models": [], "source": "error",
+                    "error": "LITELLM_BASE_URL ayarlanmadi",
+                })
+            api_key = os.environ.get("LITELLM_API_KEY", "")
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            url = base.rstrip("/")
+            # base zaten /v1 ile bitiyorsa tekrar ekleme
+            url = f"{url}/models" if url.endswith("/v1") else f"{url}/v1/models"
+            r = requests.get(url, timeout=5, headers=headers, verify=False)
+            r.raise_for_status()
+            data = r.json()
+            models = sorted({m.get("id", "") for m in data.get("data", []) if m.get("id")})
+            return JSONResponse({"provider": provider, "models": models, "source": "dynamic"})
+    except Exception as e:
+        return JSONResponse({
+            "provider": provider, "models": [], "source": "error",
+            "error": str(e),
+        })
+
+    return JSONResponse({"provider": provider, "models": [], "source": "static"})
+
+
+@app.put("/api/llm/agents/{agent_key}")
+async def update_agent_llm(agent_key: str, request: Request):
+    """Agent LLM override'i ayarla. 3 farkli body formati:
+
+    - {"profile": "<name>"}                       profile referansi
+    - {"profile": null}                           override sil
+    - {"provider": "ollama", "model": "qwen3:8b", "max_tokens": 4096}
+                                                  inline spec
+    """
+    from agile_sdlc_crew.llm.resolver import set_agent_override
+
+    if agent_key not in _AGENT_KEYS:
+        return JSONResponse(
+            {"error": f"Bilinmeyen agent: {agent_key}", "valid": _AGENT_KEYS},
+            status_code=400,
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    # Inline spec
+    if isinstance(body.get("provider"), str) and body.get("model"):
+        spec = {
+            "provider": body["provider"],
+            "model": body["model"],
+        }
+        if "max_tokens" in body:
+            spec["max_tokens"] = body["max_tokens"]
+        for k, v in body.items():
+            if k not in spec and k not in ("profile",):
+                spec[k] = v
+        try:
+            set_agent_override(agent_key, inline_spec=spec)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        pipeline_log.info(
+            f"LLM override (inline): {agent_key} -> {spec['provider']}/{spec['model']}"
+        )
+        return JSONResponse({"status": "ok", "agent_key": agent_key, "spec": spec})
+
+    # Profile reference / clear
+    profile = body.get("profile")
+    if profile is not None and not isinstance(profile, str):
+        return JSONResponse({"error": "profile string ya da null olmali"}, status_code=400)
+
+    try:
+        set_agent_override(agent_key, profile_name=profile or None)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    pipeline_log.info(f"LLM override: {agent_key} -> {profile or '(silindi)'}")
+    return JSONResponse({"status": "ok", "agent_key": agent_key, "profile": profile})
+
+
+# ── Provider Credentials API ──
+
+_VALID_NS = ("llm", "embedding", "vision", "work_item", "scm")
+
+
+def _registry_for_ns(ns: str):
+    if ns == "llm":
+        from agile_sdlc_crew.llm import registry as r
+        return r
+    if ns == "embedding":
+        from agile_sdlc_crew.embed import registry as r
+        return r
+    if ns == "vision":
+        from agile_sdlc_crew.vision import registry as r
+        return r
+    if ns == "work_item":
+        from agile_sdlc_crew.providers.registry import work_item_registry
+        return work_item_registry
+    if ns == "scm":
+        from agile_sdlc_crew.providers.registry import scm_registry
+        return scm_registry
+    raise ValueError(f"Bilinmeyen namespace: {ns}")
+
+
+@app.get("/api/providers/credentials")
+async def providers_credentials():
+    """Tum provider credential schema'larini ve mevcut degerlerini dondurur.
+
+    Secret degerler maskelenir; UI 'edit' moduna girince ayri endpoint'ten alir."""
+    from agile_sdlc_crew import credentials as creds
+
+    out: dict = {}
+    for ns in _VALID_NS:
+        reg = _registry_for_ns(ns)
+        schemas = reg.get_credential_schemas()
+        ns_data: dict = {}
+        for prov, schema in schemas.items():
+            stored = creds.get_all(ns, prov)
+            fields = []
+            for f in schema:
+                stored_val = stored.get(f["name"], "")
+                env_val = os.environ.get(f.get("env_fallback", ""), "") if f.get("env_fallback") else ""
+                if f.get("secret") and stored_val:
+                    display_val = creds.mask(stored_val)
+                else:
+                    display_val = stored_val
+                fields.append({
+                    **f,
+                    "value": display_val,
+                    "has_value": bool(stored_val),
+                    "env_present": bool(env_val),
+                })
+            ns_data[prov] = {"schema": schema, "fields": fields}
+        out[ns] = ns_data
+    return JSONResponse(out)
+
+
+@app.get("/api/providers/credentials/{namespace}/{provider}/raw")
+async def providers_credentials_raw(namespace: str, provider: str):
+    """Edit modu icin ham (mask edilmemis) degerleri dondurur."""
+    if namespace not in _VALID_NS:
+        return JSONResponse({"error": f"Bilinmeyen namespace: {namespace}"}, status_code=400)
+    from agile_sdlc_crew import credentials as creds
+
+    reg = _registry_for_ns(namespace)
+    schemas = reg.get_credential_schemas()
+    if provider not in schemas:
+        return JSONResponse({"error": f"Bilinmeyen provider: {provider}"}, status_code=400)
+
+    return JSONResponse({
+        "namespace": namespace,
+        "provider": provider,
+        "values": creds.get_all(namespace, provider),
+    })
+
+
+@app.put("/api/providers/credentials/{namespace}/{provider}")
+async def providers_credentials_update(namespace: str, provider: str, request: Request):
+    """Bir provider'in credential alanlarini gunceller.
+
+    Body: alan_adi -> deger dict'i. Bos string veya null -> alan silinir.
+    Schema'da bulunmayan alanlar reddedilir.
+    """
+    if namespace not in _VALID_NS:
+        return JSONResponse({"error": f"Bilinmeyen namespace: {namespace}"}, status_code=400)
+    from agile_sdlc_crew import credentials as creds
+
+    reg = _registry_for_ns(namespace)
+    schemas = reg.get_credential_schemas()
+    if provider not in schemas:
+        return JSONResponse({"error": f"Bilinmeyen provider: {provider}"}, status_code=400)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body bir dict olmali"}, status_code=400)
+
+    allowed = {f["name"] for f in schemas[provider]}
+    unknown = set(body.keys()) - allowed
+    if unknown:
+        return JSONResponse({
+            "error": f"Schema'da olmayan alanlar: {sorted(unknown)}. Izinli: {sorted(allowed)}"
+        }, status_code=400)
+
+    try:
+        saved = creds.save(namespace, provider, body, allowed=allowed)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    pipeline_log.info(f"Credentials guncellendi: {namespace}/{provider} ({list(saved.keys())})")
+    return JSONResponse({"status": "ok", "namespace": namespace, "provider": provider, "fields": list(saved.keys())})
+
+
+@app.delete("/api/providers/credentials/{namespace}/{provider}")
+async def providers_credentials_delete(namespace: str, provider: str):
+    """Bir provider'in tum kayitli credential'lerini siler."""
+    if namespace not in _VALID_NS:
+        return JSONResponse({"error": f"Bilinmeyen namespace: {namespace}"}, status_code=400)
+    from agile_sdlc_crew import credentials as creds
+
+    reg = _registry_for_ns(namespace)
+    schemas = reg.get_credential_schemas()
+    if provider not in schemas:
+        return JSONResponse({"error": f"Bilinmeyen provider: {provider}"}, status_code=400)
+
+    creds.save(namespace, provider, {}, allowed={f["name"] for f in schemas[provider]})
+    pipeline_log.info(f"Credentials silindi: {namespace}/{provider}")
+    return JSONResponse({"status": "ok"})
+
+
+# ── Pipeline Behavior API ──
+
+@app.get("/api/pipeline/state")
+async def pipeline_state():
+    """Pipeline davranis knob'larinin schema + degerleri + kaynaklari."""
+    from agile_sdlc_crew import pipeline_config as pc
+    return JSONResponse({
+        "fields": pc.all_values(),
+        "config": pc.load_config(),
+    })
+
+
+@app.put("/api/pipeline/config")
+async def pipeline_config_update(request: Request):
+    """Pipeline knob degerlerini yaz. Body: {KEY: value, ...}.
+
+    Bilinmeyen key veya gecersiz tip 400 doner. Bos/null deger ilgili anahtari
+    yaml'dan siler (env veya default'a duser).
+    """
+    from agile_sdlc_crew import pipeline_config as pc
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body bir dict olmali"}, status_code=400)
+
+    try:
+        doc = pc.save(body)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    pipeline_log.info(f"Pipeline config guncellendi: {list(body.keys())}")
+    return JSONResponse({"status": "ok", "config": doc})
+
+
+# ── Work Item / SCM Provider State API ──
+
+@app.get("/api/work-item/state")
+async def work_item_state():
+    """Aktif work_item provider + kayitli provider listesi + config dosyasi."""
+    from agile_sdlc_crew.providers import (
+        get_work_item_provider_name,
+        list_work_item_providers,
+        load_work_item_config,
+    )
+    return JSONResponse({
+        "provider": get_work_item_provider_name(),
+        "providers": list_work_item_providers(),
+        "config": load_work_item_config(),
+    })
+
+
+@app.get("/api/scm/state")
+async def scm_state():
+    """Aktif scm provider + kayitli provider listesi + config dosyasi."""
+    from agile_sdlc_crew.providers import (
+        get_scm_provider_name,
+        list_scm_providers,
+        load_scm_config,
+    )
+    return JSONResponse({
+        "provider": get_scm_provider_name(),
+        "providers": list_scm_providers(),
+        "config": load_scm_config(),
+    })
+
+
+# ── Vision API ──
+
+@app.get("/api/vision/state")
+async def vision_state():
+    """Aktif vision provider/model + kayitli providerlar + bilinen modeller."""
+    from agile_sdlc_crew.vision import (
+        KNOWN_VISION_MODELS, get_base_url, get_model, get_provider,
+        list_providers, load_config,
+    )
+    return JSONResponse({
+        "provider": get_provider(),
+        "providers": list_providers(),
+        "model": get_model(),
+        "base_url": get_base_url(),
+        "config": load_config(),
+        "known_models": KNOWN_VISION_MODELS,
+    })
+
+
+@app.put("/api/vision/config")
+async def vision_config_update(request: Request):
+    """Vision ayarlarini kaydet. Body: {provider, model, base_url?, api_key_env?}."""
+    from agile_sdlc_crew.vision import save_config
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    provider = body.get("provider")
+    model = body.get("model")
+    if not isinstance(provider, str) or not provider.strip():
+        return JSONResponse({"error": "provider gerekli"}, status_code=400)
+    if not isinstance(model, str) or not model.strip():
+        return JSONResponse({"error": "model gerekli"}, status_code=400)
+
+    base_url = body.get("base_url", "")
+    api_key_env = body.get("api_key_env", "")
+
+    try:
+        cfg = save_config(
+            provider=provider.strip(),
+            model=model.strip(),
+            base_url=(base_url or "").strip(),
+            api_key_env=(api_key_env or "").strip(),
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    pipeline_log.info(f"Vision config guncellendi: {cfg}")
+    return JSONResponse({"status": "ok", "config": cfg})
+
+
+@app.post("/api/vision/test")
+async def vision_test(request: Request):
+    """Vision config'i 1x1 test gorseli ile dene. Yanit: {status, model, provider, ...}."""
+    import base64, time
+    from agile_sdlc_crew.vision import (
+        analyze_image, get_api_key, get_base_url, get_model, get_provider,
+    )
+
+    # 1x1 transparent PNG (smallest valid image)
+    tiny_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+    )
+    b64 = base64.b64encode(tiny_png).decode("ascii")
+
+    t0 = time.time()
+    try:
+        result = analyze_image(
+            provider=get_provider(),
+            image_b64=b64,
+            mime="image/png",
+            prompt="Test image. Reply with one short word.",
+            model=get_model(),
+            base_url=get_base_url(),
+            api_key=get_api_key(),
+            max_tokens=20,
+        )
+        elapsed_ms = int((time.time() - t0) * 1000)
+        return JSONResponse({
+            "status": "ok",
+            "provider": get_provider(),
+            "model": get_model(),
+            "base_url": get_base_url(),
+            "elapsed_ms": elapsed_ms,
+            "response": (result or "")[:200],
+        })
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "provider": get_provider(),
+            "model": get_model(),
+            "base_url": get_base_url(),
+            "error": str(e)[:500],
+        }, status_code=500)
+
+
+# ── Embedding / Vector DB API ──
+
+@app.get("/api/embed/state")
+async def embed_state():
+    """Embedding provider/model/dim/url/db durumunu dondurur."""
+    import os, glob
+    from agile_sdlc_crew.embed import (
+        KNOWN_EMBED_DIMS, get_base_url, get_dim, get_model, get_provider,
+        list_providers, load_config,
+    )
+
+    db_path = os.path.expanduser(
+        os.environ.get("CREW_VECTOR_DB", "~/.crew_repos/.vectordb")
+    )
+    db_exists = os.path.isdir(db_path)
+    db_size = 0
+    db_tables = 0
+    if db_exists:
+        for root, dirs, files in os.walk(db_path):
+            db_size += sum(
+                os.path.getsize(os.path.join(root, f))
+                for f in files if os.path.exists(os.path.join(root, f))
+            )
+        db_tables = len(glob.glob(os.path.join(db_path, "*.lance")))
+
+    return JSONResponse({
+        "provider": get_provider(),
+        "providers": list_providers(),
+        "model": get_model(),
+        "dimension": get_dim(),
+        "base_url": get_base_url(),
+        "config": load_config(),
+        "known_dims": KNOWN_EMBED_DIMS,
+        "db": {
+            "path": db_path,
+            "exists": db_exists,
+            "size_bytes": db_size,
+            "tables": db_tables,
+        },
+    })
+
+
+@app.put("/api/embed/config")
+async def embed_config_update(request: Request):
+    """Embedding ayarlarini kaydet. Body: {provider, model, base_url?, api_key_env?, dimension?}"""
+    from agile_sdlc_crew.embed import save_config
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    provider = body.get("provider")
+    model = body.get("model")
+    if not isinstance(provider, str) or not provider.strip():
+        return JSONResponse({"error": "provider gerekli"}, status_code=400)
+    if not isinstance(model, str) or not model.strip():
+        return JSONResponse({"error": "model gerekli"}, status_code=400)
+
+    base_url = body.get("base_url", "")
+    if base_url and not isinstance(base_url, str):
+        return JSONResponse({"error": "base_url string olmali"}, status_code=400)
+
+    api_key_env = body.get("api_key_env", "")
+    if api_key_env and not isinstance(api_key_env, str):
+        return JSONResponse({"error": "api_key_env string olmali"}, status_code=400)
+
+    dimension = body.get("dimension")
+    if dimension is not None:
+        try:
+            dimension = int(dimension)
+            if dimension < 32 or dimension > 8192:
+                raise ValueError("dimension 32-8192 araliginda olmali")
+        except (TypeError, ValueError) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    try:
+        cfg = save_config(
+            provider=provider.strip(),
+            model=model.strip(),
+            base_url=(base_url or "").strip(),
+            api_key_env=(api_key_env or "").strip(),
+            dimension=dimension,
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    pipeline_log.info(f"Embedding config guncellendi: {cfg}")
+    return JSONResponse({"status": "ok", "config": cfg})
+
+
+@app.post("/api/embed/test")
+async def embed_test(request: Request):
+    """Mevcut config ile bir test embedding cek. Sure + dim raporlar."""
+    import time
+    from agile_sdlc_crew.embed import get_base_url, get_model, get_provider
+    from agile_sdlc_crew.tools.vector_store import _embed_text
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    text = (body.get("text") or "Bu bir test cumlesidir.").strip()
+
+    t0 = time.time()
+    try:
+        emb = _embed_text(text, retries=0)
+        elapsed_ms = int((time.time() - t0) * 1000)
+        return JSONResponse({
+            "status": "ok",
+            "provider": get_provider(),
+            "model": get_model(),
+            "base_url": get_base_url(),
+            "dimension": len(emb),
+            "elapsed_ms": elapsed_ms,
+        })
+    except Exception as e:
+        return JSONResponse({
+            "status": "error",
+            "provider": get_provider(),
+            "model": get_model(),
+            "base_url": get_base_url(),
+            "error": str(e)[:500],
+        }, status_code=500)
+
+
+@app.post("/api/embed/clear")
+async def embed_clear():
+    """Vector DB'yi tamamen sil. Yeni dim ile yeniden olusur."""
+    import os, shutil
+
+    db_path = os.path.expanduser(
+        os.environ.get("CREW_VECTOR_DB", "~/.crew_repos/.vectordb")
+    )
+    if not os.path.isdir(db_path):
+        return JSONResponse({"status": "ok", "message": "DB zaten yok", "path": db_path})
+
+    try:
+        shutil.rmtree(db_path)
+        pipeline_log.info(f"Vector DB temizlendi: {db_path}")
+        return JSONResponse({"status": "ok", "message": f"Vector DB silindi: {db_path}"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 

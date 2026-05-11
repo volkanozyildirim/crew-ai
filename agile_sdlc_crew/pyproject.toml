@@ -10,6 +10,7 @@ dependencies = [
     "uvicorn>=0.44.0",
     "pymysql>=1.1.2",
     "python-dotenv>=1.1.0",
+    "fastembed>=0.3.0",
 ]
 
 [project.scripts]

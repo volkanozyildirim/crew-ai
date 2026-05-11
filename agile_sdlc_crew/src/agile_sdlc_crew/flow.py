@@ -19,6 +19,56 @@ def _log(msg: str):
     log.info(msg)
 
 
+# Repo adlarinda generic gecen parcalar — tek baslarina sinyal tasimaz,
+# "stock_api_list" ekran adinin "stock-api" repo'suna haksiz puan vermesini
+# engeller. Hem step0 (kickoff) hem step4 (architect) bu seti kullanir.
+_REPO_PART_STOPWORDS = {
+    "api", "app", "core", "client", "common", "frontend", "backend",
+    "lib", "main", "server", "service", "services", "system", "tools",
+    "ui", "utils", "web", "www",
+}
+
+
+def _select_repo_by_name(known_repos: list[str], wi_text: str) -> tuple[str, str]:
+    """WI metninden repo adi tahmini.
+
+    2 katman:
+    - **tam isim**: Repo adi WI'da \\b...\\b siniriyla geciyorsa direkt o.
+      Birden fazla varsa en uzun (en spesifik) olan kazanir.
+    - **parca eslesmesi**: Repo adinin '-/_' ile parcalanmis kelimeleri,
+      stop-word olmayan ve >2 harfli olanlari, WI metninde \\b...\\b ile
+      esleshiyor mu? En yuksek skor kazanir.
+
+    Returns: (yontem, repo_name) — eslesme yoksa ('', '').
+    Yontem string'leri 'tam isim' / 'parca eslesmesi' (log mesajlarinda kullanilir).
+    """
+    import re as _re
+    text = wi_text.lower()
+
+    # Layer 0: tam isim
+    full = [
+        r for r in known_repos
+        if _re.search(rf'\b{_re.escape(r.lower())}\b', text)
+    ]
+    if full:
+        return ("tam isim", max(full, key=len))
+
+    # Layer 1: parca eslesmesi
+    def score(rname: str) -> int:
+        s = 0
+        for p in _re.split(r'[-_]', rname.lower()):
+            if len(p) <= 2 or p in _REPO_PART_STOPWORDS:
+                continue
+            if _re.search(rf'\b{_re.escape(p)}\b', text):
+                s += 1
+        return s
+
+    best = max(known_repos, key=score, default="")
+    if best and score(best) > 0:
+        return ("parca eslesmesi", best)
+    return ("", "")
+
+
 def _extract_code_block(lines: list[str], target_line: int, suffix: str = ".py") -> tuple[str, str]:
     """Hedef satirin bulundugu fonksiyon/class/method blogunu cikarir.
 
@@ -288,9 +338,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
     def _try_resume_step(self, step_key: str) -> str | None:
         """Onceki job'dan bu step'in basarili ciktisi varsa dondurur.
         Pipeline tekrar calistirildiginda tamamlanmis adimlari atlamak icin.
-        CREW_ENABLE_RESUME=1 ile aktif edilir (default: aktif)."""
+        CREW_ENABLE_RESUME=0 veya dashboard 'Cache Resume' kapaliysa atlanir."""
+        from agile_sdlc_crew import pipeline_config as _pc_resume
         import os as _os_resume
+        enabled = _pc_resume.get("CREW_ENABLE_RESUME")
+        # env override (geriye uyumluluk)
         if _os_resume.environ.get("CREW_ENABLE_RESUME", "1") == "0":
+            enabled = False
+        if not enabled:
             return None
         try:
             cached = self._db.get_cached_step_output(step_key, self.state.work_item_id)
@@ -375,13 +430,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._job_total_tokens += tt
 
         # Approximate USD cost (Sonnet 4: $3/M input, $15/M output)
-        price_in = float(_os.environ.get("CREW_PRICE_INPUT_USD_PER_M", "3.0"))
-        price_out = float(_os.environ.get("CREW_PRICE_OUTPUT_USD_PER_M", "15.0"))
+        from agile_sdlc_crew import pipeline_config as _pc
+        price_in = _pc.get("CREW_PRICE_INPUT_USD_PER_M")
+        price_out = _pc.get("CREW_PRICE_OUTPUT_USD_PER_M")
         cost = (
             self._job_prompt_tokens * price_in + self._job_completion_tokens * price_out
         ) / 1_000_000.0
 
-        max_cost = float(_os.environ.get("CREW_MAX_JOB_COST", "5.0"))
+        max_cost = _pc.get("CREW_MAX_JOB_COST")
         if step_name:
             local_tag = " [LOCAL]" if is_local else ""
             _log(
@@ -416,8 +472,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
     def _scrum_review(self, step_name: str, output: str) -> tuple[bool, str]:
         """Scrum Master ciktiyi inceler. CREW_SM_REVIEW=1 ile aktif edilir (default: kapali).
         Her cagrida ayri API call yapar — token tasarrufu icin default kapali."""
-        import os
-        if not os.environ.get("CREW_SM_REVIEW"):
+        from agile_sdlc_crew import pipeline_config as _pc
+        if not _pc.get("CREW_SM_REVIEW"):
             return True, ""
         try:
             review_crew = self._agile_crew.create_scrum_review_crew()
@@ -499,6 +555,26 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    Developer bos/kisa cikti, atlaniyor")
                 continue
 
+            # ── Guvenlik Kontrolleri (push oncesi) — main implement ile ayni ──
+            orig_len = len(existing_content.strip()) if existing_content else 0
+            new_len = len(new_content.strip())
+            orig_lines = existing_content.count("\n") if existing_content else 0
+            new_lines = new_content.count("\n")
+
+            # Cok az icerik — 3 satirdan kisa veya 50 char altinda
+            if new_len < 50 or new_lines < 3:
+                _log(f"    GUVENLIK: cok kisa icerik ({new_lines} satir, {new_len} char), retry push iptal")
+                continue
+
+            # Buyuk kod kaybi — orijinal >500 char ve %50'den kisa => agent bozuk cikti verdi
+            if existing_content and orig_len > 500 and new_len < orig_len * 0.5:
+                _log(
+                    f"    🚨 GUVENLIK ALARMI (retry): dosya %{100 - int(100 * new_len / orig_len)} kuculdu "
+                    f"({orig_lines} → {new_lines} satir, {orig_len} → {new_len} char). "
+                    f"Agent timeout/truncate sonrasi tam dosya yerine parca dondu. Retry push IPTAL."
+                )
+                continue
+
             push_result = push_file(
                 repo_name, branch, file_path, new_content,
                 f"fix: review feedback - {change.get('description', '')[:60]} (WI #{self.state.work_item_id})",
@@ -539,8 +615,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
             # step8_code_review'daki max retry kontrolune don
             self._append_context("Reviewer Geri Bildirimi (Tekrar Red)", review_text[:2000])
             review_attempt = getattr(self, "_review_attempt", 0)
-            import os as _os_rev2
-            max_review_retries = int(_os_rev2.environ.get("CREW_REVIEW_MAX_RETRIES", "2"))
+            from agile_sdlc_crew import pipeline_config as _pc_rev2
+            max_review_retries = _pc_rev2.get("CREW_REVIEW_MAX_RETRIES")
             if review_attempt < max_review_retries:
                 self._review_attempt = review_attempt + 1
                 _log(f"  🔄 Reviewer hala RED — tekrar deneniyor (deneme {self._review_attempt}/{max_review_retries})")
@@ -611,6 +687,46 @@ class AgileSDLCFlow(Flow[PipelineState]):
         if new_clones > 0:
             _log(f"  {new_clones} yeni repo clone edildi (diger repolar fetch edilmedi, hiz icin)")
 
+        # Workspace cleanup (KESIF FAZI): sadece BU WI'nin onceki run'larindan
+        # kalan artik feature branch'i olan repolari temizle. Tum repolari
+        # taramak gereksiz: yeni job icin sadece kendi WI artigi yaniltici.
+        # Aday repo (architect'in secip uzerinde calisacagi) step5'te tam
+        # reset gorur; baska WI'lara ait branch'lere DOKUNULMAZ (kullanici
+        # paralel calisma yapiyor olabilir).
+        _stale_branch = f"feature/{self.state.work_item_id}"
+        _log(f"  Workspace cleanup: '{_stale_branch}' artigi olan repolari ariyorum...")
+        _cleaned = 0
+        for _rname in self.state.known_repos:
+            _rdir = self._repo_mgr.base_dir / _rname
+            if not (_rdir / ".git").exists():
+                continue
+            try:
+                _has_stale = self._repo_mgr._git(
+                    ["rev-parse", "--verify", "--quiet", _stale_branch], cwd=_rdir,
+                ).returncode == 0
+                if not _has_stale:
+                    continue
+                # Bu repo onceki bir job'da bu WI icin dokunulmus → reset
+                self._repo_mgr._git(["fetch", "origin", "main"], cwd=_rdir)
+                self._repo_mgr._git(["checkout", "main"], cwd=_rdir)
+                self._repo_mgr._git(["reset", "--hard", "origin/main"], cwd=_rdir)
+                # Clean -fd: untracked dosyalari sil ama gitignored olanlari
+                # KORU (vendor/, node_modules/, .env vb.). REPO_SUMMARY.md
+                # gitignore'da olmadigi icin -e ile ayrica exclude ediyoruz.
+                # Local feature branch'i SILINMEZ — step5'te taze yeniden
+                # olusturulacak (kod duzenleme fazinin basi).
+                self._repo_mgr._git(
+                    ["clean", "-fd", "-e", "REPO_SUMMARY.md"], cwd=_rdir,
+                )
+                _log(f"  Onceki job artigi temizlendi: {_rname}")
+                _cleaned += 1
+            except Exception as _e:
+                _log(f"  Repo cleanup hatasi ({_rname}): {_e}")
+        if _cleaned:
+            _log(f"  Workspace cleanup: WI #{self.state.work_item_id} artigi {_cleaned} repoda temizlendi")
+        else:
+            _log("  Workspace cleanup: bu WI'ya ait artik yok")
+
         # Tum REPO_SUMMARY.md'leri vector DB'ye embed et
         # (Agent 'hangi repo' sorusuna semantic arama ile cevap bulabilsin)
         # Sirayla embed et — Ollama'ya paralel istek gitmiyor ama model swap
@@ -618,16 +734,27 @@ class AgileSDLCFlow(Flow[PipelineState]):
         import time as _embed_time
         _log("  REPO_SUMMARY.md'ler vector DB'ye embed ediliyor...")
         indexed = 0
+        regenerated = 0
         for name in self.state.known_repos:
             try:
                 repo_dir = self._repo_mgr.base_dir / name
-                if (repo_dir / "REPO_SUMMARY.md").exists():
+                summary_path = repo_dir / "REPO_SUMMARY.md"
+                # Eksikse yeniden olustur (workspace cleanup sirasinda silinmis
+                # veya repo yeni clone'lanmis olabilir).
+                if not summary_path.exists():
+                    self._repo_mgr.generate_repo_summary(name)
+                    if summary_path.exists():
+                        regenerated += 1
+                if summary_path.exists():
                     self._vector_store.index_repo_summary(name, repo_dir)
                     indexed += 1
                     _embed_time.sleep(0.1)  # Ollama throttle
             except Exception as e:
                 _log(f"  Summary index hatasi ({name}): {e}")
-        _log(f"  {indexed}/{len(self.state.known_repos)} repo summary embed edildi")
+        msg = f"  {indexed}/{len(self.state.known_repos)} repo summary embed edildi"
+        if regenerated:
+            msg += f" ({regenerated} regenerate edildi)"
+        _log(msg)
 
         # repo_mgr ve vector_store'u crew'a aktar (agent tool'lari icin)
         self._agile_crew.local_repo_mgr = self._repo_mgr
@@ -837,28 +964,49 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         })
             if _pr_links:
                 _log(f"  WI relations'da {len(_pr_links)} PR baglantisi bulundu")
-                # En son PR'i al (en buyuk PR ID)
+                # En yeni PR'den eskiye dogru tara — ilk active'i al, yoksa
+                # en son completed'i kullan, abandoned'lari hep atla.
                 _pr_links.sort(key=lambda x: x["pr_id"], reverse=True)
-                latest_pr = _pr_links[0]
 
-                # Repo ID'den repo adini bul
-                _pr_repo_name = ""
-                for rname in self.state.known_repos:
-                    try:
-                        existing_pr = self._client.get_pull_request(rname, latest_pr["pr_id"])
-                        _pr_repo_name = rname
-                        break
-                    except Exception:
-                        continue
+                _active_match: tuple[str, int] | None = None
+                _completed_match: tuple[str, int] | None = None
+                _abandoned_count = 0
 
-                if _pr_repo_name:
-                    pr_id = latest_pr["pr_id"]
-                    _pr_id_for_threads = pr_id
-                    _pr_repo_for_threads = _pr_repo_name
-                    _log(f"  Mevcut PR bulundu (WI relations): #{pr_id} ({_pr_repo_name})")
-                    existing_pr = {"pr_id": pr_id}  # asagidaki thread okuma blogu icin
+                for link in _pr_links:
+                    for rname in self.state.known_repos:
+                        try:
+                            pr_data = self._client.get_pull_request(rname, link["pr_id"])
+                        except Exception:
+                            continue
+                        status = (pr_data.get("status") or "").lower()
+                        if status == "active" and _active_match is None:
+                            _active_match = (rname, link["pr_id"])
+                        elif status == "completed" and _completed_match is None:
+                            _completed_match = (rname, link["pr_id"])
+                        elif status == "abandoned":
+                            _abandoned_count += 1
+                        break  # repo bulundu, bu PR icin diger repolari deneme
+                    if _active_match:
+                        break  # active bulundu, daha eskilere bakma
+
+                chosen = _active_match or _completed_match
+                if chosen:
+                    _pr_repo_for_threads, _pr_id_for_threads = chosen
+                    pr_kind = "active" if _active_match else "completed (active yok)"
+                    _log(
+                        f"  Mevcut PR bulundu (WI relations): #{_pr_id_for_threads} "
+                        f"({_pr_repo_for_threads}) [{pr_kind}]"
+                    )
+                    existing_pr = {"pr_id": _pr_id_for_threads}
                 else:
                     existing_pr = None
+                    if _abandoned_count == len(_pr_links):
+                        _log(
+                            f"  Tum PR baglantilari abandoned ({_abandoned_count}); "
+                            "yeni PR olusturulacak"
+                        )
+                    else:
+                        _log("  WI relations'da kullanilabilir PR bulunamadi")
             else:
                 existing_pr = None
                 _log(f"  WI relations'da PR baglantisi yok")
@@ -918,7 +1066,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._pr_id_for_threads = _pr_id_for_threads
 
         # Resim + Link analizi — description'daki inline media'yi textual'a cevir
-        if _os.environ.get("CREW_ANALYZE_WI_MEDIA", "1") != "0":
+        from agile_sdlc_crew import pipeline_config as _pc_media
+        if _pc_media.get("CREW_ANALYZE_WI_MEDIA"):
             try:
                 from agile_sdlc_crew.tools.wi_media import WIMediaAnalyzer
                 wi = self._client.get_work_item(int(self.state.work_item_id))
@@ -944,7 +1093,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # 🚨 YETERSIZLIK KONTROLU — Python-first
         # Artik agent'a "YETERSIZ de" diye sormuyoruz (kucuk LLM'ler prompt'taki
         # keyword'u kopyaliyor → yanlis karar). Sadece Python icerik uzunluguna bakar.
-        MIN_CONTENT_CHARS = int(_os.environ.get("CREW_MIN_WI_CONTENT_CHARS", "100"))
+        from agile_sdlc_crew import pipeline_config as _pc_minwi
+        MIN_CONTENT_CHARS = _pc_minwi.get("CREW_MIN_WI_CONTENT_CHARS")
         if wi_content_length < MIN_CONTENT_CHARS:
             missing = (
                 f"Is kaleminde yeterli bilgi yok (yalnizca {wi_content_length} karakter icerik). "
@@ -1067,9 +1217,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
         Agentlar bilgiye dayali teknik tartisma yapabilir.
         CREW_KICKOFF_MEETING=0 ile devre disi birakilabilir (default: aktif)."""
         import os as _os
+        from agile_sdlc_crew import pipeline_config as _pc_ko
         from agile_sdlc_crew.main import _add_wi_comment
 
-        if _os.environ.get("CREW_KICKOFF_MEETING", "1") == "0":
+        if not _pc_ko.get("CREW_KICKOFF_MEETING"):
             _log("  Kickoff toplantisi devre disi (CREW_KICKOFF_MEETING=0)")
             self._step_done("kickoff_meeting_task", "Devre dışı (CREW_KICKOFF_MEETING=0)")
             return
@@ -1088,8 +1239,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Kickoff context'i: requirements + acceptance criteria + repo bilgisi dahil
         ctx = self._build_step_context("kickoff_meeting_task")
 
-        # Hedef repo tahmini — 3 katman:
-        # 1. Repo adi eslesmesi: WI metnindeki kelimeler repo adlarinda geciyorsa
+        # Hedef repo tahmini — 4 katman:
+        # 0/1. _select_repo_by_name (tam isim + parca eslesmesi)
         # 2. Kod grep: WI'daki teknik terimler repo kodlarinda geciyorsa
         # 3. Vector semantic search (fallback)
         import re as _re_ko
@@ -1103,15 +1254,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _wi_desc_ko = _re_ko.sub(r'<[^>]+>', ' ', _wi_ko_fields.get("System.Description", "") or "").strip()
             wi_text_ko = f"{_wi_title_ko} {_wi_desc_ko} {self.state.requirements_text[:500]}".lower()
 
-            # Katman 1: Repo adi eslesmesi (en hizli, en guvenilir)
-            # "HAL uzerinde..." → project-hal, "webservice'te..." → webservice
-            def _repo_name_score(rname: str) -> int:
-                parts = _re_ko.split(r'[-_]', rname.lower())
-                return sum(1 for p in parts if len(p) > 2 and p in wi_text_ko)
-            best_name = max(self.state.known_repos, key=_repo_name_score, default="")
-            if best_name and _repo_name_score(best_name) > 0:
-                kickoff_repo = best_name
-                _log(f"  Kickoff hedef repo (isim eslesmesi): {kickoff_repo} (score={_repo_name_score(best_name)})")
+            # Katman 0/1: tam isim → parca eslesmesi (ortak helper)
+            _method, _matched = _select_repo_by_name(self.state.known_repos, wi_text_ko)
+            if _matched:
+                kickoff_repo = _matched
+                _log(f"  Kickoff hedef repo ({_method}): {kickoff_repo}")
 
             # Katman 2: Kod grep (teknik terimler)
             if not kickoff_repo:
@@ -1273,8 +1420,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._step_start("technical_design_task")
 
         # Cache: ayni WI icin onceki completed job'dan plan var mi?
-        cached = self._db.get_cached_step_output(
-            "technical_design_task", self.state.work_item_id,
+        # CREW_ENABLE_RESUME=False ise cache atlanir (vendor/yeni context icin taze calistirmak icin)
+        from agile_sdlc_crew import pipeline_config as _pc_td
+        _resume_enabled = _pc_td.get("CREW_ENABLE_RESUME")
+        cached = (
+            self._db.get_cached_step_output("technical_design_task", self.state.work_item_id)
+            if _resume_enabled else None
         )
         # JSON balance check — truncate edilmis cache'i okuma denemesi bile yapmayalim
         def _looks_complete_json(s: str) -> bool:
@@ -1349,22 +1500,20 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  WI on-hazirlik hatasi: {e}")
 
         # Hedef repo tahmini — 3 katman:
-        # 1. Repo adi eslesmesi (WI metnindeki kelimeler repo adinda geciyorsa)
+        # 0/1. _select_repo_by_name (tam isim + parca eslesmesi, helper)
         # 2. Kod grep (teknik terimler)
         # 3. Vector semantic search (fallback)
         prefetch_repo = ""
         relevant = []
 
-        # Katman 1: Repo adi eslesmesi
-        import re as _re_rn
+        # Katman 0/1: ortak helper (step0_kickoff_meeting ile birebir ayni mantik)
         wi_text_for_repo = f"{wi_title} {wi_desc_clean} {self.state.requirements_text[:500]}".lower()
-        def _repo_name_score_td(rname: str) -> int:
-            parts = _re_rn.split(r'[-_]', rname.lower())
-            return sum(1 for p in parts if len(p) > 2 and p in wi_text_for_repo)
-        best_name_td = max(self.state.known_repos, key=_repo_name_score_td, default="")
-        if best_name_td and _repo_name_score_td(best_name_td) > 0:
-            prefetch_repo = best_name_td
-            _log(f"  Repo adi eslesmesi: {prefetch_repo} (score={_repo_name_score_td(best_name_td)})")
+        _method_td, _matched_td = _select_repo_by_name(
+            self.state.known_repos, wi_text_for_repo,
+        )
+        if _matched_td:
+            prefetch_repo = _matched_td
+            _log(f"  Adim 4 hedef repo ({_method_td}): {prefetch_repo}")
 
         # grep_matched_files: repo tespitinde bulunan dosya yollari — pre-fetch'te okunur
         grep_matched_files: list[str] = []
@@ -1710,24 +1859,77 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 self._repo_mgr._git(["checkout", "main"], cwd=repo_dir)
                 # local origin/main'e hard reset — kesinlikle temiz main
                 self._repo_mgr._git(["reset", "--hard", "origin/main"], cwd=repo_dir)
-                # onceki job'dan kalan local feature branch'i sil
-                del_result = self._repo_mgr._git(
-                    ["branch", "-D", branch_name_for_cleanup], cwd=repo_dir
-                )
-                if del_result.returncode == 0:
+                # KOD DUZENLEME FAZI: local feature branch'i varsa SIL ve
+                # bir sonraki adimda origin/main'den taze olarak yeniden
+                # olustur (create_branch API call'u). Boylece onceki yanlis
+                # job'larin commit'leri agentlari yanildirmaz.
+                _has_stale = self._repo_mgr._git(
+                    ["rev-parse", "--verify", "--quiet", branch_name_for_cleanup],
+                    cwd=repo_dir,
+                ).returncode == 0
+                if _has_stale:
+                    self._repo_mgr._git(
+                        ["branch", "-D", branch_name_for_cleanup], cwd=repo_dir,
+                    )
                     _log(f"  Eski local branch silindi: {branch_name_for_cleanup}")
+                else:
+                    _log(f"  Local feature branch yok, taze olusturulacak")
             self._repo_mgr.checkout(repo_name, "main")
             # Repo summary'yi context'e ekle — sonraki adimlar yapiyi bilir
             repo_summary = self._repo_mgr.get_repo_summary(repo_name)
             if repo_summary:
                 self._append_context("Repo Yapisi", repo_summary)
 
-            # Kod embedding ATLANYOR — developer tool kullanmiyor (plan + pre-fetch
-            # context yeterli), QA/review aşamasında gerekirse orada yapilir.
-            # Onceki implementasyon Ollama 500 retry'lariyla pipeline'i dakikalarca
-            # bloke ediyordu.
+            # Deps install — vendor/ olusturur, agent'lar 3rd-party kodu okuyabilir.
+            # Pipeline knob ile kontrol; default kapali (yavas ilk install).
+            from agile_sdlc_crew import pipeline_config as _pc_deps
+            install_ok = False
+            if _pc_deps.get("CREW_INSTALL_DEPS"):
+                try:
+                    install_result = self._repo_mgr.install_dependencies(repo_name)
+                    install_ok = bool(install_result.get("success"))
+                    status_icon = "✓" if install_ok else "✗"
+                    _log(f"  Deps install [{install_result.get('manager','?')}] {status_icon}: "
+                         f"{install_result.get('message','')} ({install_result.get('elapsed_s',0):.0f}s)")
+                except Exception as e:
+                    _log(f"  Deps install hatasi: {e}")
+
+            # Hedef odakli embed — sadece plan'daki dosyalarin parent dizinleri.
+            # Tum repo embed'i (4000+ dosya) yerine ihtiyac duyulan ~20 dosya.
+            # Vendor allowlist varsa o paketler de bu sinirli kapsam icine girer.
+            if _pc_deps.get("CREW_VENDOR_INDEX") and self._vector_store:
+                if not install_ok and _pc_deps.get("CREW_INSTALL_DEPS"):
+                    _log("  Vendor index atlandi: deps install basarisiz")
+                else:
+                    try:
+                        vendor_allow = self._repo_mgr.get_vendor_allowlist(repo_name)
+                        plan_files = [
+                            ch.get("file_path", "").lstrip("/")
+                            for ch in (self.state.plan.get("changes") or [])
+                            if ch.get("file_path")
+                        ]
+                        if plan_files:
+                            _log(
+                                f"  Hedef odakli embed: {len(plan_files)} plan dosyasi"
+                                + (f", {len(vendor_allow)} vendor paketi" if vendor_allow else "")
+                            )
+                            self._vector_store._indexed_repos.discard(repo_name)
+                            repo_dir = self._repo_mgr.base_dir / repo_name
+                            self._vector_store.index_plan_files(
+                                repo_name, repo_dir,
+                                plan_file_paths=plan_files,
+                                vendor_allowlist=vendor_allow or None,
+                            )
+                        else:
+                            _log("  Hedef embed atlandi: plan'da degisecek dosya yok")
+                    except Exception as e:
+                        _log(f"  Hedef embed hatasi: {e}")
+
+            # Kod embedding step'i bilgi amacli — gercek embed yukaridaki
+            # hedef odakli akista yapildi (yapilmadiysa bile dashboard'da
+            # adim "tamamlandi" gozuksun).
             self._step_start("code_embedding_task")
-            self._step_done("code_embedding_task", "Atlandı — developer context ile çalışıyor")
+            self._step_done("code_embedding_task", "Hedef odakli embed (plan dosyalari)")
         except Exception as e:
             _log(f"  Local repo checkout hatasi: {e}")
 
@@ -1778,9 +1980,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         def _dev_context() -> str:
             """Developer'a plan ozeti + implement edilen dosyalari dondurur."""
-            import os as _os_dc
-            budget = int(_os_dc.environ.get("CREW_DEV_CONTEXT_BUDGET", "12000"))
-            per_file = int(_os_dc.environ.get("CREW_DEV_CONTEXT_PER_FILE", "2000"))
+            from agile_sdlc_crew import pipeline_config as _pc_dc
+            budget = _pc_dc.get("CREW_DEV_CONTEXT_BUDGET")
+            per_file = _pc_dc.get("CREW_DEV_CONTEXT_PER_FILE")
             parts = [f"# TUM PLAN ({len(plan.get('changes',[]))} dosya)\n{plan_summary}"]
             if implemented_codes:
                 parts.append(f"\n# ONCEKI DOSYALAR ({len(implemented_codes)})")
@@ -1802,17 +2004,22 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
             _log(f"\n  [{i+1}/{len(plan['changes'])}] {file_path} ({change_type})")
 
-            # Skip: branch'te bu dosya zaten push edilmisse ve icerik plan ile uyumluysa atla
+            # Skip: branch'te bu dosya bu job'da zaten push edilmis ise atla.
+            # Kritik: branch yeni olusturulduysa (hic commit yok), API
+            # get_file_content branch_name icin main'in icerigini doner —
+            # bu yuzden 'prefix eslesmesi' yanlis pozitif verir (edit edilmis
+            # dosyanin headeri eski headerle ayni). Sadece TAM eslesme
+            # gercek bir skip sinyalidir.
             try:
                 branch_content = self._client.get_file_content(repo_name, file_path, branch_name)
-                if branch_content and new_code:
-                    # Plan'daki new_code branch'teki dosyada varsa zaten push edilmis
-                    new_code_stripped = new_code.strip()[:200]
-                    if new_code_stripped and new_code_stripped in branch_content:
-                        _log(f"    ⏩ Branch'te zaten mevcut, atlanıyor")
-                        all_pushes.append({"file": file_path, "success": True, "change_type": change_type, "note": "skip-exists"})
-                        implemented_codes[file_path] = branch_content[:3000]
-                        continue
+                if (
+                    branch_content and new_code
+                    and branch_content.strip() == new_code.strip()
+                ):
+                    _log(f"    ⏩ Branch'te ayni icerik zaten push edilmis, atlanıyor")
+                    all_pushes.append({"file": file_path, "success": True, "change_type": change_type, "note": "skip-exists"})
+                    implemented_codes[file_path] = branch_content[:3000]
+                    continue
             except Exception:
                 pass  # dosya branch'te yok — normal devam
 
@@ -2071,6 +2278,34 @@ class AgileSDLCFlow(Flow[PipelineState]):
             )
         elif missing:
             _log(f"  ⚠️  Bazi dosyalar push edilemedi: {sorted(missing)[:5]}")
+
+        # ── Onceki run'dan kalan aktif PR varsa onu kullan ──
+        # Branch'te zaten PR acilmissa yenisini olusturmak Azure DevOps'ta
+        # 409 + retry'lar + SSL hatasi domino'su yaratir.
+        try:
+            existing_pr = self._client.find_active_pr_by_branch(
+                self.state.repo_name, self.state.branch_name,
+            )
+        except Exception as _e:
+            _log(f"  Mevcut PR sorgusu hatasi (devam ediliyor): {_e}")
+            existing_pr = None
+
+        if existing_pr:
+            existing_pr_id = existing_pr.get("pullRequestId")
+            project = (existing_pr.get("repository", {}) or {}).get("project", {}).get("name", "")
+            existing_url = (
+                f"{self._client.org_url}/{project}/_git/{self.state.repo_name}"
+                f"/pullrequest/{existing_pr_id}"
+            )
+            _log(f"  ⏩ Branch'te zaten aktif PR var: #{existing_pr_id}, yeniden kullaniliyor")
+            self.state.pr_id = str(existing_pr_id)
+            self.state.pr_url = existing_url
+            self._append_context("PR Olusturma", f"PR #{self.state.pr_id} (mevcut): {self.state.pr_url}")
+            self._step_done("create_pr_task", f"PR #{self.state.pr_id} (mevcut): {self.state.pr_url}")
+            if self.state.job_id:
+                self._db.update_job(self.state.job_id, pr_id=self.state.pr_id, pr_url=self.state.pr_url)
+            return
+
         wi_title = _get_work_item_title(
             self._client, self.state.work_item_id, plan.get("summary", "Gelistirme"),
         )
@@ -2084,12 +2319,50 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 pr_desc += f"- [ ] {ac}\n"
         pr_desc += f"\n---\n*Agile SDLC Crew ile otomatik olusturuldu*"
 
-        pr_result = create_pull_request(
-            self.state.repo_name, self.state.branch_name,
-            self.state.work_item_id, pr_title, pr_desc,
-        )
-        if not pr_result["success"]:
-            raise RuntimeError(f"PR olusturulamadi: {pr_result['error']}")
+        # Transient SSL/network hatalari icin retry — Azure DevOps zaman zaman
+        # UNEXPECTED_EOF_WHILE_READING firlatabiliyor.
+        import time as _t
+        pr_result = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                pr_result = create_pull_request(
+                    self.state.repo_name, self.state.branch_name,
+                    self.state.work_item_id, pr_title, pr_desc,
+                )
+                if pr_result.get("success"):
+                    break
+                last_err = pr_result.get("error", "unknown")
+            except Exception as _e:
+                last_err = str(_e)
+                pr_result = {"success": False, "error": last_err}
+            if attempt < 2:
+                _log(f"  PR olusturma denemesi {attempt+1}/3 hatali: {str(last_err)[:120]}, {2 ** attempt}s bekleniyor")
+                _t.sleep(2 ** attempt)
+
+        if not pr_result or not pr_result.get("success"):
+            # Son sans: belki PR olusturulurken SSL hatasi aldik ama PR aslinda olustu.
+            # Bir kez daha mevcut PR sorgulayalim.
+            try:
+                created_pr = self._client.find_active_pr_by_branch(
+                    self.state.repo_name, self.state.branch_name,
+                )
+                if created_pr:
+                    pr_result = {
+                        "success": True,
+                        "pr_id": created_pr.get("pullRequestId"),
+                        "url": (
+                            f"{self._client.org_url}/"
+                            f"{(created_pr.get('repository',{}) or {}).get('project',{}).get('name','')}"
+                            f"/_git/{self.state.repo_name}/pullrequest/{created_pr.get('pullRequestId')}"
+                        ),
+                    }
+                    _log(f"  ⏩ PR aslinda olusmus (SSL hatasi yanildi): #{pr_result['pr_id']}")
+            except Exception:
+                pass
+
+        if not pr_result or not pr_result.get("success"):
+            raise RuntimeError(f"PR olusturulamadi (3 deneme): {last_err}")
 
         self.state.pr_id = str(pr_result["pr_id"])
         self.state.pr_url = pr_result["url"]
@@ -2240,7 +2513,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
             "REJECTED", "REDDEDILDI", "REDDEDİLDİ",
             "KARAR: RED", "KARAR:RED",
         ])
-        max_review_retries = int(_os_rev.environ.get("CREW_REVIEW_MAX_RETRIES", "2"))
+        from agile_sdlc_crew import pipeline_config as _pc_rev
+        max_review_retries = _pc_rev.get("CREW_REVIEW_MAX_RETRIES")
         review_attempt = getattr(self, "_review_attempt", 0)
         if rejected:
             if review_attempt >= max_review_retries:

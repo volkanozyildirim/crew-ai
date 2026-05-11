@@ -10,19 +10,29 @@ class AzureDevOpsClient:
     API_VERSION = "7.1"
 
     def __init__(self):
-        self.org_url = os.environ.get("AZURE_DEVOPS_ORG_URL", "").rstrip("/")
-        self.pat = os.environ.get("AZURE_DEVOPS_PAT", "")
-        self.project = os.environ.get("AZURE_DEVOPS_PROJECT", "")
-        # Repolar farkli projelerde olabilir
-        repo_projects = os.environ.get("AZURE_DEVOPS_REPO_PROJECTS", "")
-        self.repo_projects = [p.strip() for p in repo_projects.split(",") if p.strip()] if repo_projects else [self.project]
+        # Credentials store > env fallback. Dashboard "Kimlik Bilgileri > Is Yonetimi
+        # > azure_devops" altindan yonetilir; env hala calismaya devam eder.
+        from agile_sdlc_crew import credentials
+        creds = credentials.get_all("work_item", "azure_devops") or {}
+
+        self.org_url = (creds.get("org_url") or os.environ.get("AZURE_DEVOPS_ORG_URL", "")).rstrip("/")
+        self.pat = creds.get("pat") or os.environ.get("AZURE_DEVOPS_PAT", "")
+        self.project = creds.get("project") or os.environ.get("AZURE_DEVOPS_PROJECT", "")
+
+        repo_projects_raw = creds.get("repo_projects") or os.environ.get("AZURE_DEVOPS_REPO_PROJECTS", "")
+        self.repo_projects = (
+            [p.strip() for p in repo_projects_raw.split(",") if p.strip()]
+            if repo_projects_raw else [self.project]
+        )
+        self.team = (creds.get("team") or os.environ.get("AZURE_DEVOPS_TEAM", "")).strip()
 
         self._repo_project_cache: dict[str, str] = {}
 
         if not all([self.org_url, self.pat, self.project]):
             raise ValueError(
-                "AZURE_DEVOPS_ORG_URL, AZURE_DEVOPS_PAT ve AZURE_DEVOPS_PROJECT "
-                "ortam degiskenleri ayarlanmalidir."
+                "Azure DevOps kimlik bilgileri eksik. Dashboard 'Kimlik Bilgileri > "
+                "Is Yonetimi > azure_devops' altindan girin veya AZURE_DEVOPS_ORG_URL/PAT/PROJECT "
+                "env degiskenlerini ayarlayin."
             )
 
     @property
@@ -426,6 +436,27 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
+    def find_active_pr_by_branch(
+        self,
+        repo_id_or_name: str,
+        source_branch: str,
+        target_branch: str = "main",
+    ) -> dict | None:
+        """Verilen kaynak branch icin aktif (acik) PR varsa bilgisini dondur.
+
+        Yoksa None. SSL/transient hata olursa exception fırlatir."""
+        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests"
+        params = {
+            "searchCriteria.sourceRefName": f"refs/heads/{source_branch}",
+            "searchCriteria.targetRefName": f"refs/heads/{target_branch}",
+            "searchCriteria.status": "active",
+            "api-version": self.API_VERSION,
+        }
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        prs = resp.json().get("value", [])
+        return prs[0] if prs else None
+
     def get_pull_request(
         self,
         repo_id_or_name: str,
@@ -516,7 +547,7 @@ class AzureDevOpsClient:
 
     def list_iterations(self, team: str = "") -> list[dict]:
         """Projedeki sprint/iteration'lari listeler."""
-        team = team.strip() or os.environ.get("AZURE_DEVOPS_TEAM", "").strip()
+        team = team.strip() or self.team
         if team:
             url = f"{self.org_url}/{self.project}/{requests.utils.quote(team, safe='')}/_apis/work/teamsettings/iterations"
         else:

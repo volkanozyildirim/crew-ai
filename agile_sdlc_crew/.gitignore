@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Dashboard tarafindan yonetilen runtime config'ler — secret iceriyor
+src/agile_sdlc_crew/config/provider_credentials.yaml
+
+# Loglar ve runtime state
+/tmp/crew_*.log
+src/agile_sdlc_crew/web/status.json
