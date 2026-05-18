@@ -756,14 +756,26 @@ def _get_work_item_title(client: AzureDevOpsClient, work_item_id: str, fallback:
 
 # ── Ana Pipeline ──────────────────────────────────
 
-def run_pipeline(work_item_id: str, use_hal: bool = False, tracker: StatusTracker | None = None, job_id: int | None = None):
+def run_pipeline(
+    work_item_id: str,
+    use_hal: bool = False,
+    tracker: StatusTracker | None = None,
+    job_id: int | None = None,
+    *,
+    kickoff_only: bool = False,
+    kickoff_feedback: str = "",
+):
     """11 adimli tam pipeline. CLI veya server'dan cagrilabilir.
 
     Orkestrasyon AgileSDLCFlow (CrewAI Flow) tarafindan yapilir.
     Bu fonksiyon geriye uyumlu ince bir wrapper'dir.
+
+    kickoff_only=True ise step0 sonrasi pipeline durur (debug akisi). Bu
+    durumda dondurulen deger None'dir; kickoff ciktisi job_steps tablosunda
+    ve /tmp/crew_kickoff/job_<id>.json icinde bulunur.
     """
     from agile_sdlc_crew import db as _db
-    from agile_sdlc_crew.flow import AgileSDLCFlow
+    from agile_sdlc_crew.flow import AgileSDLCFlow, _KickoffOnlyStop
 
     if tracker is None:
         tracker = StatusTracker()
@@ -776,14 +788,25 @@ def run_pipeline(work_item_id: str, use_hal: bool = False, tracker: StatusTracke
             "work_item_id": str(work_item_id),
             "use_hal": use_hal,
             "job_id": job_id,
+            "kickoff_only": bool(kickoff_only),
+            "kickoff_feedback": kickoff_feedback or "",
         })
         tracker.finish()
 
         _log(f"\n{'='*60}")
-        _log("  PIPELINE TAMAMLANDI!")
-        _log(f"  PR #{flow.state.pr_id}: {flow.state.pr_url}")
+        if kickoff_only:
+            _log("  KICKOFF-ONLY TAMAMLANDI (incelemeyi bekliyor)")
+        else:
+            _log("  PIPELINE TAMAMLANDI!")
+            _log(f"  PR #{flow.state.pr_id}: {flow.state.pr_url}")
         _log(f"{'='*60}")
-        return flow.state.pr_url
+        return None if kickoff_only else flow.state.pr_url
+
+    except _KickoffOnlyStop:
+        # Beklenen erken durdurma: kickoff-only modunda step0 sonrasi cikilir.
+        tracker.finish()
+        _log("  Kickoff-only stop: pipeline beklendigi gibi durduruldu")
+        return None
 
     except Exception as e:
         tracker.finish()

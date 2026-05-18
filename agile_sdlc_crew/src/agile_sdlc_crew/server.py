@@ -17,7 +17,9 @@ try:
 except ImportError:
     pass
 
-from fastapi import FastAPI, Request
+import asyncio
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -90,6 +92,29 @@ class PRFixRequest(BaseModel):
     repo_name: str
     pr_id: int
     work_item_id: str = ""  # opsiyonel — PR'dan da cikarilabilir
+
+
+class KickoffRunRequest(BaseModel):
+    """Sadece kickoff'u calistirip durduran debug akisi."""
+    work_item_id: str
+    feedback: str = ""
+
+    def validate_wi(self) -> str | None:
+        wi = self.work_item_id.strip()
+        if not wi or not _re.match(r'^\d{1,10}$', wi):
+            return "Gecersiz Work Item ID (sadece rakam, max 10 hane)"
+        return None
+
+
+class GuidanceAddRequest(BaseModel):
+    text: str
+    source_wi: str = ""
+    source_job_id: int | None = None
+
+
+class KickoffRefineRequest(BaseModel):
+    feedback: str
+    learn_globally: bool = False
 
 
 # ── API Routes ──
@@ -234,6 +259,335 @@ async def delete_job(job_id: int, force: bool = False):
 async def queue_stats():
     """Kuyruk istatistikleri."""
     return JSONResponse(db.get_queue_stats())
+
+
+# ── Kickoff Debug Akisi ────────────────────────────────────
+# Sadece kickoff'u calistirir, sonuc kullaniciya gosterilir, devam isin
+# istenirse `/api/kickoff-runs/{id}/approve` ile ayni WI icin tam pipeline
+# baslatilir (resume mekanizmasi cache'i kullanir).
+
+@app.post("/api/kickoff-runs")
+async def kickoff_run(req: KickoffRunRequest):
+    """Yeni kickoff-only debug calistir."""
+    err = req.validate_wi()
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    job_id = db.create_job(
+        req.work_item_id.strip(),
+        use_hal=False,
+        kickoff_only=True,
+        kickoff_feedback=req.feedback or "",
+    )
+    _ensure_worker()
+    return JSONResponse({
+        "job_id": job_id,
+        "status": "queued",
+        "kickoff_only": True,
+        "message": f"Kickoff debug #{job_id} (WI #{req.work_item_id}) kuyruga eklendi",
+    }, status_code=202)
+
+
+@app.get("/api/kickoff-runs")
+def list_kickoff_runs():
+    """Tum kickoff-only debug joblarinin ozeti."""
+    jobs = db.list_kickoff_only_jobs()
+    for j in jobs:
+        for k in ("created_at", "started_at", "finished_at"):
+            if j.get(k):
+                j[k] = j[k].isoformat()
+    return JSONResponse({"runs": jobs})
+
+
+@app.get("/api/kickoff-runs/{job_id}/logs")
+def kickoff_run_logs(job_id: int, lines: int = 200, since: int = 0):
+    """Pipeline log tail — kickoff debug UI canli akis icin.
+
+    `since`: dosyanin byte offset'i; daha onceki byte'lardan SONRASI okunur
+    (delta polling icin). Donen `offset` bir sonraki cagriya verilmeli.
+    `lines`: ilk cagri (since=0) icin son N satir donulur.
+    """
+    job = db.get_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job bulunamadi"}, status_code=404)
+
+    log_path = PIPELINE_LOG
+    if not log_path.exists():
+        return JSONResponse({"lines": [], "offset": 0, "running": job["status"] == "running"})
+
+    try:
+        size = log_path.stat().st_size
+        with open(log_path, "rb") as f:
+            if since and since < size:
+                f.seek(since)
+                data = f.read()
+            else:
+                # Ilk cagri: son N satir
+                # Basit ama yeterli: dosyayi acip son ~256KB'i oku, satir bol, son N'yi al
+                tail_bytes = min(size, 256 * 1024)
+                f.seek(max(0, size - tail_bytes))
+                data = f.read()
+        text = data.decode("utf-8", errors="replace")
+        all_lines = text.splitlines()
+        if not since:
+            all_lines = all_lines[-max(1, min(lines, 1000)):]
+        # Bos satir + cok uzun satir filtrele
+        cleaned = [ln for ln in all_lines if ln.strip()]
+        return JSONResponse({
+            "lines": cleaned,
+            "offset": size,
+            "running": job["status"] in ("running", "queued"),
+            "status": job["status"],
+        })
+    except Exception as e:
+        return JSONResponse({"error": f"log oku: {e}"}, status_code=500)
+
+
+def _build_kickoff_detail(job_id: int) -> dict:
+    """Detail payload — hem HTTP hem WS yolu icin tek nokta."""
+    job = db.get_job(job_id)
+    if not job:
+        return {"error": "Job bulunamadi", "_status": 404}
+    if not job.get("kickoff_only"):
+        return {"error": "Bu job kickoff-only degil", "_status": 400}
+
+    for k in ("created_at", "started_at", "finished_at"):
+        if job.get(k):
+            job[k] = job[k].isoformat()
+    if job.get("steps"):
+        for s in job["steps"]:
+            for k in ("started_at", "finished_at"):
+                if s.get(k):
+                    s[k] = s[k].isoformat()
+
+    detail_path = Path("/tmp/crew_kickoff") / f"job_{job_id}.json"
+    debug_blob = None
+    if detail_path.exists():
+        try:
+            debug_blob = json.loads(detail_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            debug_blob = {"error": f"detail JSON parse: {e}"}
+
+    return {"job": job, "debug": debug_blob}
+
+
+@app.get("/api/kickoff-runs/{job_id}")
+def kickoff_run_detail(job_id: int):
+    """Bir kickoff-only debug calistirmasinin tam ciktisi + grade gecmisi."""
+    payload = _build_kickoff_detail(job_id)
+    sc = payload.pop("_status", 200)
+    return JSONResponse(payload, status_code=sc)
+
+
+@app.websocket("/ws/kickoff-runs/{job_id}")
+async def kickoff_run_ws(websocket: WebSocket, job_id: int):
+    """Canli log + status akisi. HTTP polling yerine kullanilir.
+
+    Mesaj formatlari (sunucudan istemciye):
+      {"type":"log","lines":[...],"initial":true|false}
+      {"type":"status","status":"running|completed|failed|queued"}
+      {"type":"done","detail":{job,debug}}   # tamamlandiginda 1 kez
+      {"type":"error","message":"..."}
+    """
+    await websocket.accept()
+    log_path = PIPELINE_LOG
+    offset = 0
+    last_status = None
+
+    try:
+        job = db.get_job(job_id)
+        if not job:
+            await websocket.send_json({"type": "error", "message": "Job bulunamadi"})
+            return
+
+        # 1) Initial: son ~200 satir + status
+        if log_path.exists():
+            size = log_path.stat().st_size
+            tail = min(size, 256 * 1024)
+            with open(log_path, "rb") as f:
+                f.seek(max(0, size - tail))
+                data = f.read()
+            text = data.decode("utf-8", errors="replace")
+            init_lines = [ln for ln in text.splitlines() if ln.strip()][-200:]
+            await websocket.send_json({"type": "log", "lines": init_lines, "initial": True})
+            offset = size
+
+        last_status = job["status"]
+        await websocket.send_json({"type": "status", "status": last_status})
+
+        # Job zaten bitmis ise hemen detail gonder ve kapat
+        if last_status in ("completed", "failed"):
+            detail = _build_kickoff_detail(job_id)
+            detail.pop("_status", None)
+            await websocket.send_json({"type": "done", "detail": detail})
+            return
+
+        # 2) Tail + status poll loop (server-side, single connection)
+        while True:
+            await asyncio.sleep(1.0)
+
+            # Log delta
+            try:
+                if log_path.exists():
+                    new_size = log_path.stat().st_size
+                    if new_size < offset:
+                        # Rotated/truncated — yeniden okumaya basla
+                        offset = 0
+                    if new_size > offset:
+                        with open(log_path, "rb") as f:
+                            f.seek(offset)
+                            data = f.read(new_size - offset)
+                        text = data.decode("utf-8", errors="replace")
+                        new_lines = [ln for ln in text.splitlines() if ln.strip()]
+                        offset = new_size
+                        if new_lines:
+                            await websocket.send_json({"type": "log", "lines": new_lines})
+            except WebSocketDisconnect:
+                raise
+            except Exception as e:
+                pipeline_log.warning(f"WS log read hatasi: {e}")
+
+            # Status delta
+            try:
+                job = db.get_job(job_id)
+            except Exception:
+                job = None
+            if not job:
+                break
+            if job["status"] != last_status:
+                last_status = job["status"]
+                await websocket.send_json({"type": "status", "status": last_status})
+                if last_status in ("completed", "failed"):
+                    # Son log gecisi (race: status set olduktan sonra son satirlar gelmis olabilir)
+                    try:
+                        if log_path.exists():
+                            new_size = log_path.stat().st_size
+                            if new_size > offset:
+                                with open(log_path, "rb") as f:
+                                    f.seek(offset)
+                                    data = f.read(new_size - offset)
+                                text = data.decode("utf-8", errors="replace")
+                                tail_lines = [ln for ln in text.splitlines() if ln.strip()]
+                                offset = new_size
+                                if tail_lines:
+                                    await websocket.send_json({"type": "log", "lines": tail_lines})
+                    except Exception:
+                        pass
+                    detail = _build_kickoff_detail(job_id)
+                    detail.pop("_status", None)
+                    await websocket.send_json({"type": "done", "detail": detail})
+                    break
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.post("/api/kickoff-runs/{job_id}/approve")
+async def kickoff_run_approve(job_id: int):
+    """Kickoff'u onayla — ayni WI icin tam pipeline kuyruga eklenir.
+    flow.py resume mekanizmasi (job_steps.output cache) sayesinde kickoff
+    yeniden calistirilmaz, dogrudan step4'ten devam edilir."""
+    job = db.get_job(job_id)
+    if not job or not job.get("kickoff_only"):
+        return JSONResponse({"error": "Kickoff-only job bulunamadi"}, status_code=404)
+    if job["status"] != "completed":
+        return JSONResponse(
+            {"error": f"Kickoff henuz tamamlanmadi (status={job['status']})"},
+            status_code=409,
+        )
+
+    db.mark_kickoff_approved(job_id)
+    # Ayni WI icin yeni tam pipeline jobu (kickoff_only=False)
+    new_job_id = db.create_job(
+        job["work_item_id"],
+        use_hal=False,
+        kickoff_only=False,
+        parent_job_id=job_id,
+    )
+    _ensure_worker()
+    return JSONResponse({
+        "approved_job_id": job_id,
+        "pipeline_job_id": new_job_id,
+        "status": "queued",
+        "message": (
+            f"Kickoff #{job_id} onaylandi → Pipeline #{new_job_id} kuyruga eklendi "
+            f"(WI #{job['work_item_id']})"
+        ),
+    }, status_code=202)
+
+
+@app.post("/api/kickoff-runs/{job_id}/refine")
+async def kickoff_run_refine(job_id: int, req: KickoffRefineRequest):
+    """Kickoff'u iyilestir — yeni feedback ile YENI kickoff-only job baslatir.
+    Istege bagli learn_globally=True ise feedback global guidance'a eklenir
+    (gelecekteki tum WI'larda dikkate alinir)."""
+    job = db.get_job(job_id)
+    if not job or not job.get("kickoff_only"):
+        return JSONResponse({"error": "Kickoff-only job bulunamadi"}, status_code=404)
+
+    fb = (req.feedback or "").strip()
+    if not fb:
+        return JSONResponse({"error": "feedback bos olamaz"}, status_code=400)
+
+    learned_id = None
+    if req.learn_globally:
+        from agile_sdlc_crew import kickoff_guidance as _kg
+        rule = _kg.add_rule(fb, source_wi=job["work_item_id"], source_job_id=job_id)
+        learned_id = rule.get("id") if rule else None
+
+    new_job_id = db.create_job(
+        job["work_item_id"],
+        use_hal=False,
+        kickoff_only=True,
+        kickoff_feedback=fb,
+        parent_job_id=job_id,
+    )
+    _ensure_worker()
+    return JSONResponse({
+        "refined_job_id": new_job_id,
+        "parent_job_id": job_id,
+        "learned_guidance_id": learned_id,
+        "status": "queued",
+        "message": (
+            f"Kickoff #{job_id} icin iyilestirme — yeni debug #{new_job_id} "
+            f"kuyruga eklendi" + (f" + global kural ogrenildi" if learned_id else "")
+        ),
+    }, status_code=202)
+
+
+# ── Kickoff Global Guidance (Ogrenilmis Kurallar) ──────────
+
+@app.get("/api/kickoff-guidance")
+async def list_kickoff_guidance():
+    from agile_sdlc_crew import kickoff_guidance as _kg
+    return JSONResponse({"rules": _kg.list_rules()})
+
+
+@app.post("/api/kickoff-guidance")
+async def add_kickoff_guidance(req: GuidanceAddRequest):
+    from agile_sdlc_crew import kickoff_guidance as _kg
+    if not (req.text or "").strip():
+        return JSONResponse({"error": "text bos olamaz"}, status_code=400)
+    rule = _kg.add_rule(req.text, source_wi=req.source_wi, source_job_id=req.source_job_id)
+    return JSONResponse({"rule": rule}, status_code=201)
+
+
+@app.delete("/api/kickoff-guidance/{rule_id}")
+async def remove_kickoff_guidance(rule_id: str):
+    from agile_sdlc_crew import kickoff_guidance as _kg
+    ok = _kg.remove_rule(rule_id)
+    if not ok:
+        return JSONResponse({"error": "Kural bulunamadi"}, status_code=404)
+    return JSONResponse({"status": "ok"})
 
 
 @app.post("/api/reset")
@@ -1084,6 +1438,8 @@ def _queue_worker():
         job_id = job["id"]
         work_item_id = job["work_item_id"]
         use_hal = bool(job["use_hal"])
+        kickoff_only = bool(job.get("kickoff_only") or 0)
+        kickoff_feedback = job.get("kickoff_feedback") or ""
 
         try:
             from agile_sdlc_crew.main import run_pipeline
@@ -1096,6 +1452,8 @@ def _queue_worker():
                 use_hal=use_hal,
                 tracker=tracker,
                 job_id=job_id,
+                kickoff_only=kickoff_only,
+                kickoff_feedback=kickoff_feedback,
             )
             db.complete_job(job_id)
 

@@ -393,21 +393,12 @@ class AgileSDLCCrew:
 
     # ── Crew Factories ──────────────────────────────────
 
-    def create_kickoff_crew(self) -> Crew:
-        """Kickoff toplantisi — Sanal Odak Grup / Design Review simulasyonu.
+    def _build_kickoff_agents(self) -> tuple[Agent, Agent, Agent, Agent]:
+        """Kickoff toplantisi icin 4 agent: BA, Architect, Developer, SM.
 
-        Her agent dashboard'da configure ettigi LLM'i kullanir (resolver uzerinden).
-        Architect browse_repo + search_code ile GERCEK KOD okur — kör analiz degil.
-        Context'te 'HEDEF REPO' ve dosya yapisi zaten var (flow.py tarafindan eklendi),
-        agent dogrudan ilgili dosyalara gidebilir.
-
-        NOT: Cost-sensitivity istiyorsan dashboard'dan kickoff icin kullanilan
-        agent'lara ayri bir profile/inline ata (orn. lokal model). Kickoff 4 task,
-        toplam token kullanimi yuksek.
+        Hem `create_kickoff_crew` (klasik tek-cagrili Crew) hem de
+        `run_kickoff_meeting` (task-by-task + grading) tarafindan kullanilir.
         """
-        # 4 agent: BA, Architect, Developer, SM (tutanak)
-        # SM acilis, QA, UAT ayrı task olmak zorunda degil — her biri ~100s suruyordu,
-        # toplam 700s > timeout. 4 task ile ~300-400s hedefi.
         sm = Agent(
             config=self._agent_config_with_knowledge("scrum_master", "agile_facilitation"),
             llm=build_for_agent("scrum_master"),
@@ -422,8 +413,6 @@ class AgileSDLCCrew:
             max_iter=2,
             tools=[],
         )
-
-        # Architect — dashboard'da secilen model + browse_repo. max_iter=3: 1-2 tool call + final answer.
         arch = Agent(
             config=self._agent_config_with_knowledge(
                 "software_architect", "backend_tech_design", "frontend_nextjs"
@@ -435,8 +424,6 @@ class AgileSDLCCrew:
                 AzureDevOpsBrowseRepoTool(local_repo_mgr=self.local_repo_mgr),
             ],
         )
-
-        # Developer — kod kalitesi/karmasiklik degerlendirmesi, max_iter=2
         dev = Agent(
             config=self._agent_config_with_knowledge(
                 "senior_developer", "backend_feature_dev", "frontend_nextjs"
@@ -446,6 +433,21 @@ class AgileSDLCCrew:
             max_iter=2,
             tools=[],
         )
+        return ba, arch, dev, sm
+
+    def create_kickoff_crew(self) -> Crew:
+        """Kickoff toplantisi — Sanal Odak Grup / Design Review simulasyonu.
+
+        Her agent dashboard'da configure ettigi LLM'i kullanir (resolver uzerinden).
+        Architect browse_repo + search_code ile GERCEK KOD okur — kör analiz degil.
+        Context'te 'HEDEF REPO' ve dosya yapisi zaten var (flow.py tarafindan eklendi),
+        agent dogrudan ilgili dosyalara gidebilir.
+
+        NOT: Bu klasik path TEK Crew calistirir; grading + retry yok.
+        Yeni varsayilan path: `run_kickoff_meeting` (Haiku grading destekli).
+        """
+        # 4 task: BA → Architect → Developer → SM Tutanak (~300-400s)
+        ba, arch, dev, sm = self._build_kickoff_agents()
 
         # Her kickoff task'ina log callback ekle — hangi agent ne zaman bitti gorunsun
         import logging as _logging
@@ -521,6 +523,283 @@ class AgileSDLCCrew:
             verbose=True,
             memory=False,
         )
+
+    def run_kickoff_meeting(self, inputs: dict):
+        """Kickoff'u task-by-task calistirir; her ciktiya Haiku-bazli grading
+        ve gerekirse iyilestirilmis prompt ile retry uygular.
+
+        inputs: {work_item_id, previous_context, target_repo}
+        Returns: synthetic obj with `.raw` (str) ve `.token_usage` (toplanmis).
+
+        Env toggle'lari:
+          CREW_KICKOFF_GRADING            (1)  — 0 ise grading kapali (klasik)
+          CREW_KICKOFF_GRADE_THRESHOLD    (8)  — passing esigi (1-10)
+          CREW_KICKOFF_GRADE_MAX_RETRIES  (2)  — esik altinda max retry sayisi
+          CREW_KICKOFF_GRADER_PROFILE     (kickoff_grader)
+        """
+        import logging as _logging
+        import time as _time
+        from datetime import datetime as _dt
+        from pathlib import Path as _KPath
+
+        from agile_sdlc_crew.kickoff_grader import (
+            grade_output,
+            build_improvement_description,
+            grading_enabled,
+            grade_threshold,
+            grade_max_retries,
+        )
+
+        log = _logging.getLogger("pipeline")
+        grading_on = grading_enabled()
+        threshold = grade_threshold()
+        max_retries = grade_max_retries()
+        log.info(
+            f"  Kickoff orchestrator: grading={'ON' if grading_on else 'OFF'} "
+            f"esik={threshold} max_retry={max_retries}"
+        )
+
+        ba, arch, dev, sm = self._build_kickoff_agents()
+
+        # (key, agent, label, prior_task_keys, context_label)
+        plan = [
+            ("kickoff_ba_task",       ba,   "BA Analiz",  []),
+            ("kickoff_arch_task",     arch, "Architect",  ["kickoff_ba_task"]),
+            ("kickoff_dev_task",      dev,  "Developer",  ["kickoff_ba_task", "kickoff_arch_task"]),
+            ("kickoff_sm_close_task", sm,   "SM Tutanak", ["kickoff_ba_task", "kickoff_arch_task", "kickoff_dev_task"]),
+        ]
+
+        # Log dosyasi (klasik path ile ayni klasor + format)
+        _log_dir = _KPath("/tmp/crew_kickoff")
+        _log_dir.mkdir(parents=True, exist_ok=True)
+        _log_file = _log_dir / f"kickoff_{_dt.now().strftime('%Y%m%d_%H%M%S')}.md"
+        try:
+            _log_file.write_text(
+                f"# Kickoff Toplantisi Ciktilari (graded)\n"
+                f"**Tarih**: {_dt.now().isoformat()}\n"
+                f"**Grading**: {'ON' if grading_on else 'OFF'} (esik={threshold}, max_retry={max_retries})\n\n",
+                encoding="utf-8",
+            )
+            log.info(f"  Kickoff ciktilari dosyaya yaziliyor: {_log_file}")
+        except Exception as e:
+            log.warning(f"  Kickoff log dosyasi acilamadi: {e}")
+
+        outputs: dict[str, str] = {}
+        grade_log: dict[str, list[dict]] = {}
+        total_pt = total_ct = total_tt = 0
+        start_t = _time.time()
+        wi_context = (inputs.get("previous_context") or "")[:1800]
+
+        # Placeholder substitution: kickoff task description'larinda yalniz
+        # `{work_item_id}` ve `{previous_context}` placeholder'lari kullaniliyor.
+        # CrewAI'nin native input-interpolation'i ASIL/AGENT ciktisindaki butun
+        # `{...}` bloklarini "template variable" sanip patliyor (orn. WI metninde
+        # gecen `{orderId}` agent ciktisina dustugunde). Bunu by-pass edebilmek
+        # icin substitution'i elimizle yapip mini.kickoff()'a inputs gecmiyoruz.
+        _sub_map = {
+            "{work_item_id}": str(inputs.get("work_item_id", "")),
+            "{previous_context}": str(inputs.get("previous_context", "")),
+        }
+        _other_inputs = {
+            k: v for k, v in (inputs or {}).items()
+            if k not in ("work_item_id", "previous_context")
+        }
+
+        def _safe_sub(text: str) -> str:
+            out = text or ""
+            for needle, value in _sub_map.items():
+                if needle in out:
+                    out = out.replace(needle, value)
+            # Diger inputlardaki (orn. target_repo) opsiyonel placeholder'lari da degistir.
+            for k, v in _other_inputs.items():
+                token = "{" + k + "}"
+                if token in out:
+                    out = out.replace(token, str(v))
+            return out
+
+        for key, agent, label, prior_keys in plan:
+            cfg = self.tasks_config[key]
+            base_desc_raw = cfg["description"]
+            expected = cfg["expected_output"]
+
+            # Onceki uzman ciktilarini description'a ek olarak gom (mini-crew
+            # task'lari arasinda CrewAI context auto-link YOK)
+            prior_block = ""
+            for pk in prior_keys:
+                if outputs.get(pk):
+                    plabel = next((p[2] for p in plan if p[0] == pk), pk)
+                    prior_block += (
+                        f"\n\n# ONCEKI UZMAN CIKTISI — {plabel} ({pk})\n"
+                        f"{outputs[pk]}\n"
+                    )
+            base_desc = base_desc_raw + (
+                "\n\n# DIGER UZMANLARIN BU TOPLANTIDAKI KATKILARI\n" + prior_block
+                if prior_block else ""
+            )
+            # Placeholder substitution (CrewAI input-interpolation BY-PASS):
+            base_desc = _safe_sub(base_desc)
+            expected_sub = _safe_sub(expected)
+
+            current_desc = base_desc
+            result_text = ""
+            final_grade = None
+            grade_log[key] = []
+
+            attempts = 1 + (max_retries if grading_on else 0)
+            for attempt in range(1, attempts + 1):
+                t = Task(
+                    description=current_desc,
+                    expected_output=expected_sub,
+                    agent=agent,
+                    callback=self._make_task_callback(key) if attempt == attempts else None,
+                )
+                mini = Crew(
+                    agents=[agent],
+                    tasks=[t],
+                    process=Process.sequential,
+                    verbose=True,
+                    memory=False,
+                )
+
+                t0 = _time.time()
+                log.info(f"  Kickoff [{label}] deneme #{attempt}/{attempts} basliyor")
+                try:
+                    # inputs=None: CrewAI bunu pre-interpolate etmeyecek; biz
+                    # yukarida placeholder'lari kendi elimizle doldurduk.
+                    res = mini.kickoff()
+                except Exception as e:
+                    log.error(f"  Kickoff [{label}] deneme #{attempt} HATA: {e}")
+                    if attempt >= attempts:
+                        raise
+                    # Hata varsa improvement description'a feedback ekleyip retry
+                    current_desc = base_desc + (
+                        f"\n\n# UYARI — Onceki deneme calismadi: {e}\n"
+                        f"Sade, format'a uygun bir cikti uret."
+                    )
+                    continue
+
+                elapsed = _time.time() - t0
+                result_text = (res.raw or "") if res is not None else ""
+
+                # Token usage topla
+                usage = getattr(res, "token_usage", None)
+                pt = ct = tt = 0
+                if usage:
+                    try:
+                        pt = int(getattr(usage, "prompt_tokens", 0) or 0)
+                        ct = int(getattr(usage, "completion_tokens", 0) or 0)
+                        tt = int(getattr(usage, "total_tokens", 0) or 0) or (pt + ct)
+                    except Exception:
+                        pass
+                total_pt += pt
+                total_ct += ct
+                total_tt += tt
+
+                log.info(
+                    f"  Kickoff [{label}] deneme #{attempt} bitti ({elapsed:.0f}s, "
+                    f"+{pt}i/{ct}o token)"
+                )
+
+                if not grading_on:
+                    final_grade = None
+                    break
+
+                grade = grade_output(
+                    task_key=key,
+                    agent_label=label,
+                    description=base_desc_raw,
+                    expected_output=expected,
+                    actual_output=result_text,
+                    work_item_context=wi_context,
+                )
+                final_grade = grade
+                grade_log[key].append({
+                    "attempt": attempt,
+                    "score": grade.score,
+                    "skipped": grade.skipped,
+                    "weaknesses": grade.weaknesses,
+                    "suggestions": grade.suggestions,
+                    "reasoning": grade.reasoning,
+                })
+                status_emoji = "✅" if grade.passing(threshold) else "❌"
+                skip_note = " (grader skipped)" if grade.skipped else ""
+                log.info(
+                    f"  {status_emoji} Kickoff [{label}] grade={grade.score}/10 "
+                    f"(esik={threshold}){skip_note}"
+                )
+
+                if grade.passing(threshold) or grade.skipped:
+                    break
+                if attempt >= attempts:
+                    log.warning(
+                        f"  Kickoff [{label}] retry tukendi — son cikti score "
+                        f"{grade.score}/10 ile kullaniliyor"
+                    )
+                    break
+
+                # Iyilestirilmis prompt + retry
+                current_desc = build_improvement_description(
+                    base_desc, result_text, grade, attempt, threshold=threshold,
+                )
+                if grade.weaknesses:
+                    log.info(f"  Kickoff [{label}] zayifliklar: {'; '.join(grade.weaknesses[:3])}")
+
+            outputs[key] = result_text
+
+            # Log dosyasina yaz
+            try:
+                with open(_log_file, "a", encoding="utf-8") as _f:
+                    _f.write(f"\n---\n\n## {label} ({key})\n\n")
+                    if final_grade is not None:
+                        _f.write(
+                            f"_Final grade: **{final_grade.score}/10** "
+                            f"(esik={threshold}, deneme sayisi={len(grade_log[key])})_\n\n"
+                        )
+                        if grade_log[key]:
+                            _f.write("<details><summary>Grade history</summary>\n\n")
+                            for h in grade_log[key]:
+                                _f.write(
+                                    f"- Deneme #{h['attempt']}: {h['score']}/10"
+                                    f"{' (skipped)' if h['skipped'] else ''} — "
+                                    f"{h['reasoning'][:200]}\n"
+                                )
+                            _f.write("\n</details>\n\n")
+                    _f.write(result_text + "\n")
+            except Exception as e:
+                log.warning(f"  Kickoff log yazma hatasi ({label}): {e}")
+
+        # Sonucu birlestir — SM tutanagi en basta (downstream context icin
+        # en degerli ozet), digerleri arkasinda referans olarak.
+        sections = []
+        sm_text = outputs.get("kickoff_sm_close_task", "")
+        if sm_text:
+            sections.append(sm_text)
+        for key, _agent, label, _ in plan:
+            if key == "kickoff_sm_close_task":
+                continue
+            if outputs.get(key):
+                sections.append(f"## {label}\n\n{outputs[key]}")
+        final_text = "\n\n---\n\n".join(sections)
+
+        elapsed_total = _time.time() - start_t
+        log.info(
+            f"  Kickoff tamamlandi: {elapsed_total:.0f}s, toplam "
+            f"{total_tt} token (+{total_pt}i/{total_ct}o)"
+        )
+
+        # Synthetic result — flow.py'nin gordugu interface ile uyumlu
+        class _Usage:
+            prompt_tokens = total_pt
+            completion_tokens = total_ct
+            total_tokens = total_tt
+
+        class _Result:
+            raw = final_text
+            token_usage = _Usage()
+            kickoff_grades = grade_log     # opsiyonel telemetri (debug UI)
+            kickoff_outputs = outputs      # task_key -> son cikti
+
+        return _Result()
 
     def create_analysis_crew(self) -> Crew:
         """Software Architect: is kalemini oku, repo'yu incele, teknik tasarim olustur.
