@@ -10,3 +10,12 @@ src/agile_sdlc_crew/config/provider_credentials.yaml
 # Loglar ve runtime state
 /tmp/crew_*.log
 src/agile_sdlc_crew/web/status.json
+
+# Kickoff debug runtime state (ogrenilmis kural deposu — env override edilebilir)
+.crew_kickoff_guidance.json
+
+# Editor/dashboard backup'lari
+*.bak
+
+# Eski/yerel completion raporlari
+completion_report.md
