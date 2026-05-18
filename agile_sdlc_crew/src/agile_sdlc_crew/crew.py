@@ -430,8 +430,14 @@ class AgileSDLCCrew:
             ),
             llm=build_for_agent("senior_developer"),
             verbose=True,
-            max_iter=2,
-            tools=[],
+            max_iter=3,
+            tools=[
+                # Developer kod_noktalari ve teknik_yaklasim bolumlerinde
+                # gercek dosya:fonksiyon vermek icin repo'yu gezmeli; soyut
+                # 'log writer/helper' diye yuvarlak isim YASAK.
+                AzureDevOpsBrowseRepoTool(local_repo_mgr=self.local_repo_mgr),
+                AzureDevOpsSearchCodeTool(local_repo_mgr=self.local_repo_mgr),
+            ],
         )
         return ba, arch, dev, sm
 
@@ -548,6 +554,15 @@ class AgileSDLCCrew:
             grading_enabled,
             grade_threshold,
             grade_max_retries,
+            _detect_truncation_heuristic,
+        )
+        from agile_sdlc_crew.kickoff_sections import (
+            SECTION_PLANS,
+            RENDER_ORDER,
+            CLOSING_SUFFIX,
+            PRESENTATION_HEADER,
+            build_section_task_description,
+            summarize_agent_output,
         )
 
         log = _logging.getLogger("pipeline")
@@ -588,7 +603,12 @@ class AgileSDLCCrew:
         grade_log: dict[str, list[dict]] = {}
         total_pt = total_ct = total_tt = 0
         start_t = _time.time()
-        wi_context = (inputs.get("previous_context") or "")[:1800]
+        # FULL ctx — split agent path'inde HEDEF REPO blogu kesilmemeli
+        # (flow.py bunu ctx'in sonuna ekler; eski [:1800] kesim onu yutuyordu).
+        # build_section_task_description kendi icinde icerigi parcalayip
+        # repo_block'u ayri rapor edecek.
+        wi_context_full = inputs.get("previous_context") or ""
+        wi_context = wi_context_full[:1800]  # legacy: grader'a giden ozet
 
         # Placeholder substitution: kickoff task description'larinda yalniz
         # `{work_item_id}` ve `{previous_context}` placeholder'lari kullaniliyor.
@@ -622,6 +642,184 @@ class AgileSDLCCrew:
             base_desc_raw = cfg["description"]
             expected = cfg["expected_output"]
 
+            grade_log[key] = []
+            result_text = ""
+            final_grade = None
+
+            # ── PATH A: Per-section split (Architect/Dev/SM) ──────────────
+            # Stream top-down + sinirli output butcesi → tek-cagrida sonun
+            # kesilmesi sorunu. Coz: agent'i N mini-cagriya bol, her sub-call
+            # tek bolum uretsin (~300-800 char). Truncation fiziksel olarak
+            # imkansiz hale gelir.
+            if key in SECTION_PLANS:
+                sections = SECTION_PLANS[key]
+                # Onceki agent'larin ciktilarini OZETLE (full degil, butce icin)
+                prior_summary_parts = []
+                for pk in prior_keys:
+                    if outputs.get(pk):
+                        plabel = next((p[2] for p in plan if p[0] == pk), pk)
+                        prior_summary_parts.append(
+                            f"### {plabel}\n{summarize_agent_output(outputs[pk], 800)}"
+                        )
+                prior_summary = "\n\n".join(prior_summary_parts) if prior_summary_parts else "(yok)"
+
+                own_sections: dict[str, str] = {}
+                section_attempts_log: list[dict] = []
+
+                for section in sections:
+                    desc = build_section_task_description(
+                        section=section,
+                        persona_intro=base_desc_raw,
+                        wi_context=wi_context_full,   # FULL — HEDEF REPO bloğu kesilmesin
+                        prior_agents_summary=prior_summary,
+                        own_prior_sections=own_sections,
+                    )
+                    desc = _safe_sub(desc)
+
+                    # Sub-call structural retry — max 2 deneme
+                    sec_text = ""
+                    sec_attempts = 0
+                    for sec_attempt in range(1, 3):
+                        sec_attempts = sec_attempt
+                        t = Task(
+                            description=desc,
+                            expected_output=_safe_sub(section.expected_template),
+                            agent=agent,
+                        )
+                        mini = Crew(
+                            agents=[agent], tasks=[t],
+                            process=Process.sequential, verbose=True, memory=False,
+                        )
+                        t0 = _time.time()
+                        log.info(
+                            f"  Kickoff [{label}/{section.key}] sub #{sec_attempt} basliyor"
+                        )
+                        try:
+                            res = mini.kickoff()
+                        except Exception as e:
+                            log.error(
+                                f"  Kickoff [{label}/{section.key}] sub #{sec_attempt} HATA: {e}"
+                            )
+                            if sec_attempt >= 2:
+                                break
+                            continue
+
+                        elapsed = _time.time() - t0
+                        sec_text = (res.raw or "").strip() if res is not None else ""
+
+                        # Token toplama
+                        usage = getattr(res, "token_usage", None)
+                        pt = ct = tt = 0
+                        if usage:
+                            try:
+                                pt = int(getattr(usage, "prompt_tokens", 0) or 0)
+                                ct = int(getattr(usage, "completion_tokens", 0) or 0)
+                                tt = int(getattr(usage, "total_tokens", 0) or 0) or (pt + ct)
+                            except Exception:
+                                pass
+                        total_pt += pt
+                        total_ct += ct
+                        total_tt += tt
+
+                        # Structural check — eslesik bold + bos olmama
+                        is_trunc, reason = _detect_truncation_heuristic(sec_text)
+                        if sec_text and not is_trunc:
+                            log.info(
+                                f"  ✅ [{label}/{section.key}] sub #{sec_attempt} "
+                                f"({elapsed:.0f}s, {len(sec_text)}c, +{pt}i/{ct}o)"
+                            )
+                            break
+                        log.warning(
+                            f"  ❌ [{label}/{section.key}] sub #{sec_attempt} "
+                            f"yapisal hata: {reason or 'bos'} — yeniden denenecek"
+                        )
+
+                    own_sections[section.key] = sec_text
+                    section_attempts_log.append({
+                        "section": section.key,
+                        "label": section.label,
+                        "attempts": sec_attempts,
+                        "chars": len(sec_text),
+                    })
+
+                # Compose: render order'a gore birlestir + presentation header + closing
+                rorder = RENDER_ORDER.get(key) or [s.key for s in sections]
+                composed_parts = [own_sections[k] for k in rorder if own_sections.get(k)]
+                composed = "\n\n".join(composed_parts)
+                header = PRESENTATION_HEADER.get(key, "")
+                if header:
+                    header = _safe_sub(header)
+                closing = CLOSING_SUFFIX.get(key, "")
+                if closing:
+                    closing = _safe_sub(closing)
+                result_text = (header + composed + closing).strip()
+
+                # Whole-output grading (mevcut Haiku akisi) — coherence kontrolu
+                if grading_on:
+                    grade = grade_output(
+                        task_key=key,
+                        agent_label=label,
+                        description=base_desc_raw,
+                        expected_output=expected,
+                        actual_output=result_text,
+                        work_item_context=wi_context,
+                    )
+                    final_grade = grade
+                    grade_log[key].append({
+                        "attempt": 1,
+                        "score": grade.score,
+                        "skipped": grade.skipped,
+                        "weaknesses": grade.weaknesses,
+                        "suggestions": grade.suggestions,
+                        "reasoning": grade.reasoning,
+                        "sections_meta": section_attempts_log,
+                    })
+                    status_emoji = "✅" if grade.passing(threshold) else "❌"
+                    skip_note = " (grader skipped)" if grade.skipped else ""
+                    log.info(
+                        f"  {status_emoji} Kickoff [{label}] compose grade={grade.score}/10 "
+                        f"(esik={threshold}){skip_note}"
+                    )
+
+                # Make sure section attempts log appear even if grading off
+                if not grading_on:
+                    grade_log[key].append({
+                        "attempt": 1,
+                        "score": 0,
+                        "skipped": True,
+                        "weaknesses": [],
+                        "suggestions": [],
+                        "reasoning": "grading disabled",
+                        "sections_meta": section_attempts_log,
+                    })
+
+                outputs[key] = result_text
+
+                # Log dosyasina yaz (split agent)
+                try:
+                    with open(_log_file, "a", encoding="utf-8") as _f:
+                        _f.write(f"\n---\n\n## {label} ({key}) — SPLIT\n\n")
+                        if final_grade is not None:
+                            _f.write(
+                                f"_Compose grade: **{final_grade.score}/10** "
+                                f"(esik={threshold})_\n\n"
+                            )
+                        _f.write(
+                            "<details><summary>Section sub-calls</summary>\n\n"
+                        )
+                        for sm in section_attempts_log:
+                            _f.write(
+                                f"- {sm['label']} ({sm['section']}): "
+                                f"{sm['attempts']} deneme, {sm['chars']} char\n"
+                            )
+                        _f.write("\n</details>\n\n")
+                        _f.write(result_text + "\n")
+                except Exception as e:
+                    log.warning(f"  Kickoff log yazma hatasi ({label}): {e}")
+                continue
+            # ── End PATH A ────────────────────────────────────────────────
+
+            # ── PATH B: Single-call (BA gibi) — mevcut yol ────────────────
             # Onceki uzman ciktilarini description'a ek olarak gom (mini-crew
             # task'lari arasinda CrewAI context auto-link YOK)
             prior_block = ""
@@ -641,9 +839,6 @@ class AgileSDLCCrew:
             expected_sub = _safe_sub(expected)
 
             current_desc = base_desc
-            result_text = ""
-            final_grade = None
-            grade_log[key] = []
 
             attempts = 1 + (max_retries if grading_on else 0)
             for attempt in range(1, attempts + 1):
