@@ -80,38 +80,15 @@ kickoff_arch_task:
   description: >
     GOREV: Team Lead (Can) perspektifini ustlen. Odak gruba katki ver.
 
-    IS BILGISI VE BAGLAM:
-    {previous_context}
+    Zaman cizelgesi, ekip kapasitesi ve diger sistemlerle entegrasyon
+    risklerine bak. Pragmatik bir dengeleyicisin — ideali değil,
+    uygulanabiliri savunursun. WI BAĞLAMI ve diğer uzmanların katkıları
+    her bir alt-çağrıda ayrıca verilecek.
 
-    Zaman cizelgesi, ekip kapasitesi ve diger sistemlerle entegrasyon risklerine bak.
-    Pragmatik bir dengeleyicisin — ideali değil, uygulanabiliri savunursun.
-
-    ## ÇIKTI DİSİPLİNİ (zorunlu — ihlal edersen retry alirsin)
-    - **Bütçe**: toplam çıktı ~2000 karakteri geçmesin. Dolgu/açılış cümleleri
-      YASAK ("Genel olarak…", "Bu durumda…", "Söyleyebilirim ki…" yazma).
-    - **Form**: paragraf yerine **bullet/madde** tercih et. Her madde tek
-      cümle.
-    - **Kapanış**: tüm `**bold**` etiketleri eşleşik kapansın. Numaralı liste
-      ortada bırakılmasın. Son karakter nokta olsun.
-    - **Eksiksizlik**: format alanlarının HEPSİ dolu olmalı. Bir bölümü
-      yarım bırakacaksan onu kısalt — ASLA atlama. Özellikle "Entegrasyon
-      Riskleri" ve "Kapsam Sınırı Önerisi" alanları sona yazıldığı için
-      bunlara yer ayır.
-
-    ## ADIMLAR
-
-    ADIM 1 — Analist'in Endişelerini Yanıtla (max 4 madde, her biri 1 cümle):
-    Deniz'in açık sorularına Team Lead perspektifinden onay/abartı ayrımıyla
-    kısa yanıt ver.
-
-    ADIM 2 — 3 KRİTİK SORU/ENDİŞE (her biri 1 cümle):
-    a) Hangi mevcut sistem/modül etkilenecek? Entegrasyon riski nerede?
-    b) Hangi başka ekibe/servise bağımlı? Koordinasyon gerekiyor mu?
-    c) Scope creep riski var mı?
-
-    ADIM 3 — TAHMINI REPO/MODÜL (max 3 madde):
-    Context'teki HEDEF REPO ve dosya yapısına dayanarak modül/dosya seviyesinde
-    belirt. Spekülasyon yapma — emin değilsen "Belirsiz" yaz.
+    NOT: Bu agent'ın çıktısı pipeline tarafından bölüm bölüm üretilir
+    (kickoff_sections.SECTION_PLANS["kickoff_arch_task"]). Sen her
+    sub-call'da sadece bir bölüm üreteceksin — sub-call promptu hangi
+    bölümü istediğini ve format'ını açıkça söyleyecek.
 
     IS KALEMI: #{work_item_id}
   expected_output: >
@@ -137,38 +114,14 @@ kickoff_dev_task:
   description: >
     GOREV: Developer (Baris) perspektifini ustlen. Odak gruba katki ver.
 
-    IS BILGISI VE BAGLAM:
-    {previous_context}
+    "Nasıl kodlarız?" diye bakarsın. Karmaşıklık, teknoloji uyumu ve teknik
+    borç yaratma riskine odaklanırsın. WI BAĞLAMI ve diğer uzmanların
+    katkıları her bir alt-çağrıda ayrıca verilecek.
 
-    "Nasıl kodlarız?" diye bakarsın. Karmaşıklık, teknoloji uyumu ve teknik borç
-    yaratma riskine odaklanırsın.
-
-    ## ÇIKTI DİSİPLİNİ (zorunlu — ihlal edersen retry alirsin)
-    - **Bütçe**: toplam çıktı ~2000 karakteri geçmesin. Dolgu/açılış cümleleri
-      YASAK. Diğer uzmanlara yanıt verirken uzun yorum yapma, tek cümle yeter.
-    - **Form**: paragraf yerine **bullet/madde**. Her madde tek cümle.
-    - **Kapanış**: tüm `**bold**` etiketleri kapansın. Numaralı liste ortada
-      bırakılmasın. Son karakter nokta olsun.
-    - **Eksiksizlik**: format alanlarının HEPSİ dolu olmalı. Geçmişte
-      "Karmaşıklık", "Dikkat Edilmesi Gereken Kod Noktaları" ve "Önerilen
-      Teknik Yaklaşım" alanları sona yazıldığı için kesiliyordu — bunlara
-      YETERLİ yer ayır. Bir bölümü yarım bırakacaksan onu kısalt, atlama.
-
-    ## ADIMLAR
-
-    ADIM 1 — Analist ve Team Lead'in Endişelerini Yanıtla (max 4 madde):
-    Deniz ve Can'a Developer gözünden TEK cümle ile yanıt. Teknik açıdan
-    doğrulanan, yanlış anlanan veya daha riskli bulduklarınla işaretle.
-
-    ADIM 2 — 3 KRİTİK SORU/ENDİŞE (her biri 1 cümle):
-    a) Mevcut kod tabanıyla uyumlu mu? Yeniden yazma riski var mı?
-    b) Hangi edge case'ler kodda zorunlu? (null/race/event-order vs.)
-    c) Teknik borç riski + hangi kısayollardan kaçınmalıyız?
-
-    ADIM 3 — KARMAŞıKLıK + KOD HARİTASI + YAKLAŞIM (zorunlu, atlama):
-    - Karmaşıklığı Düşük/Orta/Yüksek puanla, 1 cümle gerekçe.
-    - 2-4 madde halinde dokunulacak dosya/fonksiyon ismi (somut path).
-    - 3-5 maddelik somut teknik yaklaşım (uygulama adımları).
+    NOT: Bu agent'ın çıktısı pipeline tarafından bölüm bölüm üretilir
+    (kickoff_sections.SECTION_PLANS["kickoff_dev_task"]). Sen her sub-call'da
+    sadece bir bölüm üreteceksin — sub-call promptu hangi bölümü istediğini
+    ve format'ını açıkça söyleyecek.
 
     IS KALEMI: #{work_item_id}
   expected_output: >
@@ -262,34 +215,18 @@ kickoff_uat_task:
 
 kickoff_sm_close_task:
   description: >
-    GOREV: Odak grup toplantisini kapat. "Kritik Tasarim Gozden Gecirme" tutanagini hazirla.
+    GOREV: Odak grup toplantisini kapat. "Kritik Tasarim Gozden Gecirme"
+    tutanagini hazirla.
 
-    IS BILGISI VE BAGLAM:
-    {previous_context}
+    Tum uzmanların (Deniz/Can/Barış/Ece) katkılarını derle. Bu tutanak tüm
+    pipeline boyunca tek referans kaynağı olacak. WI BAĞLAMI ve diğer
+    uzmanların katkıları her bir alt-çağrıda ayrıca verilecek.
 
-    Tum uzmanların (Deniz/Can/Barış) katkılarını derle.
-    Bu tutanak tüm pipeline boyunca tek referans kaynağı olacak.
-
-    TUTANAK YAPISI (4 bölüm):
-
-    1. TOPLANTI ÖZETİ
-       Fikrin/değişikliğin genel uygulanabilirliği. Ekip konsensüsü. Kapsam sınırı.
-
-    2. DİSİPLİN BAZLI ANALİZ
-       Her uzmanın ana bulgusunu (1-2 madde) disiplin başlığı altında özetle:
-       - Analiz (Deniz): İş kuralı/mantıksal bulgular
-       - Yazılım (Barış): Teknik yaklaşım ve kodlama uyarıları
-       - Yönetim (Can): Entegrasyon/kapsam kararları
-       - Test: Diger uzmanlarin ciktilarina dayanarak kritik test senaryolari ve hata yollari
-
-    3. KRİTİK RİSK TABLOSU
-       Tüm ekibin dile getirdiği riskleri şu formatta listele:
-       | Risk | Etki Seviyesi (Yüksek/Orta/Düşük) | Önerilen Önlem |
-
-    4. BACKLOG ADAYLARI
-       - Açık kalan sorular için kullanıcı hikayeleri veya teknik görevler
-       - Kabul kriterleri listesi (nihai, net, ölçülebilir)
-       - Teknik tasarımın kesinlikle ele alması gereken edge case'ler
+    NOT: Bu agent'ın çıktısı pipeline tarafından bölüm bölüm üretilir
+    (kickoff_sections.SECTION_PLANS["kickoff_sm_close_task"]). Sen her
+    sub-call'da sadece bir bölüm üreteceksin (Bölüm 4 → 3 → 2 → 1
+    üretim sırasıyla, ama render sırasında 1 → 4 olarak sunulur).
+    Sub-call promptu hangi bölümü istediğini ve format'ını açıkça söyleyecek.
 
     IS KALEMI: #{work_item_id}
   expected_output: >
