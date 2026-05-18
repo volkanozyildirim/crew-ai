@@ -84,6 +84,16 @@ profiles:
     model: claude-sonnet-4-20250514
     max_tokens: 8192
 
+  # Kickoff agent ciktilarini puanlayan hizli/ucuz Haiku grader.
+  # CREW_KICKOFF_GRADING=1 ise scrum master rolunde her kickoff
+  # ciktisini 1-10 araliginda skorlar; <8 ise iyilestirilmis prompt ile retry.
+  # claude_cli (subprocess, API key gerekmez) — projedeki diger agentlarla
+  # ayni OAuth oturumunu kullanir. Grader Haiku, agent'lar Sonnet/Opus.
+  kickoff_grader:
+    provider: claude_cli
+    model: haiku
+    max_tokens: 2048
+
 
 # Agent → default profile.
 # CREW_USE_LOCAL_LLM=1 ise resolver otomatik olarak `*_local` veya

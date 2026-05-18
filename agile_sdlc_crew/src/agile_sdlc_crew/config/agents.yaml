@@ -86,6 +86,7 @@ software_architect:
     - Performans ve guvenlik etkilerini security_perf_notes'ta degerlendir.
     - Cikti SADECE gecerli JSON olmali; serbest metin sizdirma.
     - Onceki adimlarin ciktilari (previous_context) verilmisse bunlari dikkate al.
+    - Gereksiz yorum satirlari ekleme, kritik logicler icin ekleyebilirsin
 
 senior_developer:
   role: >

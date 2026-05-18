@@ -153,11 +153,21 @@ def _extract_dev_output(code_result) -> str:
 
 # ── State Model ──────────────────────────────────────
 
+class _KickoffOnlyStop(Exception):
+    """Sentinel: kickoff-only modunda step0'dan sonra pipeline'i durdurur.
+    main.run_kickoff_only tarafindan yakalanir, basari sayilir."""
+    pass
+
+
 class PipelineState(BaseModel):
     """Flow boyunca tasınan state. Her adim state'i gunceller."""
     work_item_id: str = ""
     use_hal: bool = False
     job_id: int | None = None
+    # Kickoff-only debug: step0 sonrasi durdur. main.run_kickoff_only setler.
+    kickoff_only: bool = False
+    # Bu kickoff icin kullanicinin verdigi extra feedback (refine yolu).
+    kickoff_feedback: str = ""
     previous_context: str = ""
     requirements_text: str = ""
     repo_name: str = ""
@@ -1331,10 +1341,28 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         try:
             import time as _kt
+            # Ogrenilmis yonergeler (gecmis WI'lardan) + bu calistirma icin
+            # kullanici feedback'i — kickoff context'inin basina enjekte edilir.
+            from agile_sdlc_crew import kickoff_guidance as _kg
+            _guidance_block = _kg.format_for_context()
+            extra_prefix = ""
+            if _guidance_block:
+                extra_prefix += _guidance_block + "\n\n"
+            if self.state.kickoff_feedback:
+                extra_prefix += (
+                    "# KULLANICIDAN BU CALISTIRMA ICIN GERI BILDIRIM\n"
+                    f"{self.state.kickoff_feedback.strip()}\n"
+                    "Bu feedback'i tum uzmanlar dikkate almali.\n\n"
+                )
+            if extra_prefix:
+                ctx = extra_prefix + ctx
+
             _log(f"  Kickoff baslatiyor: 4 task, repo={kickoff_repo}")
             _kickoff_t0 = _kt.time()
-            kickoff_crew = self._agile_crew.create_kickoff_crew()
-            kickoff_result = kickoff_crew.kickoff(inputs={
+            # Yeni varsayilan path: task-by-task + Haiku grading + retry.
+            # Klasik tek-Crew calistirma icin CREW_KICKOFF_GRADING=0 ile
+            # `run_kickoff_meeting` grading'i atlayarak ayni interface ile calisir.
+            kickoff_result = self._agile_crew.run_kickoff_meeting(inputs={
                 "work_item_id": self.state.work_item_id,
                 "previous_context": ctx,
                 "target_repo": kickoff_repo,
@@ -1351,12 +1379,78 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.kickoff_text = kickoff_text
         self._append_context("Kickoff Toplantisi", kickoff_text[:3000])
         self._step_done("kickoff_meeting_task", kickoff_text[:3000])
+
+        # Per-agent ciktilarini + grade gecmisini job_id basina JSON'a yaz
+        # (debug UI bunu okur). flow.kickoff_meeting return objesinde varsa kaydet.
+        try:
+            grades_blob = getattr(kickoff_result, "kickoff_grades", None) or {}
+            per_agent = getattr(kickoff_result, "kickoff_outputs", None) or {}
+            self._persist_kickoff_debug(kickoff_text, grades_blob, per_agent, kickoff_repo)
+        except Exception as e:
+            _log(f"  Kickoff debug JSON yazma hatasi: {e}")
+
         _log("  Kickoff toplantisi tamamlandi")
+
+    def _persist_kickoff_debug(
+        self,
+        kickoff_text: str,
+        grades: dict,
+        per_agent: dict,
+        target_repo: str,
+    ) -> None:
+        """Per-agent kickoff cikti + grade gecmisini debug UI icin diske yazar.
+
+        Dosya: /tmp/crew_kickoff/job_<job_id>.json
+        """
+        import json as _json
+        from datetime import datetime as _ddt
+        from pathlib import Path as _PP
+
+        if not self.state.job_id:
+            return
+        out_dir = _PP("/tmp/crew_kickoff")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"job_{self.state.job_id}.json"
+
+        # Plan'daki sirayi koru
+        plan = [
+            ("kickoff_ba_task",       "BA Analiz"),
+            ("kickoff_arch_task",     "Architect"),
+            ("kickoff_dev_task",      "Developer"),
+            ("kickoff_sm_close_task", "SM Tutanak"),
+        ]
+        agents = []
+        for key, label in plan:
+            agents.append({
+                "key": key,
+                "label": label,
+                "output": (per_agent.get(key) or "") if isinstance(per_agent, dict) else "",
+                "attempts": (grades.get(key) or []) if isinstance(grades, dict) else [],
+            })
+
+        payload = {
+            "job_id": self.state.job_id,
+            "work_item_id": self.state.work_item_id,
+            "target_repo": target_repo,
+            "kickoff_only": bool(self.state.kickoff_only),
+            "kickoff_feedback": self.state.kickoff_feedback or "",
+            "saved_at": _ddt.now().isoformat(timespec="seconds"),
+            "agents": agents,
+            "final_text": kickoff_text,
+        }
+        tmp = out_path.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(out_path)
 
     @listen(step0_kickoff_meeting)
     def crew_step4_technical_design(self):
         """Adim 2-3 atlanir, repo ve bagimlilik bilgisi context'e eklenir.
         Teknik tasarim agent'i work item + repo summary ile calisir."""
+        # Kickoff-only debug modunda: step0 ciktilari kaydedildi, durdur.
+        if self.state.kickoff_only:
+            _log("  Kickoff-only modu: step4 ve sonrasi atlanyor, pipeline durduruluyor.")
+            raise _KickoffOnlyStop("kickoff_only mode")
+
         from agile_sdlc_crew.main import _parse_architect_output, _resolve_repo_name
 
         # Step 2-3: Agent'a 67 repo browse ettirmek yerine repo listesini

@@ -358,6 +358,9 @@ header {
       <button class="sm-btn" onclick="triggerRun()">Başlat</button>
     </div>
     <button class="sm-btn ghost" onclick="resetDashboard()">Sıfırla</button>
+    <button class="sm-btn ghost" onclick="openKickoffDebug()" title="Sadece kickoff calistir, sonucu degerlendir, onayla veya iyilestir">
+      <span style="font-size:14px;line-height:1">🎯</span> Kickoff Debug
+    </button>
     <button class="sm-btn settings-btn" onclick="openSettings()" title="Pipeline Ayarları (agentlar, gorevler, LLM, env)">
       <span style="font-size:16px;line-height:1">&#9881;</span> Ayarlar
     </button>
@@ -499,6 +502,72 @@ header {
   <div style="display:flex;gap:5px">
     <button class="sm-btn ghost" onclick="clearSel()">Temizle</button>
     <button class="sm-btn" id="queueBtn" onclick="queueSel()">Kuyruğa Ekle ▶</button>
+  </div>
+</div>
+
+<!-- Kickoff Debug Modal -->
+<div id="kickoffModal" style="display:none;position:fixed;inset:0;z-index:250;background:rgba(0,0,0,0.78);backdrop-filter:blur(4px);" onclick="if(event.target===this)closeKickoffDebug()">
+  <div style="position:absolute;top:3%;left:5%;right:5%;bottom:3%;background:var(--bg-card);border-radius:16px;border:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden">
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="font-size:18px">🎯</span>
+        <h2 style="font-size:16px;font-weight:700">Kickoff Debug — sadece kickoff calistir, sonuc onayla / iyilestir</h2>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="koLoadList()" class="sm-btn ghost" style="font-size:11px;padding:5px 11px" title="Listeyi yenile">↻ Yenile</button>
+        <button onclick="koToggleGuidance()" class="sm-btn ghost" style="font-size:11px;padding:5px 11px" title="Global ogrenilmis kurallar">📚 Yonergeler <span id="koGuidanceCount" style="color:var(--text-dim)"></span></button>
+        <button onclick="closeKickoffDebug()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
+      </div>
+    </div>
+
+    <!-- Body: left list, right detail -->
+    <div style="flex:1;display:grid;grid-template-columns:320px 1fr;min-height:0">
+      <!-- Left: list + new run input -->
+      <div style="border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0">
+        <div style="padding:12px 14px;border-bottom:1px solid var(--border);background:var(--bg-elevated)">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <div style="font-size:11px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Yeni Kickoff Debug</div>
+            <button onclick="koToggleManualWi()" id="koManualWiBtn" style="background:none;border:none;color:var(--text-dim);font-size:10px;cursor:pointer;text-decoration:underline" title="Manuel WI ID gir">manuel</button>
+          </div>
+          <select id="koWiSelect" style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;margin-bottom:7px">
+            <option value="">— Sprint'ten is sec —</option>
+          </select>
+          <input type="text" id="koWiInput" placeholder="Work Item ID (manuel)" style="display:none;width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;margin-bottom:7px" />
+          <textarea id="koFeedbackInput" placeholder="Opsiyonel: bu calistirma icin extra yonlendirme..." rows="2" style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;resize:vertical;font-family:inherit"></textarea>
+          <button onclick="koStartRun()" class="sm-btn" style="width:100%;margin-top:7px;font-size:12px;padding:7px 10px">▶ Kickoff Calistir</button>
+        </div>
+        <div style="padding:10px 12px 4px 12px;font-size:11px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Gecmis Calistirmalar</div>
+        <div id="koList" style="flex:1;overflow-y:auto;padding:4px 8px 12px 8px">
+          <div style="padding:14px;color:var(--text-dim);font-size:12px">Yukleniyor...</div>
+        </div>
+      </div>
+
+      <!-- Right: detail -->
+      <div id="koDetail" style="overflow-y:auto;padding:18px 22px;min-height:0">
+        <div style="color:var(--text-dim);font-size:13px;padding:20px 0">
+          Soldan bir calistirma sec veya yeni bir kickoff baslat.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Kickoff Guidance Modal (alt) -->
+<div id="koGuidanceModal" style="display:none;position:fixed;inset:0;z-index:300;background:rgba(0,0,0,0.78);backdrop-filter:blur(4px);" onclick="if(event.target===this)koToggleGuidance()">
+  <div style="position:absolute;top:8%;left:15%;right:15%;bottom:8%;background:var(--bg-card);border-radius:14px;border:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden">
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="font-size:18px">📚</span>
+        <h2 style="font-size:15px;font-weight:700">Ogrenilmis Yonergeler — her kickoff'a enjekte edilir</h2>
+      </div>
+      <button onclick="koToggleGuidance()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div style="padding:14px 18px;border-bottom:1px solid var(--border);background:var(--bg-elevated)">
+      <textarea id="koGuidanceText" placeholder="Yeni global yonerge ekle (orn: 'X repo'sunda sepet endpoint'i /v2/cart altinda yer alir')" rows="2" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;resize:vertical;font-family:inherit"></textarea>
+      <button onclick="koAddGuidance()" class="sm-btn" style="margin-top:8px;font-size:12px;padding:6px 14px">+ Ekle</button>
+    </div>
+    <div id="koGuidanceList" style="flex:1;overflow-y:auto;padding:10px 14px"></div>
   </div>
 </div>
 
@@ -1644,6 +1713,513 @@ document.getElementById('cfgEditor').addEventListener('keydown',function(e){
 });
 
 loadTeams();
+
+// ───────────────────────────────────────────────────────────
+// Kickoff Debug
+// ───────────────────────────────────────────────────────────
+let _koSelectedId=null;
+let _koPollTimer=null;
+let _koLastStatusById={}; // id → status
+let _koListInFlight=false;
+let _koDetailInFlight=false;
+// WebSocket: tek aktif baglanti
+let _koWS=null;
+let _koWSJobId=null;
+let _koWSBackoff=1000;
+
+function escHtml(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function koFmtTime(s){if(!s)return '-';try{return new Date(s).toLocaleString('tr-TR',{dateStyle:'short',timeStyle:'short'})}catch{return s}}
+function koStatusColor(s){return ({queued:'#888',running:'#3b82f6',completed:'#10b981',failed:'#ef4444'})[s]||'#888'}
+
+function openKickoffDebug(){
+  document.getElementById('kickoffModal').style.display='block';
+  koPopulateWiSelect();
+  koLoadList();
+  koLoadGuidanceCount();   // sadece modal acilirken bir kez
+  if(_koPollTimer)clearInterval(_koPollTimer);
+  // List poll: 8s — yalniz list HTML'i + status transition kontrolu yapar
+  _koPollTimer=setInterval(()=>{
+    if(document.getElementById('kickoffModal').style.display==='block') koLoadList(true);
+  },8000);
+}
+
+function koPopulateWiSelect(){
+  // Sprint board'tan yuklenen 'items' global'inden besleniyor.
+  // Kullanici sprint sectiyse hazirdir; sectimediyse select bos kalir.
+  const sel=document.getElementById('koWiSelect');
+  if(!sel)return;
+  const cur=sel.value;
+  let opts=['<option value="">— Sprint\'ten is sec —</option>'];
+  const list=(typeof items!=='undefined' && Array.isArray(items))?items:[];
+  if(!list.length){
+    opts.push('<option value="" disabled>(sprint secilmedi — yandaki dropdown\'dan secin veya "manuel"i acin)</option>');
+  } else {
+    // Tipe gore grupla
+    const groups={};
+    for(const it of list){
+      const t=it.type||'Other';
+      if(!groups[t])groups[t]=[];
+      groups[t].push(it);
+    }
+    for(const t of Object.keys(groups)){
+      opts.push('<optgroup label="'+escHtml(t)+' ('+groups[t].length+')">');
+      for(const it of groups[t]){
+        const label='#'+it.id+' · '+(it.title||'').slice(0,80)+(it.state?' ['+it.state+']':'');
+        opts.push('<option value="'+it.id+'">'+escHtml(label)+'</option>');
+      }
+      opts.push('</optgroup>');
+    }
+  }
+  sel.innerHTML=opts.join('');
+  // Selection geri yukle (modal acildiginda kullanici secimi kaybetmesin)
+  if(cur)sel.value=cur;
+}
+
+function koToggleManualWi(){
+  const sel=document.getElementById('koWiSelect');
+  const inp=document.getElementById('koWiInput');
+  const btn=document.getElementById('koManualWiBtn');
+  if(inp.style.display==='none'){
+    sel.style.display='none';
+    inp.style.display='block';
+    btn.textContent='sprintten sec';
+    inp.focus();
+  } else {
+    sel.style.display='block';
+    inp.style.display='none';
+    btn.textContent='manuel';
+  }
+}
+function closeKickoffDebug(){
+  document.getElementById('kickoffModal').style.display='none';
+  if(_koPollTimer){clearInterval(_koPollTimer);_koPollTimer=null}
+  koCloseWS();
+}
+
+function koCloseWS(){
+  if(_koWS){
+    try{_koWS.onclose=null;_koWS.close()}catch(e){}
+    _koWS=null;
+  }
+  _koWSJobId=null;
+  _koWSBackoff=1000;
+}
+
+function koSetWSStatus(text,color){
+  const el=document.getElementById('koWSStatus');
+  if(!el)return;
+  el.textContent=text;
+  el.style.color=color||'var(--text-dim)';
+}
+
+function koAppendLog(lines,initial){
+  const pre=document.getElementById('koLogTail');
+  if(!pre)return;
+  if(initial){
+    pre.textContent=lines.length?lines.join('\n'):'(henuz log yok)';
+  } else if(lines.length){
+    pre.textContent+=(pre.textContent.endsWith('\n')?'':'\n')+lines.join('\n');
+  }
+  const cnt=document.getElementById('koLogCount');
+  if(cnt) cnt.textContent=pre.textContent.split('\n').length+' satir';
+  if(document.getElementById('koLogAutoscroll')?.checked){
+    pre.scrollTop=pre.scrollHeight;
+  }
+}
+
+function koOpenWS(jobId){
+  // Ayni job icin zaten acik WS varsa dokunma
+  if(_koWS && _koWSJobId===jobId && (_koWS.readyState===0 || _koWS.readyState===1)) return;
+  koCloseWS();
+  _koWSJobId=jobId;
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  const url=proto+'//'+location.host+'/ws/kickoff-runs/'+jobId;
+  koSetWSStatus('baglaniyor...','#fbbf24');
+  let ws;
+  try{ws=new WebSocket(url)}
+  catch(e){koSetWSStatus('WS hata: '+e.message,'#ef4444');return}
+  _koWS=ws;
+
+  ws.onopen=()=>{
+    if(_koWSJobId!==jobId){try{ws.close()}catch(e){};return}
+    _koWSBackoff=1000;
+    koSetWSStatus('canli','#10b981');
+  };
+
+  ws.onmessage=(ev)=>{
+    if(_koWSJobId!==jobId)return;  // eski job baglantisi
+    let m;try{m=JSON.parse(ev.data)}catch(e){return}
+    if(m.type==='log'){
+      koAppendLog(m.lines||[], !!m.initial);
+    } else if(m.type==='status'){
+      // Status badge'i guncelle (re-render gerek yok)
+      const head=document.querySelector('#koDetail [data-status-badge]');
+      if(head){
+        head.textContent=m.status;
+        head.style.background=koStatusColor(m.status)+'22';
+        head.style.color=koStatusColor(m.status);
+      }
+      _koLastStatusById[jobId]=m.status;
+    } else if(m.type==='done'){
+      koSetWSStatus('tamamlandi','var(--text-dim)');
+      // Tek seferlik tam re-render (per-agent kartlari + buttons icin)
+      if(m.detail){
+        koRenderDetail(m.detail);
+      } else {
+        koShowDetail(jobId);
+      }
+    } else if(m.type==='error'){
+      koSetWSStatus('hata: '+(m.message||'?'),'#ef4444');
+    }
+  };
+
+  ws.onerror=()=>{
+    koSetWSStatus('hata','#ef4444');
+  };
+
+  ws.onclose=()=>{
+    if(_koWSJobId!==jobId)return;  // farkli job'a gectik, reconnect yok
+    // Sadece running/queued state'inde reconnect
+    const st=_koLastStatusById[jobId];
+    if(st==='completed'||st==='failed'){koSetWSStatus('kapali','var(--text-dim)');return}
+    // Exponential backoff (1s → 2s → 4s → max 10s)
+    const wait=Math.min(_koWSBackoff,10000);
+    _koWSBackoff=Math.min(_koWSBackoff*2,10000);
+    koSetWSStatus('yeniden baglaniyor ('+(wait/1000)+'s)...','#fbbf24');
+    setTimeout(()=>{if(_koWSJobId===jobId)koOpenWS(jobId)},wait);
+  };
+}
+
+async function koLoadList(silent){
+  if(_koListInFlight) return;   // concurrent guard
+  _koListInFlight=true;
+  try{
+    const r=await fetch('/api/kickoff-runs');
+    const d=await r.json();
+    const runs=d.runs||[];
+    const el=document.getElementById('koList');
+    if(!runs.length){
+      el.innerHTML='<div style="padding:14px;color:var(--text-dim);font-size:12px">Henuz kickoff debug calistirilmadi.</div>';
+    }else{
+      el.innerHTML=runs.map(r=>{
+        const sel=r.id===_koSelectedId?'background:rgba(108,92,231,0.18);border-left:3px solid var(--accent)':'border-left:3px solid transparent';
+        const approved=r.kickoff_approved?'<span title="Onaylandi" style="color:#10b981;margin-left:6px">✓</span>':'';
+        const fb=r.kickoff_feedback?` <span title="Feedback ile" style="color:#fbbf24">💬</span>`:'';
+        const parent=r.parent_job_id?`<span style="font-size:10px;color:var(--text-dim)" title="Parent">↳#${r.parent_job_id}</span>`:'';
+        return `<div onclick="koShowDetail(${r.id})" style="padding:8px 10px;margin-bottom:4px;border-radius:6px;cursor:pointer;${sel};transition:background .12s" onmouseover="if(${r.id}!==_koSelectedId)this.style.background='rgba(255,255,255,0.04)'" onmouseout="if(${r.id}!==_koSelectedId)this.style.background='transparent'">
+          <div style="display:flex;justify-content:space-between;gap:8px">
+            <div style="font-weight:600;font-size:12px">#${r.id} <span style="color:var(--text-dim);font-weight:500">· WI #${escHtml(r.work_item_id)}</span> ${approved}${fb}</div>
+            <span style="font-size:10px;padding:2px 6px;border-radius:8px;background:${koStatusColor(r.status)}22;color:${koStatusColor(r.status)};text-transform:uppercase;font-weight:600;letter-spacing:.03em">${r.status}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px">
+            <div style="font-size:10px;color:var(--text-dim)">${koFmtTime(r.created_at)}</div>
+            ${parent}
+          </div>
+        </div>`;
+      }).join('');
+    }
+    // Hicbir secim yoksa en yeni run'i otomatik sec
+    if(!_koSelectedId && runs.length){
+      _koSelectedId=runs[0].id;
+      _koLastStatusById[_koSelectedId]=runs[0].status;
+      koShowDetail(_koSelectedId);
+      return;
+    }
+    // Silent poll: yalnizca STATUS TRANSITION oldugunda detayi yeniden render et.
+    // (Re-render log paneli yok eder; running boyunca log paneli kendi polling'i ile gunceller.)
+    if(_koSelectedId){
+      const cur=runs.find(x=>x.id===_koSelectedId);
+      if(cur){
+        const prev=_koLastStatusById[_koSelectedId];
+        if(prev !== cur.status){
+          _koLastStatusById[_koSelectedId]=cur.status;
+          if(!silent){
+            koShowDetail(_koSelectedId);
+          } else {
+            // running → completed/failed gibi gercek bir gecisse re-render et
+            const transitions=[['running','completed'],['running','failed'],['queued','running']];
+            if(transitions.some(([a,b])=>prev===a && cur.status===b)){
+              koShowDetail(_koSelectedId);
+            }
+          }
+        }
+      }
+    }
+  }catch(e){console.error('koLoadList',e)}
+  finally{_koListInFlight=false}
+}
+
+async function koLoadGuidanceCount(){
+  try{
+    const r=await fetch('/api/kickoff-guidance');
+    const d=await r.json();
+    document.getElementById('koGuidanceCount').textContent='('+(d.rules?.length||0)+')';
+  }catch(e){}
+}
+
+async function koStartRun(){
+  // Sprint'ten secim veya manuel input — hangisi gorunuyorsa onu al
+  const inp=document.getElementById('koWiInput');
+  const sel=document.getElementById('koWiSelect');
+  let wi='';
+  if(inp.style.display!=='none') wi=inp.value.trim();
+  else wi=(sel.value||'').trim();
+  const fb=document.getElementById('koFeedbackInput').value.trim();
+  if(!wi){alert('Work Item secin veya manuel ID girin');return}
+  try{
+    const r=await fetch('/api/kickoff-runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:wi,feedback:fb})});
+    const d=await r.json();
+    if(d.job_id){
+      document.getElementById('koWiInput').value='';
+      document.getElementById('koWiSelect').value='';
+      document.getElementById('koFeedbackInput').value='';
+      _koSelectedId=d.job_id;
+      await koLoadList();
+      koShowDetail(d.job_id);
+    }else alert('Hata: '+(d.error||'bilinmiyor'));
+  }catch(e){alert('Baglanti: '+e)}
+}
+
+async function koShowDetail(jobId,silent){
+  if(_koDetailInFlight) return;
+  _koDetailInFlight=true;
+  _koSelectedId=jobId;
+  const det=document.getElementById('koDetail');
+  if(!silent) det.innerHTML='<div style="color:var(--text-dim);font-size:13px">Yukleniyor...</div>';
+  try{
+    const r=await fetch('/api/kickoff-runs/'+jobId);
+    const d=await r.json();
+    if(d.error){det.innerHTML='<div style="color:#ef4444">'+escHtml(d.error)+'</div>';return}
+    koRenderDetail(d);
+    if(d?.job?.status) _koLastStatusById[jobId]=d.job.status;
+  }catch(e){det.innerHTML='<div style="color:#ef4444">Baglanti hatasi: '+escHtml(String(e))+'</div>'}
+  finally{_koDetailInFlight=false}
+}
+
+function koRenderDetail(d){
+  const j=d.job||{}, dbg=d.debug;
+  const status=j.status||'unknown';
+  // Farkli/biten bir job'a gecildiyse WS'yi temizle
+  if(j.id && _koWSJobId && _koWSJobId!==j.id) koCloseWS();
+  if(status!=='running' && status!=='queued') koCloseWS();
+  const wi=j.work_item_id||'?';
+  const det=document.getElementById('koDetail');
+
+  // Header summary
+  let html='';
+  html+=`<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:10px;flex-wrap:wrap">
+    <div>
+      <h3 style="font-size:17px;margin:0">Kickoff #${j.id} · WI #${escHtml(String(wi))}</h3>
+      <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;font-size:11px">
+        <span data-status-badge style="padding:3px 9px;border-radius:10px;background:${koStatusColor(status)}22;color:${koStatusColor(status)};text-transform:uppercase;font-weight:600;letter-spacing:.04em">${status}</span>
+        ${j.kickoff_approved?'<span style="padding:3px 9px;border-radius:10px;background:#10b98122;color:#10b981;font-weight:600">✓ Onaylandi</span>':''}
+        ${j.parent_job_id?`<span style="padding:3px 9px;border-radius:10px;background:var(--bg-elevated);color:var(--text-dim)" title="Iyilestirme zinciri">↳ #${j.parent_job_id}</span>`:''}
+        <span style="padding:3px 9px;border-radius:10px;background:var(--bg-elevated);color:var(--text-dim)">${koFmtTime(j.created_at)}</span>
+      </div>
+    </div>
+  </div>`;
+
+  if(j.kickoff_feedback){
+    html+=`<div style="padding:10px 12px;border-radius:8px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);margin-bottom:14px">
+      <div style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Bu calistirma icin kullanici feedback'i</div>
+      <div style="font-size:13px;white-space:pre-wrap">${escHtml(j.kickoff_feedback)}</div>
+    </div>`;
+  }
+  if(j.error_message){
+    html+=`<div style="padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#fca5a5;margin-bottom:14px;font-size:12px">
+      <b>Hata:</b> ${escHtml(j.error_message)}
+    </div>`;
+  }
+
+  // Per-agent cards
+  if(status==='completed' && dbg && Array.isArray(dbg.agents) && dbg.agents.length){
+    html+='<div style="display:grid;gap:10px;margin-bottom:18px">';
+    for(const a of dbg.agents){
+      const attempts=a.attempts||[];
+      const last=attempts.length?attempts[attempts.length-1]:null;
+      const score=last?last.score:null;
+      const passing=score!=null && score>=8;
+      const scoreColor=score==null?'#888':(passing?'#10b981':(score>=5?'#fbbf24':'#ef4444'));
+      let scoreBadge='';
+      if(score!=null){
+        scoreBadge=`<span style="padding:3px 9px;border-radius:10px;background:${scoreColor}22;color:${scoreColor};font-weight:700;font-size:12px">${score}/10</span>`;
+      }
+      const tries=attempts.length>1?`<span title="${attempts.length} deneme" style="font-size:10px;color:var(--text-dim);margin-left:6px">×${attempts.length}</span>`:'';
+      const histId='koHist_'+a.key;
+      let hist='';
+      if(attempts.length){
+        hist='<div style="margin-top:8px;font-size:11px"><details><summary style="cursor:pointer;color:var(--text-dim)">Grade gecmisi (${attempts.length} deneme)</summary><div style="margin-top:6px;padding-left:8px;border-left:2px solid var(--border)">';
+        for(const at of attempts){
+          const sc=at.score, sk=at.skipped?' <span style="color:#fbbf24">(grader skipped)</span>':'';
+          hist+=`<div style="margin-bottom:7px">
+            <div><b>Deneme #${at.attempt}:</b> <span style="color:${sc>=8?'#10b981':sc>=5?'#fbbf24':'#ef4444'}">${sc}/10</span>${sk}</div>
+            <div style="color:var(--text-dim);margin-top:2px">${escHtml(at.reasoning||'')}</div>
+            ${(at.weaknesses||[]).length?'<div style="margin-top:3px"><b style="color:#fca5a5">Zayifliklar:</b><ul style="margin:2px 0 0 18px">'+(at.weaknesses||[]).map(w=>'<li>'+escHtml(w)+'</li>').join('')+'</ul></div>':''}
+            ${(at.suggestions||[]).length?'<div style="margin-top:3px"><b style="color:#7dd3fc">Oneriler:</b><ul style="margin:2px 0 0 18px">'+(at.suggestions||[]).map(s=>'<li>'+escHtml(s)+'</li>').join('')+'</ul></div>':''}
+          </div>`;
+        }
+        hist+='</div></details></div>';
+      }
+      const outId='koOut_'+a.key;
+      html+=`<div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--bg-elevated)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <b style="font-size:13px">${escHtml(a.label)}</b>
+            <span style="font-size:10px;color:var(--text-dim);font-family:monospace">${escHtml(a.key)}</span>
+            ${tries}
+          </div>
+          ${scoreBadge}
+        </div>
+        <details><summary style="cursor:pointer;color:var(--text-dim);font-size:11px">Cikti (${(a.output||'').length} karakter)</summary>
+          <pre style="margin:8px 0 0 0;padding:10px;background:var(--bg);border-radius:6px;font-size:11px;line-height:1.5;white-space:pre-wrap;max-height:340px;overflow:auto;font-family:'JetBrains Mono',monospace">${escHtml(a.output||'(bos)')}</pre>
+        </details>
+        ${hist}
+      </div>`;
+    }
+    html+='</div>';
+
+    // Action buttons: Approve + Refine
+    html+=`<div style="border-top:1px solid var(--border);padding-top:14px;margin-top:6px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <button onclick="koApprove(${j.id})" class="sm-btn" style="background:#10b981;border-color:#10b981;font-size:12px">✓ Onayla ve Pipeline ile Devam Et</button>
+        <button onclick="koToggleRefine()" class="sm-btn ghost" style="font-size:12px">📝 Iyilestir</button>
+      </div>
+      <div id="koRefineBox" style="display:none;border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:12px;background:rgba(251,191,36,.04)">
+        <div style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Iyilestirme yonergesi</div>
+        <textarea id="koRefineText" rows="4" placeholder="Agentlara ne eksik / yanlis oldugunu, ne yapmalari gerektigini yaz..." style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;resize:vertical;font-family:inherit"></textarea>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-size:12px">
+          <input type="checkbox" id="koLearnGlobally" />
+          <span>Bu yonergeyi <b>global kural</b> olarak ogren — gelecekteki tum kickoff'larda kullanilir</span>
+        </label>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button onclick="koRefineRun(${j.id})" class="sm-btn" style="font-size:12px">▶ Iyilestirilmis Kickoff Calistir</button>
+          <button onclick="koToggleRefine()" class="sm-btn ghost" style="font-size:12px">Vazgec</button>
+        </div>
+      </div>
+    </div>`;
+
+    // Tum kickoff metni
+    if(dbg.final_text){
+      html+=`<details style="margin-top:14px"><summary style="cursor:pointer;color:var(--text-dim);font-size:12px">Birlestirilmis kickoff metni (${dbg.final_text.length} karakter)</summary>
+        <pre style="margin-top:8px;padding:12px;background:var(--bg-elevated);border-radius:8px;font-size:11px;line-height:1.5;white-space:pre-wrap;max-height:500px;overflow:auto">${escHtml(dbg.final_text)}</pre>
+      </details>`;
+    }
+  } else if(status==='running' || status==='queued'){
+    html+=`<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--bg)">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:var(--bg-elevated);border-bottom:1px solid var(--border)">
+        <div style="display:flex;gap:8px;align-items:center;font-size:12px;font-weight:600">
+          <span class="ko-spin" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#3b82f6;animation:koPulse 1s infinite"></span>
+          Canli pipeline log
+          <span style="font-size:10px;font-weight:500;padding:2px 7px;border-radius:8px;background:var(--bg);border:1px solid var(--border);color:var(--text-dim)" id="koWSStatus">baglaniyor...</span>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;font-size:11px;color:var(--text-dim)">
+          <label style="display:flex;gap:5px;align-items:center;cursor:pointer"><input type="checkbox" id="koLogAutoscroll" checked /> auto-scroll</label>
+          <span id="koLogCount">0 satir</span>
+        </div>
+      </div>
+      <pre id="koLogTail" style="margin:0;padding:10px 12px;font-family:'JetBrains Mono',monospace;font-size:10.5px;line-height:1.55;background:var(--bg);color:var(--text);max-height:480px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">Log yukleniyor...</pre>
+    </div>
+    <style>@keyframes koPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(1.3)}}</style>`;
+  } else if(status==='completed'){
+    // No debug blob — fallback to step output
+    html+='<div style="padding:14px;color:var(--text-dim);font-size:12px">Per-agent JSON dosyasi bulunamadi (eski format). Ham kickoff metni icin "Birlestirilmis kickoff metni" bolumune bakin.</div>';
+  }
+
+  det.innerHTML=html;
+
+  // Canli log WS — yalniz running/queued state'inde
+  if(status==='running' || status==='queued'){
+    koOpenWS(j.id);
+  } else {
+    koCloseWS();
+  }
+}
+
+function koToggleRefine(){
+  const b=document.getElementById('koRefineBox');
+  if(!b)return;
+  b.style.display=b.style.display==='none'?'block':'none';
+}
+
+async function koApprove(jobId){
+  if(!confirm('Bu kickoff onaylansin ve tam pipeline (kod yazma + PR) baslasin mi?'))return;
+  try{
+    const r=await fetch('/api/kickoff-runs/'+jobId+'/approve',{method:'POST'});
+    const d=await r.json();
+    if(d.pipeline_job_id){
+      alert('Pipeline #'+d.pipeline_job_id+' kuyruga eklendi.');
+      fetchJobs();
+      koLoadList();
+    } else alert('Hata: '+(d.error||'bilinmiyor'));
+  }catch(e){alert('Baglanti: '+e)}
+}
+
+async function koRefineRun(jobId){
+  const fb=(document.getElementById('koRefineText')?.value||'').trim();
+  if(!fb){alert('Iyilestirme yonergesi bos olamaz');return}
+  const learn=document.getElementById('koLearnGlobally')?.checked||false;
+  try{
+    const r=await fetch('/api/kickoff-runs/'+jobId+'/refine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback:fb,learn_globally:learn})});
+    const d=await r.json();
+    if(d.refined_job_id){
+      _koSelectedId=d.refined_job_id;
+      koLoadList();
+      koShowDetail(d.refined_job_id);
+    } else alert('Hata: '+(d.error||'bilinmiyor'));
+  }catch(e){alert('Baglanti: '+e)}
+}
+
+// ── Guidance ──
+function koToggleGuidance(){
+  const m=document.getElementById('koGuidanceModal');
+  const show=m.style.display==='none';
+  m.style.display=show?'block':'none';
+  if(show) koLoadGuidance();
+}
+
+async function koLoadGuidance(){
+  try{
+    const r=await fetch('/api/kickoff-guidance');
+    const d=await r.json();
+    const rules=d.rules||[];
+    const el=document.getElementById('koGuidanceList');
+    document.getElementById('koGuidanceCount').textContent='('+rules.length+')';
+    if(!rules.length){
+      el.innerHTML='<div style="padding:20px;text-align:center;color:var(--text-dim);font-size:13px">Henuz global yonerge yok. Iyilestirme yaparken "global olarak ogren" isaretleyerek veya yukaridan ekleyerek olusturabilirsin.</div>';
+      return;
+    }
+    el.innerHTML=rules.map(r=>{
+      const d=r.created_at?new Date(r.created_at*1000).toLocaleString('tr-TR',{dateStyle:'short',timeStyle:'short'}):'';
+      return `<div style="padding:10px 12px;margin-bottom:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg-elevated);display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+        <div style="flex:1">
+          <div style="font-size:13px;white-space:pre-wrap">${escHtml(r.text||'')}</div>
+          <div style="font-size:10px;color:var(--text-dim);margin-top:5px">${r.source_wi?'WI #'+escHtml(r.source_wi)+' · ':''}${d}${r.source_job_id?' · Kickoff #'+r.source_job_id:''}</div>
+        </div>
+        <button onclick="koRemoveGuidance('${escHtml(r.id)}')" style="background:none;border:1px solid var(--border);color:var(--text-dim);padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px" title="Sil">🗑</button>
+      </div>`;
+    }).join('');
+  }catch(e){console.error('koLoadGuidance',e)}
+}
+
+async function koAddGuidance(){
+  const txt=(document.getElementById('koGuidanceText')?.value||'').trim();
+  if(!txt){alert('Yonerge bos olamaz');return}
+  try{
+    const r=await fetch('/api/kickoff-guidance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:txt})});
+    const d=await r.json();
+    if(d.rule){document.getElementById('koGuidanceText').value='';koLoadGuidance()}
+    else alert('Hata: '+(d.error||'bilinmiyor'));
+  }catch(e){alert('Baglanti: '+e)}
+}
+
+async function koRemoveGuidance(id){
+  if(!confirm('Bu yonerge silinsin mi?'))return;
+  try{
+    await fetch('/api/kickoff-guidance/'+encodeURIComponent(id),{method:'DELETE'});
+    koLoadGuidance();
+  }catch(e){alert('Baglanti: '+e)}
+}
+
 </script>
 </body>
 </html>

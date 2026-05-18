@@ -85,7 +85,7 @@ def get_conn():
 
 
 def init_db():
-    """Tablolari olustur."""
+    """Tablolari olustur + idempotent migration'lar."""
     with get_conn() as conn:
         cur = conn.cursor()
         for stmt in SCHEMA.split(";"):
@@ -93,14 +93,49 @@ def init_db():
             if stmt:
                 cur.execute(stmt)
 
+        # Kickoff debug akisi icin eklenen kolonlar — INFORMATION_SCHEMA
+        # ile yoklayip yoksa ekle (eski DB'ler icin idempotent).
+        _ensure_column(cur, "jobs", "kickoff_only", "TINYINT(1) DEFAULT 0")
+        _ensure_column(cur, "jobs", "kickoff_feedback", "TEXT")
+        _ensure_column(cur, "jobs", "kickoff_approved", "TINYINT(1) DEFAULT 0")
+        _ensure_column(cur, "jobs", "parent_job_id", "INT NULL")
 
-def create_job(work_item_id: str, use_hal: bool = True, wi_title: str = "") -> int:
-    """Yeni is olustur, step'leri ekle, job_id dondur."""
+
+def _ensure_column(cur, table: str, column: str, ddl: str):
+    """Bir kolonu yoksa ekler (idempotent ALTER TABLE)."""
+    cur.execute(
+        "SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+        (table, column),
+    )
+    row = cur.fetchone()
+    exists = bool(row and (row.get("c") if isinstance(row, dict) else row[0]))
+    if not exists:
+        cur.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {ddl}")
+
+
+def create_job(
+    work_item_id: str,
+    use_hal: bool = True,
+    wi_title: str = "",
+    *,
+    kickoff_only: bool = False,
+    kickoff_feedback: str = "",
+    parent_job_id: int | None = None,
+) -> int:
+    """Yeni is olustur, step'leri ekle, job_id dondur.
+
+    kickoff_only=True ise pipeline step0 sonrasi durdurulur (debug akisi).
+    """
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO jobs (work_item_id, use_hal, wi_title) VALUES (%s, %s, %s)",
-            (work_item_id, int(use_hal), wi_title),
+            "INSERT INTO jobs (work_item_id, use_hal, wi_title, kickoff_only, "
+            "kickoff_feedback, parent_job_id) VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                work_item_id, int(use_hal), wi_title,
+                int(bool(kickoff_only)), kickoff_feedback or "", parent_job_id,
+            ),
         )
         job_id = cur.lastrowid
         for step_key, step_name, agent in STEP_DEFINITIONS:
@@ -109,6 +144,26 @@ def create_job(work_item_id: str, use_hal: bool = True, wi_title: str = "") -> i
                 (job_id, step_key, step_name, agent),
             )
         return job_id
+
+
+def list_kickoff_only_jobs(limit: int = 50) -> list[dict]:
+    """Sadece kickoff debug jobs."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, work_item_id, wi_title, status, kickoff_approved, "
+            "kickoff_feedback, parent_job_id, error_message, "
+            "created_at, started_at, finished_at "
+            "FROM jobs WHERE kickoff_only=1 ORDER BY id DESC LIMIT %s",
+            (limit,),
+        )
+        return cur.fetchall()
+
+
+def mark_kickoff_approved(job_id: int):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE jobs SET kickoff_approved=1 WHERE id=%s", (job_id,))
 
 
 def get_next_queued_job() -> dict | None:

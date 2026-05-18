@@ -86,32 +86,51 @@ kickoff_arch_task:
     Zaman cizelgesi, ekip kapasitesi ve diger sistemlerle entegrasyon risklerine bak.
     Pragmatik bir dengeleyicisin — ideali değil, uygulanabiliri savunursun.
 
-    ADIM 1 — Analist'in Endişelerini Yanıtla:
-    Deniz'in (Analist) dile getirdiği açık sorulara Team Lead perspektifinden yanıt ver.
-    Hangi endişeler teknik/entegrasyon açısından onaylanıyor, hangisi abartılı?
+    ## ÇIKTI DİSİPLİNİ (zorunlu — ihlal edersen retry alirsin)
+    - **Bütçe**: toplam çıktı ~2000 karakteri geçmesin. Dolgu/açılış cümleleri
+      YASAK ("Genel olarak…", "Bu durumda…", "Söyleyebilirim ki…" yazma).
+    - **Form**: paragraf yerine **bullet/madde** tercih et. Her madde tek
+      cümle.
+    - **Kapanış**: tüm `**bold**` etiketleri eşleşik kapansın. Numaralı liste
+      ortada bırakılmasın. Son karakter nokta olsun.
+    - **Eksiksizlik**: format alanlarının HEPSİ dolu olmalı. Bir bölümü
+      yarım bırakacaksan onu kısalt — ASLA atlama. Özellikle "Entegrasyon
+      Riskleri" ve "Kapsam Sınırı Önerisi" alanları sona yazıldığı için
+      bunlara yer ayır.
 
-    ADIM 2 — 3 KRİTİK SORU / ENDİŞE (Can olarak):
+    ## ADIMLAR
+
+    ADIM 1 — Analist'in Endişelerini Yanıtla (max 4 madde, her biri 1 cümle):
+    Deniz'in açık sorularına Team Lead perspektifinden onay/abartı ayrımıyla
+    kısa yanıt ver.
+
+    ADIM 2 — 3 KRİTİK SORU/ENDİŞE (her biri 1 cümle):
     a) Hangi mevcut sistem/modül etkilenecek? Entegrasyon riski nerede?
-    b) Bu değişiklik hangi başka ekibe/servise bağımlı? Koordinasyon gerekiyor mu?
-    c) Scope creep riski var mı? Kapsam netleştirilmeli mi?
+    b) Hangi başka ekibe/servise bağımlı? Koordinasyon gerekiyor mu?
+    c) Scope creep riski var mı?
 
-    ADIM 3 — TAHMINI REPO / MODÜL:
-    Context'teki HEDEF REPO ve dosya yapısı bilgisine dayanarak değişikliğin hangi modüllerde yapılacağını belirt.
+    ADIM 3 — TAHMINI REPO/MODÜL (max 3 madde):
+    Context'teki HEDEF REPO ve dosya yapısına dayanarak modül/dosya seviyesinde
+    belirt. Spekülasyon yapma — emin değilsen "Belirsiz" yaz.
 
     IS KALEMI: #{work_item_id}
   expected_output: >
     ## Team Lead (Can) — Perspektif
 
-    **Deniz'in Endişelerine Yanıt:** [her açık soruya kısa yanıt]
+    **Deniz'in Endişelerine Yanıt:**
+    - [soru 1]: [onay/abartı + tek cümle]
+    - [soru 2]: [onay/abartı + tek cümle]
 
     **3 Kritik Soru/Endişe:**
-    1. [Entegrasyon/bağımlılık endişesi]
-    2. [Koordinasyon veya ekip kapasitesi endişesi]
-    3. [Kapsam/scope endişesi]
+    1. [entegrasyon riski — tek cümle]
+    2. [koordinasyon — tek cümle]
+    3. [scope — tek cümle]
 
-    **Tahmini Etkilenen Repo/Modül:** [isim veya "Belirsiz"]
-    **Entegrasyon Riskleri:** [liste veya "Yok"]
-    **Kapsam Sınırı Önerisi:** [net sınır veya "Mevcut kapsam yeterli"]
+    **Tahmini Etkilenen Repo/Modül:** [isim/path veya "Belirsiz"]
+    **Entegrasyon Riskleri:**
+    - [risk 1 — tek cümle]
+    - [risk 2 — tek cümle]
+    **Kapsam Sınırı Önerisi:** [tek cümle net sınır]
   agent: software_architect
 
 kickoff_dev_task:
@@ -124,32 +143,57 @@ kickoff_dev_task:
     "Nasıl kodlarız?" diye bakarsın. Karmaşıklık, teknoloji uyumu ve teknik borç
     yaratma riskine odaklanırsın.
 
-    ADIM 1 — Analist ve Team Lead'in Endişelerini Yanıtla:
-    Deniz ve Can'ın dile getirdiği noktalara Developer gözünden yanıt ver.
-    Teknik açıdan doğrulanan, yanlış anlanan veya daha da riskli bulunan noktalar?
+    ## ÇIKTI DİSİPLİNİ (zorunlu — ihlal edersen retry alirsin)
+    - **Bütçe**: toplam çıktı ~2000 karakteri geçmesin. Dolgu/açılış cümleleri
+      YASAK. Diğer uzmanlara yanıt verirken uzun yorum yapma, tek cümle yeter.
+    - **Form**: paragraf yerine **bullet/madde**. Her madde tek cümle.
+    - **Kapanış**: tüm `**bold**` etiketleri kapansın. Numaralı liste ortada
+      bırakılmasın. Son karakter nokta olsun.
+    - **Eksiksizlik**: format alanlarının HEPSİ dolu olmalı. Geçmişte
+      "Karmaşıklık", "Dikkat Edilmesi Gereken Kod Noktaları" ve "Önerilen
+      Teknik Yaklaşım" alanları sona yazıldığı için kesiliyordu — bunlara
+      YETERLİ yer ayır. Bir bölümü yarım bırakacaksan onu kısalt, atlama.
 
-    ADIM 2 — 3 KRİTİK SORU / ENDİŞE (Barış olarak):
-    a) Bu değişiklik mevcut kod tabanıyla uyumlu mu? Yeniden yazma riski var mı?
-    b) Hangi edge case'ler koda yansıtılmak zorunda? (Örn: null check, race condition)
-    c) Bu geliştirme teknik borç bırakır mı? Hangi kısayollardan kaçınmalıyız?
+    ## ADIMLAR
 
-    ADIM 3 — KARMAŞıKLıK TAHMİNİ:
-    Geliştirme karmaşıklığını Düşük / Orta / Yüksek olarak puanla ve gerekçele.
+    ADIM 1 — Analist ve Team Lead'in Endişelerini Yanıtla (max 4 madde):
+    Deniz ve Can'a Developer gözünden TEK cümle ile yanıt. Teknik açıdan
+    doğrulanan, yanlış anlanan veya daha riskli bulduklarınla işaretle.
+
+    ADIM 2 — 3 KRİTİK SORU/ENDİŞE (her biri 1 cümle):
+    a) Mevcut kod tabanıyla uyumlu mu? Yeniden yazma riski var mı?
+    b) Hangi edge case'ler kodda zorunlu? (null/race/event-order vs.)
+    c) Teknik borç riski + hangi kısayollardan kaçınmalıyız?
+
+    ADIM 3 — KARMAŞıKLıK + KOD HARİTASI + YAKLAŞIM (zorunlu, atlama):
+    - Karmaşıklığı Düşük/Orta/Yüksek puanla, 1 cümle gerekçe.
+    - 2-4 madde halinde dokunulacak dosya/fonksiyon ismi (somut path).
+    - 3-5 maddelik somut teknik yaklaşım (uygulama adımları).
 
     IS KALEMI: #{work_item_id}
   expected_output: >
     ## Developer (Barış) — Perspektif
 
-    **Deniz ve Can'ın Endişelerine Yanıt:** [teknik perspektiften değerlendirme]
+    **Deniz ve Can'a Yanıt:**
+    - [nokta 1]: [tek cümle]
+    - [nokta 2]: [tek cümle]
 
     **3 Kritik Soru/Endişe:**
-    1. [Kod uyumluluğu / yeniden yazma riski]
-    2. [Edge case'ler — kodda ele alınması zorunlu]
-    3. [Teknik borç riski]
+    1. [kod uyumu/refactor riski — tek cümle]
+    2. [edge case'ler — tek cümle]
+    3. [teknik borç riski — tek cümle]
 
-    **Karmaşıklık:** Düşük / Orta / Yüksek — [gerekçe]
-    **Dikkat Edilmesi Gereken Kod Noktaları:** [liste]
-    **Önerilen Teknik Yaklaşım:** [kısa açıklama]
+    **Karmaşıklık:** Düşük/Orta/Yüksek — [tek cümle gerekçe]
+
+    **Dikkat Edilmesi Gereken Kod Noktaları:**
+    - [dosya:fonksiyon 1]
+    - [dosya:fonksiyon 2]
+    - [dosya:fonksiyon 3]
+
+    **Önerilen Teknik Yaklaşım:**
+    1. [adım — tek cümle]
+    2. [adım — tek cümle]
+    3. [adım — tek cümle]
   agent: senior_developer
 
 kickoff_qa_task:
