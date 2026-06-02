@@ -6,20 +6,28 @@ import time
 from typing import Any
 import uuid
 
+from crewai_core.plus_api import (
+    TraceBatchInitPayload,
+    TraceBatchMetadata,
+    TraceEventsPayload,
+    TraceExecutionContext,
+    TraceExecutionMetadata,
+    TraceFinalizePayload,
+)
+from crewai_core.settings import Settings
 from rich.console import Console
 from rich.panel import Panel
 
-from crewai.cli.authentication.token import AuthError, get_auth_token
-from crewai.cli.config import Settings
-from crewai.cli.constants import DEFAULT_CREWAI_ENTERPRISE_URL
-from crewai.cli.plus_api import PlusAPI
+from crewai.auth.token import AuthError, get_auth_token
+from crewai.constants import DEFAULT_CREWAI_ENTERPRISE_URL
 from crewai.events.listeners.tracing.types import TraceEvent
 from crewai.events.listeners.tracing.utils import (
     get_user_id,
     is_tracing_enabled_in_context,
     should_auto_collect_first_time_traces,
 )
-from crewai.utilities.version import get_crewai_version
+from crewai.plus_api import PlusAPI
+from crewai.version import get_crewai_version
 
 
 logger = getLogger(__name__)
@@ -123,25 +131,27 @@ class TraceBatchManager:
             return None
 
         try:
-            payload = {
+            execution_context: TraceExecutionContext = {
+                "crew_fingerprint": execution_metadata.get("crew_fingerprint"),
+                "crew_name": execution_metadata.get("crew_name", None),
+                "flow_name": execution_metadata.get("flow_name", None),
+                "crewai_version": self.current_batch.version,
+                "privacy_level": user_context.get("privacy_level", "standard"),
+            }
+            execution_metadata_payload: TraceExecutionMetadata = {
+                "expected_duration_estimate": execution_metadata.get(
+                    "expected_duration_estimate", 300
+                ),
+                "agent_count": execution_metadata.get("agent_count", 0),
+                "task_count": execution_metadata.get("task_count", 0),
+                "flow_method_count": execution_metadata.get("flow_method_count", 0),
+                "execution_started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            payload: TraceBatchInitPayload = {
                 "trace_id": self.current_batch.batch_id,
                 "execution_type": execution_metadata.get("execution_type", "crew"),
-                "execution_context": {
-                    "crew_fingerprint": execution_metadata.get("crew_fingerprint"),
-                    "crew_name": execution_metadata.get("crew_name", None),
-                    "flow_name": execution_metadata.get("flow_name", None),
-                    "crewai_version": self.current_batch.version,
-                    "privacy_level": user_context.get("privacy_level", "standard"),
-                },
-                "execution_metadata": {
-                    "expected_duration_estimate": execution_metadata.get(
-                        "expected_duration_estimate", 300
-                    ),
-                    "agent_count": execution_metadata.get("agent_count", 0),
-                    "task_count": execution_metadata.get("task_count", 0),
-                    "flow_method_count": execution_metadata.get("flow_method_count", 0),
-                    "execution_started_at": datetime.now(timezone.utc).isoformat(),
-                },
+                "execution_context": execution_context,
+                "execution_metadata": execution_metadata_payload,
             }
             if use_ephemeral:
                 payload["ephemeral_trace_id"] = self.current_batch.batch_id
@@ -264,13 +274,14 @@ class TraceBatchManager:
         if not self.plus_api or not self.trace_batch_id or not self.event_buffer:
             return 500
         try:
-            payload = {
+            batch_metadata: TraceBatchMetadata = {
+                "events_count": len(self.event_buffer),
+                "batch_sequence": 1,
+                "is_final_batch": False,
+            }
+            payload: TraceEventsPayload = {
                 "events": [event.to_dict() for event in self.event_buffer],
-                "batch_metadata": {
-                    "events_count": len(self.event_buffer),
-                    "batch_sequence": 1,
-                    "is_final_batch": False,
-                },
+                "batch_metadata": batch_metadata,
             }
 
             response = (
@@ -364,7 +375,7 @@ class TraceBatchManager:
             return
 
         try:
-            payload = {
+            payload: TraceFinalizePayload = {
                 "status": "completed",
                 "duration_ms": self.calculate_duration("execution"),
                 "final_event_count": events_count,
@@ -392,7 +403,6 @@ class TraceBatchManager:
                 if self.is_current_batch_ephemeral:
                     self.ephemeral_trace_url = return_link
 
-                # Create a properly formatted message with URL on its own line
                 message_parts = [
                     f"✅ Trace batch finalized with session ID: {self.trace_batch_id}",
                     "",

@@ -11,8 +11,8 @@ from unittest import mock
 
 import pytest
 
-import crewai.utilities.lock_store as lock_store
-from crewai.utilities.lock_store import lock
+import crewai_core.lock_store as lock_store
+from crewai_core.lock_store import lock
 
 
 @pytest.fixture(autouse=True)
@@ -20,9 +20,7 @@ def no_redis_url(monkeypatch):
     monkeypatch.setattr(lock_store, "_REDIS_URL", None)
 
 
-# ---------------------------------------------------------------------------
 # _redis_available
-# ---------------------------------------------------------------------------
 
 
 def test_redis_not_available_without_url():
@@ -41,9 +39,7 @@ def test_redis_available_with_url_and_package(monkeypatch):
     assert lock_store._redis_available() is True
 
 
-# ---------------------------------------------------------------------------
 # lock strategy selection
-# ---------------------------------------------------------------------------
 
 
 def test_uses_file_lock_when_redis_unavailable():

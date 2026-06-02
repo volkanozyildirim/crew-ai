@@ -60,6 +60,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
+import logging
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from pydantic import BaseModel, Field
@@ -72,6 +73,8 @@ if TYPE_CHECKING:
     from crewai.flow.flow import Flow
     from crewai.llms.base_llm import BaseLLM
 
+
+logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -188,6 +191,7 @@ class HumanFeedbackConfig:
     provider: HumanFeedbackProvider | None = None
     learn: bool = False
     learn_source: str = "hitl"
+    learn_strict: bool = False
 
 
 class HumanFeedbackMethod(FlowMethod[Any, Any]):
@@ -237,6 +241,7 @@ def human_feedback(
     provider: HumanFeedbackProvider | None = None,
     learn: bool = False,
     learn_source: str = "hitl",
+    learn_strict: bool = False,
 ) -> Callable[[F], F]:
     """Decorator for Flow methods that require human feedback.
 
@@ -275,6 +280,14 @@ def human_feedback(
             external systems like Slack, Teams, or webhooks. When the
             provider raises HumanFeedbackPending, the flow pauses and
             can be resumed later with Flow.resume().
+        learn: Enable HITL learning. Recall past lessons to pre-review
+            output before the human sees it, and distill new lessons
+            from feedback after.
+        learn_source: Memory source tag for stored/recalled lessons.
+        learn_strict: When True, re-raise exceptions from the pre-review
+            and distillation steps instead of falling back to raw output.
+            Default False preserves graceful degradation; failures are
+            always logged via ``logger.warning`` regardless of this flag.
 
     Returns:
         A decorator function that wraps the method with human feedback
@@ -326,7 +339,6 @@ def human_feedback(
             return "Content to review..."
         ```
     """
-    # Validation at decoration time
     if emit is not None:
         if not llm:
             raise ValueError(
@@ -345,8 +357,6 @@ def human_feedback(
 
     def decorator(func: F) -> F:
         """Inner decorator that wraps the function."""
-
-        # -- HITL learning helpers (only used when learn=True) --------
 
         def _get_hitl_prompt(key: str) -> str:
             """Read a HITL prompt from the i18n translations."""
@@ -404,7 +414,19 @@ def human_feedback(
                 reviewed = llm_inst.call(messages)
                 return reviewed if isinstance(reviewed, str) else str(reviewed)
             except Exception:
-                return method_output  # fallback to raw output on any failure
+                if learn_strict:
+                    logger.warning(
+                        "HITL pre-review failed for %s; re-raising (learn_strict=True)",
+                        func.__name__,
+                        exc_info=True,
+                    )
+                    raise
+                logger.warning(
+                    "HITL pre-review failed for %s; falling back to raw output",
+                    func.__name__,
+                    exc_info=True,
+                )
+                return method_output
 
         def _distill_and_store_lessons(
             flow_instance: Flow[Any], method_output: Any, raw_feedback: str
@@ -446,10 +468,19 @@ def human_feedback(
 
                 if lessons:
                     mem.remember_many(lessons, source=learn_source)  # type: ignore[union-attr]
-            except Exception:  # noqa: S110
-                pass  # non-critical: don't fail the flow because lesson storage failed
-
-        # -- Core feedback helpers ------------------------------------
+            except Exception:
+                if learn_strict:
+                    logger.warning(
+                        "HITL lesson distillation failed for %s; re-raising (learn_strict=True)",
+                        func.__name__,
+                        exc_info=True,
+                    )
+                    raise
+                logger.warning(
+                    "HITL lesson distillation failed for %s; no lessons stored",
+                    func.__name__,
+                    exc_info=True,
+                )
 
         def _build_feedback_context(
             flow_instance: Flow[Any], method_output: Any
@@ -529,15 +560,12 @@ def human_feedback(
             raw_feedback: str,
         ) -> HumanFeedbackResult | str:
             """Process feedback and return result or outcome."""
-            # Determine outcome
             collapsed_outcome: str | None = None
 
             if not raw_feedback.strip():
-                # Empty feedback
                 if default_outcome:
                     collapsed_outcome = default_outcome
                 elif emit:
-                    # No default and no feedback - use first outcome
                     collapsed_outcome = emit[0]
             elif emit:
                 if llm is not None:
@@ -549,7 +577,6 @@ def human_feedback(
                 else:
                     collapsed_outcome = emit[0]
 
-            # Create result
             result = HumanFeedbackResult(
                 output=method_output,
                 feedback=raw_feedback,
@@ -559,7 +586,6 @@ def human_feedback(
                 metadata=metadata or {},
             )
 
-            # Store in flow instance
             flow_instance.human_feedback_history.append(result)
             flow_instance.last_human_feedback = result
 
@@ -571,19 +597,17 @@ def human_feedback(
             return result
 
         if asyncio.iscoroutinefunction(func):
-            # Async wrapper
+
             @wraps(func)
             async def async_wrapper(self: Flow[Any], *args: Any, **kwargs: Any) -> Any:
                 method_output = await func(self, *args, **kwargs)
 
-                # Pre-review: apply past HITL lessons before human sees it
                 if learn and getattr(self, "memory", None) is not None:
                     method_output = _pre_review_with_lessons(self, method_output)
 
                 raw_feedback = await _request_feedback_async(self, method_output)
                 result = _process_feedback(self, method_output, raw_feedback)
 
-                # Distill: extract lessons from output + feedback, store in memory
                 if (
                     learn
                     and getattr(self, "memory", None) is not None
@@ -591,10 +615,10 @@ def human_feedback(
                 ):
                     _distill_and_store_lessons(self, method_output, raw_feedback)
 
-                # Stash the real method output for final flow result when emit is set
-                # (result is the collapsed outcome string for routing, but we want to
-                # preserve the actual method output as the flow's final result)
-                # Uses per-method dict for concurrency safety and to handle None returns
+                # Stash the real method output for final flow result when emit is set:
+                # result is the collapsed outcome string for routing, but we preserve the
+                # actual method output as the flow's final result. Uses per-method dict for
+                # concurrency safety and to handle None returns.
                 if emit:
                     self._human_feedback_method_outputs[func.__name__] = method_output
 
@@ -602,19 +626,17 @@ def human_feedback(
 
             wrapper: Any = async_wrapper
         else:
-            # Sync wrapper
+
             @wraps(func)
             def sync_wrapper(self: Flow[Any], *args: Any, **kwargs: Any) -> Any:
                 method_output = func(self, *args, **kwargs)
 
-                # Pre-review: apply past HITL lessons before human sees it
                 if learn and getattr(self, "memory", None) is not None:
                     method_output = _pre_review_with_lessons(self, method_output)
 
                 raw_feedback = _request_feedback(self, method_output)
                 result = _process_feedback(self, method_output, raw_feedback)
 
-                # Distill: extract lessons from output + feedback, store in memory
                 if (
                     learn
                     and getattr(self, "memory", None) is not None
@@ -622,10 +644,10 @@ def human_feedback(
                 ):
                     _distill_and_store_lessons(self, method_output, raw_feedback)
 
-                # Stash the real method output for final flow result when emit is set
-                # (result is the collapsed outcome string for routing, but we want to
-                # preserve the actual method output as the flow's final result)
-                # Uses per-method dict for concurrency safety and to handle None returns
+                # Stash the real method output for final flow result when emit is set:
+                # result is the collapsed outcome string for routing, but we preserve the
+                # actual method output as the flow's final result. Uses per-method dict for
+                # concurrency safety and to handle None returns.
                 if emit:
                     self._human_feedback_method_outputs[func.__name__] = method_output
 
@@ -633,7 +655,6 @@ def human_feedback(
 
             wrapper = sync_wrapper
 
-        # Preserve existing Flow decorator attributes
         for attr in [
             "__is_start_method__",
             "__trigger_methods__",
@@ -644,7 +665,7 @@ def human_feedback(
             if hasattr(func, attr):
                 setattr(wrapper, attr, getattr(func, attr))
 
-        # Add human feedback specific attributes (create config inline to avoid race conditions)
+        # Create config inline to avoid race conditions
         wrapper.__human_feedback_config__ = HumanFeedbackConfig(
             message=message,
             emit=emit,
@@ -654,6 +675,7 @@ def human_feedback(
             provider=provider,
             learn=learn,
             learn_source=learn_source,
+            learn_strict=learn_strict,
         )
         wrapper.__is_flow_method__ = True
 
