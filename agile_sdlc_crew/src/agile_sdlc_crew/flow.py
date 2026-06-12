@@ -2249,25 +2249,40 @@ class AgileSDLCFlow(Flow[PipelineState]):
             )
 
         analysis_crew = self._agile_crew.create_analysis_crew()
-        analysis_result = analysis_crew.kickoff(inputs={
-            "work_item_id": self.state.work_item_id,
-            "target_repo": prefetch_repo or "",
-            "previous_context": ctx,
-            "scrum_master_feedback": ctx_hint,
-        })
+        try:
+            analysis_result = analysis_crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "target_repo": prefetch_repo or "",
+                "previous_context": ctx,
+                "scrum_master_feedback": ctx_hint,
+            })
+        except Exception as e:
+            # Guardrail retry'lari tukendi (veya kickoff hatasi) — guardrail'siz
+            # crew ile manuel fallback. Mevcut parse onarimi yine devrede.
+            _log(f"  Guardrail/kickoff hatasi ({e}), guardrail'siz fallback kickoff")
+            analysis_crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
+            analysis_result = analysis_crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "target_repo": prefetch_repo or "",
+                "previous_context": ctx,
+                "scrum_master_feedback": ctx_hint,
+            })
         self._track_and_check_budget(analysis_result, "technical_design_task")
         raw_output = analysis_result.raw or ""
 
         # Parse hatasi — onceki ciktiyi context'e ekleyip tekrar dene
+        # (Guardrail KAPALIYKEN birincil retry; ACIKKEN guardrail zaten parse
+        #  garantiledigi icin bu blok genelde tetiklenmez — yine de fallback kalir.)
         try:
             plan = _parse_architect_output(raw_output)
         except ValueError as e:
-            _log(f"  Parse hatasi ({e}), ayni architect ile retry")
+            _log(f"  Parse hatasi ({e}), guardrail'siz architect ile retry")
             retry_ctx = ctx + (
                 f"\n\n# ONCEKI DENEME CIKTISI\n"
                 f"(Asagidaki bilgilerden JSON uret — tool cagirma, direkt JSON yaz)\n\n"
                 f"{raw_output[:6000]}"
             )
+            analysis_crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
             analysis_result = analysis_crew.kickoff(inputs={
                 "work_item_id": self.state.work_item_id,
                 "target_repo": prefetch_repo or "",

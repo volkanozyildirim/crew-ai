@@ -11,7 +11,7 @@ mantigi degismeden calismaya devam eder. Guardrail birincil retry; mevcut
 Python parse (architect) / lint+ollama-fix (developer) FALLBACK olarak kalir.
 """
 
-from __future__ import annotations
+from typing import Any, Tuple
 
 
 def _raw_of(output) -> str:
@@ -22,7 +22,7 @@ def _raw_of(output) -> str:
     return (raw or "").strip()
 
 
-def architect_json_guardrail(output) -> tuple[bool, str]:
+def architect_json_guardrail(output) -> Tuple[bool, Any]:
     """Architect technical_design ciktisinin parse edilebilir/gecerli JSON plan
     oldugunu dogrular. _parse_architect_output'u (4 kademeli onarim + placeholder
     guard) yeniden kullanir; basariili olursa ham metni passthrough eder."""
@@ -51,7 +51,7 @@ _REFUSAL_MARKERS = (
 )
 
 
-def developer_code_guardrail(output) -> tuple[bool, str]:
+def developer_code_guardrail(output) -> Tuple[bool, Any]:
     """Developer kod ciktisinin bos/cop/halusinasyon olmadigini dogrular.
     Lint DEGIL — yapisal kontrol (lint Python fallback'te kalir)."""
     raw = _raw_of(output)

@@ -996,12 +996,20 @@ class AgileSDLCCrew:
 
         return _Result()
 
-    def create_analysis_crew(self) -> Crew:
+    def create_analysis_crew(self, with_guardrail: bool | None = None) -> Crew:
         """Software Architect: is kalemini oku, repo'yu incele, teknik tasarim olustur.
         Not: output_pydantic CrewAI'da OpenAI API key istedigi icin kullanmiyoruz —
-        task prompt'undaki JSON format kurali + retry mekanizmasi yeterli."""
+        task prompt'undaki JSON format kurali + retry mekanizmasi yeterli.
+        with_guardrail=None ise CREW_TASK_GUARDRAILS knob'una bakar."""
+        from agile_sdlc_crew import pipeline_config as _pc
+        if with_guardrail is None:
+            with_guardrail = _pc.get("CREW_TASK_GUARDRAILS")
         arch = self.software_architect()
-        t1 = self._task("technical_design_task", arch)
+        extra = {}
+        if with_guardrail:
+            from agile_sdlc_crew.guardrails import architect_json_guardrail
+            extra["guardrail"] = architect_json_guardrail
+        t1 = self._task("technical_design_task", arch, **extra)
 
         return Crew(
             agents=[arch],
