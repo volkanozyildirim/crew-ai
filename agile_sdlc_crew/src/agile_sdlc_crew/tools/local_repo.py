@@ -331,27 +331,64 @@ class LocalRepoManager:
                 return {"success": False, "manager": "composer", "elapsed_s": 0,
                         "message": "'composer' PATH'te yok"}
 
-            if php_bin and php_bin != "php":
-                cmd = [
-                    php_bin, composer_path, "install",
-                    "--no-dev", "--no-interaction", "--no-progress", "--prefer-dist",
-                ]
-            else:
+            # composer'in curl_multi tabanli downloader'i bu makinenin PHP + sistem
+            # libcurl'unde %100 CPU busy-loop yapiyor (curl_easy calisiyor ama
+            # curl_multi baglanti kurarken spin ediyor → install dakikalarca takiliyor).
+            # curl_multi_* fonksiyonlarini disable edince composer PHP-stream
+            # downloader'ina duser ve sorunsuz indirir.
+            _CURL_MULTI_OFF = (
+                "disable_functions=curl_multi_init,curl_multi_exec,curl_multi_select,"
+                "curl_multi_add_handle,curl_multi_remove_handle,curl_multi_getcontent,"
+                "curl_multi_setopt,curl_multi_close,curl_multi_strerror"
+            )
+            base_flags = ["--no-dev", "--no-interaction", "--no-progress", "--prefer-dist"]
+            php_exec = php_bin if (php_bin and php_bin != "php") else "php"
+            if php_exec == "php":
                 # Sistem php — versiyon uyumsuzlugu olabilir, ignore-platform-reqs ile geç
-                cmd = [
-                    "composer", "install",
-                    "--no-dev", "--no-interaction", "--no-progress", "--prefer-dist",
-                    "--ignore-platform-reqs",
-                ]
+                base_flags = base_flags + ["--ignore-platform-reqs"]
+
+            def _composer_cmd(php_executable):
+                # composer'i her zaman explicit php uzerinden + curl_multi disabled cagir
+                return [php_executable, "-d", _CURL_MULTI_OFF, composer_path, "install", *base_flags]
+
+            cmd = _composer_cmd(php_exec)
 
             log.info(f"  composer install: {repo_name} (vendor olusturuluyor){php_msg}")
             t0 = _t.time()
-            # Buyuk projeler (private packagist + SSH git repo) 10dk'dan uzun
-            # surebilir. 30dk timeout — pipeline yine de cok takilirsa knob ile kontrol edilir.
-            COMPOSER_TIMEOUT = int(os.environ.get("CREW_COMPOSER_TIMEOUT", "1800"))
+            # 30dk cok uzun — takilan composer tek-worker pipeline'i donduruyordu.
+            # 10dk default; CREW_COMPOSER_TIMEOUT ile ayarlanabilir.
+            COMPOSER_TIMEOUT = int(os.environ.get("CREW_COMPOSER_TIMEOUT", "600"))
+            # git/ssh prompt'ta (host-key/passphrase) stdin'de kilitlenmeyi engelle.
+            comp_env = os.environ.copy()
+            comp_env["GIT_TERMINAL_PROMPT"] = "0"
+            comp_env["COMPOSER_NO_INTERACTION"] = "1"
+            comp_env.setdefault(
+                "GIT_SSH_COMMAND",
+                "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10",
+            )
 
             def _run_composer(c):
-                return subprocess.run(c, cwd=repo_dir, capture_output=True, text=True, timeout=COMPOSER_TIMEOUT)
+                # start_new_session + killpg: timeout'ta TUM process agacini (composer +
+                # spawn ettigi git/ssh/php) oldur — aksi halde oksuz process %100 CPU'da
+                # kalirdi. stdin=DEVNULL: hicbir alt-surec prompt'ta hang edemez.
+                proc = subprocess.Popen(
+                    c, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, stdin=subprocess.DEVNULL, env=comp_env, start_new_session=True,
+                )
+                try:
+                    out, err = proc.communicate(timeout=COMPOSER_TIMEOUT)
+                    return subprocess.CompletedProcess(c, proc.returncode, out, err)
+                except subprocess.TimeoutExpired:
+                    import signal as _signal
+                    try:
+                        os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                    except Exception:
+                        proc.kill()
+                    try:
+                        proc.communicate(timeout=10)
+                    except Exception:
+                        pass
+                    raise
 
             try:
                 result = _run_composer(cmd)
@@ -368,10 +405,7 @@ class LocalRepoManager:
                             if self._try_brew_install_php(detected_php):
                                 retry_php_bin = self._find_php_binary(detected_php)
                         if retry_php_bin:
-                            cmd = [
-                                retry_php_bin, composer_path, "install",
-                                "--no-dev", "--no-interaction", "--no-progress", "--prefer-dist",
-                            ]
+                            cmd = _composer_cmd(retry_php_bin)
                             log.info(f"  composer install retry: PHP={detected_php} ({retry_php_bin})")
                             result = _run_composer(cmd)
                             required_php = detected_php
