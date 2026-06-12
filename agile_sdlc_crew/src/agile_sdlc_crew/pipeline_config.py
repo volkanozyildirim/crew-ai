@@ -54,6 +54,27 @@ SCHEMA: list[dict] = [
         "default": True,
         "desc": "Work item description'daki gorseller ve linkler analiz edilsin mi?",
     },
+    {
+        "key": "CREW_PARALLEL_TEST_UAT",
+        "label": "Test + UAT Paralel",
+        "type": "bool",
+        "default": False,
+        "desc": "Test planlama (step9) ve UAT (step10) ayni anda calissin. claude_cli ile sure kisalir; ayni tek lokal modelde kazanc sinirli olabilir.",
+    },
+    {
+        "key": "CREW_TASK_GUARDRAILS",
+        "label": "Task Guardrails",
+        "type": "bool",
+        "default": False,
+        "desc": "Architect (JSON) ve Developer (kod) ciktilarini CrewAI guardrail ile dogrula; basarisizsa agent otomatik retry eder.",
+    },
+    {
+        "key": "CREW_KNOWLEDGE_RAG",
+        "label": "Knowledge RAG",
+        "type": "bool",
+        "default": False,
+        "desc": "Domain knowledge'i backstory'ye tikistirmak yerine CrewAI Knowledge ile RAG olarak ver (token tasarrufu, kucuk modelde odak).",
+    },
 
     # ── Maliyet kontrolu ──
     {
