@@ -5,7 +5,6 @@ donusturur. State yonetimi, HAL/CrewAI dallanmasi ve quality gate'ler
 deklaratif olarak tanimlanir.
 """
 
-import asyncio
 import logging
 from typing import Any
 
@@ -649,15 +648,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 if _os_local.environ.get("CREW_LOCAL_DEVELOPER", "1").lower() not in ("0", "false", "no"):
                     return True
         return False
-
-    async def _akickoff(self, crew, inputs: dict):
-        """crew.kickoff()'u CREW_PARALLEL_TEST_UAT acikken ayri thread'de calistirir
-        (claude_cli blocking subprocess → gercek paralellik). Kapaliyken dogrudan
-        cagirir (event loop'u bloklar → bugunku seri davranis korunur)."""
-        from agile_sdlc_crew import pipeline_config as _pc
-        if _pc.get("CREW_PARALLEL_TEST_UAT"):
-            return await asyncio.to_thread(crew.kickoff, inputs=inputs)
-        return crew.kickoff(inputs=inputs)
 
     def _track_and_check_budget(self, crew_result, step_name: str = ""):
         """Her crew.kickoff() sonrasi token kullanimini topla ve budget check yap.
@@ -3084,7 +3074,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         )
 
     @listen(step8_code_review)
-    async def step9_test_planning(self):
+    def step9_test_planning(self):
         """Adim 9: Test Planlama — code_review sonrasi PARALEL calisir (UAT ile birlikte).
         DRY-RUN: PR yok, atlanir."""
         from agile_sdlc_crew.main import (
@@ -3184,7 +3174,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         else:
             ctx = self._build_step_context("test_planning_task")
             test_crew = self._agile_crew.create_test_crew()
-            test_result = await self._akickoff(test_crew, {
+            test_result = test_crew.kickoff(inputs={
                 "work_item_id": self.state.work_item_id,
                 "requirements": self.state.requirements_text[:3000],
                 "target_repo": self.state.repo_name,
@@ -3199,7 +3189,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             if not approved:
                 _log("  SM iyilestirme istedi, tekrar calistiriliyor...")
                 test_crew = self._agile_crew.create_test_crew()
-                test_result = await self._akickoff(test_crew, {
+                test_result = test_crew.kickoff(inputs={
                     "work_item_id": self.state.work_item_id,
                     "requirements": self.state.requirements_text[:3000],
                     "target_repo": self.state.repo_name,
@@ -3221,7 +3211,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         )
 
     @listen(step8_code_review)
-    async def step10_uat(self):
+    def step10_uat(self):
         """Adim 10: UAT Dogrulama — code_review sonrasi PARALEL calisir (Test ile birlikte).
         DRY-RUN: PR yok, atlanir."""
         from agile_sdlc_crew.main import _add_wi_comment
@@ -3254,7 +3244,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         else:
             ctx = self._build_step_context("uat_task")
             uat_crew = self._agile_crew.create_uat_crew()
-            uat_result = await self._akickoff(uat_crew, {
+            uat_result = uat_crew.kickoff(inputs={
                 "work_item_id": self.state.work_item_id,
                 "requirements": self.state.requirements_text[:3000],
                 "pr_id": self.state.pr_id,
@@ -3268,7 +3258,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             if not approved:
                 _log("  SM iyilestirme istedi, tekrar calistiriliyor...")
                 uat_crew = self._agile_crew.create_uat_crew()
-                uat_result = await self._akickoff(uat_crew, {
+                uat_result = uat_crew.kickoff(inputs={
                     "work_item_id": self.state.work_item_id,
                     "requirements": self.state.requirements_text[:3000],
                     "pr_id": self.state.pr_id,
