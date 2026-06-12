@@ -79,6 +79,7 @@ import re as _re
 class RunRequest(BaseModel):
     work_item_id: str
     use_hal: bool = False
+    dry_run: bool = False
 
     def validate_wi(self) -> str | None:
         """Work item ID dogrulama. Sadece rakam kabul et."""
@@ -144,16 +145,21 @@ async def get_status():
 
 @app.post("/api/run")
 async def queue_job(req: RunRequest):
-    """Is kuyruğa ekle. Birden fazla is eklenebilir."""
+    """Is kuyruğa ekle. dry_run=true ise PR/review/test/UAT atlanir,
+    sonuc lokal kalir."""
     err = req.validate_wi()
     if err:
         return JSONResponse({"error": err}, status_code=400)
-    job_id = db.create_job(req.work_item_id.strip(), req.use_hal)
+    job_id = db.create_job(
+        req.work_item_id.strip(), req.use_hal, dry_run=req.dry_run,
+    )
     _ensure_worker()
+    msg_suffix = " (DRY-RUN)" if req.dry_run else ""
     return JSONResponse({
         "job_id": job_id,
         "status": "queued",
-        "message": f"#{req.work_item_id} kuyruga eklendi",
+        "dry_run": req.dry_run,
+        "message": f"#{req.work_item_id} kuyruga eklendi{msg_suffix}",
     }, status_code=202)
 
 
@@ -212,6 +218,115 @@ async def get_job(job_id: int):
             if s.get(k) and isinstance(s[k], datetime):
                 s[k] = s[k].isoformat()
     return JSONResponse(job)
+
+
+@app.get("/api/jobs/{job_id}/diff")
+async def get_job_diff(job_id: int):
+    """Return unified diff for a job's branch (main..<branch>).
+    Works for both dry-run (local-only) and regular jobs (after fetching the
+    pushed branch from origin). Returns raw diff text + per-file metadata."""
+    job = db.get_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job bulunamadi"}, status_code=404)
+    repo_name = job.get("repo_name") or ""
+    branch = job.get("branch_name") or ""
+    if not repo_name or not branch:
+        return JSONResponse({
+            "error": "Job henuz repo/branch atamamis",
+            "repo_name": repo_name, "branch": branch,
+        }, status_code=409)
+
+    from agile_sdlc_crew.tools.local_repo import LocalRepoManager
+    mgr = LocalRepoManager()
+    repo_dir = mgr.base_dir / repo_name
+    if not (repo_dir / ".git").exists():
+        return JSONResponse({
+            "error": f"Repo lokal'de yok: {repo_dir}",
+        }, status_code=404)
+
+    # For regular jobs the branch was pushed to remote — fetch it so the
+    # local diff reflects what's in the PR.
+    is_dry = bool(job.get("dry_run"))
+    if not is_dry:
+        try:
+            mgr._git(["fetch", "origin", branch], cwd=repo_dir, timeout=60)
+        except Exception as e:
+            # Not fatal — local branch may still exist from when we created it
+            pass
+
+    # Pick the branch ref that exists
+    branch_ref = branch
+    for candidate in (branch, f"origin/{branch}"):
+        check = mgr._git(["rev-parse", "--verify", "--quiet", candidate], cwd=repo_dir)
+        if check.returncode == 0:
+            branch_ref = candidate
+            break
+
+    try:
+        diff = mgr.get_diff(repo_name, branch_ref, base="main")
+    except Exception as e:
+        return JSONResponse({"error": f"Diff cikarilamadi: {e}"}, status_code=500)
+
+    # Per-file numstat (added/removed lines)
+    files: list[dict] = []
+    try:
+        ns = mgr._git(["diff", "--numstat", f"main...{branch_ref}"], cwd=repo_dir, timeout=30)
+        for line in (ns.stdout or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                added, removed, path = parts
+                files.append({
+                    "path": path,
+                    "added": 0 if added == "-" else int(added or 0),
+                    "removed": 0 if removed == "-" else int(removed or 0),
+                })
+    except Exception:
+        pass
+
+    return JSONResponse({
+        "job_id": job_id,
+        "work_item_id": job.get("work_item_id"),
+        "repo_name": repo_name,
+        "branch": branch,
+        "dry_run": is_dry,
+        "pr_url": job.get("pr_url") or "",
+        "files": files,
+        "diff": diff,
+    })
+
+
+@app.get("/api/jobs/{job_id}/dry-run-report")
+async def get_dry_run_report(job_id: int):
+    """Dry-run bir isin lokal raporunu donder (markdown).
+    Rapor ~/.crew_repos/<repo>/.dry_run_<job_id>.md'de tutulur."""
+    job = db.get_job(job_id)
+    if not job:
+        return JSONResponse({"error": "Job bulunamadi"}, status_code=404)
+    if not job.get("dry_run"):
+        return JSONResponse({"error": "Bu is dry-run degil"}, status_code=400)
+    repo_name = job.get("repo_name") or ""
+    if not repo_name:
+        return JSONResponse({"error": "Job henuz repo set etmemis"}, status_code=409)
+    import os as _os
+    from pathlib import Path as _P
+    base = _P(_os.environ.get("CREW_REPOS_DIR", "~/.crew_repos")).expanduser()
+    report_path = base / repo_name / f".dry_run_{job_id}.md"
+    if not report_path.exists():
+        return JSONResponse({
+            "error": "Rapor henuz yazilmadi (is tamamlanmis olmali)",
+            "expected_path": str(report_path),
+        }, status_code=404)
+    try:
+        content = report_path.read_text(encoding="utf-8")
+    except Exception as e:
+        return JSONResponse({"error": f"Rapor okunamadi: {e}"}, status_code=500)
+    return JSONResponse({
+        "job_id": job_id,
+        "report_path": str(report_path),
+        "repo_path": str(base / repo_name),
+        "branch": job.get("branch_name") or "",
+        "content": content,
+    })
 
 
 @app.post("/api/jobs/{job_id}/retry")

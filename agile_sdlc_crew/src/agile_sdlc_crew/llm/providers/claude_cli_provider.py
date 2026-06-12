@@ -28,6 +28,11 @@ def _register_litellm_handler() -> None:
 
     class ClaudeCLIHandler(litellm.CustomLLM):
         def completion(self, model, messages, **kwargs):
+            # system role'unu AYRI topla — `--system-prompt` ile gercek system
+            # prompt olarak gecirilecek. User metnine gomulurse (eski davranis)
+            # Claude CLI kendi default kimligini koruyup persona'yi "yapistirilmis
+            # metin" sanyor ve rolu kiriyor (BA/Architect yerine meta-yorum).
+            system_parts = []
             prompt_parts = []
             for msg in messages:
                 role = msg.get("role", "user")
@@ -37,16 +42,19 @@ def _register_litellm_handler() -> None:
                         c.get("text", "") for c in content if isinstance(c, dict)
                     )
                 if role == "system":
-                    prompt_parts.append(f"[System]: {content}")
+                    system_parts.append(content)
                 elif role == "assistant":
                     prompt_parts.append(f"[Assistant]: {content}")
                 else:
                     prompt_parts.append(content)
             prompt = "\n\n".join(prompt_parts)
+            system = "\n\n".join(p for p in system_parts if p)
 
             cli_model = model.split("/", 1)[1] if "/" in model else ""
             max_tokens = kwargs.get("max_tokens", 4096)
-            result = claude_cli_completion(prompt, max_tokens=max_tokens, model=cli_model)
+            result = claude_cli_completion(
+                prompt, max_tokens=max_tokens, model=cli_model, system=system
+            )
 
             from litellm import Choices, Message, ModelResponse, Usage
             return ModelResponse(

@@ -168,6 +168,9 @@ class PipelineState(BaseModel):
     kickoff_only: bool = False
     # Bu kickoff icin kullanicinin verdigi extra feedback (refine yolu).
     kickoff_feedback: str = ""
+    # Dry-run: development stays local; no push, no PR, no review/test/UAT.
+    # Set from DB row (jobs.dry_run) or env CREW_DRY_RUN in initialize().
+    dry_run: bool = False
     previous_context: str = ""
     requirements_text: str = ""
     repo_name: str = ""
@@ -269,13 +272,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"{i+1}. {c}" for i, c in enumerate(s.acceptance_criteria)
             )
             parts.append(
-                f"\n# Kabul Kriterleri (Pipeline Boyunca Bagleyici — BA Tarafindan Belirlendi)\n"
+                f"\n# Acceptance Criteria (Binding Throughout Pipeline — Set by BA)\n"
                 f"{criteria_text}\n"
-                f"⚠️ Her adim bu kriterlere gore yapilmalidir:\n"
-                f"- Teknik Tasarim: plan her kriteri karsimali\n"
-                f"- Gelistirme: kod her kriteri uygulamali\n"
-                f"- Kod Inceleme: her kriter karsilanmis mi kontrol et\n"
-                f"- UAT: her kriteri GECTI/KALDI olarak degerlendirr"
+                f"⚠️ Every step must align with these criteria:\n"
+                f"- Technical Design: plan must cover every criterion\n"
+                f"- Development: code must implement every criterion\n"
+                f"- Code Review: verify each criterion is met\n"
+                f"- UAT: evaluate each criterion as PASS/FAIL"
             )
 
         # Plan (step 4 sonrasi)
@@ -395,6 +398,235 @@ class AgileSDLCFlow(Flow[PipelineState]):
             except Exception:
                 pass
 
+    def _run_discover_repos(self, candidate_repos: list[str], evidence: dict | None = None) -> None:
+        """LLM'e en alakali aday repo'larin summary'lerini ver, hedef repo'yu sec.
+
+        Vector + BM25 hibrid arama genelde 0.02-0.03 araliginda skor verir
+        (Flo monorepolari hepsi PHP/Butterfly + e-commerce semantigi); LLM
+        tablo/model/migration kanıtlarına bakarak daha guvenilir karar verir.
+        Sonuc DB'ye yazilir ve technical_design context'ine hint olarak eklenir.
+        Karar verilemezse pipeline akisi etkilenmez — architect yine de calisir.
+        """
+        import json as _json
+        self._step_start("discover_repos_task")
+
+        if not candidate_repos:
+            self._step_done("discover_repos_task", "Atlandı — aday repo yok")
+            return
+
+        # Aday'lar icin tam summary'leri toplayalim (architect'in karar
+        # vermesi icin model + tablo + migration listesi onemli)
+        adaylar = []
+        for rname in candidate_repos:
+            s = self._repo_mgr.get_repo_summary(rname)
+            if not s:
+                continue
+            # Generic dizin ozetini at, geri kalan her sey: framework,
+            # README, Domain, DB Tablolari, Migrationlar
+            short_lines = []
+            for line in s.split("\n"):
+                if line.startswith("## Ust Seviye Dizinler"):
+                    break
+                short_lines.append(line)
+            adaylar.append((rname, "\n".join(short_lines).strip()))
+
+        if not adaylar:
+            self._step_done("discover_repos_task", "Atlandı — summary'ler bos")
+            return
+
+        prompt_user = (
+            f"# Is Kalemi\nWI #{self.state.work_item_id}\n\n"
+            f"# Gereksinim Analizi (BA Ciktisi)\n{self.state.requirements_text[:3500]}\n\n"
+            f"# Aday Repo Ozetleri (en alakali {len(adaylar)})\n"
+        )
+        for name, summary in adaylar:
+            # Her aday icin ~10K char — buyuk monolithlerde (orkestra ~14KB)
+            # tablo + model listesi cikti, LLM'in kanıt görmesi icin gerekli.
+            # 20 aday × 10K = ~200KB; Claude Sonnet/Opus icin sorunsuz.
+            prompt_user += f"\n=================== {name} ===================\n{summary[:10000]}\n"
+
+        # Birebir kod kaniti — isim benzerliginden GUCLU sinyal.
+        evidence_block = ""
+        if evidence:
+            ev_sorted = sorted(
+                evidence.items(),
+                key=lambda kv: (len(kv[1].get("exclusive", [])), len(kv[1].get("symbols", []))),
+                reverse=True,
+            )
+            ev_lines = []
+            for repo, e in ev_sorted:
+                excl = e.get("exclusive", [])
+                excl_txt = f"  ← YALNIZCA bu repoda: {excl}" if excl else ""
+                ev_lines.append(f"- {repo}: {e.get('symbols', [])}{excl_txt}")
+            evidence_block = (
+                "\n\n# BIREBIR KOD KANITI (grep ile dogrulandi — repo ADI benzerliginden GUCLU)\n"
+                "Asagidaki tanimlayicilar WI'da geciyor ve repolarin KODUNDA birebir bulundu.\n"
+                "Bir sembol YALNIZCA tek repoda geciyorsa, o repo gercek SAHIPTIR. "
+                "Repo ADI benzerligine ALDANMA: ornegin 'stock_api_list' sembolu "
+                "'stock-api' adli microservice'te DEGIL, ekranin yasadigi baska bir "
+                "repoda birebir geciyor olabilir — kod kaniti isim eslesmesini EZER.\n"
+                + "\n".join(ev_lines)
+            )
+        prompt_user += evidence_block
+        prompt_user += (
+            "\n\nGOREV: Bu is kalemi (WI) yukaridaki aday repo'lardan HANGISINDE "
+            "yapilmalidir? Tek bir repo sec. Oncelik sirasi:\n"
+            "1) BIREBIR KOD KANITI'nda bir sembol YALNIZCA tek repoda geciyorsa, "
+            "o repo cok guclu adaydir — repo adi baska bir seye benzese bile onu sec.\n"
+            "2) Sonra WI'da gecen tablo/model/dosya yukaridaki aday'larin "
+            "'DB Tablolari & Migrationlar' / 'Domain Bilesenleri > Model' "
+            "listelerinde gectigine bak. Birden fazla aday'da geciyorsa modelin "
+            "yasadigi (sahibi) repoyu sec.\n"
+            "3) Repo adi benzerligi EN ZAYIF sinyaldir; tek basina yeterli degil.\n\n"
+            "Cikti SADECE su JSON formatinda olsun (markdown kullanma):\n"
+            '{"target_repo": "repo_adi", "reason": "kanit + neden (1-2 cumle, '
+            'Turkce, tablo/model/dosya/sembol belirt)", "alternatives": ["ikinci_aday", "ucuncu_aday"]}'
+        )
+
+        try:
+            from agile_sdlc_crew.llm import build_for_agent
+            llm = build_for_agent("software_architect")
+            raw = llm.call([
+                {"role": "system", "content": (
+                    "You are a senior software architect. Pick the single most likely "
+                    "target repo for the given work item, citing concrete table/model/file "
+                    "evidence from the candidate summaries. Respond with ONLY a JSON object."
+                )},
+                {"role": "user", "content": prompt_user},
+            ])
+        except Exception as e:
+            _log(f"  discover_repos LLM hatasi: {e} — atlanyor")
+            self._step_done("discover_repos_task", f"LLM hatasi: {e}")
+            return
+
+        raw_s = raw if isinstance(raw, str) else str(raw)
+        start = raw_s.find("{")
+        end = raw_s.rfind("}")
+        parsed: dict = {}
+        target = ""
+        reason = ""
+        if start >= 0 and end > start:
+            try:
+                parsed = _json.loads(raw_s[start:end + 1])
+                target = (parsed.get("target_repo") or "").strip()
+                reason = (parsed.get("reason") or "").strip()
+            except Exception as e:
+                _log(f"  discover_repos JSON parse hatasi: {e}")
+
+        known = set(self.state.known_repos)
+        if target and target not in known:
+            _log(f"  discover_repos uyari: LLM '{target}' donduerdu, known_repos'ta yok — gormezden gelinecek")
+            target = ""
+
+        if target:
+            # state.repo_name'i set ETMIYORUZ — architect technical_design
+            # JSON'unda kendi repo_name'ini yazsin; bu sadece ONERI.
+            alt = ", ".join(parsed.get("alternatives", []) or [])
+            _log(f"  Discover repo onerisi: {target} — {reason[:200]}")
+            self._step_done(
+                "discover_repos_task",
+                _json.dumps(parsed, ensure_ascii=False, indent=2),
+            )
+            self._append_context(
+                "Discover Repo Onerisi (Advisory)",
+                f"ONERILEN REPO: {target}\nGEREKCE: {reason}"
+                + (f"\nALTERNATIFLER: {alt}" if alt else "")
+                + "\n\nNOT: Bu yalnizca bir oneridir; son karar Yazilim Mimari'na aittir.",
+            )
+        else:
+            self._step_done(
+                "discover_repos_task",
+                f"LLM secim yapamadi, raw cikti: {raw_s[:500]}",
+            )
+
+    def _grep_symbol_evidence(self, max_symbols: int = 8) -> dict:
+        """WI'daki ayirt edici tanimlayicilari (snake_case, camelCase) TUM
+        repolarin kodunda BIREBIR grep'le ara.
+
+        Fuzzy isim eslesmesi tehlikeli: 'stock_api_list' WI'da gecince
+        repo adi 'stock-api' (parca: stock+api) yuksek skor aliyor — ama
+        sembol aslinda 'orkestra'da birebir geciyor. Bir sembol YALNIZCA
+        tek repoda geciyorsa o repo gercek sahiptir; bu, isim benzerligini
+        ezmeli.
+
+        Returns: {repo: {"symbols": [...], "exclusive": [...]}}
+                 exclusive = yalnizca o repoda gecen semboller (en guclu).
+                 Eslesme yoksa {}.
+        """
+        import re as _re_se
+        import subprocess as _sp_se
+        from pathlib import Path as _P_se
+
+        text = f"{self.state.requirements_text} {self.state.kickoff_text}"
+        # BA/architect JSON sema anahtarlari ve pipeline jenerik terimleri —
+        # WI icerigi DEGIL, gurultu. Bunlar repolarin kodunda da gectigi icin
+        # (orn. project-hal'da 'acceptance_criteria') yanlis exclusive kaniti
+        # uretir; sembol cikariminda atla.
+        _SYMBOL_STOPWORDS = {
+            "functional_requirements", "technical_requirements", "acceptance_criteria",
+            "out_of_scope", "open_questions", "breaking_changes", "migration_notes",
+            "security_perf_notes", "alternatives_considered", "covers_requirements",
+            "current_code", "new_code", "change_type", "file_path", "work_item_id",
+            "repo_name", "start_marker", "end_marker", "test_plan", "expected_output",
+            "scrum_master_feedback", "previous_context", "target_repo",
+        }
+        symbols: list[str] = []
+        seen: set[str] = set()
+        # snake_case ≥2 segment, >=8 char: stock_api_list, scheduled_delivery_date_range
+        for m in _re_se.finditer(r'\b([a-z][a-z0-9]+(?:_[a-z0-9]+){1,5})\b', text):
+            s = m.group(1)
+            if len(s) >= 8 and s.lower() not in seen and s.lower() not in _SYMBOL_STOPWORDS:
+                seen.add(s.lower()); symbols.append(s)
+        # camelCase/PascalCase ≥1 hump, >=6 char: getStocks, OrderAddress
+        for m in _re_se.finditer(r'\b([A-Za-z][a-z0-9]+(?:[A-Z][a-z0-9]+){1,4})\b', text):
+            s = m.group(1)
+            if len(s) >= 6 and s.lower() not in seen and s.lower() not in _SYMBOL_STOPWORDS:
+                seen.add(s.lower()); symbols.append(s)
+        if not symbols:
+            return {}
+        symbols.sort(key=len, reverse=True)  # en spesifik once
+        symbols = symbols[:max_symbols]
+
+        base = self._repo_mgr.base_dir
+        known = set(self.state.known_repos)
+        sym_to_repos: dict[str, set] = {}
+        for sym in symbols:
+            try:
+                res = _sp_se.run(
+                    ["grep", "-rlF",
+                     "--include=*.php", "--include=*.py", "--include=*.ts",
+                     "--include=*.tsx", "--include=*.js", "--include=*.go",
+                     "--include=*.cs", "--include=*.java", "--include=*.vue",
+                     "--exclude-dir=vendor", "--exclude-dir=node_modules",
+                     "--exclude-dir=.git",
+                     sym, str(base)],
+                    capture_output=True, text=True, timeout=15,
+                )
+            except Exception:
+                continue
+            if res.returncode != 0 or not res.stdout.strip():
+                continue
+            repos_for_sym: set[str] = set()
+            for line in res.stdout.strip().split("\n"):
+                try:
+                    repo = _P_se(line).relative_to(base).parts[0]
+                except Exception:
+                    continue
+                if repo in known:
+                    repos_for_sym.add(repo)
+            if repos_for_sym:
+                sym_to_repos[sym] = repos_for_sym
+
+        by_repo: dict[str, dict] = {}
+        for sym, repos in sym_to_repos.items():
+            is_exclusive = len(repos) == 1
+            for repo in repos:
+                e = by_repo.setdefault(repo, {"symbols": [], "exclusive": []})
+                e["symbols"].append(sym)
+                if is_exclusive:
+                    e["exclusive"].append(sym)
+        return by_repo
+
     # Budget'a dahil OLMAYAN adimlar — local Ollama LLM kullanan step'ler.
     # Bu step'ler bedava (local model), budget sadece harici API cagrilarini sayar.
     _LOCAL_STEPS = frozenset({
@@ -493,8 +725,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 "work_item_id": self.state.work_item_id,
             })
             raw = result.raw or ""
-            rejected = "IYILESTIR" in raw.upper() or "İYİLEŞTİR" in raw.upper()
-            _log(f"  SM Review ({step_name}): {'IYILESTIR' if rejected else 'ONAY'}")
+            up = raw.upper()
+            # Accept both new (English) and legacy (Turkish) decision tokens
+            rejected = any(tok in up for tok in ("IMPROVE", "IYILESTIR", "İYİLEŞTİR"))
+            _log(f"  SM Review ({step_name}): {'IMPROVE' if rejected else 'APPROVE'}")
             return (not rejected), raw
         except Exception as e:
             _log(f"  SM Review hatasi: {e}")
@@ -588,6 +822,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             push_result = push_file(
                 repo_name, branch, file_path, new_content,
                 f"fix: review feedback - {change.get('description', '')[:60]} (WI #{self.state.work_item_id})",
+                repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
             )
             if push_result.get("success"):
                 _log(f"    Push OK: {file_path}")
@@ -614,12 +849,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.review_text = review_text
         self._append_context("Kod Inceleme (Retry)", review_text)
 
-        # Tekrar kontrol — hâlâ red mi?
+        # Re-check — still rejected? (accept both English and legacy Turkish tokens)
         review_upper = review_text.upper()
         still_rejected = any(marker in review_upper for marker in [
+            "CHANGES_REQUIRED", "CHANGES REQUIRED",
             "DEGISIKLIK GEREKLI", "DEĞİŞİKLİK GEREKLİ",
             "REJECTED", "REDDEDILDI", "REDDEDİLDİ",
-            "KARAR: RED", "KARAR:RED",
+            "VERDICT: REJECT", "KARAR: RED", "KARAR:RED",
         ])
         if still_rejected:
             # step8_code_review'daki max retry kontrolune don
@@ -675,6 +911,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._vector_store = VectorStore()
         self._repo_mgr = LocalRepoManager()
         self._repo_mgr.vector_store = self._vector_store
+
+        # Resolve dry_run from DB row (set when job was queued) or env override
+        import os as _os_init
+        _dry_env = _os_init.environ.get("CREW_DRY_RUN", "").lower() in ("1", "true", "yes")
+        if self.state.job_id:
+            try:
+                _job = _db.get_job(self.state.job_id)
+                if _job and bool(_job.get("dry_run")):
+                    self.state.dry_run = True
+            except Exception:
+                pass
+        if _dry_env:
+            self.state.dry_run = True
+        if self.state.dry_run:
+            _log(f"  🔬 DRY-RUN modu aktif — push/PR/review/test/UAT atlanacak, sonuc lokal kalacak")
 
         # Tum repolari listele; fetch YAPMA — sadece eksik olanlari clone et.
         # Hedef repo'nun fetch'i step5_create_branch icinde yapilir.
@@ -1100,37 +1351,38 @@ class AgileSDLCFlow(Flow[PipelineState]):
         })
         requirements_text = req_result.raw or ""
 
-        # 🚨 YETERSIZLIK KONTROLU — Python-first
-        # Artik agent'a "YETERSIZ de" diye sormuyoruz (kucuk LLM'ler prompt'taki
-        # keyword'u kopyaliyor → yanlis karar). Sadece Python icerik uzunluguna bakar.
+        # 🚨 INSUFFICIENCY CHECK — Python-first.
+        # We no longer ask the agent "say INSUFFICIENT" (small LLMs copy
+        # the keyword from the prompt → wrong decision). Python decides
+        # purely on WI content length.
         from agile_sdlc_crew import pipeline_config as _pc_minwi
         MIN_CONTENT_CHARS = _pc_minwi.get("CREW_MIN_WI_CONTENT_CHARS")
         if wi_content_length < MIN_CONTENT_CHARS:
             missing = (
-                f"Is kaleminde yeterli bilgi yok (yalnizca {wi_content_length} karakter icerik). "
-                f"Baslik + aciklama + kabul kriterleri toplamda en az {MIN_CONTENT_CHARS} karakter olmali."
+                f"Work item has too little info (only {wi_content_length} characters of content). "
+                f"Title + description + acceptance criteria must total at least {MIN_CONTENT_CHARS} characters."
             )
-            _log(f"  🚨 IS KALEMI YETERSIZ: {missing}")
+            _log(f"  🚨 WORK ITEM INSUFFICIENT: {missing}")
             _add_wi_comment(self._client, self.state.work_item_id,
-                f"## ⚠️ Is Kalemi Yetersiz — Gelistirme Baslatilamadi\n\n"
-                f"Is kaleminin aciklamasi cok kisa ({wi_content_length} karakter). "
-                f"Otomatik gelistirme icin en az {MIN_CONTENT_CHARS} karakter iceriginiz olmali.\n\n"
-                f"Lutfen is kaleminde asagidaki bilgileri netlestirin:\n"
-                f"- Aciklama: ne yapilacak, neden gerekli\n"
-                f"- Kabul kriterleri: basarili sayilmasi icin hangi sartlar saglanmali\n"
-                f"- Teknik detay: hangi repo/modul/dosya etkilenir, ornek/referans var mi\n\n"
-                f"Bilgiler eklendikten sonra is kalemini tekrar kuyruga ekleyebilirsiniz.\n\n"
-                f"---\n*Agile SDLC Crew - Yetersizlik Kontrolu*"
+                f"## ⚠️ Work Item Insufficient — Development Not Started\n\n"
+                f"The work item description is too short ({wi_content_length} characters). "
+                f"At least {MIN_CONTENT_CHARS} characters are needed for automated development.\n\n"
+                f"Please clarify the following in the work item:\n"
+                f"- Description: what will be done, why it's needed\n"
+                f"- Acceptance criteria: conditions for success\n"
+                f"- Technical detail: which repo/module/file is affected, example/reference\n\n"
+                f"After adding the info, you can re-queue the work item.\n\n"
+                f"---\n*Agile SDLC Crew - Insufficiency Check*"
             )
-            self._step_fail("requirements_analysis_task", f"YETERSIZ: {missing}")
-            raise RuntimeError(f"Is kalemi gelistirme icin yetersiz: {missing}")
+            self._step_fail("requirements_analysis_task", f"INSUFFICIENT: {missing}")
+            raise RuntimeError(f"Work item insufficient for development: {missing}")
 
-        # Geriye donuk uyumluluk: eski prompt/agent "YETERSIZ: ..." cikartabilir —
-        # Python zaten yeterli buldu, bu keyword'u sessizce temizle
-        if _re.search(r'YETERSIZ\s*:', requirements_text[:500], _re.IGNORECASE):
-            _log(f"  ℹ️  Agent ciktisinda YETERSIZ keyword'u vardi, temizleniyor (icerik yeterli: {wi_content_length} char)")
+        # Backward compat: old prompts/agents may still emit "INSUFFICIENT:"
+        # or "YETERSIZ:" — Python already said "sufficient", silently strip.
+        if _re.search(r'(INSUFFICIENT|YETERSIZ)\s*:', requirements_text[:500], _re.IGNORECASE):
+            _log(f"  ℹ️  Agent output contained insufficiency keyword, stripping (content is sufficient: {wi_content_length} char)")
             requirements_text = _re.sub(
-                r'YETERSIZ\s*:\s*[^\n]*\n?', '', requirements_text, flags=_re.IGNORECASE
+                r'(INSUFFICIENT|YETERSIZ)\s*:\s*[^\n]*\n?', '', requirements_text, flags=_re.IGNORECASE
             ).lstrip()
 
         # SM Review
@@ -1453,11 +1705,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         from agile_sdlc_crew.main import _parse_architect_output, _resolve_repo_name
 
-        # Step 2-3: Agent'a 67 repo browse ettirmek yerine repo listesini
-        # ve REPO_SUMMARY.md'leri context'e ekle
-        skip_steps = ["discover_repos_task", "dependency_analysis_task"]
-        for sk in skip_steps:
-            self._step_done(sk, "Atlandı — repo bilgisi local'den alınıyor")
+        # Step 3 (dependency_analysis) hala atlanyor — repo summary context icin yeterli.
+        self._step_done("dependency_analysis_task", "Atlandı — repo bilgisi local'den alınıyor")
 
         # Repo listesini context'e ekle
         repo_list = ", ".join(self.state.known_repos)
@@ -1489,6 +1738,64 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     short.append(line)
                 summaries.append("\n".join(short).strip())
                 summaries_repos.append(rname)
+
+        # Adim 2: LLM'e en alakali 20 summary'yi vererek hedef repo icin
+        # ONERI uretsin. Onerisi technical_design context'ine eklenir;
+        # SON KARAR architect'in — kendi kanıtlarına dayanarak farkli bir
+        # repo secebilir, override edebilir.
+        #
+        # Path/URL mining: vector search bazen WI'da net olarak gecen repo
+        # adini (ornegin "/webservice/v1/meta/get" -> 'webservice') top 20'de
+        # cikartmiyor (tum skorlar 0.025-0.030 araliginda sikisik). Bu yuzden
+        # BA ciktisindaki path/URL token'larini known_repos'a karsi esleyip
+        # eslesenleri candidate listesine ZORLA dahil ediyoruz.
+        candidate_repos = list(summaries_repos[:20])
+        try:
+            import re as _re_pm
+            haystack = f"{self.state.requirements_text} {self.state.kickoff_text}"
+            # Path segment'lerinden ve "repo-name" benzeri token'lardan aday cikar
+            # ('/foo/...', 'foo/bar', 'foo-repo') hepsi yakalanir
+            path_tokens: set[str] = set()
+            for m in _re_pm.finditer(r"[/\s\"'`(]([a-z][a-z0-9_-]{2,40})(?:[/\.])", haystack):
+                path_tokens.add(m.group(1).lower())
+            forced = []
+            for tok in path_tokens:
+                if tok in self.state.known_repos and tok not in candidate_repos:
+                    forced.append(tok)
+            if forced:
+                # En basta — WI metninde gecen repo adlari en gucl sinyal
+                candidate_repos = forced + [r for r in candidate_repos if r not in forced]
+                _log(f"  Path mining: WI metninde gecen repo'lar candidate'e eklendi: {forced}")
+        except Exception as e:
+            _log(f"  Path mining hatasi: {e} — vector top 20 ile devam")
+
+        # Birebir kod kaniti — WI sembollerini repolarin kodunda grep'le.
+        # Fuzzy isim eslesmesinin (stock_api_list → stock-api) yanlis repoyu
+        # secmesini engeller; exclusive eslesmeleri candidate'e ZORLA dahil et.
+        symbol_evidence: dict = {}
+        try:
+            symbol_evidence = self._grep_symbol_evidence()
+            if symbol_evidence:
+                # Exclusive eslesmesi olan repolar once, sonra digerleri
+                ev_ranked = sorted(
+                    symbol_evidence.items(),
+                    key=lambda kv: (len(kv[1].get("exclusive", [])), len(kv[1].get("symbols", []))),
+                    reverse=True,
+                )
+                ev_repos = [r for r, _ in ev_ranked]
+                candidate_repos = ev_repos + [r for r in candidate_repos if r not in ev_repos]
+                _log(f"  Symbol-grep kaniti: " + ", ".join(
+                    f"{r}({len(e.get('exclusive', []))}excl/{len(e.get('symbols', []))})"
+                    for r, e in ev_ranked[:6]
+                ))
+        except Exception as e:
+            _log(f"  Symbol-grep hatasi: {e} — atlaniyor")
+
+        self._run_discover_repos(candidate_repos[:25], evidence=symbol_evidence)
+
+        # Repo Ozetleri context'i: top 15 ozet (Discover karari context'e
+        # ayri bir blok olarak zaten eklendi; burada tum adaylar kalir ki
+        # architect kendi kararini ozgurce versin).
         if summaries:
             self._append_context("Repo Ozetleri", "\n---\n".join(summaries[:15]))
             _log(f"  Repo ozet sirasi (ilk 5): {summaries_repos[:5]}")
@@ -1600,14 +1907,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
         prefetch_repo = ""
         relevant = []
 
+        # Katman -1: BIREBIR KOD KANITI (en guclu). Bir sembol yalnizca tek
+        # repoda geciyorsa, fuzzy isim eslesmesini EZER. 'stock_api_list' →
+        # 'stock-api' adi yanilgisini engeller (asil sahip orkestra).
+        if symbol_evidence:
+            ev_ranked = sorted(
+                symbol_evidence.items(),
+                key=lambda kv: (len(kv[1].get("exclusive", [])), len(kv[1].get("symbols", []))),
+                reverse=True,
+            )
+            top_repo, top_e = ev_ranked[0]
+            if top_e.get("exclusive"):
+                prefetch_repo = top_repo
+                _log(f"  Adim 4 hedef repo (symbol-grep exclusive {top_e['exclusive']}): {prefetch_repo}")
+
         # Katman 0/1: ortak helper (step0_kickoff_meeting ile birebir ayni mantik)
-        wi_text_for_repo = f"{wi_title} {wi_desc_clean} {self.state.requirements_text[:500]}".lower()
-        _method_td, _matched_td = _select_repo_by_name(
-            self.state.known_repos, wi_text_for_repo,
-        )
-        if _matched_td:
-            prefetch_repo = _matched_td
-            _log(f"  Adim 4 hedef repo ({_method_td}): {prefetch_repo}")
+        # — yalnizca symbol kaniti karar vermediyse.
+        if not prefetch_repo:
+            wi_text_for_repo = f"{wi_title} {wi_desc_clean} {self.state.requirements_text[:500]}".lower()
+            _method_td, _matched_td = _select_repo_by_name(
+                self.state.known_repos, wi_text_for_repo,
+            )
+            if _matched_td:
+                prefetch_repo = _matched_td
+                _log(f"  Adim 4 hedef repo ({_method_td}): {prefetch_repo}")
 
         # grep_matched_files: repo tespitinde bulunan dosya yollari — pre-fetch'te okunur
         grep_matched_files: list[str] = []
@@ -1795,6 +2118,65 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     except Exception:
                         pass
 
+                # 1.5. Repo biliniyor ama az/hic dosya icerigi cekildi: WI'nin
+                #      teknik terimleriyle repo ICINDE grep yap, eslesen
+                #      dosyalarin ICERIGINI cek. Dosya-adi ipucu olmayan
+                #      WI'larda (ornegin "stock_api_list ekrani") handler'i
+                #      context'e getirir; architect browse_repo cagirmak
+                #      zorunda kalmaz (claude_cli ReAct tool-loop'unda bos donuyor).
+                if prefetch_file_count < 3 and repo_dir.exists():
+                    import subprocess as _sp_grep
+                    _term_src = f"{wi_title} {wi_desc_clean} {wi_criteria_clean} {self.state.requirements_text[:800]}"
+                    grep_terms: list[str] = []
+                    for pat in (
+                        r'\b([a-z][a-z0-9]{2,}_[a-z0-9_]{2,})\b',   # snake_case: stock_api_list
+                        r'\b([a-z]+[A-Z][a-zA-Z]{3,})\b',           # camelCase: getStockList
+                        r'/api/(\w+)',                              # endpoint: /api/stock
+                    ):
+                        for m in _re.finditer(pat, _term_src, _re.IGNORECASE):
+                            t = m.group(1)
+                            if t.lower() not in {x.lower() for x in grep_terms}:
+                                grep_terms.append(t)
+                    # En spesifik (uzun) terimler once
+                    grep_terms.sort(key=len, reverse=True)
+                    seen_grep: set[str] = set()
+                    if grep_terms:
+                        _log(f"  Repo-ici grep terimleri: {grep_terms[:8]}")
+                        for term in grep_terms[:6]:
+                            if prefetch_file_count >= 4:
+                                break
+                            try:
+                                res = _sp_grep.run(
+                                    ["grep", "-rl",
+                                     "--include=*.php", "--include=*.py", "--include=*.ts",
+                                     "--include=*.tsx", "--include=*.js", "--include=*.go",
+                                     "--include=*.cs", "--include=*.java",
+                                     "-m", "1", term, str(repo_dir)],
+                                    capture_output=True, text=True, timeout=5,
+                                )
+                            except Exception:
+                                continue
+                            if res.returncode != 0 or not res.stdout.strip():
+                                continue
+                            for fstr in res.stdout.strip().split("\n"):
+                                if prefetch_file_count >= 4:
+                                    break
+                                if not fstr or fstr in seen_grep:
+                                    continue
+                                if any(s in fstr for s in ("vendor/", "node_modules/", ".git/", "/test", "_test.", "/mocks/")):
+                                    continue
+                                seen_grep.add(fstr)
+                                try:
+                                    p = _Path(fstr)
+                                    content = p.read_text(encoding="utf-8", errors="replace")
+                                    rel_path = "/" + str(p.relative_to(repo_dir))
+                                    trunc = content[:4000] + ("\n... (truncated)" if len(content) > 4000 else "")
+                                    ctx += f"\n\n# DOSYA ICERIGI: {rel_path}\n```\n{trunc}\n```"
+                                    prefetch_file_count += 1
+                                    _log(f"  Pre-fetch (repo-ici grep '{term}'): {rel_path} ({len(content)} char)")
+                                except Exception:
+                                    pass
+
                 # 2. Ipucu yoksa veya az dosya bulunduysa: repo'nun temel yapisini ekle
                 #    Architect'in tool cagirmadan plan yapabilmesi icin yeterli bilgi saglar.
                 if prefetch_file_count < 2 and repo_dir.exists():
@@ -1879,9 +2261,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 "target_repo": prefetch_repo or "",
                 "previous_context": retry_ctx,
                 "scrum_master_feedback": (
-                    "⚠️ Onceki denemende JSON parse edilemedi. "
-                    "Simdi elindeki TUM bilgilerle SADECE JSON plan uret. "
-                    "Tool cagirma, aciklama yazma — SADE JSON."
+                    f"⚠️ Onceki denemende plan validation hatasi:\n{e}\n\n"
+                    "Hatayi gider ve SADECE gecerli JSON plan uret. "
+                    "Tool cagirma, aciklama yazma — SADE JSON. "
+                    "Placeholder kullanma (timestamp/class/tablo adlari somut olmali)."
                 ),
             })
             self._track_and_check_budget(analysis_result, "technical_design_task (retry)")
@@ -2030,14 +2413,25 @@ class AgileSDLCFlow(Flow[PipelineState]):
         _log("\n-- ADIM 5: Branch olusturuluyor --")
         self._step_start("create_branch_task")
 
-        branch_result = create_branch(repo_name, self.state.work_item_id)
-        if not branch_result["success"]:
-            raise RuntimeError(f"Branch olusturulamadi: {branch_result['error']}")
-
-        self.state.branch_name = branch_result["branch"]
-        _log(f"  Branch: {self.state.branch_name}")
-        if branch_result.get("note"):
-            _log(f"    ({branch_result['note']})")
+        if self.state.dry_run:
+            # Dry-run: create branch locally (no remote API call).
+            branch_name = f"feature/{self.state.work_item_id}"
+            repo_dir = self._repo_mgr.base_dir / repo_name
+            try:
+                # Branch from current HEAD (main) — already reset above
+                self._repo_mgr._git(["checkout", "-B", branch_name], cwd=repo_dir)
+                self.state.branch_name = branch_name
+                _log(f"  🔬 DRY-RUN Branch (local): {branch_name}")
+            except Exception as e:
+                raise RuntimeError(f"Dry-run branch olusturulamadi: {e}")
+        else:
+            branch_result = create_branch(repo_name, self.state.work_item_id)
+            if not branch_result["success"]:
+                raise RuntimeError(f"Branch olusturulamadi: {branch_result['error']}")
+            self.state.branch_name = branch_result["branch"]
+            _log(f"  Branch: {self.state.branch_name}")
+            if branch_result.get("note"):
+                _log(f"    ({branch_result['note']})")
 
         self._append_context("Branch Olusturma", f"Branch: {self.state.branch_name}, Repo: {repo_name}")
         self._step_done("create_branch_task", f"Branch: {self.state.branch_name}")
@@ -2313,9 +2707,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 continue
 
             commit_msg = f"#{self.state.work_item_id}: {description[:80]}"
-            push_result = push_file(repo_name, branch_name, file_path, final_content, commit_msg, repo_mgr=self._repo_mgr)
+            push_result = push_file(
+                repo_name, branch_name, file_path, final_content, commit_msg,
+                repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
+            )
             if push_result["success"]:
-                _log(f"    Push #{push_result['push_id']} ({push_result['change_type']})")
+                if push_result.get("dry_run"):
+                    _log(f"    🔬 DRY-RUN local commit ({push_result['change_type']}): {push_result.get('local_path', file_path)}")
+                else:
+                    _log(f"    Push #{push_result.get('push_id','?')} ({push_result['change_type']})")
                 all_pushes.append(push_result)
                 # Sonraki dosyalar bu dosyanin kodunu referans alabilsin
                 implemented_codes[file_path] = final_content[:3000]
@@ -2329,12 +2729,27 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
     @listen(step6_implement_code)
     def step7_create_pr(self):
-        """Adim 7: PR Olustur — plan-push eslesmesi kontrolu ile."""
+        """Adim 7: PR Olustur — plan-push eslesmesi kontrolu ile.
+        DRY-RUN: PR olusturulmaz, placeholder URL ile gecilir."""
         from agile_sdlc_crew.main import _get_work_item_title, _add_wi_comment
         from agile_sdlc_crew.pipeline import create_pull_request
 
         _log("\n-- ADIM 7: PR olusturuluyor --")
         self._step_start("create_pr_task")
+
+        if self.state.dry_run:
+            repo_path = self._repo_mgr.base_dir / self.state.repo_name
+            self.state.pr_id = ""
+            self.state.pr_url = (
+                f"DRY-RUN: no PR. Local branch '{self.state.branch_name}' at {repo_path}"
+            )
+            _log(f"  🔬 DRY-RUN: PR olusturma atlandi")
+            _log(f"     Lokal branch: {self.state.branch_name}")
+            _log(f"     Repo yolu:    {repo_path}")
+            _log(f"     Inceleme:     cd {repo_path} && git log --oneline main..{self.state.branch_name}")
+            self._append_context("PR Olusturma", f"DRY-RUN — no remote PR, local branch: {self.state.branch_name}")
+            self._step_done("create_pr_task", self.state.pr_url)
+            return
 
         if not self.state.all_pushes:
             _add_wi_comment(self._client, self.state.work_item_id,
@@ -2470,8 +2885,16 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
     @listen(step7_create_pr)
     def step8_code_review(self):
-        """Adim 8: PR Yorumlarini Yanitla + Kod Inceleme."""
+        """Adim 8: PR Yorumlarini Yanitla + Kod Inceleme.
+        DRY-RUN: PR yok, review atlanir."""
         from agile_sdlc_crew.main import _add_wi_comment
+
+        if self.state.dry_run:
+            _log("\n-- ADIM 8: Kod inceleme — DRY-RUN: atlandi (PR yok) --")
+            self._step_start("review_pr_task")
+            self.state.review_text = "DRY-RUN: code review skipped (no remote PR)"
+            self._step_done("review_pr_task", self.state.review_text)
+            return
 
         # Onceki PR yorumlarina yanit ver (implement sonrasi)
         # Resume durumunda _pr_threads_to_respond bos olabilir — direkt oku
@@ -2598,14 +3021,16 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.review_text = review_text
         self._append_context("Kod Inceleme", review_text)
 
-        # 🚨 REVIEWER KARARINA SAYGI — DEGISIKLIK GEREKLI / REJECTED ise
-        # tekrar gelistirme dongusune gir (max CREW_REVIEW_MAX_RETRIES, default 2)
+        # 🚨 RESPECT REVIEWER VERDICT — if CHANGES_REQUIRED / REJECTED,
+        # loop back into dev (max CREW_REVIEW_MAX_RETRIES, default 2).
+        # Accept both English (new) and Turkish (legacy) tokens.
         import os as _os_rev
         review_upper = review_text.upper()
         rejected = any(marker in review_upper for marker in [
+            "CHANGES_REQUIRED", "CHANGES REQUIRED",
             "DEGISIKLIK GEREKLI", "DEĞİŞİKLİK GEREKLİ",
             "REJECTED", "REDDEDILDI", "REDDEDİLDİ",
-            "KARAR: RED", "KARAR:RED",
+            "VERDICT: REJECT", "KARAR: RED", "KARAR:RED",
         ])
         from agile_sdlc_crew import pipeline_config as _pc_rev
         max_review_retries = _pc_rev.get("CREW_REVIEW_MAX_RETRIES")
@@ -2650,13 +3075,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
     @listen(step8_code_review)
     def step9_test_planning(self):
-        """Adim 9: Test Planlama — code_review sonrasi PARALEL calisir (UAT ile birlikte)."""
+        """Adim 9: Test Planlama — code_review sonrasi PARALEL calisir (UAT ile birlikte).
+        DRY-RUN: PR yok, atlanir."""
         from agile_sdlc_crew.main import (
             _extract_code_from_output, _validate_code, _add_wi_comment,
         )
         from agile_sdlc_crew.pipeline import push_file
 
         _log("\n-- ADIM 9: Test planlama --")
+
+        if self.state.dry_run:
+            _log("  🔬 DRY-RUN: test planlama atlandi (PR yok)")
+            self._step_start("test_planning_task")
+            self.state.test_text = "DRY-RUN: test planning skipped"
+            self._step_done("test_planning_task", self.state.test_text)
+            return
 
         # Resume
         cached_test = self._try_resume_step("test_planning_task")
@@ -2732,10 +3165,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     push_result = push_file(
                         self.state.repo_name, self.state.branch_name, test_path, final_test,
                         f"#{self.state.work_item_id}: unit test eklendi",
-                        repo_mgr=self._repo_mgr,
+                        repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
                     )
                     if push_result["success"]:
-                        _log(f"    Test push #{push_result['push_id']}")
+                        _log(f"    Test push {'(dry-run local)' if push_result.get('dry_run') else '#'+str(push_result.get('push_id','?'))}")
                     else:
                         _log(f"    Test push hatasi: {push_result['error']}")
         else:
@@ -2779,10 +3212,18 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
     @listen(step8_code_review)
     def step10_uat(self):
-        """Adim 10: UAT Dogrulama — code_review sonrasi PARALEL calisir (Test ile birlikte)."""
+        """Adim 10: UAT Dogrulama — code_review sonrasi PARALEL calisir (Test ile birlikte).
+        DRY-RUN: PR yok, atlanir."""
         from agile_sdlc_crew.main import _add_wi_comment
 
         _log("\n-- ADIM 10: UAT dogrulama --")
+
+        if self.state.dry_run:
+            _log("  🔬 DRY-RUN: UAT atlandi (PR yok)")
+            self._step_start("uat_task")
+            self.state.uat_text = "DRY-RUN: UAT skipped"
+            self._step_done("uat_task", self.state.uat_text)
+            return
 
         # Resume
         cached_uat = self._try_resume_step("uat_task")
@@ -2796,8 +3237,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         if self._hal:
             uat_detail = self._hal.followup(
-                f"#{self.state.work_item_id} is kaleminin kabul kriterlerini listele "
-                f"ve yapilan degisikliklerin her kriteri karsilayip karsilamadigini GECTI/KALDI olarak belirt."
+                f"List the acceptance criteria of work item #{self.state.work_item_id} "
+                f"and mark each as PASS/FAIL based on whether the changes satisfy it."
             )
             uat_text = uat_detail.get("response", "")
         else:
@@ -2841,11 +3282,17 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
     @listen(and_(step9_test_planning, step10_uat))
     def step11_completion_report(self):
-        """Adim 11: Tamamlanma Raporu — Test VE UAT bittikten sonra calisir."""
+        """Adim 11: Tamamlanma Raporu — Test VE UAT bittikten sonra calisir.
+        DRY-RUN: lokal rapor yazar (~/.crew_repos/<repo>/.dry_run_<job_id>.md)
+        — WI'ya yorum eklemez."""
         from agile_sdlc_crew.main import _add_wi_comment
 
         _log("\n-- ADIM 11: Tamamlanma raporu --")
         self._step_start("completion_report_task")
+
+        if self.state.dry_run:
+            self._write_dry_run_report()
+            return
 
         if self._hal:
             completion_detail = self._hal.followup(
@@ -2882,4 +3329,102 @@ class AgileSDLCFlow(Flow[PipelineState]):
         _log(f"\n{'='*60}")
         _log("  PIPELINE TAMAMLANDI!")
         _log(f"  PR #{self.state.pr_id}: {self.state.pr_url}")
+        _log(f"{'='*60}")
+
+    def _write_dry_run_report(self):
+        """Build a local-only completion summary for dry-run jobs.
+        Writes <repo_path>/.dry_run_<job_id>.md with WI summary, plan,
+        changed files and `git diff main..<branch>` output."""
+        from pathlib import Path
+        repo_name = self.state.repo_name
+        branch = self.state.branch_name
+        job_id = self.state.job_id or 0
+
+        repo_dir = self._repo_mgr.base_dir / repo_name
+        report_path = repo_dir / f".dry_run_{job_id}.md"
+
+        # Collect diff
+        try:
+            diff = self._repo_mgr.get_diff(repo_name, branch, base="main")
+        except Exception as e:
+            diff = f"(diff fetch failed: {e})"
+        # Cap diff size in the report
+        diff_capped = diff[:50_000] + ("\n\n...(diff truncated)" if len(diff) > 50_000 else "")
+
+        # Plan summary
+        plan = self.state.plan or {}
+        changes = plan.get("changes", [])
+        plan_summary = []
+        for ch in changes:
+            plan_summary.append(
+                f"- **[{ch.get('change_type','edit')}]** `{ch.get('file_path','?')}` — "
+                f"{ch.get('description','')[:200]}"
+            )
+
+        # Pushed files
+        pushed = self.state.all_pushes or []
+        pushed_list = "\n".join(
+            f"- `{p.get('file','?')}` ({p.get('change_type','?')})"
+            for p in pushed
+        ) or "_(no files committed locally)_"
+
+        # Acceptance criteria
+        acs = self.state.acceptance_criteria or []
+        ac_list = "\n".join(f"- {a}" for a in acs) or "_(none)_"
+
+        report = (
+            f"# Dry-Run Report — WI #{self.state.work_item_id}\n\n"
+            f"**Job ID:** {job_id}\n"
+            f"**Repo:** {repo_name}\n"
+            f"**Local Branch:** `{branch}`\n"
+            f"**Repo Path:** `{repo_dir}`\n\n"
+            f"## Requirements Summary\n\n"
+            f"{(self.state.requirements_text or '_(empty)_')[:3000]}\n\n"
+            f"## Acceptance Criteria\n\n"
+            f"{ac_list}\n\n"
+            f"## Technical Plan\n\n"
+            f"**Repo:** {plan.get('repo_name', repo_name)}\n"
+            f"**Summary:** {plan.get('summary', '_(empty)_')}\n\n"
+            f"**Planned Changes ({len(changes)}):**\n"
+            f"{chr(10).join(plan_summary) if plan_summary else '_(none)_'}\n\n"
+            f"## Locally Committed Files ({len(pushed)})\n\n"
+            f"{pushed_list}\n\n"
+            f"## How to Review Locally\n\n"
+            f"```bash\n"
+            f"cd {repo_dir}\n"
+            f"git log --oneline main..{branch}\n"
+            f"git diff main..{branch}\n"
+            f"# Or open the branch in your editor:\n"
+            f"git checkout {branch}\n"
+            f"```\n\n"
+            f"## Diff (main..{branch})\n\n"
+            f"```diff\n{diff_capped}\n```\n"
+        )
+        try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(report, encoding="utf-8")
+            _log(f"  🔬 Dry-run raporu yazildi: {report_path}")
+        except Exception as e:
+            _log(f"  Dry-run rapor yazma hatasi: {e}")
+            report_path = None
+
+        # State + step done
+        completion_text = (
+            f"DRY-RUN tamamlandi. {len(pushed)} dosya lokal commit edildi.\n"
+            f"Branch: {branch}\n"
+            f"Repo: {repo_dir}\n"
+            f"Rapor: {report_path or '(yazilamadi)'}"
+        )
+        self.state.completion_text = completion_text
+        self._step_done("completion_report_task", completion_text)
+        _log(f"\n{'='*60}")
+        _log("  🔬 DRY-RUN PIPELINE TAMAMLANDI")
+        _log(f"  Repo:   {repo_dir}")
+        _log(f"  Branch: {branch}")
+        if report_path:
+            _log(f"  Rapor:  {report_path}")
+        _log(f"  Inceleme:")
+        _log(f"    cd {repo_dir}")
+        _log(f"    git log --oneline main..{branch}")
+        _log(f"    git diff main..{branch}")
         _log(f"{'='*60}")

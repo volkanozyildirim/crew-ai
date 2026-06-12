@@ -112,13 +112,16 @@ def _extract_focused_sections(md_content: str, repo_name: str) -> str:
         elif current:
             sections[current].append(line)
 
-    for key in ("Ozet", "README", "Domain Bilesenleri"):
+    for key in ("Ozet", "README", "Domain Bilesenleri", "DB Tablolari & Migrationlar"):
         if key in sections:
             body = "\n".join(sections[key]).strip()
             if body:
                 result.append(f"\n## {key}\n{body}")
 
-    return "\n".join(result)[:2500]
+    # BM25 indeksi tum metni token'lar — uzun olabilir. Embedding kendi
+    # MAX_CHUNK_CHARS'i ile kesiliyor; burada erken cap koymaya gerek yok.
+    # Buyuk monolithlerde (orn. orkestra ~14KB) tablo + model listesi sigsin.
+    return "\n".join(result)[:20000]
 
 
 def _embed_text(text: str, retries: int = 4) -> list[float]:
@@ -166,6 +169,24 @@ class VectorStore:
         ).expanduser())
         self._storage = None
         self._indexed_repos: set[str] = set()
+        # Hybrid search (BM25 + vector) — CREW_HYBRID_SEARCH ile gate'li
+        self._hybrid_enabled = os.environ.get("CREW_HYBRID_SEARCH", "1") != "0"
+        self._hybrid = None  # lazy init
+
+    @property
+    def hybrid(self):
+        """Lazy HybridSearcher. CREW_HYBRID_SEARCH=0 ile None doner (saf vector path)."""
+        if not self._hybrid_enabled:
+            return None
+        if self._hybrid is None:
+            try:
+                from agile_sdlc_crew.tools.bm25_search import HybridSearcher
+                self._hybrid = HybridSearcher(storage_factory=lambda: self.storage)
+            except Exception as e:
+                log.warning(f"  HybridSearcher import/init hatasi: {e} — saf vector kullanilacak")
+                self._hybrid_enabled = False
+                return None
+        return self._hybrid
 
     @property
     def storage(self):
@@ -234,17 +255,48 @@ class VectorStore:
             embedding=embedding,
         )
         self.storage.save([record])
+        # BM25 index'i bu scope icin invalidate et — sonraki search rebuild
+        if self.hybrid is not None:
+            try:
+                self.hybrid.invalidate(scope)
+            except Exception:
+                pass
 
     def _search(self, query: str, scope_prefix: str, limit: int = 10, min_score: float = 0.0) -> list:
-        """Vector search — query'yi embed edip LanceDB'de ara."""
+        """Vector + opsiyonel BM25 hybrid search.
+
+        CREW_HYBRID_SEARCH=1 (default) ile:
+          1. Vector'den CREW_BM25_VECTOR_CANDIDATES (default 50) aday al
+          2. BM25 sonuclariyla RRF (CREW_RRF_K=60) ile fuse
+          3. Top `limit` dondur
+        CREW_HYBRID_SEARCH=0 ile: byte-identical eski vector path.
+        """
         query_emb = _embed_text(query)
-        results = self.storage.search(
+        if self.hybrid is None:
+            return self.storage.search(
+                query_embedding=query_emb,
+                scope_prefix=scope_prefix,
+                limit=limit,
+                min_score=min_score,
+            )
+        # Hybrid: vector'den over-fetch et
+        vec_k = int(os.environ.get("CREW_BM25_VECTOR_CANDIDATES", "50"))
+        vector_results = self.storage.search(
             query_embedding=query_emb,
             scope_prefix=scope_prefix,
-            limit=limit,
+            limit=max(vec_k, limit),
             min_score=min_score,
         )
-        return results  # list of (MemoryRecord, score)
+        try:
+            return self.hybrid.search(
+                scope_prefix=scope_prefix,
+                query=query,
+                vector_results=vector_results,
+                limit=limit,
+            )
+        except Exception as e:
+            log.warning(f"  Hybrid search fallback: {e}")
+            return vector_results[:limit]
 
     # ── Repo Summary ──────────────────────────────────
 

@@ -13,8 +13,15 @@ import subprocess
 log = logging.getLogger("pipeline")
 
 
-def claude_cli_completion(prompt: str, max_tokens: int = 4096, model: str = "") -> str:
+def claude_cli_completion(
+    prompt: str, max_tokens: int = 4096, model: str = "", system: str = ""
+) -> str:
     """Claude CLI ile tek prompt calistir, sonucu string olarak dondur.
+
+    system: agent personasi. Verilirse `--system-prompt` ile gercek system
+    prompt olarak gecirilir; boylece Claude CLI kendi default kimligi
+    ("You are Claude Code...") yerine bizim persona gibi davranir. Aksi
+    halde persona user metnine gomulurse model rolu kirip meta-yorum yapiyor.
 
     Timeout pipeline_config'dan okunur (CREW_CLAUDE_CLI_TIMEOUT, default 300s).
     Dashboard veya env override edebilir."""
@@ -27,6 +34,8 @@ def claude_cli_completion(prompt: str, max_tokens: int = 4096, model: str = "") 
         timeout_s = int(os.environ.get("CREW_CLAUDE_CLI_TIMEOUT", "300"))
 
     cmd = ["claude", "-p", prompt]
+    if system:
+        cmd.extend(["--system-prompt", system])
     if model:
         cmd.extend(["--model", model])
 

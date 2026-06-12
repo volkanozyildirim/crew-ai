@@ -708,7 +708,27 @@ class LocalRepoManager:
             lines.append("## Domain Bilesenleri")
             for category, items in signals.items():
                 if items:
-                    lines.append(f"- **{category}**: {', '.join(items[:15])}")
+                    # signals zaten _extract_domain_signals'da kategoriye gore
+                    # kesilmis — burada ek cap koymuyoruz
+                    lines.append(f"- **{category}**: {', '.join(items)}")
+            lines.append("")
+
+        # ── DB Sinyalleri: tablo adlari + migration dosya adlari ──
+        # Migration filename'leri tablo + kolon adi tasir (ornegin
+        # "2024_01_01_add_scheduled_delivery_date_range_to_order_address.php"),
+        # bu da repo seciminde en ayirt edici sinyaldir.
+        db = self._extract_db_signals(repo_dir)
+        if db.get("tables") or db.get("migrations"):
+            lines.append("## DB Tablolari & Migrationlar")
+            if db.get("tables"):
+                # Repo seciminde en ayirt edici sinyal — buyuk monolithlerde
+                # 200+ tablo olabilir, alfabetik kesilirse 'o' / 'p' / 'r' harfli
+                # tablolar duser (ornegin order_addresses), o yuzden cap genis.
+                lines.append(f"- **Tablolar**: {', '.join(db['tables'][:300])}")
+            if db.get("migrations"):
+                lines.append("- **Son Migration'lar**:")
+                for m in db["migrations"][-40:]:
+                    lines.append(f"  - {m}")
             lines.append("")
 
         # ── Top-level dizinler (sadece 1 seviye) ──
@@ -784,9 +804,94 @@ class LocalRepoManager:
                 for it in items:
                     if it not in seen:
                         seen.append(it)
-                signals[category] = seen[:25]
+                # Model listesi cap'siz — buyuk monolithlerde 200+ model olabilir,
+                # alfabetik kesilirse 'O' / 'P' / 'R' harfli modeller duser (ornegin
+                # OrderAddress) ve LLM repo karari verirken kaniti goremez.
+                cap = 1000 if category == "Model" else 30
+                signals[category] = seen[:cap]
 
         return signals
+
+    def _extract_db_signals(self, repo_dir: Path) -> dict:
+        """Migration dosya adlari ve Model'lerdeki $table tanimlarindan DB tablo adlarini cikar.
+
+        - Migration filename'leri: '2024_01_01_add_xxx_to_yyy.php' formatinda tablo +
+          kolon adi tasir, semantic arama icin en degerli sinyaller. Son 40 migration tutulur.
+        - Schema::table('order_address', ...) / Schema::create('orders', ...) calls icindeki
+          tablo adlari toplanir.
+        - Model dosyalarindaki `$table = 'order_address'` deklarasyonlari toplanir.
+        """
+        import re as _re
+
+        tables: set[str] = set()
+        migrations: list[str] = []
+
+        table_call_re = _re.compile(
+            r"Schema::(?:table|create|hasTable|drop|dropIfExists)\(\s*['\"]([a-z_][a-z0-9_]*)['\"]",
+            _re.IGNORECASE,
+        )
+        # Laravel: protected $table = 'xxx'  /  Butterfly: protected $_name = 'xxx'
+        table_decl_re = _re.compile(
+            r"\$(?:table|_name)\s*=\s*['\"]([a-z_][a-z0-9_]*)['\"]",
+            _re.IGNORECASE,
+        )
+        # Butterfly Install/Upgrade pattern: CREATE TABLE `xxx` veya raw SQL
+        create_table_sql_re = _re.compile(
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`'\"]?([a-z_][a-z0-9_]*)[`'\"]?",
+            _re.IGNORECASE,
+        )
+
+        # Migration dizinleri (Butterfly, Laravel, generic)
+        migration_dirs = [
+            "database/Migrations", "database/migrations",
+            "db/migrations", "migrations",
+            "app/Migration", "app/Migrations",  # Butterfly Install/Upgrade pattern
+        ]
+        for md in migration_dirs:
+            mdir = repo_dir / md
+            if not mdir.exists() or not mdir.is_dir():
+                continue
+            try:
+                files = sorted(
+                    p for p in mdir.iterdir()
+                    if p.is_file() and p.suffix.lower() in (".php", ".sql")
+                )
+            except PermissionError:
+                continue
+            for f in files:
+                migrations.append(f.stem)
+                try:
+                    txt = f.read_text(encoding="utf-8", errors="replace")
+                    for m in table_call_re.finditer(txt):
+                        tables.add(m.group(1).lower())
+                    for m in create_table_sql_re.finditer(txt):
+                        tables.add(m.group(1).lower())
+                except Exception:
+                    pass
+
+        # Model dosyalarindaki $table deklarasyonlari (ilk 300 model dosyasi)
+        model_dirs = ["app/Model", "app/Models", "src/models"]
+        for md in model_dirs:
+            mdir = repo_dir / md
+            if not mdir.exists() or not mdir.is_dir():
+                continue
+            try:
+                files = list(mdir.rglob("*.php"))[:300]
+            except Exception:
+                continue
+            for f in files:
+                try:
+                    txt = f.read_text(encoding="utf-8", errors="replace")
+                    m = table_decl_re.search(txt)
+                    if m:
+                        tables.add(m.group(1).lower())
+                except Exception:
+                    pass
+
+        return {
+            "tables": sorted(tables),
+            "migrations": migrations,
+        }
 
     def _extract_meaningful_deps(self, repo_dir: Path) -> list[str]:
         """Sadece is mantigiyla ilgili bagimliliklari dondur — genel framework/util paketlerini atla."""
@@ -846,6 +951,67 @@ class LocalRepoManager:
         except Exception:
             pass
         return ""
+
+    def write_and_commit_local(
+        self, repo_name: str, branch: str, file_path: str, content: str, message: str,
+    ) -> dict:
+        """Dry-run path: write file to local working tree and commit locally.
+        Does NOT push to remote. Used when state.dry_run is True.
+        """
+        repo_dir = self._get_repo_dir(repo_name)
+        # Ensure we're on the target branch
+        try:
+            self.checkout(repo_name, branch)
+        except Exception:
+            # Create branch from current HEAD if missing
+            self._git(["checkout", "-B", branch], cwd=repo_dir)
+
+        clean_path = file_path.lstrip("/")
+        full_path = repo_dir / clean_path
+        existed = full_path.exists()
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(content, encoding="utf-8")
+
+        # Stage + commit
+        self._git(["add", "--", clean_path], cwd=repo_dir)
+        # Check if there are actual changes to commit
+        status = self._git(["status", "--porcelain", "--", clean_path], cwd=repo_dir)
+        if not status.stdout.strip():
+            return {
+                "success": True, "dry_run": True, "file": file_path,
+                "change_type": "edit" if existed else "add",
+                "note": "no-op (content identical)",
+            }
+        commit = self._git(
+            ["-c", "user.name=Agile SDLC Crew (dry-run)",
+             "-c", "user.email=dry-run@local",
+             "commit", "-m", message],
+            cwd=repo_dir,
+        )
+        if commit.returncode != 0:
+            return {
+                "success": False, "dry_run": True, "file": file_path,
+                "error": commit.stderr or commit.stdout or "git commit failed",
+            }
+        return {
+            "success": True, "dry_run": True, "file": file_path,
+            "change_type": "edit" if existed else "add",
+            "local_path": str(full_path),
+        }
+
+    def get_diff(self, repo_name: str, branch: str, base: str = "main") -> str:
+        """Return `git diff base..branch` output for review/report."""
+        repo_dir = self._get_repo_dir(repo_name)
+        # Ensure base is fetched and exists locally
+        for ref in (f"{base}", f"origin/{base}"):
+            check = self._git(["rev-parse", "--verify", "--quiet", ref], cwd=repo_dir)
+            if check.returncode == 0:
+                base_ref = ref
+                break
+        else:
+            base_ref = base  # let git fail if neither exists
+        diff = self._git(["diff", f"{base_ref}...{branch}"], cwd=repo_dir, timeout=60)
+        return diff.stdout or ""
 
     # ── Internal ────────────────────────────────────
 

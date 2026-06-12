@@ -115,12 +115,52 @@ def _parse_architect_output(raw_output: str) -> dict:
     if not plan["changes"]:
         raise ValueError("Architect ciktisinda degisiklik listesi bos.")
 
+    # Placeholder pattern guard — architect bazen file_path veya new_code'da
+    # `<TIMESTAMP>`, `{{CLASS}}`, `XXXX_XX_XX` gibi placeholder bırakıyor;
+    # bu PHP/Go/Python linter'ı patlatıyor ve dosya push edilemiyor (sessizce
+    # PR'dan düşüyor). Erken yakalayıp retry'a düşürelim.
+    _placeholder_re = re.compile(
+        r"<[A-Z][A-Z0-9_]+>|"          # <TIMESTAMP>, <CLASS_NAME>
+        r"\{\{[A-Z][A-Z0-9_]+\}\}|"    # {{TIMESTAMP}}
+        r"XXXX[_X]+|"                  # XXXX_XX_XX
+        r"\bTBD\b|\bTODO_PLACEHOLDER\b",
+        re.IGNORECASE,
+    )
+
+    repo_name_for_strip = (plan.get("repo_name") or "").strip()
     for i, change in enumerate(plan["changes"]):
         for field in ["file_path", "change_type", "new_code"]:
             if field not in change:
                 raise ValueError(
                     f"Architect ciktisi changes[{i}] icinde '{field}' alani eksik: {list(change.keys())}"
                 )
+        for field in ("file_path", "new_code", "current_code"):
+            val = change.get(field, "") or ""
+            m = _placeholder_re.search(val)
+            if m:
+                raise ValueError(
+                    f"Architect ciktisi changes[{i}].{field} icinde placeholder "
+                    f"bulundu: '{m.group(0)}'. Somut deger uret "
+                    f"(ornek: <TIMESTAMP> yerine 20260604123045)."
+                )
+
+        # file_path normalize — architect bazen kapris yapip
+        # `repo_name/path` veya `./path` veya `path` (leading / yok) yazyor.
+        # Pipeline path'i repo dizini ile birlestiriyor; LLM kaprisini absorbe edelim.
+        original_fp = change.get("file_path") or ""
+        if original_fp:
+            fp = original_fp.strip(" \t\"'`\n")
+            # './' ile basliyorsa kaldir
+            if fp.startswith("./"):
+                fp = fp[2:]
+            # Repo adi prefix'i — 'webservice/app/...' -> '/app/...'
+            if repo_name_for_strip and fp.startswith(repo_name_for_strip + "/"):
+                fp = fp[len(repo_name_for_strip):]
+            # Leading '/' garantile
+            if fp and not fp.startswith("/"):
+                fp = "/" + fp
+            if fp != original_fp:
+                change["file_path"] = fp
 
     return plan
 
@@ -242,15 +282,63 @@ def _try_direct_edit(full_content: str, current_code: str, new_code: str, min_fu
     return result
 
 
-def _validate_code(code: str, file_path: str, original_content: str, description: str, repo_name: str = "") -> tuple[bool, str]:
-    """Push oncesi kod dogrulama. Local linter oncelikli, Ollama fallback.
+def _validate_file_boundaries(code: str, file_path: str) -> tuple[bool, list[str]]:
+    """Check language-specific file structure (opening tag, package, etc.).
 
-    1. Dile gore native linter calistir (php -l, go vet, python -m py_compile vb.)
-    2. Linter yoksa veya dil desteklenmiyorsa Ollama ile kontrol et
-    3. Hata varsa Ollama'dan duzeltme iste
+    Critical for PHP: `php -l` falsely marks a PHP file WITHOUT `<?php` opener
+    as valid (treats it as plain text). Same gap exists for Go (needs `package X`),
+    Vue SFCs (need <template> or <script>), etc. Run BEFORE the linter.
 
     Returns:
-        (valid, fixed_code) - valid=False ise kod push edilmemeli
+        (valid, issues) — valid=False blocks push.
+    """
+    if not code or not code.strip():
+        return False, ["Empty file content"]
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+    head = code.lstrip()[:200]
+    issues: list[str] = []
+
+    if ext == "php":
+        if "<?php" not in code[:300] and "<?=" not in code[:300]:
+            issues.append(
+                "PHP file missing '<?php' opening tag in first 300 chars. "
+                "File will be treated as plain text by PHP."
+            )
+    elif ext == "go":
+        # First non-comment, non-blank line should be 'package XXX'
+        first_real = next(
+            (l.strip() for l in code.splitlines()
+             if l.strip() and not l.strip().startswith("//")),
+            ""
+        )
+        if not first_real.startswith("package "):
+            issues.append(
+                "Go file missing 'package XXX' declaration as first real line."
+            )
+    elif ext == "vue":
+        if "<template" not in code and "<script" not in code:
+            issues.append("Vue SFC missing <template> or <script> block.")
+    elif ext in ("jsx", "tsx"):
+        # JSX/TSX should have either import or export somewhere
+        if "import " not in code[:500] and "export " not in code:
+            issues.append(
+                "JSX/TSX file has no import/export — likely missing module boundary."
+            )
+
+    return (len(issues) == 0), issues
+
+
+def _validate_code(code: str, file_path: str, original_content: str, description: str, repo_name: str = "") -> tuple[bool, str]:
+    """Pre-push code validation. Local linter first, Ollama fallback.
+
+    0. Language file-boundary check (PHP <?php, Go package, etc.) — gaps that
+       native linters miss
+    1. Run native linter (php -l, go vet, python -m py_compile, etc.)
+    2. If linter missing or unsupported, check with Ollama
+    3. On error, ask Ollama for a fix
+
+    Returns:
+        (valid, fixed_code) - valid=False blocks push
     """
     import subprocess
     import tempfile
@@ -261,14 +349,33 @@ def _validate_code(code: str, file_path: str, original_content: str, description
 
     ext = file_path.rsplit(".", 1)[-1] if "." in file_path else ""
 
+    # ── 0. File boundary check (catches gaps that linters miss) ──
+    boundary_ok, boundary_issues = _validate_file_boundaries(code, file_path)
+    if not boundary_ok:
+        _log(f"    Code validation (boundaries): FAIL")
+        for issue in boundary_issues:
+            _log(f"      - {issue}")
+        # Try Ollama-based repair for boundary issues
+        fixed = _fix_with_ollama(code, file_path, boundary_issues, original_content)
+        if fixed:
+            recheck_ok, _ = _validate_file_boundaries(fixed, file_path)
+            if recheck_ok:
+                _log(f"    Ollama boundary fix succeeded")
+                code = fixed  # keep going, run linter on fixed code
+            else:
+                _log(f"    Ollama could not fix file boundaries")
+                return False, code
+        else:
+            return False, code
+
     # ── 1. Native Linter ──
     lint_result = _lint_with_native(code, ext, repo_name=repo_name)
     if lint_result is not None:
         if lint_result["valid"]:
-            _log(f"    Kod dogrulama (linter): GECTI")
+            _log(f"    Code validation (linter): PASS")
             return True, code
         else:
-            _log(f"    Kod dogrulama (linter): BASARISIZ")
+            _log(f"    Code validation (linter): FAIL")
             for issue in lint_result.get("issues", [])[:3]:
                 _log(f"      - {issue}")
             # Ollama ile duzeltme dene
@@ -290,10 +397,10 @@ def _validate_code(code: str, file_path: str, original_content: str, description
         return True, code
 
     if ollama_result["valid"]:
-        _log(f"    Kod dogrulama (ollama): GECTI")
+        _log(f"    Code validation (ollama): PASS")
         return True, code
 
-    _log(f"    Kod dogrulama (ollama): BASARISIZ")
+    _log(f"    Code validation (ollama): FAIL")
     for issue in ollama_result.get("issues", [])[:3]:
         _log(f"      - {issue}")
 

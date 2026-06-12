@@ -99,6 +99,8 @@ def init_db():
         _ensure_column(cur, "jobs", "kickoff_feedback", "TEXT")
         _ensure_column(cur, "jobs", "kickoff_approved", "TINYINT(1) DEFAULT 0")
         _ensure_column(cur, "jobs", "parent_job_id", "INT NULL")
+        # Dry-run: development stays local; no push, no PR, no review
+        _ensure_column(cur, "jobs", "dry_run", "TINYINT(1) DEFAULT 0")
 
 
 def _ensure_column(cur, table: str, column: str, ddl: str):
@@ -122,19 +124,22 @@ def create_job(
     kickoff_only: bool = False,
     kickoff_feedback: str = "",
     parent_job_id: int | None = None,
+    dry_run: bool = False,
 ) -> int:
-    """Yeni is olustur, step'leri ekle, job_id dondur.
+    """Create a new job, add step rows, return job_id.
 
-    kickoff_only=True ise pipeline step0 sonrasi durdurulur (debug akisi).
+    kickoff_only=True stops pipeline after step0 (debug flow).
+    dry_run=True keeps development local — no push, no PR, no review.
     """
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO jobs (work_item_id, use_hal, wi_title, kickoff_only, "
-            "kickoff_feedback, parent_job_id) VALUES (%s, %s, %s, %s, %s, %s)",
+            "kickoff_feedback, parent_job_id, dry_run) VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (
                 work_item_id, int(use_hal), wi_title,
                 int(bool(kickoff_only)), kickoff_feedback or "", parent_job_id,
+                int(bool(dry_run)),
             ),
         )
         job_id = cur.lastrowid
@@ -339,7 +344,8 @@ def get_all_jobs(limit: int = 50) -> list[dict]:
         cur = conn.cursor()
         cur.execute(
             "SELECT id, work_item_id, wi_title, status, use_hal, repo_name, "
-            "pr_url, current_step, error_message, created_at, started_at, finished_at "
+            "branch_name, pr_url, dry_run, current_step, error_message, "
+            "created_at, started_at, finished_at "
             "FROM jobs ORDER BY id DESC LIMIT %s",
             (limit,),
         )

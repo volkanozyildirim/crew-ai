@@ -7,30 +7,30 @@
 
 agents:
   business_analyst:
-    max_tokens: 4096
+    max_tokens: 32768
     model: sonnet
     provider: claude_cli
   code_reviewer:
-    max_tokens: 4096
-    model: sonnet
+    max_tokens: 100000
+    model: opus
     provider: claude_cli
   qa_engineer:
-    max_tokens: 4096
+    max_tokens: 32768
     model: sonnet
     provider: claude_cli
   scrum_master:
-    max_tokens: 4096
+    max_tokens: 32768
     model: sonnet
     provider: claude_cli
   senior_developer:
-    max_tokens: 32768
+    max_tokens: 100000
     model: opus
     provider: claude_cli
   software_architect:
-    max_tokens: 32768
+    max_tokens: 100000
     model: opus
     provider: claude_cli
   uat_specialist:
-    max_tokens: 4096
+    max_tokens: 32768
     model: sonnet
     provider: claude_cli

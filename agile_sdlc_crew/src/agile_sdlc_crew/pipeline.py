@@ -131,7 +131,18 @@ def create_branch(repo_name: str, work_item_id: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def push_file(repo_name: str, branch: str, file_path: str, content: str, message: str, repo_mgr=None) -> dict:
+def push_file(
+    repo_name: str, branch: str, file_path: str, content: str, message: str,
+    repo_mgr=None, dry_run: bool = False,
+) -> dict:
+    """Push a file to a branch. In dry_run mode, write to local working
+    tree and commit locally (no remote push)."""
+    if dry_run:
+        if repo_mgr is None:
+            from agile_sdlc_crew.tools.local_repo import LocalRepoManager
+            repo_mgr = LocalRepoManager()
+        return repo_mgr.write_and_commit_local(repo_name, branch, file_path, content, message)
+
     client = AzureDevOpsClient()
 
     # Remote branch'teki gercek durum — API'den kesin sorgu.

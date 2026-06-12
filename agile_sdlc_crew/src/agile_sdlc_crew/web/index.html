@@ -355,6 +355,7 @@ header {
     <div class="trigger-bar">
       <input type="text" id="wiInput" placeholder="Work Item ID" class="trigger-input" />
       <label class="hal-toggle"><input type="checkbox" id="halMode" /> HAL</label>
+      <label class="hal-toggle" title="Dry-run: push/PR/review atlanir, sonuc lokal kalir"><input type="checkbox" id="dryRun" /> 🔬 Dry Run</label>
       <button class="sm-btn" onclick="triggerRun()">Başlat</button>
     </div>
     <button class="sm-btn ghost" onclick="resetDashboard()">Sıfırla</button>
@@ -494,6 +495,41 @@ header {
 .combo-item:hover{background:var(--bg-elevated);color:var(--accent-light)}
 .combo-item.current{background:rgba(108,92,231,0.12);color:var(--accent-light);font-weight:600}
 .combo-empty{padding:10px 12px;color:var(--text-dim);font-style:italic;font-size:12px;text-align:center}
+/* Diff Viewer */
+.diff-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;display:none;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px}
+.diff-overlay.open{display:flex}
+.diff-modal{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;width:100%;max-width:1300px;display:flex;flex-direction:column;max-height:calc(100vh - 40px);box-shadow:0 12px 40px rgba(0,0,0,0.6)}
+.diff-head{padding:12px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--bg-elevated);border-radius:10px 10px 0 0}
+.diff-title{font-size:14px;font-weight:600;color:var(--text);font-family:ui-sans-serif,system-ui,sans-serif}
+.diff-title .badge-dry{font-size:10px;padding:2px 7px;border-radius:4px;background:rgba(255,196,0,0.15);color:#ffc400;margin-left:6px}
+.diff-stats{font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+.diff-stats .add{color:#3fb950}
+.diff-stats .rem{color:#f85149}
+.diff-body{padding:16px;overflow-y:auto;flex:1}
+.diff-file{margin-bottom:18px;border:1px solid var(--border);border-radius:6px;overflow:hidden;background:#0d1117}
+.diff-file-head{padding:8px 12px;background:#161b22;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font-family:'JetBrains Mono',monospace;font-size:12px;border-bottom:1px solid #30363d;user-select:none}
+.diff-file-head:hover{background:#1c2128}
+.diff-file-head .fpath{color:#c9d1d9;font-weight:500}
+.diff-file-head .fmeta{font-size:11px}
+.diff-file-head .chev{color:var(--text-dim);transition:transform .15s}
+.diff-file.collapsed .chev{transform:rotate(-90deg)}
+.diff-file.collapsed .diff-file-body{display:none}
+.diff-file-body{padding:0;font-family:'JetBrains Mono','Menlo',monospace;font-size:12px;line-height:1.5;overflow-x:auto;background:#0d1117}
+.diff-line{display:flex;white-space:pre;color:#c9d1d9}
+.diff-line .lno{flex:0 0 50px;text-align:right;padding:0 8px;color:#6e7681;background:#0d1117;border-right:1px solid #21262d;user-select:none}
+.diff-line .lcontent{flex:1;padding:0 8px}
+.diff-line.add{background:rgba(46,160,67,0.15)}
+.diff-line.add .lcontent{color:#aff5b4}
+.diff-line.add .lno{color:#3fb950;background:rgba(46,160,67,0.08)}
+.diff-line.rem{background:rgba(248,81,73,0.15)}
+.diff-line.rem .lcontent{color:#ffdcd7}
+.diff-line.rem .lno{color:#f85149;background:rgba(248,81,73,0.08)}
+.diff-line.hunk{background:#1c2128;color:#79c0ff}
+.diff-line.hunk .lno{visibility:hidden}
+.diff-line.hunk .lcontent{color:#79c0ff;font-style:italic}
+.diff-empty{padding:30px;text-align:center;color:var(--text-dim);font-size:13px}
+.diff-loading{padding:30px;text-align:center;color:var(--text-dim);font-size:13px}
+.diff-error{padding:18px;background:rgba(248,81,73,0.1);color:#f85149;border-radius:6px;font-size:12px;margin-bottom:12px}
 </style>
 
 <!-- Action Bar -->
@@ -600,13 +636,18 @@ function renderJobs(jobs){
   list.innerHTML=jobs.slice(0,20).map(j=>{
     let dur='';
     if(j.started_at){const s=new Date(j.started_at),e=j.finished_at?new Date(j.finished_at):new Date(),sec=Math.floor((e-s)/1000);dur=sec>=60?Math.floor(sec/60)+'dk':sec+'sn'}
+    const isDry=Number(j.dry_run||0)===1;
+    const hasDiff=(j.status==='completed'||j.status==='running')&&j.repo_name&&j.branch_name;
     return `<div class="job-item" onclick="viewJob(${j.id})">
       <div class="jdot ${j.status}"></div>
       <span class="jwi">#${j.work_item_id}</span>
+      ${isDry?`<span class="jmeta" style="background:rgba(255,196,0,0.12);color:#ffc400" title="Dry-run: lokal, push yok">🔬 DRY</span>`:''}
       <span class="jtitle">${esc(j.wi_title||j.repo_name||j.status)}</span>
       ${j.current_step?`<span class="jstep">${j.current_step.replace('_task','')}</span>`:''}
       ${dur?`<span class="jmeta">${dur}</span>`:''}
-      ${j.pr_url?`<span class="jmeta"><a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()" style="color:var(--accent-light)">PR</a></span>`:''}
+      ${hasDiff?`<button class="job-retry" onclick="event.stopPropagation();showDiff(${j.id})" title="Diff goster" style="background:rgba(108,92,231,0.15);color:var(--accent-light)">📊</button>`:''}
+      ${isDry&&j.status==='completed'?`<button class="job-retry" onclick="event.stopPropagation();showDryRunReport(${j.id})" title="Dry-run raporunu goster" style="background:rgba(255,196,0,0.15);color:#ffc400">📄</button>`:''}
+      ${(!isDry&&j.pr_url)?`<span class="jmeta"><a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()" style="color:var(--accent-light)">PR</a></span>`:''}
       ${(j.status==='failed'||j.status==='completed')?`<button class="job-retry" onclick="event.stopPropagation();retryJob(${j.id})" title="Tekrar dene">↻</button>`:''}
       <button class="job-del" onclick="event.stopPropagation();delJob(${j.id},'${j.status}')">&times;</button>
     </div>`}).join('');
@@ -748,9 +789,22 @@ async function retryCurrentJob(){
 async function triggerRun(){
   const wi=document.getElementById('wiInput').value.trim();
   if(!wi){alert('Work Item ID giriniz.');return}
+  const dryRun=document.getElementById('dryRun')?.checked||false;
   try{
-    const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:wi,use_hal:document.getElementById('halMode').checked})});
+    const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:wi,use_hal:document.getElementById('halMode').checked,dry_run:dryRun})});
     const d=await r.json();if(d.status==='queued'){document.getElementById('wiInput').value='';fetchJobs()}
+  }catch(e){alert('Hata: '+e.message)}
+}
+async function showDryRunReport(jobId){
+  try{
+    const r=await fetch('/api/jobs/'+jobId+'/dry-run-report');
+    const d=await r.json();
+    if(!r.ok){alert(d.error||'Rapor okunamadi'+(d.expected_path?'\n\n'+d.expected_path:''));return}
+    const w=window.open('','_blank','width=900,height=700');
+    if(!w){alert('Popup engellendi. Rapor: '+d.report_path);return}
+    const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    w.document.write('<html><head><title>Dry-Run Report #'+jobId+'</title><style>body{font-family:ui-monospace,Menlo,monospace;padding:20px;max-width:1100px;margin:0 auto;background:#0d1117;color:#c9d1d9}pre{background:#161b22;padding:12px;border-radius:6px;overflow:auto;white-space:pre-wrap}code{background:#161b22;padding:2px 5px;border-radius:3px}h1,h2{border-bottom:1px solid #30363d;padding-bottom:6px}a{color:#58a6ff}</style></head><body><h1>Dry-Run Report #'+jobId+'</h1><p><strong>Repo:</strong> <code>'+esc(d.repo_path)+'</code><br><strong>Branch:</strong> <code>'+esc(d.branch)+'</code><br><strong>Path:</strong> <code>'+esc(d.report_path)+'</code></p><pre>'+esc(d.content)+'</pre></body></html>');
+    w.document.close();
   }catch(e){alert('Hata: '+e.message)}
 }
 async function resetDashboard(){
@@ -876,8 +930,10 @@ function clearSel(){document.querySelectorAll('.wi-check').forEach(cb=>{cb.check
 async function queueSel(){
   const cbs=document.querySelectorAll('.wi-check:checked');if(!cbs.length)return;
   const btn=document.getElementById('queueBtn');btn.disabled=true;btn.textContent='Ekleniyor...';
-  const hal=document.getElementById('halMode').checked;let ok=0,fail=0;
-  for(const cb of cbs){try{const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:cb.dataset.id,use_hal:hal})});const d=await r.json();if(d.status==='queued')ok++;else fail++}catch(e){fail++}}
+  const hal=document.getElementById('halMode').checked;
+  const dryRun=document.getElementById('dryRun')?.checked||false;
+  let ok=0,fail=0;
+  for(const cb of cbs){try{const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:cb.dataset.id,use_hal:hal,dry_run:dryRun})});const d=await r.json();if(d.status==='queued')ok++;else fail++}catch(e){fail++}}
   btn.disabled=false;btn.textContent='Kuyruğa Ekle ▶';clearSel();fetchJobs();if(fail)alert(`${ok} eklendi, ${fail} başarısız.`);
 }
 
@@ -2219,6 +2275,107 @@ async function koRemoveGuidance(id){
     koLoadGuidance();
   }catch(e){alert('Baglanti: '+e)}
 }
+
+// ─── Diff Viewer ─────────────────────────────────────────
+function _escDiff(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function _renderDiff(diffText){
+  if(!diffText||!diffText.trim()){return '<div class="diff-empty">Diff bos — degisiklik yok</div>'}
+  // Split per file on "diff --git" boundary
+  const lines=diffText.split('\n');
+  const files=[]; let cur=null;
+  for(const ln of lines){
+    if(ln.startsWith('diff --git ')){
+      if(cur)files.push(cur);
+      // Parse "diff --git a/path b/path"
+      const m=ln.match(/^diff --git a\/(.+?) b\/(.+)$/);
+      const path=m?m[2]:ln.slice(11);
+      cur={path:path,lines:[],added:0,removed:0};
+      continue;
+    }
+    if(!cur)continue;
+    cur.lines.push(ln);
+    if(ln.startsWith('+')&&!ln.startsWith('+++'))cur.added++;
+    if(ln.startsWith('-')&&!ln.startsWith('---'))cur.removed++;
+  }
+  if(cur)files.push(cur);
+  if(!files.length){return '<div class="diff-empty">Diff parse edilemedi.</div><pre style="background:#0d1117;padding:12px;border-radius:6px;color:#c9d1d9;overflow:auto;max-height:500px">'+_escDiff(diffText.slice(0,8000))+'</pre>'}
+  return files.map((f,idx)=>{
+    // Render lines with old/new line numbers
+    let oldNo=0,newNo=0,inHunk=false;
+    const rows=f.lines.map(ln=>{
+      if(ln.startsWith('@@')){
+        const hm=ln.match(/@@\s*-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s*@@/);
+        if(hm){oldNo=parseInt(hm[1],10);newNo=parseInt(hm[2],10);}
+        inHunk=true;
+        return `<div class="diff-line hunk"><span class="lno"></span><span class="lcontent">${_escDiff(ln)}</span></div>`;
+      }
+      if(!inHunk||ln.startsWith('---')||ln.startsWith('+++')||ln.startsWith('index ')||ln.startsWith('new file ')||ln.startsWith('deleted file ')||ln.startsWith('similarity ')||ln.startsWith('rename ')||ln.startsWith('Binary ')){
+        // Skip metadata lines (already shown in header)
+        return '';
+      }
+      if(ln.startsWith('+')){
+        const r=`<div class="diff-line add"><span class="lno">${newNo}</span><span class="lcontent">${_escDiff(ln)}</span></div>`;
+        newNo++;return r;
+      }
+      if(ln.startsWith('-')){
+        const r=`<div class="diff-line rem"><span class="lno">${oldNo}</span><span class="lcontent">${_escDiff(ln)}</span></div>`;
+        oldNo++;return r;
+      }
+      // Context line
+      const r=`<div class="diff-line"><span class="lno">${newNo}</span><span class="lcontent">${_escDiff(ln)}</span></div>`;
+      oldNo++;newNo++;return r;
+    }).join('');
+    return `<div class="diff-file" id="diffFile${idx}">
+      <div class="diff-file-head" onclick="this.parentElement.classList.toggle('collapsed')">
+        <span class="fpath"><span class="chev">▼</span> ${_escDiff(f.path)}</span>
+        <span class="fmeta diff-stats"><span class="add">+${f.added}</span> / <span class="rem">−${f.removed}</span></span>
+      </div>
+      <div class="diff-file-body">${rows}</div>
+    </div>`;
+  }).join('');
+}
+async function showDiff(jobId){
+  let ov=document.getElementById('diffOverlay');
+  if(!ov){
+    ov=document.createElement('div');
+    ov.id='diffOverlay';ov.className='diff-overlay';
+    ov.onclick=function(e){if(e.target===ov)closeDiff()};
+    ov.innerHTML=`<div class="diff-modal">
+      <div class="diff-head">
+        <div class="diff-title" id="diffTitle">Diff yukleniyor...</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="diff-stats" id="diffStats"></span>
+          <button class="detail-close" onclick="closeDiff()">✕ Kapat</button>
+        </div>
+      </div>
+      <div class="diff-body" id="diffBody"><div class="diff-loading">Diff cekiliyor...</div></div>
+    </div>`;
+    document.body.appendChild(ov);
+  }
+  ov.classList.add('open');
+  document.getElementById('diffBody').innerHTML='<div class="diff-loading">Diff cekiliyor...</div>';
+  document.getElementById('diffTitle').textContent='Diff yukleniyor...';
+  document.getElementById('diffStats').innerHTML='';
+  try{
+    const r=await fetch('/api/jobs/'+jobId+'/diff');
+    const d=await r.json();
+    if(!r.ok){
+      document.getElementById('diffBody').innerHTML='<div class="diff-error">'+_escDiff(d.error||'Diff alinamadi')+'</div>';
+      return;
+    }
+    const dryBadge=d.dry_run?'<span class="badge-dry">🔬 DRY</span>':'';
+    const prLink=d.pr_url&&!d.dry_run?` · <a href="${_escDiff(d.pr_url)}" target="_blank" style="color:var(--accent-light);font-size:11px">PR Aç</a>`:'';
+    document.getElementById('diffTitle').innerHTML=`#${jobId} · WI #${_escDiff(d.work_item_id||'?')} · ${_escDiff(d.repo_name||'')}/<code style="font-size:11px;background:#161b22;padding:2px 5px;border-radius:3px">${_escDiff(d.branch||'')}</code>${dryBadge}${prLink}`;
+    const totalAdd=(d.files||[]).reduce((s,f)=>s+(f.added||0),0);
+    const totalRem=(d.files||[]).reduce((s,f)=>s+(f.removed||0),0);
+    document.getElementById('diffStats').innerHTML=`${(d.files||[]).length} dosya · <span class="add">+${totalAdd}</span> / <span class="rem">−${totalRem}</span>`;
+    document.getElementById('diffBody').innerHTML=_renderDiff(d.diff||'');
+  }catch(e){
+    document.getElementById('diffBody').innerHTML='<div class="diff-error">Hata: '+_escDiff(e.message)+'</div>';
+  }
+}
+function closeDiff(){const o=document.getElementById('diffOverlay');if(o)o.classList.remove('open');}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDiff();});
 
 </script>
 </body>

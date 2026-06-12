@@ -1095,7 +1095,7 @@ class AgileSDLCCrew:
         return Crew(agents=[sm], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
 
     def create_scrum_review_crew(self) -> Crew:
-        """Scrum Master: bir adimin ciktisini incele, ONAY veya IYILESTIR."""
+        """Scrum Master: review a step's output, output APPROVE or IMPROVE."""
         sm = self.scrum_master()
         t1 = self._task("scrum_review_task", sm)
         return Crew(agents=[sm], tasks=[t1], process=Process.sequential, verbose=True, memory=False)

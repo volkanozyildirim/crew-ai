@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-CrewAI-based agentic Agile SDLC pipeline. Takes an Azure DevOps Work Item ID and autonomously runs 13 steps from requirements analysis through PR creation, review, test planning and UAT. Two run modes: long-lived FastAPI server with a MySQL job queue and a live dashboard, or one-shot CLI. Agent prompts and task definitions are in Turkish — preserve that when editing `config/agents.yaml` and `config/tasks.yaml`.
+CrewAI-based agentic Agile SDLC pipeline. Takes an Azure DevOps Work Item ID and autonomously runs 13 steps from requirements analysis through PR creation, review, test planning and UAT. Two run modes: long-lived FastAPI server with a MySQL job queue and a live dashboard, or one-shot CLI.
+
+**Prompt language convention (as of 2026-04-21):** agent system prompts and task instructions in `config/agents.yaml` and `config/tasks.yaml` are in **English** for reliable LLM instruction-following (especially for smaller local models like Qwen3:8b / Qwen2.5-coder:7b). The work item content (title, description, AC) is read as-is (Turkish). **User-facing output** — markdown headings in expected_output, JSON `desc`/`summary`/`description` field values, WI comments, log messages, dashboard text — MUST remain in Turkish. When editing these YAMLs: write rules/workflow/checklists in English; preserve Turkish in the expected_output templates and instruct the agent to write text fields in Turkish.
 
 ## Common commands
 

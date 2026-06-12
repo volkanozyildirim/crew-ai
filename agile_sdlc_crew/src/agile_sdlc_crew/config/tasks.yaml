@@ -1,332 +1,339 @@
 # ══════════════════════════════════════════════════════════════
-# FAZ 0: Kickoff - Sanal Odak Grup (Design Review Simulasyonu)
+# PHASE 0: Kickoff — Virtual Focus Group (Design Review Simulation)
+#
+# Note: WI content is read as-is (input data — could be any language).
+# All system instructions and agent output are in English.
+# Decision tokens (APPROVE/IMPROVE/INSUFFICIENT/CHANGES_REQUIRED/PASS/FAIL)
+# are pipeline-critical — Python regex depends on them.
 # ══════════════════════════════════════════════════════════════
 
 kickoff_sm_open_task:
   description: >
-    GOREV: #{work_item_id} is kalemi icin "Sanal Odak Grup" toplantisini ac.
-    Moderator olarak toplantıyı yönet.
+    TASK: Open the "Virtual Focus Group" meeting for work item #{work_item_id}.
+    You are the moderator running the meeting.
 
-    "get_work_item" aracını kullanarak is kalemini oku.
-    Is kalemini ekibe sun: baslik, aciklama, kabul kriterleri ve yorumlar.
-    Yorumlar varsa mutlaka dahil et — ek bagiam, karar gecmisi veya degisiklik
-    talepleri icerebilir.
+    Use "get_work_item" to read the work item.
+    Present it to the team: title, description, acceptance criteria and comments.
+    If there are comments, include them — they may carry context, decision
+    history or change requests.
 
-    TOPLANTI YAPISI:
-    Bu toplantıda 4 uzman kendi perspektifinden 3 kritik soru/endise dile getirecek,
-    ardindan birbirlerinin görüşlerine yanıt verecek.
-    Son olarak bir "Kritik Tasarim Gozden Gecirme" tutanagi hazırlanacak.
+    MEETING STRUCTURE:
+    Four experts each raise 3 critical questions/concerns from their own
+    perspective, then respond to each other. Finally a "Critical Design
+    Review" minutes will be produced.
 
-    UZMANLAR:
-    - Analist (Deniz): İş kuralları, mantıksal boşluklar, kullanıcı deneyimi — belirsizliği sevmez
-    - Developer (Baris): Nasil kodlanir, karmasiklik, teknoloji uyumu, teknik borc riski
-    - Team Lead (Can): Zaman cizelgesi, ekip kapasitesi, diger sistemlerle entegrasyon — pragmatik dengeleyici
-    - QA/Tester (Ece): Hata senaryolari, "bu sistem nerede patlar?", nasil test edilir
+    EXPERTS:
+    - Analyst (Deniz): Business rules, logical gaps, UX — dislikes ambiguity
+    - Developer (Baris): How to code it, complexity, tech fit, tech-debt risk
+    - Team Lead (Can): Schedule, team capacity, integrations — pragmatic balancer
+    - QA/Tester (Ece): Failure scenarios, "where does this blow up?", testability
 
-    ONCEKI BAGLAM:
+    PREVIOUS CONTEXT:
     {previous_context}
   expected_output: >
-    ## Sanal Odak Grup — Acilis
+    ## Virtual Focus Group — Opening
 
-    **Is Kalemi:** #{work_item_id}
-    **Baslik:** [baslik]
-    **Ozet:** [1-2 cumle]
-    **Mevcut Kabul Kriterleri:** [WI'den okunan liste, eksikse "Tanimsiz"]
-    **Yorumlar:** [varsa yazar + icerik, yoksa "Yorum yok"]
-    **Toplanti Gundem:** Uzmanlar sira ile 3 kritik soru/endise paylaşacak, ardindan cros-tartisma yapilacak.
+    **Work Item:** #{work_item_id}
+    **Title:** [title]
+    **Summary:** [1-2 sentences]
+    **Existing Acceptance Criteria:** [list from WI, "Undefined" if missing]
+    **Comments:** [author + content if any, else "No comments"]
+    **Agenda:** Experts will share 3 critical questions/concerns each, then cross-discuss.
   agent: scrum_master
 
 kickoff_ba_task:
   description: >
-    GOREV: Analist (Deniz) perspektifini ustlen. Odak grup toplantisina katki ver.
+    TASK: Take the Analyst (Deniz) persona. Contribute to the focus group.
 
-    Is kurallarına, mantıksal boşluklara ve kullanıcı deneyimine odaklan.
-    Belirsizliği sevmezsin — her muğlak noktayı işaretle.
+    Focus on business rules, logical gaps and user experience. You dislike
+    ambiguity — flag every unclear point.
 
-    IS BILGISI VE BAGLAM:
+    WORK ITEM CONTEXT:
     {previous_context}
 
-    ADIM 1 — 3 KRİTİK SORU / ENDİŞE (Deniz olarak):
-    Yukaridaki is bilgilerine gore seni en cok endişelendiren 3 noktayı dile getir:
-    a) Hangi iş kuralı net değil veya eksik? (Örn: "X durumunda Y mi yapılacak Z mi?")
-    b) Hangi mantıksal boşluk var? (Örn: "Edge case'ler tanımlanmamış")
-    c) Kullanıcı deneyimi nasıl etkilenecek? Geriye dönük uyumluluk?
+    STEP 1 — 3 CRITICAL QUESTIONS/CONCERNS (as Deniz):
+    Based on the work item info above, raise the 3 points that concern you most:
+    a) Which business rule is unclear or missing? (e.g. "in case X should it do Y or Z?")
+    b) Which logical gap exists? (e.g. "edge cases undefined")
+    c) How is UX affected? Backwards compatibility?
 
-    ADIM 2 — WI'DEN CEVAPLANABİLEN NOKTALARI YANIT:
-    Her soruyu yukaridaki is bilgilerine dayanarak yanıtla. Yanıtlanamayan → "ACIK SORU" işaretle.
+    STEP 2 — ANSWER WHAT CAN BE ANSWERED FROM THE WI:
+    For each question, answer using the WI info. Unanswerable → mark as "OPEN QUESTION".
 
-    ADIM 3 — KABUL KRİTERLERİNİ DOĞRULA:
-    Yukaridaki kabul kriterleri ölçülebilir ve test edilebilir mi?
-    Eksik veya muğlak kriter varsa net, somut hale getir ve öner.
+    STEP 3 — VALIDATE ACCEPTANCE CRITERIA:
+    Are the acceptance criteria measurable and testable?
+    If any is missing or vague, propose a concrete, measurable version.
 
-    IS KALEMI: #{work_item_id}
+    WORK ITEM: #{work_item_id}
   expected_output: >
-    ## Analist (Deniz) — Perspektif
+    ## Analyst (Deniz) — Perspective
 
-    **3 Kritik Soru/Endişe:**
-    1. [Endişe] — [WI'den cevap veya "AÇIK SORU"]
-    2. [Endişe] — [WI'den cevap veya "AÇIK SORU"]
-    3. [Endişe] — [WI'den cevap veya "AÇIK SORU"]
+    **3 Critical Questions/Concerns:**
+    1. [Concern] — [answer from WI or "OPEN QUESTION"]
+    2. [Concern] — [answer from WI or "OPEN QUESTION"]
+    3. [Concern] — [answer from WI or "OPEN QUESTION"]
 
-    **Kabul Kriterlerine Deniz'in Değerlendirmesi:**
-    - [Kriter 1]: Ölçülebilir / Muğlak — [öneri]
-    - [Kriter 2]: Ölçülebilir / Muğlak — [öneri]
+    **Deniz's Assessment of Acceptance Criteria:**
+    - [Criterion 1]: Measurable / Vague — [suggestion]
+    - [Criterion 2]: Measurable / Vague — [suggestion]
 
-    **Açık Kalan Sorular:** [liste veya "Yok"]
-    **Önerilen Ek Kabul Kriterleri:** [liste veya "Yok"]
+    **Open Questions:** [list or "None"]
+    **Suggested Additional Acceptance Criteria:** [list or "None"]
   agent: business_analyst
 
 kickoff_arch_task:
   description: >
-    GOREV: Team Lead (Can) perspektifini ustlen. Odak gruba katki ver.
+    TASK: Take the Team Lead (Can) persona. Contribute to the focus group.
 
-    Zaman cizelgesi, ekip kapasitesi ve diger sistemlerle entegrasyon
-    risklerine bak. Pragmatik bir dengeleyicisin — ideali değil,
-    uygulanabiliri savunursun. WI BAĞLAMI ve diğer uzmanların katkıları
-    her bir alt-çağrıda ayrıca verilecek.
+    Look at schedule, team capacity and integration risks with other systems.
+    You are a pragmatic balancer — defend the feasible, not the ideal.
+    WI context and other experts' contributions will be supplied in each sub-call.
 
-    NOT: Bu agent'ın çıktısı pipeline tarafından bölüm bölüm üretilir
-    (kickoff_sections.SECTION_PLANS["kickoff_arch_task"]). Sen her
-    sub-call'da sadece bir bölüm üreteceksin — sub-call promptu hangi
-    bölümü istediğini ve format'ını açıkça söyleyecek.
+    NOTE: This agent's output is produced section-by-section by the pipeline
+    (kickoff_sections.SECTION_PLANS["kickoff_arch_task"]). In each sub-call
+    you produce only ONE section — the sub-call prompt will tell you which
+    section and its format.
 
-    IS KALEMI: #{work_item_id}
+    WORK ITEM: #{work_item_id}
   expected_output: >
-    ## Team Lead (Can) — Perspektif
+    ## Team Lead (Can) — Perspective
 
-    **Deniz'in Endişelerine Yanıt:**
-    - [soru 1]: [onay/abartı + tek cümle]
-    - [soru 2]: [onay/abartı + tek cümle]
+    **Response to Deniz's Concerns:**
+    - [question 1]: [agree/disagree + one sentence]
+    - [question 2]: [agree/disagree + one sentence]
 
-    **3 Kritik Soru/Endişe:**
-    1. [entegrasyon riski — tek cümle]
-    2. [koordinasyon — tek cümle]
-    3. [scope — tek cümle]
+    **3 Critical Questions/Concerns:**
+    1. [integration risk — one sentence]
+    2. [coordination — one sentence]
+    3. [scope — one sentence]
 
-    **Tahmini Etkilenen Repo/Modül:** [isim/path veya "Belirsiz"]
-    **Entegrasyon Riskleri:**
-    - [risk 1 — tek cümle]
-    - [risk 2 — tek cümle]
-    **Kapsam Sınırı Önerisi:** [tek cümle net sınır]
+    **Estimated Affected Repo/Module:** [name/path or "Unclear"]
+    **Integration Risks:**
+    - [risk 1 — one sentence]
+    - [risk 2 — one sentence]
+    **Scope Boundary Suggestion:** [one-sentence clear boundary]
   agent: software_architect
 
 kickoff_dev_task:
   description: >
-    GOREV: Developer (Baris) perspektifini ustlen. Odak gruba katki ver.
+    TASK: Take the Developer (Baris) persona. Contribute to the focus group.
 
-    "Nasıl kodlarız?" diye bakarsın. Karmaşıklık, teknoloji uyumu ve teknik
-    borç yaratma riskine odaklanırsın. WI BAĞLAMI ve diğer uzmanların
-    katkıları her bir alt-çağrıda ayrıca verilecek.
+    You look at "how do we code it?" Focus on complexity, tech fit and
+    tech-debt risk. WI context and other experts' contributions will be
+    supplied in each sub-call.
 
-    NOT: Bu agent'ın çıktısı pipeline tarafından bölüm bölüm üretilir
-    (kickoff_sections.SECTION_PLANS["kickoff_dev_task"]). Sen her sub-call'da
-    sadece bir bölüm üreteceksin — sub-call promptu hangi bölümü istediğini
-    ve format'ını açıkça söyleyecek.
+    NOTE: This agent's output is produced section-by-section by the pipeline
+    (kickoff_sections.SECTION_PLANS["kickoff_dev_task"]). In each sub-call
+    you produce only ONE section — the sub-call prompt will tell you which
+    section and its format.
 
-    IS KALEMI: #{work_item_id}
+    WORK ITEM: #{work_item_id}
   expected_output: >
-    ## Developer (Barış) — Perspektif
+    ## Developer (Baris) — Perspective
 
-    **Deniz ve Can'a Yanıt:**
-    - [nokta 1]: [tek cümle]
-    - [nokta 2]: [tek cümle]
+    **Response to Deniz and Can:**
+    - [point 1]: [one sentence]
+    - [point 2]: [one sentence]
 
-    **3 Kritik Soru/Endişe:**
-    1. [kod uyumu/refactor riski — tek cümle]
-    2. [edge case'ler — tek cümle]
-    3. [teknik borç riski — tek cümle]
+    **3 Critical Questions/Concerns:**
+    1. [code fit / refactor risk — one sentence]
+    2. [edge cases — one sentence]
+    3. [tech debt risk — one sentence]
 
-    **Karmaşıklık:** Düşük/Orta/Yüksek — [tek cümle gerekçe]
+    **Complexity:** Low/Medium/High — [one-sentence rationale]
 
-    **Dikkat Edilmesi Gereken Kod Noktaları:**
-    - [dosya:fonksiyon 1]
-    - [dosya:fonksiyon 2]
-    - [dosya:fonksiyon 3]
+    **Code Points to Watch:**
+    - [file:function 1]
+    - [file:function 2]
+    - [file:function 3]
 
-    **Önerilen Teknik Yaklaşım:**
-    1. [adım — tek cümle]
-    2. [adım — tek cümle]
-    3. [adım — tek cümle]
+    **Suggested Technical Approach:**
+    1. [step — one sentence]
+    2. [step — one sentence]
+    3. [step — one sentence]
   agent: senior_developer
 
 kickoff_qa_task:
   description: >
-    GOREV: QA/Tester (Ece) perspektifini ustlen. Odak gruba katki ver.
+    TASK: Take the QA/Tester (Ece) persona. Contribute to the focus group.
 
-    Hata senaryolarını düşünürsün. "Bu sistem nerede patlar?" ve "Nasıl test ederiz?"
-    sorularını sorarsın.
+    You think in failure scenarios. Ask "where does this blow up?" and
+    "how do we test it?".
 
-    ADIM 1 — Tüm Ekibin Endişelerini Test Perspektifinden Değerlendir:
-    Deniz'in mantıksal boşlukları, Can'ın entegrasyon riskleri ve Barış'ın edge
-    case'leri QA gözünden nasıl görünüyor? Her birinin test edilebilirliği nedir?
+    STEP 1 — Evaluate the team's concerns from a testing perspective:
+    Deniz's logical gaps, Can's integration risks and Baris's edge cases —
+    how do they look from QA's eye? Are they testable?
 
-    ADIM 2 — 3 KRİTİK SORU / ENDİŞE (Ece olarak):
-    a) Hangi negatif senaryo (hata yolu) test edilmeden üretim riski oluşturur?
-    b) Bu değişiklik mevcut özellikleri bozabilir mi? Regresyon riski nerede?
-    c) Performans / yük testi gerekiyor mu? Hangi eşikler kritik?
+    STEP 2 — 3 CRITICAL QUESTIONS/CONCERNS (as Ece):
+    a) Which negative scenario (failure path), untested, creates production risk?
+    b) Could this change break existing features? Where is regression risk?
+    c) Is performance/load testing needed? Which thresholds matter?
 
-    ADIM 3 — TEST SENARYOLARI:
-    Geliştirilmesi gereken temel test senaryolarını listele (happy path + hata yolları).
+    STEP 3 — TEST SCENARIOS:
+    List the essential test scenarios to be developed (happy path + failure paths).
 
-    IS KALEMI: #{work_item_id}
+    WORK ITEM: #{work_item_id}
   expected_output: >
-    ## QA/Tester (Ece) — Perspektif
+    ## QA/Tester (Ece) — Perspective
 
-    **Ekibin Endişelerinin Test Edilebilirliği:**
-    - Deniz'in [boşluk]: Test edilebilir / Test edilemez — [açıklama]
-    - Can'ın [risk]: Test edilebilir / Test edilemez — [açıklama]
-    - Barış'ın [edge case]: Test senaryosu: [açıklama]
+    **Testability of Team's Concerns:**
+    - Deniz's [gap]: Testable / Untestable — [explanation]
+    - Can's [risk]: Testable / Untestable — [explanation]
+    - Baris's [edge case]: Test scenario: [explanation]
 
-    **3 Kritik Soru/Endişe:**
-    1. [Kritik negatif senaryo]
-    2. [Regresyon riski]
-    3. [Performans/yük endişesi]
+    **3 Critical Questions/Concerns:**
+    1. [Critical negative scenario]
+    2. [Regression risk]
+    3. [Performance/load concern]
 
-    **Temel Test Senaryoları:**
-    - [ ] Happy path: [açıklama]
-    - [ ] Hata yolu 1: [açıklama]
-    - [ ] Hata yolu 2: [açıklama]
-    - [ ] Edge case: [açıklama]
+    **Essential Test Scenarios:**
+    - [ ] Happy path: [explanation]
+    - [ ] Failure path 1: [explanation]
+    - [ ] Failure path 2: [explanation]
+    - [ ] Edge case: [explanation]
 
-    **Regresyon Riski:** Düşük / Orta / Yüksek
+    **Regression Risk:** Low / Medium / High
   agent: qa_engineer
 
 kickoff_uat_task:
   description: >
-    GOREV: UAT Specialist olarak son kullanici kabulunu degerlendir.
+    TASK: As UAT Specialist, evaluate end-user acceptance.
 
-    Tum ekibin perspektiflerini (Deniz/Can/Baris/Ece) dikkate alarak
-    kullanici kabul testi acisindan degerlendirme yap.
+    Considering all team perspectives (Deniz/Can/Baris/Ece), evaluate from
+    UAT angle.
 
-    - Kabul kriterleri son kullanici perspektifinden test edilebilir mi?
-    - Hangi kabul kriterleri "teknik dogru ama is hatasi" olarak gecilebilir?
-    - Is kurali ihlali riski olan noktalari isaretla.
+    - Are acceptance criteria testable from end-user perspective?
+    - Which acceptance criteria might be "technically correct but business
+      incorrect"?
+    - Flag points with business rule violation risk.
 
-    IS KALEMI: #{work_item_id}
+    WORK ITEM: #{work_item_id}
   expected_output: >
-    ## UAT Perspektifi
+    ## UAT Perspective
 
-    **Kabul Kriterlerinin Son Kullanici Degerlemesi:**
-    - [Kriter 1]: UAT'ta test edilebilir / Edilemez — [aciklama]
+    **End-User Evaluation of Acceptance Criteria:**
+    - [Criterion 1]: Testable in UAT / Untestable — [explanation]
 
-    **Is Kurali Riskleri:** [liste veya "Yok"]
-    **Son Kullanici Etkisi:** [aciklama]
+    **Business Rule Risks:** [list or "None"]
+    **End-User Impact:** [explanation]
   agent: uat_specialist
 
 kickoff_sm_close_task:
   description: >
-    GOREV: Odak grup toplantisini kapat. "Kritik Tasarim Gozden Gecirme"
-    tutanagini hazirla.
+    TASK: Close the focus group meeting. Prepare the "Critical Design Review"
+    minutes.
 
-    Tum uzmanların (Deniz/Can/Barış/Ece) katkılarını derle. Bu tutanak tüm
-    pipeline boyunca tek referans kaynağı olacak. WI BAĞLAMI ve diğer
-    uzmanların katkıları her bir alt-çağrıda ayrıca verilecek.
+    Aggregate all experts' (Deniz/Can/Baris/Ece) contributions. This minutes
+    document is the single reference source for the rest of the pipeline.
+    WI context and other experts' contributions will be supplied in each
+    sub-call.
 
-    NOT: Bu agent'ın çıktısı pipeline tarafından bölüm bölüm üretilir
-    (kickoff_sections.SECTION_PLANS["kickoff_sm_close_task"]). Sen her
-    sub-call'da sadece bir bölüm üreteceksin (Bölüm 4 → 3 → 2 → 1
-    üretim sırasıyla, ama render sırasında 1 → 4 olarak sunulur).
-    Sub-call promptu hangi bölümü istediğini ve format'ını açıkça söyleyecek.
+    NOTE: This agent's output is produced section-by-section by the pipeline
+    (kickoff_sections.SECTION_PLANS["kickoff_sm_close_task"]). In each sub-call
+    you produce only ONE section (in production order 4 → 3 → 2 → 1, but
+    rendered 1 → 4 for display). The sub-call prompt tells you which section
+    and its format.
 
-    IS KALEMI: #{work_item_id}
+    WORK ITEM: #{work_item_id}
   expected_output: >
-    ## Kritik Tasarim Gozden Gecirme — Tutanak
+    ## Critical Design Review — Minutes
 
-    **Is Kalemi:** #{work_item_id}
+    **Work Item:** #{work_item_id}
 
-    ### 1. Toplanti Ozeti
-    [Genel uygulanabilirlik degerlendirmesi, ekip konsensüsü, kapsam siniri]
+    ### 1. Meeting Summary
+    [Overall feasibility assessment, team consensus, scope boundary]
 
-    ### 2. Disiplin Bazli Analiz
-    **Analiz (Deniz):** [ana bulgular]
-    **Yazilim (Baris):** [teknik yaklasim + uyarilar]
-    **Yonetim (Can):** [entegrasyon/kapsam kararlari]
-    **Test (Ece):** [kritik test senaryolari]
+    ### 2. Per-Discipline Analysis
+    **Analysis (Deniz):** [main findings]
+    **Software (Baris):** [technical approach + warnings]
+    **Management (Can):** [integration/scope decisions]
+    **Testing (Ece):** [critical test scenarios]
 
-    ### 3. Kritik Risk Tablosu
-    | Risk | Etki | Onlem |
-    |------|------|-------|
-    | [risk 1] | Yuksek/Orta/Dusuk | [onlem] |
-    | [risk 2] | Yuksek/Orta/Dusuk | [onlem] |
+    ### 3. Critical Risk Table
+    | Risk | Impact | Mitigation |
+    |------|--------|------------|
+    | [risk 1] | High/Medium/Low | [mitigation] |
+    | [risk 2] | High/Medium/Low | [mitigation] |
 
-    ### 4. Backlog Adaylari
-    **Nihai Kabul Kriterleri:**
-    - [ ] [Kriter 1 — olculebilir, test edilebilir]
-    - [ ] [Kriter 2 — olculebilir, test edilebilir]
+    ### 4. Backlog Candidates
+    **Final Acceptance Criteria:**
+    - [ ] [Criterion 1 — measurable, testable]
+    - [ ] [Criterion 2 — measurable, testable]
 
-    **Teknik Tasarimin Ele Almasi Gereken Edge Case'ler:**
+    **Edge Cases the Technical Design Must Address:**
     - [edge case 1]
     - [edge case 2]
 
-    **Acik Gorevler / Hikayeler:**
-    - [varsa]
+    **Open Tasks / Stories:**
+    - [if any]
 
-    *Tum takim #{work_item_id} is kalemine hazir.*
+    *The whole team is ready for work item #{work_item_id}.*
   agent: scrum_master
 
 # ══════════════════════════════════════════════════════════════
-# FAZ 0: Scrum Master - Repo Kesfetme ve Bagimlilik Analizi
+# PHASE 0: Scrum Master — Repo Discovery and Dependency Analysis
 # ══════════════════════════════════════════════════════════════
 
 discover_repos_task:
   description: >
-    GOREV: {work_item_id} is kalemi icin ilgili Azure DevOps repolarini kesfet.
-    "list_repos" aracini kullanarak projedeki tum repolari listele.
-    Is kalemindeki bilgilere dayanarak hangi repo(lar)da calisma yapilacagini belirle.
+    TASK: Discover the relevant Azure DevOps repositories for work item
+    {work_item_id}. Use "list_repos" to list all repos in the project.
+    Based on the work item info, identify which repo(s) will be worked on.
 
-    ONCEKI ADIM CIKTILARI:
+    PREVIOUS STEP OUTPUTS:
     {previous_context}
   expected_output: >
-    Kesfedilen repolarin listesi ve is kalemi ile iliskili repo(lar)in adi.
+    List of discovered repos and the name of the repo(s) related to the work item.
   agent: software_architect
 
 dependency_analysis_task:
   description: >
-    GOREV: Belirlenen repo(lar)in yapisini incele.
-    "browse_repo" aracini kullanarak dizin yapisini, ana dosyalari ve
-    bagimliliklari (import, config dosyalari) analiz et.
+    TASK: Inspect the structure of the identified repo(s).
+    Use "browse_repo" to analyze directory layout, main files and
+    dependencies (imports, config files).
 
-    ONCEKI ADIM CIKTILARI:
+    PREVIOUS STEP OUTPUTS:
     {previous_context}
   expected_output: >
-    Repo yapisi ozeti, kullanilan dil/framework ve bagimlilik haritasi.
+    Repo structure summary, language/framework used and dependency map.
   agent: software_architect
 
 # ══════════════════════════════════════════════════════════════
-# FAZ 1: Is Analizi ve Teknik Tasarim
+# PHASE 1: Requirements Analysis and Technical Design
 # ══════════════════════════════════════════════════════════════
 
 requirements_analysis_task:
   description: >
-    GOREV: {work_item_id} idli is kalemini analiz et ve yapilandirilmis JSON cikti uret.
+    TASK: Analyze work item {work_item_id} and produce structured JSON output.
 
-    Context'te "WORK ITEM DETAYI" basligiyla is kalemi bilgisi hazir. Oku ve analiz et.
-    get_work_item araci ile de okuyabilirsin — ama context'te varsa tekrar okuma.
+    The work item info is ready under a "WORK ITEM DETAIL" heading in
+    context. Read and analyze. You may also use get_work_item — but if it's
+    already in context, do not re-read.
 
-    CALISMA AKISI:
-    1. Is kaleminin baslik + aciklama + kabul kriterlerini oku
-    2. Fonksiyonel gereksinimleri cikar (FR1, FR2, ...)
-    3. Teknik gereksinimleri cikar (TR1, TR2, ...)
-    4. Kabul kriterlerini numarala (AC1, AC2, ...)
-    5. Kapsam disi maddeleri belirle
-    6. Varsayimlari "ASSUMPTION:" ile isaretle
-    7. Belirsiz noktalari open_questions'a ekle
+    WORKFLOW:
+    1. Read the WI title + description + acceptance criteria
+    2. Extract functional requirements (FR1, FR2, ...)
+    3. Extract technical requirements (TR1, TR2, ...)
+    4. Number the acceptance criteria (AC1, AC2, ...)
+    5. Identify out-of-scope items
+    6. Mark assumptions with "ASSUMPTION:" prefix
+    7. Add ambiguous points to open_questions
 
-    ONEMLI: Onceki bagiamda "Kickoff Toplantisi Ozeti" varsa dikkate al.
-    PR yorumlari varsa onlari da gereksinimlere yansit.
+    IMPORTANT: If previous context contains a "Kickoff Meeting Summary", take
+    it into account. If PR comments are present, reflect them in requirements.
 
-    Her durumda analizi tamamla — eldeki bilgilerle devam et.
+    Complete the analysis in every case — work with whatever info is available.
 
     {scrum_master_feedback}
 
-    ONCEKI ADIM CIKTILARI:
+    PREVIOUS STEP OUTPUTS:
     {previous_context}
   expected_output: >
-    SADECE gecerli JSON dondur. Serbest metin YAZMA.
+    Return ONLY valid JSON. NO free text outside the JSON.
 
     ```json
     {
-      "summary": "is kaleminin tek cumlede ozeti",
+      "summary": "one-sentence summary of the work item",
       "functional_requirements": [
         {"id": "FR1", "desc": "..."},
         {"id": "FR2", "desc": "..."}
@@ -344,117 +351,137 @@ requirements_analysis_task:
     }
     ```
 
-    KURALLAR:
-    - Her FR/TR/AC benzersiz id alir
-    - Description'da yer almayan sey UYDURMA
-    - Eksik bilgiyi open_questions'a ekle
-    - JSON disinda HICBIR metin yazma
+    RULES:
+    - Every FR/TR/AC gets a unique id
+    - DO NOT INVENT anything not in the description
+    - Add missing info to open_questions
+    - NO text outside the JSON
   agent: business_analyst
 
 technical_design_task:
   description: >
-    GOREV: Azure DevOps is kalemi #{work_item_id} icin gelistirme plani olustur.
+    TASK: Produce a development plan for Azure DevOps work item #{work_item_id}.
 
-    ⚠️ KRITIK: Final ciktin MUTLAKA JSON plan olacak (work_item_id, repo_name,
-    summary, changes[], acceptance_criteria alanlari ile). Tool cagrilarini
-    TAMAMLADIKTAN SONRA, topladigin bilgilerle JSON uret. Tool cagrisi formatini
-    asla "final answer" olarak yazma.
+    ⚠️ CRITICAL: Your FINAL output MUST be a JSON plan (with work_item_id,
+    repo_name, summary, changes[], acceptance_criteria fields). AFTER you
+    finish all tool calls, produce the JSON from gathered info. NEVER write
+    a tool call format as "final answer".
 
-    🚨 YETERSIZLIK KONTROLU (kod yazma perspektifinden):
-    Eger is kalemi YAZILIM GELISTIRME ICIN YETERSIZ ise, JSON yerine ciktinin
-    en basina su marker'i yaz:
+    🚨 INSUFFICIENCY CHECK (from a code-writing perspective):
+    If the work item is INSUFFICIENT FOR SOFTWARE DEVELOPMENT, instead of
+    JSON, write this marker at the very start of your output:
 
-    YETERSIZ: <gelistirici icin eksik olan kritik bilgileri kisaca listele>
+    INSUFFICIENT: <briefly list the critical missing info from a developer's view>
 
-    YETERSIZ demen icin gecerli sebepler:
-    - Hangi fonksiyonelite eklenecek/degisecek belirsiz (agent repo'yu inceledikten sonra bile)
-    - Beklenen input/output, veri yapisi, API contract bilinmiyor
-    - Degisecek dosyalarin tahmini bile mumkun degil
-    - Kabul kriterleri test edilebilir halde degil (olçulemez)
-    - Is kuralı veya flow tarif edilmemis (edge case'ler dahil)
-    - Tool'larla arastirdigin halde yeterli teknik baglam bulamadin
+    Valid reasons to say INSUFFICIENT:
+    - What functionality changes is unclear (even after agent inspected repo)
+    - Expected input/output, data structure or API contract unknown
+    - Even guessing which files change is impossible
+    - Acceptance criteria are not testable (not measurable)
+    - Business rule or flow not described (including edge cases)
+    - Despite using tools, you cannot find sufficient technical context
 
-    YETERSIZ DEGIL (bunlari tahmin/kesfet):
-    - Repo adi: tool'larla keşfet
-    - Tam dosya yolu: kod tabaninda ara
-    - Kucuk belirsizlikler: en makul varsayimla devam et
+    NOT INSUFFICIENT (guess/discover these):
+    - Repo name: discover with tools
+    - Exact file path: search the codebase
+    - Small ambiguities: continue with the most reasonable assumption
 
-    Eger YETERSIZ degilse DIREKT JSON uret, marker yazma.
+    If NOT INSUFFICIENT, produce the JSON DIRECTLY without any marker.
 
-    ⚡ MALİYET OPTIMIZASYONU — TOOL KULLANIMI:
-    Context'te asagidaki bilgiler HAZIR:
-    - "WORK ITEM DETAYI" basligi altinda: baslik, aciklama, kabul kriterleri
-    - "DOSYA ICERIGI: /yol/dosya.php" basligiyla dosya icerikleri (varsa)
-    - "Kickoff Toplantisi Ozeti" basligi altinda: takim analizi
-    - "ONERILEN REPOLAR" basligi altinda: hedef repo
+    ⚡ COST OPTIMIZATION — TOOL USAGE:
+    The following info is READY in context:
+    - "WORK ITEM DETAIL" heading: title, description, acceptance criteria
+    - "FILE CONTENT: /path/file.php" heading: file contents (if any)
+    - "Kickoff Meeting Summary" heading: team analysis
+    - "SUGGESTED REPOS" heading: target repo
 
-    KURAL: Context'te var olan bilgi icin HICBIR TOOL CAGIRMA.
-    - get_work_item CAGIRMA — WI detayi zaten "WORK ITEM DETAYI" altinda
-    - Dosya context'teyse browse_repo CAGIRMA — dosya icerigi zaten var
-    - Repo biliniyorsa list_repos CAGIRMA
+    RULE: For info already in context, DO NOT CALL ANY TOOL.
+    - DO NOT call get_work_item — WI detail is already in context
+    - DO NOT call browse_repo if file is in context — file contents already present
+    - DO NOT call list_repos if repo is known
 
-    Tool sadece context'te OLMAYAN bilgi icin kullan:
-    - Context'te bulunmayan bir dosyayi okumak gerekiyorsa → browse_repo
-    - Kod arama gerekiyorsa → search_code
+    Use tools ONLY for info NOT in context:
+    - To read a file not in context → browse_repo
+    - To search code → search_code
 
-    ADIM 1 - KABUL KRİTERLERİNİ ANLA:
-    Context'te "Kabul Kriterleri" başlığı varsa oku ve not al.
-    Bu kriterler BA tarafından belirlenmiş olup teknik planın HER birini karşılaması zorunludur.
-    Planın `acceptance_criteria` JSON alanı bu listenin tam karşılığı olmalıdır.
+    STEP 1 — UNDERSTAND THE ACCEPTANCE CRITERIA:
+    If context has an "Acceptance Criteria" heading, read and note it.
+    These were set by BA and the technical plan MUST cover each one.
+    The plan's `acceptance_criteria` JSON field must mirror this list exactly.
 
-    ADIM 2 - IS KALEMINI ANLA:
-    Context'teki "WORK ITEM DETAYI" bolumunu oku. Asagidakileri belirle:
-    - Hangi repository uzerinde calisilacak ("ONERILEN REPOLAR" veya aciklamadan)
-    - Ne yapilmasi isteniyor (translate, refactor, yeni endpoint, fix vb.)
-    - Hangi dosya/endpoint/route degisecek
-    - Ornek dosya veya pattern referansi varsa not al
+    STEP 2 — UNDERSTAND THE WORK ITEM:
+    Read the "WORK ITEM DETAIL" section in context. Determine:
+    - Which repository to work on. If context has a "Discover Repo Onerisi
+      (Advisory)" section, treat it as input — review the rationale and the
+      candidate summaries in "Repo Ozetleri". You are the final decision
+      maker on `repo_name`: agree with the advisory if it fits, or pick a
+      different repo if the evidence (tables, models, file ownership)
+      points elsewhere. Always justify your choice with concrete evidence
+      from the summaries.
+    - What is being asked (translate, refactor, new endpoint, fix, etc.)
+    - Which file/endpoint/route will change
+    - Note any example file or pattern reference
 
-    ADIM 3 - DEGISECEK DOSYAYI BUL:
-    Context'te "DOSYA ICERIGI: /yol/dosya.php" varsa onu kullan.
-    YOKSA browse_repo ile hedef dosyayi bul ve oku.
+    STEP 3 — FIND THE FILE TO CHANGE:
+    If context has "FILE CONTENT: /path/file.php", use it.
+    Otherwise find and read the target file with browse_repo.
 
-    ADIM 4 - ORNEK DOSYAYI OKU (varsa, context'te yoksa):
-    Description'da ornek dosya/pattern belirtilmisse ve context'te yoksa oku.
-    Ornek dosyadaki pattern'i anla - ayni yapiyi hedef dosyaya uygulayacaksin.
+    STEP 4 — READ THE EXAMPLE FILE (if any and not in context):
+    If the description references an example file/pattern and it's not in
+    context, read it. Understand the pattern — you'll apply the same shape
+    to the target file.
 
-    ADIM 5 - DEGISIKLIK PLANINI YAZ:
-    Asagidaki JSON formatinda ciktini olustur.
-    HER dosya icin mevcut kodu ve yeni kodu GOSTER.
-    Tahminde bulunma - sadece okudugu kodlara dayali plan yaz.
+    STEP 5 — WRITE THE CHANGE PLAN:
+    Produce JSON in the format below.
+    For EACH file, SHOW the current code and the new code.
+    No guessing — base the plan only on the code you read.
 
-    ONEMLI:
-    - Sadece is kaleminde istenen degisiklikleri planla
-    - Is kaleminde BELIRTILMEYEN dosyalara/modullere DOKUNMA
-    - Her dosyayi MUTLAKA oku, tahminde bulunma
-    - Ornek dosyadaki pattern'i hedef dosyaya uyarla, kopyalama
+    IMPORTANT:
+    - Only plan the changes asked by the work item
+    - DO NOT TOUCH files/modules NOT MENTIONED in the work item
+    - DO READ every file you reference — do not guess
+    - Adapt the example pattern to the target file; do not copy verbatim
+    - ⛔ NO PLACEHOLDER TOKENS in `file_path`, `current_code`, or `new_code`.
+      Concretize every token at generation time:
+      - Migration timestamps → emit the real UTC value as a 14-digit
+        string YYYYMMDDHHMMSS (example: 20260604123045). Do NOT leave
+        the word TIMESTAMP, DATE, or XX patterns inside the filename or
+        class name.
+      - Class names, table names, column names → use the actual values
+        from the work item. Do NOT leave generic words like ClassName,
+        TABLE, COLUMN, TBD, TODO inside any output field.
+      - If you genuinely do not know a concrete value, OMIT that change
+        entirely (don't ship a half-defined plan). A change with an
+        unfilled token will be rejected by validation and dropped from
+        the PR.
 
     {scrum_master_feedback}
 
-    ONCEKI ADIM CIKTILARI:
+    PREVIOUS STEP OUTPUTS:
     {previous_context}
   expected_output: >
-    Ciktini KESINLIKLE asagidaki JSON formatinda ver.
-    JSON disinda HICBIR ACIKLAMA YAZMA.
+    Return your output STRICTLY in the JSON format below.
+    NO EXPLANATION outside the JSON.
 
     ```json
     {
       "work_item_id": "{work_item_id}",
-      "repo_name": "repository-adi",
-      "summary": "is kaleminin tek cumlede ozeti",
+      "repo_name": "repository-name",
+      "summary": "one-sentence summary of the work item",
       "changes": [
         {
-          "file_path": "/tam/dosya/yolu.php",
+          "file_path": "/full/file/path.php",
           "change_type": "edit",
-          "description": "Bu dosyada ne degisecek (tek cumle)",
-          "current_code": "dosyadan okunan MEVCUT ilgili kod bolumu",
-          "new_code": "uygulanmasi gereken YENI kod bolumu",
+          "description": "What changes in this file (one sentence)",
+          "current_code": "EXISTING code block read from the file",
+          "new_code": "NEW code block to apply",
           "covers_requirements": ["FR1", "AC2"],
           "risk": "low"
         }
       ],
       "acceptance_criteria": [
-        {"id": "AC1", "desc": "kriter 1"},
-        {"id": "AC2", "desc": "kriter 2"}
+        {"id": "AC1", "desc": "criterion 1"},
+        {"id": "AC2", "desc": "criterion 2"}
       ],
       "alternatives_considered": [
         {"option": "...", "tradeoff": "...", "chosen": true}
@@ -465,324 +492,363 @@ technical_design_task:
     }
     ```
 
-    KURALLAR:
-    - current_code alani GERCEK dosyadan okunmus olmali, uydurmali degil
-    - new_code alani derlenebilir/calisabilir olmali
-    - Her change en az bir FR/TR/AC id'sine baglanmali (covers_requirements)
-    - covers_requirements bos olan change YAZMA
-    - Sadece is kaleminde istenen degisiklikleri icerir
-    - acceptance_criteria BA ciktisindaki AC listesiyle uyumlu olmali
+    RULES:
+    - `current_code` MUST be read from the real file, not invented
+    - `new_code` MUST be compilable/runnable
+    - Each change MUST link to at least one FR/TR/AC id (covers_requirements)
+    - DO NOT write changes with empty covers_requirements
+    - Include only the changes the WI asks for
+    - `acceptance_criteria` must align with BA's AC list
+    - `file_path` FORMAT: repo-relative absolute path, MUST start with `/`.
+      Do NOT prepend the repo name (it lives in `repo_name`). Examples:
+      - GOOD: `/app/Controller/Api/V1/Meta.php`
+      - GOOD: `/database/Migrations/20260605120000_AddX.php`
+      - BAD: `webservice/app/Controller/Api/V1/Meta.php` (repo name in path)
+      - BAD: `app/Controller/Api/V1/Meta.php` (missing leading slash)
+      - BAD: `./app/Controller/Api/V1/Meta.php` (dot-relative)
   agent: software_architect
 
 # ══════════════════════════════════════════════════════════════
-# FAZ 2: Developer - Kod Yazma
+# PHASE 2: Developer — Code Writing
 # ══════════════════════════════════════════════════════════════
 
 implement_change_task:
   description: >
-    GOREV: Asagidaki degisiklik planini BIREBIR uygula. Ciktin dosyanin
-    DEGISIKLIK UYGULANMIS TAM HALI olacak — bastan sona her satir.
+    TASK: Apply the change plan below EXACTLY. Your output is the FULL FILE
+    WITH THE CHANGE APPLIED — every line from start to end.
 
     ╔══════════════════════════════════════════════════════════════╗
-    ║ KRITIK: TAM DOSYA SOZLESMESI                                 ║
+    ║ CRITICAL: FULL-FILE CONTRACT                                 ║
     ║                                                              ║
-    ║ Ciktinin tamami dogrudan dosyaya YAZILACAK. Push edildigi    ║
-    ║ andan itibaren dosya = senin ciktin. Eksik bir karakter      ║
-    ║ uretim sistemini KIRAR.                                      ║
+    ║ Your entire output is WRITTEN DIRECTLY to the file. From     ║
+    ║ the moment of push, file == your output. A missing character ║
+    ║ BREAKS the production system.                                ║
     ║                                                              ║
-    ║ ORIGINAL_LINES (orjinal dosya satir sayisi) -> NEW_LINES     ║
-    ║ Kabul edilebilir aralik: NEW_LINES = ORIGINAL_LINES ± 30%    ║
-    ║ Bu araligin disinda olan cikti push edilmeden REDDEDILIR ve  ║
-    ║ Pipeline tekrar denemek zorunda kalir.                       ║
+    ║ ORIGINAL_LINES -> NEW_LINES                                  ║
+    ║ Acceptable range: NEW_LINES = ORIGINAL_LINES ± 30%           ║
+    ║ Outside this range output is REJECTED before push and the    ║
+    ║ pipeline must retry.                                         ║
     ╚══════════════════════════════════════════════════════════════╝
+
+    NOTE: When the pipeline gives change_description containing "ONLY NEW
+    CODE BLOCK", switch to BLOCK MODE — output only the replacement block
+    (Python side handles integration). Default mode is FULL FILE unless
+    told otherwise.
 
     PLAN:
     Repo: {target_repo}
-    Dosya: {target_file}
-    Degisiklik: {change_description}
+    File: {target_file}
+    Change: {change_description}
 
-    TUM PLAN VE DIGER DOSYALAR (entegrasyon icin referans):
+    FULL PLAN AND OTHER FILES (for integration reference):
     {previous_context}
 
-    MEVCUT KOD (planda belirtilen — dosyada bulunan blok):
+    CURRENT CODE (from plan — block present in file):
     ```
     {current_code}
     ```
 
-    YENI KOD (planda belirtilen — yukaridakinin yerine yazilacak blok):
+    NEW CODE (from plan — block to replace the above):
     ```
     {new_code}
     ```
 
-    ZORUNLU ADIMLAR (sirasi degistirilemez):
+    MANDATORY STEPS (order is fixed):
 
-    ADIM 1 — DOSYAYI BASTAN SONA OKU:
-    "browse_repo" araci ile {target_file} dosyasini oku. Dosyanin BIRINCI
-    satirindan SON satirina kadar tam icerigi al. Orta dosya/large dosya
-    olsa bile tamamini iste.
+    STEP 1 — READ THE FILE END-TO-END:
+    Use "browse_repo" to read {target_file}. Get the full content from
+    the FIRST line to the LAST. Even for medium/large files, request the
+    whole thing.
 
-    ADIM 2 — DOSYAYI ZIHNINDE OLC:
-    Okudugun dosyanin satir sayisini sayar gibi zihninde tut:
-      ORIG_LINES = <orjinal dosya satir sayisi>
-      Plan etkisi: +<eklenen> / -<silinen> satir
-      EXPECTED_NEW_LINES = ORIG_LINES + ekleme - silme
+    STEP 2 — MEASURE THE FILE MENTALLY:
+    Keep in mind:
+      ORIG_LINES = <original file line count>
+      Plan delta: +<added> / -<removed> lines
+      EXPECTED_NEW_LINES = ORIG_LINES + added - removed
 
-    ADIM 3 — DEGISIKLIGI UYGULA:
-    Plan'daki current_code blogunu dosyada bul, new_code ile degistir.
-    Diger HICBIR satira dokunma — formatlama, naming, comment, import
-    sirasi, whitespace HICBIRI degismez.
+    STEP 3 — APPLY THE CHANGE (SURGICAL):
+    Find the plan's `current_code` block in the file, replace with `new_code`.
+    Do NOT touch any other line — formatting, naming, comments, import
+    order, whitespace remain UNCHANGED. Smallest blast radius: change ONLY
+    what the plan requires, nothing adjacent. Do NOT refactor, rename, or
+    reformat surrounding code even if it looks improvable. Do NOT add
+    task-tied comments (e.g. "// added for WI", "# new column"); the edit
+    must read as if the original author wrote it. Match the exact
+    surrounding style (indent, quotes, trailing commas, brace placement).
 
-    ADIM 4 — TAM DOSYAYI DONDUR:
-    Dosyanin BIRINCI satirindan (orn. PHP icin "<?php"), SON satirina kadar
-    tum icerigi tek bir kod blogu olarak dondur. Hicbir kismini atlama.
+    STEP 4 — RETURN THE FULL FILE:
+    Output the file from its REAL FIRST LINE (e.g. PHP: "<?php") to its
+    REAL LAST LINE, as a single code block. Skip nothing.
 
-    ADIM 5 — SELF-CHECK (cikti uretirken):
-    Dondurmeden once kendine sor:
-      [ ] Cikti dosyanin gercek ilk satiri ile mi basliyor? (orn: <?php)
-      [ ] Cikti dosyanin gercek son satiri ile mi bitiyor?
-      [ ] Cikti satir sayisi EXPECTED_NEW_LINES'a yakin mi?
-      [ ] "..." veya "// (rest unchanged)" gibi kisaltma marker'i YOK mu?
-      [ ] Plan disi degisiklik YOK mu?
-    Herhangi bir cevap "HAYIR" ise CIKTIYI DONDURME — yeniden olustur.
+    STEP 5 — SELF-CHECK (while producing output):
+    Before returning, ask yourself:
+      [ ] Does output start with the file's real first line? (e.g. <?php)
+      [ ] Does output end with the file's real last line?
+      [ ] Is output line count close to EXPECTED_NEW_LINES?
+      [ ] NO "..." or "// (rest unchanged)" abbreviation markers?
+      [ ] NO out-of-plan changes?
+    If ANY answer is "NO" — DO NOT RETURN, regenerate.
 
-    MUTLAK YASAKLAR:
-    - "..." / "// kalan kod ayni" / "/* original code */" kisaltmalar
-    - Sadece degisen metodu/fonksiyonu donmek (dosya birden fazla method
-      iceriyorsa hepsini orijinal halde tekrar yaz)
-    - Plan'da olmayan dosyalara dokunmak
-    - Mevcut import'lari/namespace'leri silmek
-    - Kod blogu disinda aciklama, "Iste guncel dosya:" gibi giris cumlesi
-    - Dosyayi okumadan tahminle kod uretmek
+    ABSOLUTE PROHIBITIONS:
+    - "..." / "// rest of code is the same" / "/* original code */" abbreviations
+    - Returning only the changed method/function (if file has multiple
+      methods, rewrite all of them as-is)
+    - Touching files not in the plan
+    - Deleting existing imports/namespaces
+    - Any explanation outside the code block, e.g. "Here is the updated file:"
+    - Producing code without reading the file
 
-    BUYUK DOSYA UYARISI (>500 satir):
-    Dosya buyukse "tahminen aynisi" diye dusunup atlama. Orijinal kodu
-    dikkatli copy + sadece plan'daki degisiklik. max_tokens limitin yeterli;
-    yetmiyorsa yine tum dosyayi dondur, hata mesaji ile dur — KISMI cikti
-    uretme.
-
+    LARGE FILE WARNING (>500 lines):
+    Do not skip with "presumably the same". Carefully copy the original
+    code + apply only the plan's change. Your max_tokens is sufficient;
+    if not, return the full file and stop with an error message — DO NOT
+    produce partial output.
   expected_output: >
-    Dosyanin DEGISIKLIK UYGULANMIS TAMAMINI tek bir kod blogu icinde dondur.
+    Return the FULL FILE WITH THE CHANGE APPLIED in a single code block.
 
-    KESIN KURALLAR:
-    - Cikti dosyanin BIRINCI satiri ile basliyor (orn. <?php, package main,
-      from xyz import vb.)
-    - Cikti dosyanin SON satiri ile bitiyor (kapanis tag, son fonksiyon
-      kapanisi vb.)
-    - Cikti satir sayisi orijinal dosya satir sayisinin %70-130'u arasinda
-      (orjinal 1000 satir ise cikti 700-1300 arasi olmali)
-    - Kod blogu disinda HICBIR METIN YAZMA — ne giris cumlesi, ne ozet,
-      ne "burada degisiklikler:" tarzi aciklama
-    - Markdown ``` opsiyonel ama tek bir kod blogu olmali
+    STRICT RULES:
+    - Output STARTS with the file's first line (e.g. <?php, package main,
+      from xyz import, etc.)
+    - Output ENDS with the file's last line (closing tag, last function
+      close, etc.)
+    - Output line count is %70-%130 of the original (orig 1000 lines →
+      output 700-1300)
+    - NO TEXT outside the code block — no preamble, no summary, no
+      "here are the changes:" explanation
+    - Markdown ``` optional but must be a single code block
 
-    Cikti formati:
+    Output format:
     ```
-    [dosyanin BIRINCI satiri]
-    [...orijinal kodun degisiklik uygulanmis hali...]
-    [dosyanin SON satiri]
+    [file's FIRST line]
+    [...original code with change applied...]
+    [file's LAST line]
     ```
 
-    PIPELINE GUVENLIK KONTROLU: Cikti orijinalin %50'sinden kisa olursa
-    push otomatik IPTAL edilir. Kisaltma uretirsen pipeline yeniden
-    deneyecek; bu hem zaman hem maliyet kaybi.
+    PIPELINE SAFETY: If output is less than %50 of original size, push is
+    automatically CANCELED. Producing abbreviated output makes the pipeline
+    retry — wasting both time and money.
   agent: senior_developer
 
 # ══════════════════════════════════════════════════════════════
-# FAZ 3: Review - PR Dogrulama
+# PHASE 3: Review — PR Validation
 # ══════════════════════════════════════════════════════════════
 
 review_pr_task:
   description: >
-    GOREV: PR #{pr_id} degisikliklerinin is kalemiyle uyumunu ve kod kalitesini dogrula.
+    TASK: Validate that PR #{pr_id} changes align with the work item and meet
+    code quality bar.
 
-    IS KALEMI: #{work_item_id}
-    IS GEREKSINIMLERI:
+    WORK ITEM: #{work_item_id}
+    BUSINESS REQUIREMENTS:
     {requirements}
 
     PR: {pr_url}
     Repo: {target_repo}
 
-    ⚠️ KRITIK KARAR KURALI:
-    - PR'daki degisiklikler is kalemindeki ISTEMLERLE BIREBIR eslesmiyorsa
-      → KARAR: DEGISIKLIK GEREKLI
-    - Plan'da 6 dosya degisecek ama PR'da 1 dosya varsa → DEGISIKLIK GEREKLI
-    - PR'daki kod sadece yuzeysel (bir satir, bir alan) ve is kalemi koklu
-      degisiklik isteyen bir is ise → DEGISIKLIK GEREKLI
-    - Kabul kriterleri karsilanmamissa → DEGISIKLIK GEREKLI
-    - Syntax hatasi, acik bug varsa → DEGISIKLIK GEREKLI
+    ⚠️ CRITICAL DECISION RULE:
+    - If PR changes DO NOT match work item asks ONE-TO-ONE → VERDICT: CHANGES_REQUIRED
+    - If plan changes 6 files but PR contains 1 file → CHANGES_REQUIRED
+    - If PR code is superficial (one line, one field) while WI asks for deep
+      change → CHANGES_REQUIRED
+    - If acceptance criteria are not met → CHANGES_REQUIRED
+    - If there are syntax errors / obvious bugs → CHANGES_REQUIRED
 
-    Sahte ONAY verme — PR eksikse acikca belirt. Pipeline senin kararina gore durur.
+    DO NOT give fake APPROVE — if PR is incomplete, say so explicitly. The
+    pipeline halts on your verdict.
 
-    ADIMLARIN:
-    1. "get_pr_changes" araci ile PR'daki degisen dosyalari listele
-    2. Her degisen dosyayi "Repo Gezgini" ile oku (branch: {target_branch})
-    3. Asagidaki kontrol listesini uygula:
+    YOUR STEPS:
+    1. Use "get_pr_changes" to list changed files in PR
+    2. Read each changed file (branch: {target_branch})
+    3. Apply the checklists below:
 
-    KABUL KRİTERLERİ KONTROL LİSTESİ (ÖNCE BU):
-    Context'te "Kabul Kriterleri" başlığı varsa her birini tek tek kontrol et:
-    - [ ] Her kabul kriteri PR'daki kodda karşılanmış mı?
-    - [ ] Karşılanmayan kriter varsa → KARAR: DEGISIKLIK GEREKLI
-    Bu kriterler BA ve teknik tasarım sürecinde belirlenmiş olup bağlayıcıdır.
+    ACCEPTANCE CRITERIA CHECK (FIRST):
+    If context has an "Acceptance Criteria" heading, check each one:
+    - [ ] Is each acceptance criterion satisfied in the PR's code?
+    - [ ] Any unmet criterion → VERDICT: CHANGES_REQUIRED
+    These criteria are binding (set during BA and technical design).
 
-    IS UYUMU KONTROL LISTESI:
-    - [ ] PR sadece is kaleminde istenen dosyalari mi degistirmis?
-    - [ ] Gereksiz/alakasiz dosya degisikligi var mi?
-    - [ ] Is kalemindeki TUM gereksinimler karsilanmis mi?
-    - [ ] Ornek pattern dogru uygulanmis mi?
+    BUSINESS ALIGNMENT CHECK:
+    - [ ] Does PR change only the files asked by the WI?
+    - [ ] Any unrelated file changes?
+    - [ ] Are ALL WI requirements met?
+    - [ ] Is the example pattern applied correctly?
 
-    KOD KALITESI KONTROL LISTESI (SOLID & CLEAN CODE):
-    - [ ] Single Responsibility: Her sinif/metod tek bir sorumluluga mi sahip?
-    - [ ] Open/Closed: Degisiklik mevcut kodu bozmadan genisletme yapiyor mu?
-    - [ ] Liskov Substitution: Alt siniflar ust siniflarin yerine gecebiliyor mu?
-    - [ ] Interface Segregation: Gereksiz bagimlilik olusturulmus mu?
-    - [ ] Dependency Inversion: Somut siniflara degil soyutlamalara mi bagli?
-    - [ ] Naming conventions projenin mevcut konvansiyonlarina uygun mu?
-    - [ ] Hata yonetimi (try-catch, null check, validation) yeterli mi?
-    - [ ] Edge case'ler ele alinmis mi?
-    - [ ] Gereksiz karmasiklik (over-engineering) var mi?
-    - [ ] Performans etkisi (N+1 query, gereksiz dongu, buyuk bellek kullanimi) var mi?
-    - [ ] Syntax hatasi veya eksik import var mi?
+    MINIMALITY CHECK (scope creep):
+    - [ ] Are the changes minimal — ONLY what the task requires?
+    - [ ] Any line touched beyond the plan (refactor, rename, reformat,
+          reordered imports, style churn on unrelated lines)? → flag it.
+    - [ ] Any task-tied comments added (e.g. "// added for WI")? → flag it.
+    - [ ] Unrelated "improvements" the WI did not ask for → CHANGES_REQUIRED.
 
-    4. Sonucu "add_pr_comment" araci ile PR'a yorum olarak ekle
-    5. Ayrica is kalemine ({work_item_id}) yorum olarak da ekle
+    REGRESSION CHECK (deleted/altered existing logic) — CRITICAL:
+    For EVERY removed (-) line in the diff, ask: was this an EXISTING
+    validation, guard, condition, branch, or error message?
+    - [ ] Did the PR rewrite an existing `if`/guard into a different
+          condition (widen/narrow/repurpose)? e.g. `if (X && noFilter)`
+          became `if (noFilter)` — that DELETES business rule X.
+    - [ ] Did it remove or change an existing error message / return / log
+          the WI did not ask to change?
+    - [ ] Did it drop a branch, early-return, null-check, or permission check?
+    If a removed (-) line carried logic the WI did NOT explicitly ask to
+    remove → VERDICT: CHANGES_REQUIRED. Adding a new check must NOT come at
+    the cost of silently deleting an existing one.
+
+    CODE QUALITY CHECK (SOLID & CLEAN CODE):
+    - [ ] Single Responsibility: each class/method has one responsibility?
+    - [ ] Open/Closed: change extends without breaking existing code?
+    - [ ] Liskov Substitution: subclasses substitute superclasses correctly?
+    - [ ] Interface Segregation: no unnecessary dependencies?
+    - [ ] Dependency Inversion: depends on abstractions, not concretes?
+    - [ ] Naming conventions consistent with project's existing style?
+    - [ ] Error handling (try-catch, null check, validation) sufficient?
+    - [ ] Edge cases handled?
+    - [ ] No over-engineering / unnecessary complexity?
+    - [ ] No performance issues (N+1, unnecessary loops, big memory)?
+    - [ ] No syntax errors / missing imports?
+
+    4. Use "add_pr_comment" to comment the result on the PR
+    5. Also comment on the work item ({work_item_id})
 
     {scrum_master_feedback}
 
-    ONCEKI ADIM CIKTILARI:
+    PREVIOUS STEP OUTPUTS:
     {previous_context}
   expected_output: >
-    ## PR Review Sonucu
+    ## PR Review Result
 
-    **Karar:** ONAY / DEGISIKLIK GEREKLI
+    **Verdict:** APPROVE / CHANGES_REQUIRED
 
-    **Kabul Kriterleri Kontrolü:**
-    - [Kriter 1]: KARSILANDI / EKSİK - [açıklama]
-    - [Kriter 2]: KARSILANDI / EKSİK - [açıklama]
+    **Acceptance Criteria Check:**
+    - [Criterion 1]: MET / UNMET - [explanation]
+    - [Criterion 2]: MET / UNMET - [explanation]
 
-    **Is Uyumu:**
-    - Karsilanan gereksinimler: [liste]
-    - Eksik gereksinimler: [liste veya "Yok"]
+    **Business Alignment:**
+    - Met requirements: [list]
+    - Missing requirements: [list or "None"]
 
-    **Kod Kalitesi (SOLID & Clean Code):**
-    - SOLID uyumu: [degerlendirme]
-    - Clean code: [degerlendirme]
-    - Sorunlar: [liste veya "Sorun yok"]
+    **Code Quality (SOLID & Clean Code):**
+    - SOLID compliance: [assessment]
+    - Clean code: [assessment]
+    - Issues: [list or "None"]
 
-    **Gereksiz Degisiklikler:**
-    - [liste veya "Yok"]
+    **Unrelated Changes:**
+    - [list or "None"]
   agent: code_reviewer
 
 # ══════════════════════════════════════════════════════════════
-# FAZ 4: Test ve Kalite Guvence
+# PHASE 4: Testing and Quality Assurance
 # ══════════════════════════════════════════════════════════════
 
 test_planning_task:
   description: >
-    GOREV: {work_item_id} is kalemi icin yapilan degisikliklerin test planini olustur.
-    PR'daki degisiklikleri incele, {target_repo} reposundaki {target_branch} branch'ini oku.
+    TASK: Produce a test plan for the changes made for work item {work_item_id}.
+    Inspect the PR changes, read the {target_branch} branch in {target_repo}.
 
-    ONEMLI: Onceki baglamda "Kickoff Toplantisi Ozeti" varsa QA perspektifini dikkate al.
-    Kickoff'ta QA mühendisi test senaryolarini ve regresyon riskini zaten degerlendirdi.
-    O bulgulari baslangic noktasi olarak al, uzerine tamamla ve genis.
+    IMPORTANT: If previous context contains a "Kickoff Meeting Summary", take
+    the QA perspective into account. The QA engineer already evaluated test
+    scenarios and regression risk in kickoff. Use those as starting point,
+    expand and extend.
 
-    Test planinda su bolumleri icermeli:
-    - Basarili senaryolar (happy path)
-    - Hata senaryolari (error cases)
-    - Sinir degerleri (edge cases)
-    - Entegrasyon test senaryolari
-    - Mumkunse unit test kodu
+    The test plan must include:
+    - Happy path scenarios
+    - Error scenarios
+    - Edge cases (boundary values)
+    - Integration test scenarios
+    - Unit test code where possible
 
     {scrum_master_feedback}
 
-    ONCEKI ADIM CIKTILARI:
+    PREVIOUS STEP OUTPUTS:
     {previous_context}
   expected_output: >
-    Test plani: test senaryolari listesi, edge case'ler, onerilen unit test kodlari.
+    Test plan: list of test scenarios, edge cases, suggested unit test code.
   agent: qa_engineer
 
 uat_task:
   description: >
-    GOREV: {work_item_id} is kalemi icin kullanici kabul testi yap.
+    TASK: Perform user acceptance test for work item {work_item_id}.
 
-    ADIM 0 - KABUL KRİTERLERİNİ HAZIRLA:
-    Context'te "Kabul Kriterleri (Pipeline Boyunca Bagleyici)" başlığı varsa
-    ORADAN AL — get_work_item çağırma, kriterler zaten belirlenmiş.
-    Bu kriterler BA tarafından analiz aşamasında, teknik tasarımdan ÖNCE belirlendi
-    ve tüm pipeline boyunca bağlayıcı tek kaynaktır.
+    STEP 0 — PREPARE ACCEPTANCE CRITERIA:
+    If context has an "Acceptance Criteria (Binding Throughout Pipeline)"
+    heading, USE IT — do not call get_work_item, criteria are already set.
+    These criteria were set by BA before technical design and are binding
+    across the pipeline.
 
-    Context'te kabul kriteri yoksa "get_work_item" ile WI'yi oku ve çıkar.
+    If context has no acceptance criteria, use "get_work_item" to fetch WI
+    and extract them.
 
-    Kickoff Toplantısı Özeti varsa UAT perspektifini de dikkate al.
+    If "Kickoff Meeting Summary" exists, take the UAT perspective into account.
 
-    ADIM 1 - PR DEGISIKLIKLERINI INCELE:
-    "get_pr_changes" araci ile PR'daki degisiklikleri incele.
-    Her degisikligin hangi kabul kriterine karsilik geldigini belirle.
+    STEP 1 — REVIEW PR CHANGES:
+    Use "get_pr_changes" to inspect PR changes.
+    Determine which acceptance criterion each change addresses.
 
-    ADIM 2 - DEGERLENDIRME:
-    Her kabul kriteri icin GECTI veya KALDI karari ver.
-    KALDI olanlar icin ne eksik oldugunu acikla.
+    STEP 2 — EVALUATION:
+    For each acceptance criterion give PASS or FAIL.
+    For FAIL, explain what's missing.
 
     {scrum_master_feedback}
 
-    ONCEKI ADIM CIKTILARI:
+    PREVIOUS STEP OUTPUTS:
     {previous_context}
   expected_output: >
-    ## UAT Raporu
+    ## UAT Report
 
-    **Kabul Kriterleri:**
-    1. [Kriter] - GECTI/KALDI - [Aciklama]
-    2. [Kriter] - GECTI/KALDI - [Aciklama]
+    **Acceptance Criteria:**
+    1. [Criterion] - PASS/FAIL - [Explanation]
+    2. [Criterion] - PASS/FAIL - [Explanation]
     ...
 
-    **Genel Degerlendirme:** KABUL / RED
-    **Eksikler:** [liste veya "Yok"]
+    **Overall Evaluation:** ACCEPTED / REJECTED
+    **Gaps:** [list or "None"]
   agent: uat_specialist
 
 # ══════════════════════════════════════════════════════════════
-# FAZ 5: Tamamlanma Raporu
+# PHASE 5: Completion Report
 # ══════════════════════════════════════════════════════════════
 
 completion_report_task:
   description: >
-    GOREV: {work_item_id} is kalemi icin tamamlanma raporu olustur.
-    Tum sureci ozetle: gereksinimler, yapilan degisiklikler, test sonuclari,
-    UAT sonuclari ve PR bilgisi.
-    Is kalemine yorum olarak ozet ekle.
+    TASK: Produce a completion report for work item {work_item_id}.
+    Summarize the whole process: requirements, changes made, test results,
+    UAT results and PR info.
+    Add the summary as a comment to the work item.
 
-    ONCEKI ADIM CIKTILARI:
+    PREVIOUS STEP OUTPUTS:
     {previous_context}
   expected_output: >
-    Tamamlanma raporu: is ozeti, degisiklik listesi, test sonuclari,
-    UAT sonuclari, PR linki. Is kalemine yorum eklenmis olmali.
+    Completion report: work summary, change list, test results, UAT results,
+    PR link. Comment must be added to the work item.
   agent: scrum_master
 
 # ══════════════════════════════════════════════════════════════
-# Scrum Master Review (her adim sonrasi kalite kontrolu)
+# Scrum Master Review (quality gate after each step)
 # ══════════════════════════════════════════════════════════════
 
 scrum_review_task:
   description: >
-    GOREV: Asagidaki adimin ciktisini incele ve kalite kontrolu yap.
+    TASK: Review the output of the step below and run a quality gate.
 
-    ADIM: {step_name}
-    IS KALEMI: #{work_item_id}
+    STEP: {step_name}
+    WORK ITEM: #{work_item_id}
 
-    ADIM CIKTISI:
+    STEP OUTPUT:
     {step_output}
 
-    DEGERLENDIRME KRITERLERI:
-    - Cikti is kalemiyle uyumlu mu?
-    - Cikti eksiksiz ve anlasilir mi?
-    - Ciktida hatali veya tutarsiz bilgi var mi?
-    - Cikti bir sonraki adim icin yeterli mi?
+    EVALUATION CRITERIA:
+    - Is the output aligned with the work item?
+    - Is the output complete and clear?
+    - Are there any errors or inconsistencies?
+    - Is the output sufficient for the next step?
 
-    Kararini ONAY veya IYILESTIR olarak belirt.
-    IYILESTIR dersen, eksikleri ve somut iyilestirme onerilerini yaz.
+    Declare your decision as APPROVE or IMPROVE.
+    If IMPROVE, list deficiencies and concrete improvement suggestions.
   expected_output: >
-    **Karar:** ONAY veya IYILESTIR
+    **Decision:** APPROVE or IMPROVE
 
-    **Degerlendirme:** [kisa aciklama]
+    **Evaluation:** [brief explanation]
 
-    **Iyilestirme Onerileri (IYILESTIR ise):**
-    - [somut oneri 1]
-    - [somut oneri 2]
+    **Improvement Suggestions (if IMPROVE):**
+    - [concrete suggestion 1]
+    - [concrete suggestion 2]
   agent: scrum_master
