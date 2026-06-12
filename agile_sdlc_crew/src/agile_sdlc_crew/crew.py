@@ -1043,13 +1043,21 @@ class AgileSDLCCrew:
     def create_code_crew(self) -> Crew:
         """Developer: tek dosya icin degisiklik uygula.
         Not: output_pydantic kullanmiyoruz (OpenAI API key sorunu) — task
-        prompt'undaki TAM DOSYA kurali + push oncesi guvenlik kontrollari yeterli."""
+        prompt'undaki TAM DOSYA kurali + push oncesi guvenlik kontrollari yeterli.
+        CREW_TASK_GUARDRAILS=1 iken yapisal guardrail (bos/cop/tool-call) eklenir;
+        lint Python tarafinda (_validate_code) fallback olarak kalir."""
+        from agile_sdlc_crew import pipeline_config as _pc
         dev = self.senior_developer()
         cfg = self.tasks_config["implement_change_task"]
+        extra = {}
+        if _pc.get("CREW_TASK_GUARDRAILS"):
+            from agile_sdlc_crew.guardrails import developer_code_guardrail
+            extra["guardrail"] = developer_code_guardrail
         t = Task(
             description=cfg["description"],
             expected_output=cfg["expected_output"],
             agent=dev,
+            **extra,
         )
         return Crew(
             agents=[dev],
