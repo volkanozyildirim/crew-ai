@@ -20,6 +20,17 @@ def load_knowledge(name: str) -> str:
     return ""
 
 
+def load_knowledge_source(name: str):
+    """Knowledge .md icerigini CrewAI StringKnowledgeSource olarak dondur.
+    Icerik bossa None doner (cagiran filtreler)."""
+    from crewai.knowledge.source.string_knowledge_source import StringKnowledgeSource
+
+    content = load_knowledge(name)
+    if not content.strip():
+        return None
+    return StringKnowledgeSource(content=content)
+
+
 def knowledge_for_repo_type(repo_type: str) -> str:
     """Repo tipine göre uygun knowledge'ı döndür.
 

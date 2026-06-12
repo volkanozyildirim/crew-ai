@@ -238,6 +238,10 @@ class AgileSDLCCrew:
         # llm_profile resolver tarafindan okunur, CrewAI Agent config'ine
         # sizdirma — bilinmeyen alan hatasina neden olabilir.
         cfg.pop("llm_profile", None)
+        # RAG modu acikken knowledge backstory'ye DEGIL, knowledge_sources'a gider.
+        from agile_sdlc_crew import pipeline_config as _pc
+        if _pc.get("CREW_KNOWLEDGE_RAG"):
+            return cfg
         extra = []
         for name in knowledge_names:
             content = load_knowledge(name)
@@ -251,6 +255,19 @@ class AgileSDLCCrew:
             cfg["backstory"] = (cfg.get("backstory", "") or "") + "".join(extra)
         return cfg
 
+    def _knowledge_kwargs(self, *knowledge_names: str) -> dict:
+        """CREW_KNOWLEDGE_RAG acikken Agent'a knowledge_sources + embedder verir;
+        kapaliyken bos dict (backstory enjeksiyonu devrede)."""
+        from agile_sdlc_crew import pipeline_config as _pc
+        if not _pc.get("CREW_KNOWLEDGE_RAG"):
+            return {}
+        from agile_sdlc_crew.knowledge import load_knowledge_source
+        from agile_sdlc_crew.embed.crewai_embedder import crewai_embedder_config
+        sources = [s for s in (load_knowledge_source(n) for n in knowledge_names) if s]
+        if not sources:
+            return {}
+        return {"knowledge_sources": sources, "embedder": crewai_embedder_config()}
+
     def scrum_master(self) -> Agent:
         return Agent(
             config=self._agent_config_with_knowledge(
@@ -263,6 +280,7 @@ class AgileSDLCCrew:
                 AzureDevOpsGetWorkItemTool(),
                 AzureDevOpsListWorkItemsTool(),
             ],
+            **self._knowledge_kwargs("agile_facilitation"),
         )
 
     def business_analyst(self) -> Agent:
@@ -277,6 +295,7 @@ class AgileSDLCCrew:
                 AzureDevOpsGetWorkItemTool(),
                 AzureDevOpsAddCommentTool(),
             ],
+            **self._knowledge_kwargs("requirements_analysis"),
         )
 
     def software_architect(self) -> Agent:
@@ -308,6 +327,7 @@ class AgileSDLCCrew:
             verbose=True,
             max_iter=max_iter,
             tools=tools,
+            **self._knowledge_kwargs("backend_tech_design", "frontend_nextjs"),
         )
 
     def qa_engineer(self) -> Agent:
@@ -326,6 +346,7 @@ class AgileSDLCCrew:
             verbose=True,
             max_iter=8,
             tools=tools,
+            **self._knowledge_kwargs("testing_strategy"),
         )
 
     def uat_specialist(self) -> Agent:
@@ -341,6 +362,7 @@ class AgileSDLCCrew:
                 AzureDevOpsAddCommentTool(),
                 AzureDevOpsPRChangesTool(),
             ],
+            **self._knowledge_kwargs("uat_strategy"),
         )
 
     def senior_developer(self) -> Agent:
@@ -356,6 +378,7 @@ class AgileSDLCCrew:
             verbose=True,
             max_iter=3,
             tools=[],
+            **self._knowledge_kwargs("backend_feature_dev", "frontend_nextjs"),
         )
 
     def code_reviewer(self) -> Agent:
@@ -375,6 +398,7 @@ class AgileSDLCCrew:
                 AzureDevOpsPRChangesTool(),
                 AzureDevOpsPRReviewTool(),
             ],
+            **self._knowledge_kwargs("backend_code_review"),
         )
 
     # ── Helpers ──────────────────────────────────
