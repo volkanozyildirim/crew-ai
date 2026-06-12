@@ -6,6 +6,7 @@ deklaratif olarak tanimlanir.
 """
 
 import logging
+import threading
 from typing import Any
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -208,6 +209,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
     _job_prompt_tokens: int = PrivateAttr(default=0)
     _job_completion_tokens: int = PrivateAttr(default=0)
     _job_total_tokens: int = PrivateAttr(default=0)
+    # step9 (test) ve step10 (UAT) ayni event'i dinledigi icin CrewAI bunlari
+    # ayri thread'lerde paralel calistirir; paylasimli state yazimlarini korur.
+    _state_lock: Any = PrivateAttr(default=None)
 
     # ── Helper Methods (dekoratorsuz) ────────────────
 
@@ -215,7 +219,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
         """Ham previous_context string'ine step ciktisini ekler.
         Step-bazli optimize context icin _build_step_context() kullanin."""
         summary = (output or "")[:5000]  # 1500 → 5000
-        self.state.previous_context += f"\n\n--- {step_name} ---\n{summary}"
+        addition = f"\n\n--- {step_name} ---\n{summary}"
+        # step9/step10 paralel thread'lerden cagrilabilir; previous_context += ...
+        # read-modify-write atomik degil, lock ile koru (lost-update onlenir).
+        if self._state_lock is not None:
+            with self._state_lock:
+                self.state.previous_context += addition
+        else:
+            self.state.previous_context += addition
 
     def _build_step_context(self, step_key: str) -> str:
         """Step'e ozel, tipli bilgilerden derlenen yapisal context.
@@ -904,6 +915,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Pipeline basi: tool cache'i sifirla
         reset_tool_cache()
 
+        self._state_lock = threading.Lock()
         self._db = _db
         self._agile_crew = AgileSDLCCrew()
         self._agile_crew.set_status_tracker(self._tracker)

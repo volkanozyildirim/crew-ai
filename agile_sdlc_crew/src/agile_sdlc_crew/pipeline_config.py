@@ -55,13 +55,6 @@ SCHEMA: list[dict] = [
         "desc": "Work item description'daki gorseller ve linkler analiz edilsin mi?",
     },
     {
-        "key": "CREW_PARALLEL_TEST_UAT",
-        "label": "Test + UAT Paralel",
-        "type": "bool",
-        "default": False,
-        "desc": "Test planlama (step9) ve UAT (step10) ayni anda calissin. claude_cli ile sure kisalir; ayni tek lokal modelde kazanc sinirli olabilir.",
-    },
-    {
         "key": "CREW_TASK_GUARDRAILS",
         "label": "Task Guardrails",
         "type": "bool",
