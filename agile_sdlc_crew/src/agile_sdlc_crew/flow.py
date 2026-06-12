@@ -2259,6 +2259,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception as e:
             # Guardrail retry'lari tukendi (veya kickoff hatasi) — guardrail'siz
             # crew ile manuel fallback. Mevcut parse onarimi yine devrede.
+            # NOT: Tukenen guardrail retry'larinin token'lari exception ile dustugu
+            # icin budget'a sayilmaz (hafif under-count); sadece guardrails ACIK +
+            # exhaustion yolunda olur, cost guard yine fallback sonucunu sayar.
             _log(f"  Guardrail/kickoff hatasi ({e}), guardrail'siz fallback kickoff")
             analysis_crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
             analysis_result = analysis_crew.kickoff(inputs={

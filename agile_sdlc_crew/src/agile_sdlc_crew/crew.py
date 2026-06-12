@@ -429,6 +429,7 @@ class AgileSDLCCrew:
             verbose=True,
             max_iter=2,
             tools=[],
+            **self._knowledge_kwargs("agile_facilitation"),
         )
         ba = Agent(
             config=self._agent_config_with_knowledge("business_analyst", "requirements_analysis"),
@@ -436,6 +437,7 @@ class AgileSDLCCrew:
             verbose=True,
             max_iter=2,
             tools=[],
+            **self._knowledge_kwargs("requirements_analysis"),
         )
         arch = Agent(
             config=self._agent_config_with_knowledge(
@@ -447,6 +449,7 @@ class AgileSDLCCrew:
             tools=[
                 AzureDevOpsBrowseRepoTool(local_repo_mgr=self.local_repo_mgr),
             ],
+            **self._knowledge_kwargs("backend_tech_design", "frontend_nextjs"),
         )
         dev = Agent(
             config=self._agent_config_with_knowledge(
@@ -462,6 +465,7 @@ class AgileSDLCCrew:
                 AzureDevOpsBrowseRepoTool(local_repo_mgr=self.local_repo_mgr),
                 AzureDevOpsSearchCodeTool(local_repo_mgr=self.local_repo_mgr),
             ],
+            **self._knowledge_kwargs("backend_feature_dev", "frontend_nextjs"),
         )
         return ba, arch, dev, sm
 
