@@ -47,6 +47,8 @@ def measure(label: str, text: str) -> str:
     if n > warn:
         log.warning(f"  ⚠️ context[{label}] {n} char > {warn} esigini asti")
         if os.environ.get("CREW_CTX_HARD_TRUNCATE", "0") == "1":
-            text = text[-warn:]
-            log.warning(f"  ✂️ context[{label}] son {warn} char'a kirpildi")
+            # Bas'i tut: en baglayici icerik (WI, kickoff, requirements, kabul
+            # kriterleri) _build_step_context'te basta; kuyruk daha dusuk degerli.
+            text = text[:warn]
+            log.warning(f"  ✂️ context[{label}] ilk {warn} char'a kirpildi")
     return text
