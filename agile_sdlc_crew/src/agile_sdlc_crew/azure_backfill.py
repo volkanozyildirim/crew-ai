@@ -211,17 +211,20 @@ class AzureBackfillRunner:
                     with self._lock:
                         self._p["with_pr"] += 1; self._p["current_wi"] = wi_id
                     try:
-                        self.vs.index_repo_decision(
+                        ok = self.vs.index_repo_decision(
                             str(wi_id), repo, str(pr_id),
                             _build_plan(repo, paths), content, skip_dedup_check=True,
                         )
+                    except Exception as e:
+                        ok = False
+                        log.debug(f"  Backfill index hatasi WI#{wi_id}: {e}")
+                    if ok:
                         seen.add(str(wi_id))
                         with self._lock:
                             self._p["indexed"] += 1; self._write()
-                    except Exception as e:
+                    else:
                         with self._lock:
                             self._p["errors"] += 1; self._write()
-                        log.debug(f"  Backfill index hatasi WI#{wi_id}: {e}")
 
             if self._cancel.is_set():
                 with self._lock:
@@ -234,6 +237,7 @@ class AzureBackfillRunner:
         finally:
             with self._lock:
                 self._p["running"] = False
+                self._p["current_wi"] = None
                 self._p["finished_at"] = datetime.now().isoformat(timespec="seconds")
                 self._write()
             self._running = False

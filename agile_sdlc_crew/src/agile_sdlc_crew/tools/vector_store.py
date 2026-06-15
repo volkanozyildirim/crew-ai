@@ -637,7 +637,7 @@ class VectorStore:
         skip_dedup_check=True ise ic tarama atlanir; tekillik garantisi cagirana aittir
         (toplu backfill icin existing_repo_decision_wis ile birlikte kullanilir)."""
         if not repo or not work_item_id:
-            return
+            return False
         scope = "/repo-decisions"
         wi = str(work_item_id)
         if not skip_dedup_check:
@@ -647,7 +647,7 @@ class VectorStore:
                 if info and info.record_count > 0:
                     for r in self.storage.list_records(scope, limit=10_000):
                         if r.metadata.get("work_item_id") == wi:
-                            return
+                            return False
             except Exception as e:
                 log.debug(f"  Repo-decision dedup kontrolu atlandi: {e}")
         changes = plan.get("changes", []) if isinstance(plan, dict) else []
@@ -672,8 +672,10 @@ class VectorStore:
                 },
                 importance=0.8,
             )
+            return True
         except Exception as e:
             log.warning(f"  Repo-decision indeks hatasi (WI#{wi}): {e}")
+            return False
 
     def suggest_repo_from_history(
         self, query: str, path_hints: list[str] | None = None,
