@@ -1952,7 +1952,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         # Katman 1.5: Geçmiş-iş önerisi (isim eşleşmesi yoksa, grep'ten önce)
         if not prefetch_repo and repo_history_suggestions:
-            from agile_sdlc_crew import pipeline_config as _pc_rh
             _min_score = _pc_rh.get("CREW_REPO_HISTORY_MIN_SCORE")
             if repo_history_suggestions[0]["score"] >= _min_score:
                 prefetch_repo = repo_history_suggestions[0]["repo"]
