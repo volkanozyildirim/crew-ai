@@ -3283,6 +3283,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         self.state.completion_text = completion_text
         self._step_done("completion_report_task", completion_text[:3000])
+        _log(f"  Tamamlanma raporu olusturuldu")
+        _add_wi_comment(self._client, self.state.work_item_id,
+            f"## Tamamlanma Raporu\n\n"
+            f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
+            f"{completion_text[:3000]}\n\n"
+            f"---\n*Agile SDLC Crew - Pipeline tamamlandi*"
+        )
+
         # Geçmiş-iş repo indeksine yaz — yalnızca başarılı PR (buraya ulaşmak
         # PR oluştu + review onayladı demek; dry-run bu metodun başında döner).
         from agile_sdlc_crew import pipeline_config as _pc_rh
@@ -3298,13 +3306,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log("  📚 Repo kararı geçmiş indekse yazıldı")
             except Exception as e:
                 _log(f"  Repo kararı indeksleme hatası: {e}")
-        _log(f"  Tamamlanma raporu olusturuldu")
-        _add_wi_comment(self._client, self.state.work_item_id,
-            f"## Tamamlanma Raporu\n\n"
-            f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
-            f"{completion_text[:3000]}\n\n"
-            f"---\n*Agile SDLC Crew - Pipeline tamamlandi*"
-        )
 
         _log(f"\n{'='*60}")
         _log("  PIPELINE TAMAMLANDI!")
