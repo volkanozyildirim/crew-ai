@@ -10,6 +10,7 @@ Sonuc degismeyecegi icin:
 import hashlib
 import json
 import logging
+import threading
 
 log = logging.getLogger("pipeline")
 
@@ -34,6 +35,7 @@ class CachedToolMixin:
     # Class-level (paylasimli) state — tum tool instance'lari arasinda
     _cache: dict = {}
     _call_count: dict = {}
+    _lock = threading.Lock()
 
     def _cached_wrap(self, original_run, *args, **kwargs):
         """Orijinal _run metodunu sar: cache + limit kontrolu.
@@ -42,11 +44,14 @@ class CachedToolMixin:
         - 4. cagri: uyari ile cache
         - 5+ cagri: HARD BLOCK — agent'a cevap yok, baska yaklasim dene"""
         key = (self.__class__.__name__, _hash_args(args, kwargs))
-        count = self._call_count.get(key, 0) + 1
-        self._call_count[key] = count
+        with self._lock:
+            count = self._call_count.get(key, 0) + 1
+            self._call_count[key] = count
+            cached_hit = self._cache.get(key, None)
+            has_hit = key in self._cache
 
-        if key in self._cache:
-            cached = self._cache[key]
+        if has_hit:
+            cached = cached_hit
             if count >= 5:
                 log.warning(f"  Tool BLOCKED: {self.__class__.__name__} {count}x ayni argumanla — hard block")
                 return (
@@ -63,9 +68,10 @@ class CachedToolMixin:
                 )
             return f"[Cache, {count}. cagri]\n{cached}"
 
-        # Ilk cagri — calistir ve cache'e yaz
+        # Ilk cagri — calistir (lock disinda, yavas olabilir) ve cache'e yaz
         result = original_run(*args, **kwargs)
-        self._cache[key] = result
+        with self._lock:
+            self._cache[key] = result
         return result
 
 

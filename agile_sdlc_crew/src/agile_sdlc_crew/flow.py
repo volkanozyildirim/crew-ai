@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from crewai.flow import Flow, and_, listen, or_, router, start
 
+from agile_sdlc_crew import context_budget as _cb
+
 log = logging.getLogger("pipeline")
 
 
@@ -171,7 +173,6 @@ class PipelineState(BaseModel):
     # Dry-run: development stays local; no push, no PR, no review/test/UAT.
     # Set from DB row (jobs.dry_run) or env CREW_DRY_RUN in initialize().
     dry_run: bool = False
-    previous_context: str = ""
     requirements_text: str = ""
     repo_name: str = ""
     plan: dict = Field(default_factory=dict)
@@ -208,14 +209,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
     _job_prompt_tokens: int = PrivateAttr(default=0)
     _job_completion_tokens: int = PrivateAttr(default=0)
     _job_total_tokens: int = PrivateAttr(default=0)
-
     # ── Helper Methods (dekoratorsuz) ────────────────
-
-    def _append_context(self, step_name: str, output: str):
-        """Ham previous_context string'ine step ciktisini ekler.
-        Step-bazli optimize context icin _build_step_context() kullanin."""
-        summary = (output or "")[:5000]  # 1500 → 5000
-        self.state.previous_context += f"\n\n--- {step_name} ---\n{summary}"
 
     def _build_step_context(self, step_key: str) -> str:
         """Step'e ozel, tipli bilgilerden derlenen yapisal context.
@@ -237,30 +231,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 # Architect: Risk Tablosu + Edge Case'ler + Kabul Kriterleri mutlaka gorusun
                 parts.append(
                     f"\n# Kickoff Design Review Tutanagi (Tum Disiplinler)\n"
-                    f"{s.kickoff_text[:4000]}\n"
+                    f"{s.kickoff_text[:_cb.cap('KICKOFF')]}\n"
                     f"⚠️ Teknik plan 'Kritik Risk Tablosu'ndaki TUM riskler ve "
                     f"'Edge Case'ler' icin somut kod degisiklikleri icermeli."
                 )
             elif step_key in ("test_planning_task",):
                 parts.append(
                     f"\n# Kickoff Design Review — Test Perspektifi\n"
-                    f"{s.kickoff_text[:2500]}"
+                    f"{s.kickoff_text[:_cb.cap('KICKOFF_QA')]}"
                 )
             elif step_key in ("uat_task",):
                 parts.append(
                     f"\n# Kickoff Design Review — Backlog Adaylari ve Kabul Kriterleri\n"
-                    f"{s.kickoff_text[:2500]}"
+                    f"{s.kickoff_text[:_cb.cap('KICKOFF_QA')]}"
                 )
             elif step_key in ("review_pr_task",):
                 # Reviewer: risk tablosunu bilerek PR'i incelesin
                 parts.append(
                     f"\n# Kickoff Design Review — Kritik Riskler\n"
-                    f"{s.kickoff_text[:2000]}"
+                    f"{s.kickoff_text[:_cb.cap('KICKOFF_REVIEW')]}"
                 )
 
         # Requirements (step 1 sonrasi — kickoff dahil, artik requirements once calisiyor)
         if s.requirements_text and step_key != "requirements_analysis_task":
-            parts.append(f"\n# Is Analizi (Gereksinimler)\n{s.requirements_text[:3000]}")
+            parts.append(f"\n# Is Analizi (Gereksinimler)\n{s.requirements_text[:_cb.cap('REQUIREMENTS')]}")
 
         # Kabul kriterleri — BA analizinden sonra belirlenir, pipeline boyunca
         # baglayici tek kaynak: tasarim, gelistirme, inceleme ve UAT buna gore yapilir.
@@ -284,7 +278,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Plan (step 4 sonrasi)
         if s.plan and step_key not in ("requirements_analysis_task", "technical_design_task"):
             changes_summary = []
-            for ch in s.plan.get("changes", [])[:10]:
+            for ch in s.plan.get("changes", [])[:_cb.cap('PLAN_CHANGES')]:
                 changes_summary.append(
                     f"- [{ch.get('change_type','edit')}] `{ch.get('file_path','?')}`: "
                     f"{ch.get('description','')[:120]}"
@@ -315,11 +309,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Validation ciktilari (step 11 icin)
         if step_key == "completion_report_task":
             if s.review_text:
-                parts.append(f"\n# Kod Inceleme\n{s.review_text[:2500]}")
+                parts.append(f"\n# Kod Inceleme\n{s.review_text[:_cb.cap('REVIEW')]}")
             if s.test_text:
-                parts.append(f"\n# Test Planlama\n{s.test_text[:2500]}")
+                parts.append(f"\n# Test Planlama\n{s.test_text[:_cb.cap('TEST')]}")
             if s.uat_text:
-                parts.append(f"\n# UAT Dogrulama\n{s.uat_text[:2500]}")
+                parts.append(f"\n# UAT Dogrulama\n{s.uat_text[:_cb.cap('UAT')]}")
 
         # Vector DB'den benzer onceki isler (step 4 icin)
         if step_key == "technical_design_task" and self._vector_store:
@@ -331,14 +325,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 rel = [x for x in similar if x.get("work_item_id") != s.work_item_id]
                 if rel:
                     sim_text = "\n".join(
-                        f"- WI#{x['work_item_id']} ({x['step']}): {x['content'][:200]}"
+                        f"- WI#{x['work_item_id']} ({x['step']}): {x['content'][:_cb.cap('SIMILAR')]}"
                         for x in rel
                     )
                     parts.append(f"\n# Benzer Onceki Isler\n{sim_text}")
             except Exception:
                 pass
 
-        return "\n".join(parts)
+        return _cb.measure(step_key, "\n".join(parts))
 
     def _step_start(self, step_key: str):
         if self.state.job_id:
@@ -382,7 +376,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
             except Exception:
                 pass
         # Vector store'a da kaydet (benzer is arama icin)
-        if self._vector_store and output and len(output.strip()) > 20:
+        import os as _os_sd
+        if (
+            _os_sd.environ.get("CREW_SAVE_STEP_OUTPUT", "1") != "0"
+            and self._vector_store and output and len(output.strip()) > 20
+        ):
             try:
                 self._vector_store.save_step_output(
                     self.state.work_item_id, step_key, output,
@@ -526,12 +524,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._step_done(
                 "discover_repos_task",
                 _json.dumps(parsed, ensure_ascii=False, indent=2),
-            )
-            self._append_context(
-                "Discover Repo Onerisi (Advisory)",
-                f"ONERILEN REPO: {target}\nGEREKCE: {reason}"
-                + (f"\nALTERNATIFLER: {alt}" if alt else "")
-                + "\n\nNOT: Bu yalnizca bir oneridir; son karar Yazilim Mimari'na aittir.",
             )
         else:
             self._step_done(
@@ -847,7 +839,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._track_and_check_budget(review_result, "review_pr_task (retry)")
         review_text = review_result.raw or ""
         self.state.review_text = review_text
-        self._append_context("Kod Inceleme (Retry)", review_text)
 
         # Re-check — still rejected? (accept both English and legacy Turkish tokens)
         review_upper = review_text.upper()
@@ -859,7 +850,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         ])
         if still_rejected:
             # step8_code_review'daki max retry kontrolune don
-            self._append_context("Reviewer Geri Bildirimi (Tekrar Red)", review_text[:2000])
             review_attempt = getattr(self, "_review_attempt", 0)
             from agile_sdlc_crew import pipeline_config as _pc_rev2
             max_review_retries = _pc_rev2.get("CREW_REVIEW_MAX_RETRIES")
@@ -891,6 +881,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
     # ── Flow Start ───────────────────────────────────
 
+    def _reset_job_state(self):
+        """Job basinda paylasimli/birikimli durumu sifirla (cross-job sizinti onleme)."""
+        from agile_sdlc_crew.tools.tool_cache import reset_tool_cache
+        reset_tool_cache()
+        self._job_prompt_tokens = 0
+        self._job_completion_tokens = 0
+        self._job_total_tokens = 0
+
     @start()
     def initialize(self):
         """Pipeline baslangici: client'lar olustur, tracker'i baslat."""
@@ -898,11 +896,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
         from agile_sdlc_crew.tools.local_repo import LocalRepoManager
         from agile_sdlc_crew.tools.vector_store import VectorStore
-        from agile_sdlc_crew.tools.tool_cache import reset_tool_cache
         from agile_sdlc_crew import db as _db
 
-        # Pipeline basi: tool cache'i sifirla
-        reset_tool_cache()
+        # Pipeline basi: birikimli durumu sifirla
+        self._reset_job_state()
 
         self._db = _db
         self._agile_crew = AgileSDLCCrew()
@@ -1163,7 +1160,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         self.state.acceptance_criteria.append(ac)
             except Exception:
                 pass
-            self._append_context("Is Analizi", cached_ba[:5000])
             self._resume_step("requirements_analysis_task", cached_ba)
             return
 
@@ -1463,12 +1459,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         else:
             _log("  Kabul kriteri bulunamadi (WI'de tanimsiz)")
 
-        # BA JSON varsa yapisal context ekle, yoksa serbest metin
-        if ba_json:
-            ba_context = _json_ba.dumps(ba_json, ensure_ascii=False, indent=2)
-            self._append_context("Is Analizi (JSON)", ba_context[:5000])
-        else:
-            self._append_context("Is Analizi", requirements_text)
         self._step_done("requirements_analysis_task", requirements_text[:3000])
         _log(f"  Is analizi tamamlandi")
 
@@ -1491,7 +1481,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         cached_kickoff = self._try_resume_step("kickoff_meeting_task")
         if cached_kickoff:
             self.state.kickoff_text = cached_kickoff
-            self._append_context("Kickoff Toplantisi", cached_kickoff[:3000])
             self._resume_step("kickoff_meeting_task", cached_kickoff)
             return
 
@@ -1629,7 +1618,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             raise RuntimeError(f"Kickoff toplantisi basarisiz: {e}")
 
         self.state.kickoff_text = kickoff_text
-        self._append_context("Kickoff Toplantisi", kickoff_text[:3000])
+        _log(f"  📏 kickoff: {len(kickoff_text or '')} char")
         self._step_done("kickoff_meeting_task", kickoff_text[:3000])
 
         # Per-agent ciktilarini + grade gecmisini job_id basina JSON'a yaz
@@ -1707,10 +1696,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         # Step 3 (dependency_analysis) hala atlanyor — repo summary context icin yeterli.
         self._step_done("dependency_analysis_task", "Atlandı — repo bilgisi local'den alınıyor")
-
-        # Repo listesini context'e ekle
-        repo_list = ", ".join(self.state.known_repos)
-        self._append_context("Bilinen Repolar", repo_list)
 
         # Repo summary'lerini context'e ekle.
         # Vector search ile en ilgili repolari basa al — 66 repo varken
@@ -1797,26 +1782,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # ayri bir blok olarak zaten eklendi; burada tum adaylar kalir ki
         # architect kendi kararini ozgurce versin).
         if summaries:
-            self._append_context("Repo Ozetleri", "\n---\n".join(summaries[:15]))
             _log(f"  Repo ozet sirasi (ilk 5): {summaries_repos[:5]}")
 
         # Benzer onceki isleri bul ve context'e ekle
-        if self._vector_store:
-            try:
-                similar = self._vector_store.find_similar_jobs(
-                    f"WI#{self.state.work_item_id}: {self.state.requirements_text[:500]}",
-                    limit=3,
-                )
-                if similar:
-                    sim_text = "\n".join(
-                        f"- WI#{s['work_item_id']} ({s['step']}): {s['content'][:200]}"
-                        for s in similar if s.get("work_item_id") != self.state.work_item_id
-                    )
-                    if sim_text:
-                        self._append_context("Benzer Onceki Isler", sim_text)
-            except Exception:
-                pass
-
         _log("\n-- ADIM 4: Teknik tasarim --")
         self._step_start("technical_design_task")
 
@@ -1857,7 +1825,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 self.state.repo_name = repo_name
                 self.state.plan = plan
                 self.state.requirements_text = self.state.requirements_text or cached
-                self._append_context("Teknik Tasarim", cached[:1500])
                 # Tam JSON'u sakla — sonraki job'lar da parse edebilsin
                 self._step_done("technical_design_task", cached[:50_000])
                 _log(f"  Onceki job'dan plan kullanildi: {len(plan['changes'])} dosya, repo={repo_name}")
@@ -2237,25 +2204,43 @@ class AgileSDLCFlow(Flow[PipelineState]):
             )
 
         analysis_crew = self._agile_crew.create_analysis_crew()
-        analysis_result = analysis_crew.kickoff(inputs={
-            "work_item_id": self.state.work_item_id,
-            "target_repo": prefetch_repo or "",
-            "previous_context": ctx,
-            "scrum_master_feedback": ctx_hint,
-        })
+        try:
+            analysis_result = analysis_crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "target_repo": prefetch_repo or "",
+                "previous_context": ctx,
+                "scrum_master_feedback": ctx_hint,
+            })
+        except Exception as e:
+            # Guardrail retry'lari tukendi (veya kickoff hatasi) — guardrail'siz
+            # crew ile manuel fallback. Mevcut parse onarimi yine devrede.
+            # NOT: Tukenen guardrail retry'larinin token'lari exception ile dustugu
+            # icin budget'a sayilmaz (hafif under-count); sadece guardrails ACIK +
+            # exhaustion yolunda olur, cost guard yine fallback sonucunu sayar.
+            _log(f"  Guardrail/kickoff hatasi ({e}), guardrail'siz fallback kickoff")
+            analysis_crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
+            analysis_result = analysis_crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "target_repo": prefetch_repo or "",
+                "previous_context": ctx,
+                "scrum_master_feedback": ctx_hint,
+            })
         self._track_and_check_budget(analysis_result, "technical_design_task")
         raw_output = analysis_result.raw or ""
 
         # Parse hatasi — onceki ciktiyi context'e ekleyip tekrar dene
+        # (Guardrail KAPALIYKEN birincil retry; ACIKKEN guardrail zaten parse
+        #  garantiledigi icin bu blok genelde tetiklenmez — yine de fallback kalir.)
         try:
             plan = _parse_architect_output(raw_output)
         except ValueError as e:
-            _log(f"  Parse hatasi ({e}), ayni architect ile retry")
+            _log(f"  Parse hatasi ({e}), guardrail'siz architect ile retry")
             retry_ctx = ctx + (
                 f"\n\n# ONCEKI DENEME CIKTISI\n"
                 f"(Asagidaki bilgilerden JSON uret — tool cagirma, direkt JSON yaz)\n\n"
                 f"{raw_output[:6000]}"
             )
+            analysis_crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
             analysis_result = analysis_crew.kickoff(inputs={
                 "work_item_id": self.state.work_item_id,
                 "target_repo": prefetch_repo or "",
@@ -2297,7 +2282,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         self.state.repo_name = repo_name
         self.state.plan = plan
-        self._append_context("Teknik Tasarim", raw_output[:1500])
         # technical_design_task ciktisi JSON — cache'den parse edilebilmesi icin
         # tam veya en azindan buyuk pencereli sakla (onceden [:3000] ile kesilip
         # sonraki run'da JSON bozuk geliyordu)
@@ -2352,11 +2336,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 else:
                     _log(f"  Local feature branch yok, taze olusturulacak")
             self._repo_mgr.checkout(repo_name, "main")
-            # Repo summary'yi context'e ekle — sonraki adimlar yapiyi bilir
-            repo_summary = self._repo_mgr.get_repo_summary(repo_name)
-            if repo_summary:
-                self._append_context("Repo Yapisi", repo_summary)
-
             # Deps install — vendor/ olusturur, agent'lar 3rd-party kodu okuyabilir.
             # Pipeline knob ile kontrol; default kapali (yavas ilk install).
             from agile_sdlc_crew import pipeline_config as _pc_deps
@@ -2433,7 +2412,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
             if branch_result.get("note"):
                 _log(f"    ({branch_result['note']})")
 
-        self._append_context("Branch Olusturma", f"Branch: {self.state.branch_name}, Repo: {repo_name}")
         self._step_done("create_branch_task", f"Branch: {self.state.branch_name}")
         if self.state.job_id:
             self._db.update_job(self.state.job_id, repo_name=repo_name, branch_name=self.state.branch_name)
@@ -2723,8 +2701,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    Push hatasi: {push_result['error']}")
 
         self.state.all_pushes = all_pushes
-        push_summary = ", ".join(p.get("file", "") for p in all_pushes)
-        self._append_context("Kod Yazma & Push", f"{len(all_pushes)} dosya: {push_summary}")
         self._step_done("implement_change_task", f"{len(all_pushes)} dosya push edildi")
 
     @listen(step6_implement_code)
@@ -2747,7 +2723,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"     Lokal branch: {self.state.branch_name}")
             _log(f"     Repo yolu:    {repo_path}")
             _log(f"     Inceleme:     cd {repo_path} && git log --oneline main..{self.state.branch_name}")
-            self._append_context("PR Olusturma", f"DRY-RUN — no remote PR, local branch: {self.state.branch_name}")
             self._step_done("create_pr_task", self.state.pr_url)
             return
 
@@ -2809,7 +2784,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  ⏩ Branch'te zaten aktif PR var: #{existing_pr_id}, yeniden kullaniliyor")
             self.state.pr_id = str(existing_pr_id)
             self.state.pr_url = existing_url
-            self._append_context("PR Olusturma", f"PR #{self.state.pr_id} (mevcut): {self.state.pr_url}")
             self._step_done("create_pr_task", f"PR #{self.state.pr_id} (mevcut): {self.state.pr_url}")
             if self.state.job_id:
                 self._db.update_job(self.state.job_id, pr_id=self.state.pr_id, pr_url=self.state.pr_url)
@@ -2876,7 +2850,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.pr_id = str(pr_result["pr_id"])
         self.state.pr_url = pr_result["url"]
         _log(f"  PR #{self.state.pr_id}: {self.state.pr_url}")
-        self._append_context("PR Olusturma", f"PR #{self.state.pr_id}: {self.state.pr_url}")
         self._step_done("create_pr_task", f"PR #{self.state.pr_id}: {self.state.pr_url}")
         if self.state.job_id:
             self._db.update_job(self.state.job_id, pr_id=self.state.pr_id, pr_url=self.state.pr_url)
@@ -3019,7 +2992,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 review_text = review_result.raw or ""
 
         self.state.review_text = review_text
-        self._append_context("Kod Inceleme", review_text)
 
         # 🚨 RESPECT REVIEWER VERDICT — if CHANGES_REQUIRED / REJECTED,
         # loop back into dev (max CREW_REVIEW_MAX_RETRIES, default 2).
@@ -3058,8 +3030,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"Otomatik düzeltme başlatılıyor...\n\n"
                 f"---\n*Agile SDLC Crew - Review Retry*"
             )
-            # Reviewer feedback'ini state'e ekle — teknik tasarim + implement bunu gorsun
-            self._append_context("Reviewer Geri Bildirimi (Duzeltme Talebi)", review_text[:2000])
             # Tekrar gelistirme: implement → push → review (branch + PR zaten var)
             self._review_retry_loop()
             return  # review_retry_loop icerisinde step_done cagirilir
@@ -3095,7 +3065,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         cached_test = self._try_resume_step("test_planning_task")
         if cached_test:
             self.state.test_text = cached_test
-            self._append_context("Test Planlama", cached_test)
             self._resume_step("test_planning_task", cached_test)
             return
 
@@ -3201,7 +3170,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 test_text = test_result.raw or ""
 
         self.state.test_text = test_text
-        self._append_context("Test Planlama", test_text)
         self._step_done("test_planning_task", test_text[:3000])
         _log(f"  Test planlama tamamlandi")
         _add_wi_comment(self._client, self.state.work_item_id,
@@ -3229,7 +3197,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         cached_uat = self._try_resume_step("uat_task")
         if cached_uat:
             self.state.uat_text = cached_uat
-            self._append_context("UAT Dogrulama", cached_uat)
             self._resume_step("uat_task", cached_uat)
             return
 
@@ -3269,7 +3236,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 uat_text = uat_result.raw or ""
 
         self.state.uat_text = uat_text
-        self._append_context("UAT Dogrulama", uat_text)
         self._step_done("uat_task", uat_text[:3000])
         _log(f"  UAT dogrulama tamamlandi")
         _add_wi_comment(self._client, self.state.work_item_id,
@@ -3316,7 +3282,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
             completion_text = (completion_result.raw or "") if completion_result else ""
 
         self.state.completion_text = completion_text
-        self._append_context("Tamamlanma Raporu", completion_text)
         self._step_done("completion_report_task", completion_text[:3000])
         _log(f"  Tamamlanma raporu olusturuldu")
         _add_wi_comment(self._client, self.state.work_item_id,
