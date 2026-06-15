@@ -616,22 +616,40 @@ class VectorStore:
 
     # ── Job Gecmisi ────────────────────────────────
 
-    def index_repo_decision(self, work_item_id: str, repo: str, pr_id: str, plan: dict, wi_content: str):
+    def existing_repo_decision_wis(self) -> set[str]:
+        """/repo-decisions indeksinde halihazirda bulunan work_item_id kumesi (tek sorgu)."""
+        out: set[str] = set()
+        try:
+            info = self.storage.get_scope_info("/repo-decisions")
+            if info and info.record_count > 0:
+                for r in self.storage.list_records("/repo-decisions", limit=100_000):
+                    wi = r.metadata.get("work_item_id")
+                    if wi:
+                        out.add(str(wi))
+        except Exception as e:
+            log.debug(f"  existing_repo_decision_wis atlandi: {e}")
+        log.debug(f"  existing_repo_decision_wis: {len(out)} WI indekste")
+        return out
+
+    def index_repo_decision(self, work_item_id: str, repo: str, pr_id: str, plan: dict, wi_content: str, skip_dedup_check: bool = False):
         """Basarili bir isin 'icerik+dosya yollari -> repo' kaydini /repo-decisions
-        scope'una yaz. Idempotent: ayni work_item_id zaten varsa atlar."""
+        scope'una yaz. Varsayilan: idempotent (ayni work_item_id zaten varsa atlar).
+        skip_dedup_check=True ise ic tarama atlanir; tekillik garantisi cagirana aittir
+        (toplu backfill icin existing_repo_decision_wis ile birlikte kullanilir)."""
         if not repo or not work_item_id:
-            return
+            return False
         scope = "/repo-decisions"
         wi = str(work_item_id)
-        # Idempotency: ayni WI zaten indekste mi? (index_repo_summary deseni)
-        try:
-            info = self.storage.get_scope_info(scope)
-            if info and info.record_count > 0:
-                for r in self.storage.list_records(scope, limit=10_000):
-                    if r.metadata.get("work_item_id") == wi:
-                        return
-        except Exception as e:
-            log.debug(f"  Repo-decision dedup kontrolu atlandi: {e}")
+        if not skip_dedup_check:
+            # Idempotency: ayni WI zaten indekste mi? (index_repo_summary deseni)
+            try:
+                info = self.storage.get_scope_info(scope)
+                if info and info.record_count > 0:
+                    for r in self.storage.list_records(scope, limit=10_000):
+                        if r.metadata.get("work_item_id") == wi:
+                            return False
+            except Exception as e:
+                log.debug(f"  Repo-decision dedup kontrolu atlandi: {e}")
         changes = plan.get("changes", []) if isinstance(plan, dict) else []
         file_paths = [c.get("file_path", "") for c in changes if c.get("file_path")]
         routes = _extract_routes(f"{wi_content or ''} " + " ".join(file_paths))
@@ -654,8 +672,10 @@ class VectorStore:
                 },
                 importance=0.8,
             )
+            return True
         except Exception as e:
             log.warning(f"  Repo-decision indeks hatasi (WI#{wi}): {e}")
+            return False
 
     def suggest_repo_from_history(
         self, query: str, path_hints: list[str] | None = None,

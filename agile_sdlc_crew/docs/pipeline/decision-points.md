@@ -243,7 +243,7 @@ Her giriş şu yapıdadır: **Nerede** (adım + kaynak satır) · **Karar** (han
 - **Karar:** Başarılı geçmiş işlerden bu WI'ya benzer olanlar hangi repo(lar)da yapılmış?
 - **Girdi:** `CREW_REPO_HISTORY_SUGGEST` açık + `/repo-decisions` scope'unda hybrid arama; repo'ya göre gruplanmış skor vs `CREW_REPO_HISTORY_MIN_SCORE`.
 - **Sonuç:** Önerilen repo candidate listesine zorla dahil + context/prompt'a kanıt bloğu; kickoff/technical-design cascade'inde isim eşleşmesi yoksa seçilebilir. **Architect son kararı verir** (advisory).
-- **Neden:** "Bu tür dosyalar/route'lar daha önce şu repoda değişti" sinyali repo adı benzerliğinden güçlü; geçmiş başarılı kararlardan öğrenir. Yazma yalnızca başarılı PR'da (KN-32 öncesi step11). Filtreler: repo ∉ known_repos elenir, kendi WI'sı önerilmez.
+- **Neden:** "Bu tür dosyalar/route'lar daha önce şu repoda değişti" sinyali repo adı benzerliğinden güçlü; geçmiş başarılı kararlardan öğrenir. Yazma yalnızca başarılı PR'da (KN-32 öncesi step11). İndeks ayrıca iki backfill ile doldurulabilir: (1) bu sistemin MySQL'deki başarılı koşumları (`backfill_repo_decisions`), (2) **Azure DevOps geçmişi** — dashboard board butonu, takımın done+merge'li işlerini tarar (`azure_backfill.AzureBackfillRunner`, `/api/backfill/start`). Filtreler: repo ∉ known_repos elenir, kendi WI'sı önerilmez.
 
 ---
 

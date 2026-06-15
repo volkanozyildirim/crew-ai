@@ -83,6 +83,29 @@ SCHEMA: list[dict] = [
         "min": 0.0,
         "desc": "Geçmiş-iş repo önerisinin kabul edileceği minimum benzerlik skoru. Altındaki öneriler yok sayılır.",
     },
+    {
+        "key": "CREW_AZ_BACKFILL_WORKERS",
+        "label": "Azure Backfill Worker Sayısı",
+        "type": "int",
+        "default": 8,
+        "min": 1,
+        "desc": "Azure DevOps backfill sırasında PR/WI çekmek için eşzamanlı thread sayısı.",
+    },
+    {
+        "key": "CREW_AZ_BACKFILL_LIMIT",
+        "label": "Azure Backfill Maks. WI",
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "desc": "Taranacak maksimum done work item sayısı (güncelden geriye). 0 = limitsiz (tümü).",
+    },
+    {
+        "key": "CREW_AZ_DONE_STATES",
+        "label": "Azure 'Done' Durumları",
+        "type": "str",
+        "default": "Done,Closed,Resolved",
+        "desc": "Backfill'de 'tamamlanmış' sayılan WI durumları (virgülle ayrılmış).",
+    },
 
     # ── Maliyet kontrolu ──
     {
