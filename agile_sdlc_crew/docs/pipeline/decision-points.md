@@ -249,8 +249,9 @@ Her giriş şu yapıdadır: **Nerede** (adım + kaynak satır) · **Karar** (han
 
 ## Repo seçim kararlarının birleşik görünümü
 
-Repo seçimi pipeline'da **üç ayrı yerde** olur ve birbirini tamamlar — gelecekte
-"geçmiş işlerden repo önerisi" özelliği bu zincire eklenecek doğal aday:
+Repo seçimi pipeline'da **üç ayrı yerde** olur ve birbirini tamamlar; "geçmiş
+işlerden repo önerisi" (KN-33) bu zincirin her üç noktasına da advisory sinyal
+olarak eklenmiştir:
 
 | Sıra | Adım | Karar | Bağlayıcı mı? |
 |------|------|-------|----------------|
