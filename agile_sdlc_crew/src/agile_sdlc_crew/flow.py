@@ -1506,6 +1506,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         # Hedef repo tahmini — 4 katman:
         # 0/1. _select_repo_by_name (tam isim + parca eslesmesi)
+        # 1.5. Geçmiş-iş önerisi (suggest_repo_from_history)
         # 2. Kod grep: WI'daki teknik terimler repo kodlarinda geciyorsa
         # 3. Vector semantic search (fallback)
         import re as _re_ko
@@ -1533,8 +1534,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         exclude_wi=self.state.work_item_id,
                         known_repos=self.state.known_repos,
                     )
-                    _min = _pc_ko.get("CREW_REPO_HISTORY_MIN_SCORE")
-                    if _sug and _sug[0]["score"] >= _min:
+                    _min_score = _pc_ko.get("CREW_REPO_HISTORY_MIN_SCORE")
+                    if _sug and _sug[0]["score"] >= _min_score:
                         kickoff_repo = _sug[0]["repo"]
                         _log(f"  Kickoff hedef repo (geçmiş-iş): {kickoff_repo} (skor {_sug[0]['score']})")
                 except Exception as e:
