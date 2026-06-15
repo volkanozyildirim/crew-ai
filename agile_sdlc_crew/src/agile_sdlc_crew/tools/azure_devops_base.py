@@ -589,7 +589,7 @@ class AzureDevOpsClient:
             })
         return result
 
-    def query_work_items(self, wiql: str) -> list[dict]:
+    def query_work_items(self, wiql: str, limit: int = 0) -> list[dict]:
         url = f"{self._base_api_url}/wit/wiql"
         params = {"api-version": self.API_VERSION}
         resp = requests.post(
@@ -599,6 +599,8 @@ class AzureDevOpsClient:
         result = resp.json()
 
         ids = [item["id"] for item in result.get("workItems", [])]
+        if limit and limit > 0:
+            ids = ids[:limit]
         if not ids:
             return []
 
@@ -618,3 +620,36 @@ class AzureDevOpsClient:
             items.extend(batch_resp.json().get("value", []))
 
         return items
+
+    def get_team_area_path(self, team: str = "") -> str:
+        """Takimin varsayilan area path'ini dondurur (teamfieldvalues.defaultValue).
+        Bulunamazsa bos string."""
+        team = (team or "").strip() or self.team
+        if not team:
+            return ""
+        url = (
+            f"{self.org_url}/{self.project}/"
+            f"{requests.utils.quote(team, safe='')}/_apis/work/teamsettings/teamfieldvalues"
+        )
+        params = {"api-version": self.API_VERSION}
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        return (resp.json().get("defaultValue") or "").strip()
+
+    def query_done_work_items(
+        self, area_path: str = "", states: list[str] | None = None, limit: int = 0,
+    ) -> list[dict]:
+        """Tamamlanmis (done) work item'lari ChangedDate DESC (guncelden eskiye) dondurur.
+        area_path verilirse o alanin altina filtreler. Donen item'lar fields + relations icerir."""
+        states = states or ["Done", "Closed", "Resolved"]
+        states_sql = ", ".join("'" + s.replace("'", "''") + "'" for s in states)
+        wiql = (
+            "SELECT [System.Id] FROM WorkItems "
+            "WHERE [System.TeamProject] = @project "
+            f"AND [System.State] IN ({states_sql}) "
+        )
+        if area_path:
+            safe_area = area_path.replace("'", "''")
+            wiql += f"AND [System.AreaPath] UNDER '{safe_area}' "
+        wiql += "ORDER BY [System.ChangedDate] DESC"
+        return self.query_work_items(wiql, limit=limit)
