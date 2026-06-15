@@ -622,8 +622,13 @@ class AzureDevOpsClient:
         return items
 
     def get_team_area_path(self, team: str = "") -> str:
-        """Takimin varsayilan area path'ini dondurur (teamfieldvalues.defaultValue).
-        Bulunamazsa bos string."""
+        """Takimin area path'ini dondurur.
+
+        teamfieldvalues.values[] icinde leaf segment'i takim adina esit olan
+        area tercih edilir (ornek: takim 'E-commerce Logistic Operations' ->
+        'Boards Management\\E-commerce Logistic Operations'). Eslesme yoksa
+        defaultValue'ya duser. defaultValue bazi takimlarda yanlis (test) area
+        olabildigi icin values[] once denenir. Bulunamaz/404/hata -> bos string."""
         team = (team or "").strip() or self.team
         if not team:
             return ""
@@ -639,7 +644,13 @@ class AzureDevOpsClient:
             resp.raise_for_status()
         except requests.RequestException:
             return ""
-        return (resp.json().get("defaultValue") or "").strip()
+        data = resp.json()
+        # Takim adiyla eslesen area (leaf == team) — en isabetli kapsam
+        for v in (data.get("values") or []):
+            val = str(v.get("value", "")).strip()
+            if val and val.split("\\")[-1].strip().lower() == team.lower():
+                return val
+        return (data.get("defaultValue") or "").strip()
 
     def query_done_work_items(
         self, area_path: str = "", states: list[str] | None = None, limit: int = 0,
