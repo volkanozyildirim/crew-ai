@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from crewai.flow import Flow, and_, listen, or_, router, start
 
+from agile_sdlc_crew import context_budget as _cb
+
 log = logging.getLogger("pipeline")
 
 
@@ -248,30 +250,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 # Architect: Risk Tablosu + Edge Case'ler + Kabul Kriterleri mutlaka gorusun
                 parts.append(
                     f"\n# Kickoff Design Review Tutanagi (Tum Disiplinler)\n"
-                    f"{s.kickoff_text[:4000]}\n"
+                    f"{s.kickoff_text[:_cb.cap('KICKOFF')]}\n"
                     f"⚠️ Teknik plan 'Kritik Risk Tablosu'ndaki TUM riskler ve "
                     f"'Edge Case'ler' icin somut kod degisiklikleri icermeli."
                 )
             elif step_key in ("test_planning_task",):
                 parts.append(
                     f"\n# Kickoff Design Review — Test Perspektifi\n"
-                    f"{s.kickoff_text[:2500]}"
+                    f"{s.kickoff_text[:_cb.cap('KICKOFF_QA')]}"
                 )
             elif step_key in ("uat_task",):
                 parts.append(
                     f"\n# Kickoff Design Review — Backlog Adaylari ve Kabul Kriterleri\n"
-                    f"{s.kickoff_text[:2500]}"
+                    f"{s.kickoff_text[:_cb.cap('KICKOFF_QA')]}"
                 )
             elif step_key in ("review_pr_task",):
                 # Reviewer: risk tablosunu bilerek PR'i incelesin
                 parts.append(
                     f"\n# Kickoff Design Review — Kritik Riskler\n"
-                    f"{s.kickoff_text[:2000]}"
+                    f"{s.kickoff_text[:_cb.cap('KICKOFF_REVIEW')]}"
                 )
 
         # Requirements (step 1 sonrasi — kickoff dahil, artik requirements once calisiyor)
         if s.requirements_text and step_key != "requirements_analysis_task":
-            parts.append(f"\n# Is Analizi (Gereksinimler)\n{s.requirements_text[:3000]}")
+            parts.append(f"\n# Is Analizi (Gereksinimler)\n{s.requirements_text[:_cb.cap('REQUIREMENTS')]}")
 
         # Kabul kriterleri — BA analizinden sonra belirlenir, pipeline boyunca
         # baglayici tek kaynak: tasarim, gelistirme, inceleme ve UAT buna gore yapilir.
@@ -295,7 +297,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Plan (step 4 sonrasi)
         if s.plan and step_key not in ("requirements_analysis_task", "technical_design_task"):
             changes_summary = []
-            for ch in s.plan.get("changes", [])[:10]:
+            for ch in s.plan.get("changes", [])[:_cb.cap('PLAN_CHANGES')]:
                 changes_summary.append(
                     f"- [{ch.get('change_type','edit')}] `{ch.get('file_path','?')}`: "
                     f"{ch.get('description','')[:120]}"
@@ -326,11 +328,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Validation ciktilari (step 11 icin)
         if step_key == "completion_report_task":
             if s.review_text:
-                parts.append(f"\n# Kod Inceleme\n{s.review_text[:2500]}")
+                parts.append(f"\n# Kod Inceleme\n{s.review_text[:_cb.cap('REVIEW')]}")
             if s.test_text:
-                parts.append(f"\n# Test Planlama\n{s.test_text[:2500]}")
+                parts.append(f"\n# Test Planlama\n{s.test_text[:_cb.cap('TEST')]}")
             if s.uat_text:
-                parts.append(f"\n# UAT Dogrulama\n{s.uat_text[:2500]}")
+                parts.append(f"\n# UAT Dogrulama\n{s.uat_text[:_cb.cap('UAT')]}")
 
         # Vector DB'den benzer onceki isler (step 4 icin)
         if step_key == "technical_design_task" and self._vector_store:
@@ -342,14 +344,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 rel = [x for x in similar if x.get("work_item_id") != s.work_item_id]
                 if rel:
                     sim_text = "\n".join(
-                        f"- WI#{x['work_item_id']} ({x['step']}): {x['content'][:200]}"
+                        f"- WI#{x['work_item_id']} ({x['step']}): {x['content'][:_cb.cap('SIMILAR')]}"
                         for x in rel
                     )
                     parts.append(f"\n# Benzer Onceki Isler\n{sim_text}")
             except Exception:
                 pass
 
-        return "\n".join(parts)
+        return _cb.measure(step_key, "\n".join(parts))
 
     def _step_start(self, step_key: str):
         if self.state.job_id:
