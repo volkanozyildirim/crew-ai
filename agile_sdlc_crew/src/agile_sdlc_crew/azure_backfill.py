@@ -17,7 +17,9 @@ from pathlib import Path
 log = logging.getLogger("pipeline")
 
 PROGRESS_FILE = Path("/tmp/crew_backfill.json")
-_PR_LINK_RE = re.compile(r"PullRequestId/[^%]+%2f([^%]+)%2f(\d+)")
+# NOT: Azure PR link url'leri ayraci %2F (buyuk) veya %2f (kucuk) olabiliyor —
+# IGNORECASE sart (aksi halde %2F'li linkler eslesmez, PR'lar kacar).
+_PR_LINK_RE = re.compile(r"PullRequestId/[^%]+%2f([^%]+)%2f(\d+)", re.IGNORECASE)
 
 _run_lock = threading.Lock()
 _active_runner = None  # AzureBackfillRunner | None
