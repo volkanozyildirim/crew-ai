@@ -664,7 +664,9 @@ class VectorStore:
     ) -> list[dict]:
         """Gecmis basarili islerden repo onerisi. Sonuclari repo'ya gore gruplar:
         repo_score = max(tekil_skorlar) + 0.05*(n-1), 1.0'da sinirli.
-        Donen: [{repo, score, supporting_wis, file_paths_evidence}] (skora gore sirali)."""
+        Donen: [{repo, score, supporting_wis, file_paths_evidence}] (skora gore sirali).
+
+        known_repos=None -> filtre yok; known_repos=[] -> hicbir repo gecmez (hepsi elenir)."""
         try:
             q = query
             if path_hints:
@@ -680,25 +682,27 @@ class VectorStore:
             wi = record.metadata.get("work_item_id", "")
             if not repo:
                 continue
+            if not wi:
+                continue
             if ex and wi == ex:
                 continue
             if known_repos is not None and repo not in known_repos:
                 continue
-            e = by_repo.setdefault(
+            entry = by_repo.setdefault(
                 repo, {"scores": [], "supporting_wis": [], "file_paths_evidence": []}
             )
-            e["scores"].append(score)
-            e["supporting_wis"].append(wi)
-            e["file_paths_evidence"].extend(record.metadata.get("file_paths", [])[:3])
+            entry["scores"].append(score)
+            entry["supporting_wis"].append(wi)
+            entry["file_paths_evidence"].extend(record.metadata.get("file_paths", [])[:3])
         out = []
-        for repo, e in by_repo.items():
-            n = len(e["scores"])
-            repo_score = min(1.0, max(e["scores"]) + 0.05 * (n - 1))
+        for repo, entry in by_repo.items():
+            n = len(entry["scores"])
+            repo_score = min(1.0, max(entry["scores"]) + 0.05 * (n - 1))
             out.append({
                 "repo": repo,
                 "score": round(repo_score, 3),
-                "supporting_wis": e["supporting_wis"][:5],
-                "file_paths_evidence": list(dict.fromkeys(e["file_paths_evidence"]))[:8],
+                "supporting_wis": entry["supporting_wis"][:5],
+                "file_paths_evidence": list(dict.fromkeys(entry["file_paths_evidence"]))[:8],
             })
         out.sort(key=lambda x: x["score"], reverse=True)
         return out[:limit]
