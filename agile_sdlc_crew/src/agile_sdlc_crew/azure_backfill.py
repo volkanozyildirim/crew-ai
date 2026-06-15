@@ -108,7 +108,7 @@ class AzureBackfillRunner:
         self.workers = max(1, int(config.get("CREW_AZ_BACKFILL_WORKERS")))
         self.limit = int(config.get("CREW_AZ_BACKFILL_LIMIT"))
         self.states = [s.strip() for s in str(config.get("CREW_AZ_DONE_STATES")).split(",") if s.strip()]
-        self._running = False
+        self._running = True
         self._cancel = threading.Event()
         self._lock = threading.Lock()
         self._p = {
