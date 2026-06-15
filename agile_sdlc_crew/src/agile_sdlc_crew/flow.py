@@ -1028,7 +1028,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
             msg += f" ({regenerated} regenerate edildi)"
         _log(msg)
 
-        # Geçmiş-iş repo önerisi açıksa ve indeks boşsa DB'den geri-doldur (bir kez)
+        # Geçmiş-iş repo önerisi açıksa ve indeks boşsa DB'den geri-doldur
+        # (indeks boş kaldıkça her başlatmada denenir; boşken maliyet tek SQL sorgusu,
+        #  ilk başarılı iş sonrası record_count ile erken çıkar)
         from agile_sdlc_crew import pipeline_config as _pc_bf
         if _pc_bf.get("CREW_REPO_HISTORY_SUGGEST"):
             try:
@@ -1042,6 +1044,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     _log(f"  Repo-decision indeksi geri-dolduruldu: {n} iş")
                 except Exception as e:
                     _log(f"  Repo-decision backfill hatası: {e}")
+            else:
+                _log(f"  Repo-decision indeksi mevcut ({_info.record_count} kayıt), backfill atlandı")
 
         # repo_mgr ve vector_store'u crew'a aktar (agent tool'lari icin)
         self._agile_crew.local_repo_mgr = self._repo_mgr
