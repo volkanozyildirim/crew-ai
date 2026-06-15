@@ -1448,9 +1448,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         else:
             _log("  Kabul kriteri bulunamadi (WI'de tanimsiz)")
 
-        # BA JSON varsa yapisal context ekle, yoksa serbest metin
-        if ba_json:
-            ba_context = _json_ba.dumps(ba_json, ensure_ascii=False, indent=2)
         self._step_done("requirements_analysis_task", requirements_text[:3000])
         _log(f"  Is analizi tamamlandi")
 
