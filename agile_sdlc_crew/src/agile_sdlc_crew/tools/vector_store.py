@@ -100,6 +100,18 @@ def _content_hash(content: str) -> str:
     return hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
+def _extract_routes(text: str) -> list[str]:
+    """Metinden route/endpoint ve dosya-adı token'larini cikar (repo-decision indeksi icin).
+    flow.py'deki repo-tespit regex desenleriyle tutarli."""
+    import re as _re
+    routes: set[str] = set()
+    for m in _re.finditer(r'/api/[\w/]+', text):
+        routes.add(m.group(0))
+    for m in _re.finditer(r'\b(\w+\.(?:php|py|ts|tsx|js|jsx|go|cs|java|vue))\b', text):
+        routes.add(m.group(1))
+    return sorted(routes)
+
+
 def _extract_focused_sections(md_content: str, repo_name: str) -> str:
     """REPO_SUMMARY.md'den sadece ayirt edici bolumleri cikar."""
     result = [f"Repository: {repo_name}"]
@@ -602,6 +614,47 @@ class VectorStore:
             return []
 
     # ── Job Gecmisi ────────────────────────────────
+
+    def index_repo_decision(self, work_item_id: str, repo: str, pr_id: str, plan: dict, wi_content: str):
+        """Basarili bir isin 'icerik+dosya yollari -> repo' kaydini /repo-decisions
+        scope'una yaz. Idempotent: ayni work_item_id zaten varsa atlar."""
+        if not repo or not work_item_id:
+            return
+        scope = "/repo-decisions"
+        wi = str(work_item_id)
+        # Idempotency: ayni WI zaten indekste mi? (index_repo_summary deseni)
+        try:
+            info = self.storage.get_scope_info(scope)
+            if info and info.record_count > 0:
+                for r in self.storage.list_records(scope, limit=10_000):
+                    if r.metadata.get("work_item_id") == wi:
+                        return
+        except Exception:
+            pass
+        changes = plan.get("changes", []) if isinstance(plan, dict) else []
+        file_paths = [c.get("file_path", "") for c in changes if c.get("file_path")]
+        routes = _extract_routes(f"{wi_content} " + " ".join(file_paths))
+        content = (
+            f"WI #{wi}\n{(wi_content or '')[:2000]}\n"
+            f"Degisen dosyalar: {', '.join(file_paths)}\n"
+            f"Route/endpoint: {', '.join(routes)}"
+        )
+        try:
+            self._save_record(
+                content=content[:5000],
+                scope=scope,
+                categories=["repo-decision"],
+                metadata={
+                    "work_item_id": wi,
+                    "repo": repo,
+                    "pr_id": str(pr_id or ""),
+                    "file_paths": file_paths[:50],
+                    "routes": routes[:50],
+                },
+                importance=0.8,
+            )
+        except Exception as e:
+            log.warning(f"  Repo-decision indeks hatasi (WI#{wi}): {e}")
 
     def save_step_output(self, work_item_id: str, step_key: str, output: str, metadata: dict | None = None):
         """Tamamlanan step ciktisini embed et."""
