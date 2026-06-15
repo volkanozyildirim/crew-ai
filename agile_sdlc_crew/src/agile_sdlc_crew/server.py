@@ -1533,19 +1533,19 @@ async def board_work_items(iteration_path: str = ""):
 async def backfill_start(req: BackfillRequest):
     """Azure DevOps gecmis-is backfill'i baslat (async daemon thread)."""
     from agile_sdlc_crew import azure_backfill, pipeline_config
-    from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
     from agile_sdlc_crew.tools.vector_store import VectorStore
+    team = (req.team or "").strip()
     if azure_backfill.is_running():
         return JSONResponse({"error": "Backfill zaten calisiyor"}, status_code=409)
     try:
         started = azure_backfill.start_backfill(
-            (req.team or "").strip(), VectorStore(), AzureDevOpsClient(), pipeline_config,
+            team, VectorStore(), AzureDevOpsClient(), pipeline_config,
         )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     if not started:
         return JSONResponse({"error": "Backfill zaten calisiyor"}, status_code=409)
-    return JSONResponse({"status": "started", "team": (req.team or "").strip()}, status_code=202)
+    return JSONResponse({"status": "started", "team": team}, status_code=202)
 
 
 @app.get("/api/backfill/status")
@@ -1559,7 +1559,8 @@ async def backfill_status():
 async def backfill_cancel():
     """Calisan backfill'i iptal et."""
     from agile_sdlc_crew import azure_backfill
-    return JSONResponse({"cancelled": azure_backfill.request_cancel()}, status_code=202)
+    cancelled = azure_backfill.request_cancel()
+    return JSONResponse({"cancelled": cancelled}, status_code=202 if cancelled else 409)
 
 
 # ── Static files ──
