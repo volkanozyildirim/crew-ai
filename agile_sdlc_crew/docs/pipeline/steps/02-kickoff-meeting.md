@@ -50,6 +50,7 @@ test perspektifini, UAT backlog adaylarını).
 - **KN-11** — Kickoff hedef repo tahmini (4 katman). Bkz. [decision-points.md#kn-11](../decision-points.md#kn-11)
 - **KN-12** — Kickoff grading + retry. Bkz. [decision-points.md#kn-12](../decision-points.md#kn-12)
 - **KN-13** — Kickoff-only modu (step4'te durur). Bkz. [decision-points.md#kn-13](../decision-points.md#kn-13)
+- **KN-33** — Geçmiş-iş repo önerisi katmanı (cascade'de). Bkz. [decision-points.md#kn-33](../decision-points.md#kn-33)
 
 ## Resume / dry-run
 - Resume: kickoff metni cache'ten okunur.

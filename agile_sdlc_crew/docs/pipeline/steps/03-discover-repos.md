@@ -38,6 +38,7 @@ DB'ye yazılır ve technical_design context'ine hint olarak eklenir.
 ## Karar noktaları
 - **KN-14** — Öneri doğrulama (known_repos kontrolü). Bkz. [decision-points.md#kn-14](../decision-points.md#kn-14)
 - **KN-15** — Repo seçimi öncelik sırası (exclusive symbol > sahiplik > isim). Bkz. [decision-points.md#kn-15](../decision-points.md#kn-15)
+- **KN-33** — Geçmiş-iş kanıt bloğu (candidate + prompt). Bkz. [decision-points.md#kn-33](../decision-points.md#kn-33)
 
 ## Resume / dry-run
 - Resume yok (technical_design içinde her seferinde çalışır).

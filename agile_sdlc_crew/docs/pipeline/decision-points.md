@@ -238,6 +238,13 @@ Her giriş şu yapıdadır: **Nerede** (adım + kaynak satır) · **Karar** (han
 - **Sonuç:** Dry-run → `<repo>/.dry_run_<job_id>.md` (diff dahil), WI'ya yorum YOK. Normal → WI'ya "Tamamlanma Raporu" yorumu.
 - **Neden:** Dry-run'da remote WI'ya yazmamak; sonucu local incelenebilir bırakmak.
 
+## KN-33 — Geçmiş-iş repo önerisi (advisory)
+- **Nerede:** `02-kickoff` (cascade), `03-discover` (prompt+candidate), `05-technical-design` (cascade+context) · `flow.py` + `VectorStore.suggest_repo_from_history`
+- **Karar:** Başarılı geçmiş işlerden bu WI'ya benzer olanlar hangi repo(lar)da yapılmış?
+- **Girdi:** `CREW_REPO_HISTORY_SUGGEST` açık + `/repo-decisions` scope'unda hybrid arama; repo'ya göre gruplanmış skor vs `CREW_REPO_HISTORY_MIN_SCORE`.
+- **Sonuç:** Önerilen repo candidate listesine zorla dahil + context/prompt'a kanıt bloğu; kickoff/technical-design cascade'inde isim eşleşmesi yoksa seçilebilir. **Architect son kararı verir** (advisory).
+- **Neden:** "Bu tür dosyalar/route'lar daha önce şu repoda değişti" sinyali repo adı benzerliğinden güçlü; geçmiş başarılı kararlardan öğrenir. Yazma yalnızca başarılı PR'da (KN-32 öncesi step11). Filtreler: repo ∉ known_repos elenir, kendi WI'sı önerilmez.
+
 ---
 
 ## Repo seçim kararlarının birleşik görünümü
@@ -254,3 +261,7 @@ Repo seçimi pipeline'da **üç ayrı yerde** olur ve birbirini tamamlar — gel
 Üçünün de ortak sinyalleri: `_select_repo_by_name` (isim/parça), kod grep,
 `_grep_symbol_evidence` (exclusive symbol), vector search. **Exclusive symbol
 kanıtı** her zaman en güçlü; **repo adı benzerliği** en zayıf sinyaldir.
+
+**Geçmiş-iş önerisi (KN-33)** üç noktaya da advisory olarak eklenir: önce başarılı
+PR'lar `/repo-decisions` indeksine yazılır, sonra benzer WI'larda o repolar aday
+olarak öne çıkar.

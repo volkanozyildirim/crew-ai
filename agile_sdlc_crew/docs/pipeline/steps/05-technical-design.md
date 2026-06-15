@@ -55,6 +55,7 @@ için Python tarafı agresif **dosya pre-fetch** yapar (token tasarrufu).
 - **KN-18** — Architect JSON guardrail. Bkz. [decision-points.md#kn-18](../decision-points.md#kn-18)
 - **KN-19** — Plan parse hatası → retry. Bkz. [decision-points.md#kn-19](../decision-points.md#kn-19)
 - **KN-22** — Budget guard. Bkz. [decision-points.md#kn-22](../decision-points.md#kn-22)
+- **KN-33** — Geçmiş-iş repo önerisi (cascade + context). Bkz. [decision-points.md#kn-33](../decision-points.md#kn-33)
 
 ## Resume / dry-run
 - Resume: tam JSON plan cache'ten parse edilip kullanılır (brace-balance şartı).
