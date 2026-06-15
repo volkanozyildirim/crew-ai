@@ -734,8 +734,12 @@ class VectorStore:
                 db.get_cached_step_output("requirements_analysis_task", wi)
                 or plan.get("summary", "")
             )
-            self.index_repo_decision(wi, repo, pr_id, plan, wi_content)
-            done += 1
+            try:
+                self.index_repo_decision(wi, repo, pr_id, plan, wi_content)
+                done += 1
+            except Exception as exc:
+                log.warning(f"  Backfill: WI#{wi} indekslenemedi: {exc}")
+                continue
         log.info(f"  📚 Repo-decision backfill: {done} is islendi")
         return done
 
