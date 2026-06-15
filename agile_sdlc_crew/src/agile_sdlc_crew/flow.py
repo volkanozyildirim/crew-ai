@@ -1525,6 +1525,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 kickoff_repo = _matched
                 _log(f"  Kickoff hedef repo ({_method}): {kickoff_repo}")
 
+            # Katman 1.5: Geçmiş-iş önerisi (isim eşleşmesi yoksa, grep'ten önce)
+            if not kickoff_repo and _pc_ko.get("CREW_REPO_HISTORY_SUGGEST") and self._vector_store:
+                try:
+                    _sug = self._vector_store.suggest_repo_from_history(
+                        self.state.requirements_text[:600],
+                        exclude_wi=self.state.work_item_id,
+                        known_repos=self.state.known_repos,
+                    )
+                    _min = _pc_ko.get("CREW_REPO_HISTORY_MIN_SCORE")
+                    if _sug and _sug[0]["score"] >= _min:
+                        kickoff_repo = _sug[0]["repo"]
+                        _log(f"  Kickoff hedef repo (geçmiş-iş): {kickoff_repo} (skor {_sug[0]['score']})")
+                except Exception as e:
+                    _log(f"  Kickoff geçmiş-iş önerisi hatası: {e}")
+
             # Katman 2: Kod grep (teknik terimler)
             if not kickoff_repo:
                 search_text_ko = f"{_wi_title_ko} {_wi_desc_ko}"
