@@ -376,7 +376,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
             except Exception:
                 pass
         # Vector store'a da kaydet (benzer is arama icin)
-        if self._vector_store and output and len(output.strip()) > 20:
+        import os as _os_sd
+        if (
+            _os_sd.environ.get("CREW_SAVE_STEP_OUTPUT", "1") != "0"
+            and self._vector_store and output and len(output.strip()) > 20
+        ):
             try:
                 self._vector_store.save_step_output(
                     self.state.work_item_id, step_key, output,
@@ -877,6 +881,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
     # ── Flow Start ───────────────────────────────────
 
+    def _reset_job_state(self):
+        """Job basinda paylasimli/birikimli durumu sifirla (cross-job sizinti onleme)."""
+        from agile_sdlc_crew.tools.tool_cache import reset_tool_cache
+        reset_tool_cache()
+        self._job_prompt_tokens = 0
+        self._job_completion_tokens = 0
+        self._job_total_tokens = 0
+
     @start()
     def initialize(self):
         """Pipeline baslangici: client'lar olustur, tracker'i baslat."""
@@ -884,11 +896,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
         from agile_sdlc_crew.tools.local_repo import LocalRepoManager
         from agile_sdlc_crew.tools.vector_store import VectorStore
-        from agile_sdlc_crew.tools.tool_cache import reset_tool_cache
         from agile_sdlc_crew import db as _db
 
-        # Pipeline basi: tool cache'i sifirla
-        reset_tool_cache()
+        # Pipeline basi: birikimli durumu sifirla
+        self._reset_job_state()
 
         self._db = _db
         self._agile_crew = AgileSDLCCrew()
