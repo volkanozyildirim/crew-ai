@@ -8,6 +8,7 @@ Scope'lar:
 - /sdlc/repo-summaries → her repo'nun REPO_SUMMARY.md ozeti
 - /sdlc/repos/{repo}/code → kod chunk'lari
 - /sdlc/jobs/{work_item_id}/{step} → tamamlanan step ciktilari
+- /repo-decisions → basarili her is icin WI icerigi + degisen dosya yollari/route'lari → repo eslesmesi (1 kayit/WI)
 """
 
 import hashlib
@@ -629,11 +630,11 @@ class VectorStore:
                 for r in self.storage.list_records(scope, limit=10_000):
                     if r.metadata.get("work_item_id") == wi:
                         return
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"  Repo-decision dedup kontrolu atlandi: {e}")
         changes = plan.get("changes", []) if isinstance(plan, dict) else []
         file_paths = [c.get("file_path", "") for c in changes if c.get("file_path")]
-        routes = _extract_routes(f"{wi_content} " + " ".join(file_paths))
+        routes = _extract_routes(f"{wi_content or ''} " + " ".join(file_paths))
         content = (
             f"WI #{wi}\n{(wi_content or '')[:2000]}\n"
             f"Degisen dosyalar: {', '.join(file_paths)}\n"
