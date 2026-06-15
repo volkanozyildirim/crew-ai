@@ -68,6 +68,21 @@ SCHEMA: list[dict] = [
         "default": False,
         "desc": "Domain knowledge'i backstory'ye tikistirmak yerine CrewAI Knowledge ile RAG olarak ver (token tasarrufu, kucuk modelde odak).",
     },
+    {
+        "key": "CREW_REPO_HISTORY_SUGGEST",
+        "label": "Geçmiş-İş Repo Önerisi",
+        "type": "bool",
+        "default": False,
+        "desc": "Başarılı geçmiş işleri (içerik+dosya yolu→repo) vector indekse al; yeni işte repo kararına advisory öneri olarak kickoff/discover/technical-design'a besle. Architect son kararı verir.",
+    },
+    {
+        "key": "CREW_REPO_HISTORY_MIN_SCORE",
+        "label": "Repo Önerisi Min. Skor",
+        "type": "float",
+        "default": 0.1,
+        "min": 0.0,
+        "desc": "Geçmiş-iş repo önerisinin kabul edileceği minimum benzerlik skoru. Altındaki öneriler yok sayılır.",
+    },
 
     # ── Maliyet kontrolu ──
     {

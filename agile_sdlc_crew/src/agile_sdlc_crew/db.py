@@ -311,6 +311,20 @@ def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | Non
         return row["output"] if row else None
 
 
+def list_successful_jobs_for_backfill(limit: int = 1000) -> list[dict]:
+    """Repo-decision indeksini geri-doldurmak icin: tamamlanmis, repo_name + pr_id
+    dolu isler. En yeniden eskiye."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, work_item_id, repo_name, pr_id FROM jobs "
+            "WHERE status='completed' AND repo_name <> '' AND pr_id <> '' "
+            "ORDER BY id DESC LIMIT %s",
+            (limit,),
+        )
+        return cur.fetchall()
+
+
 def clear_cached_step_output(step_key: str, work_item_id: str) -> int:
     """Bozuk (truncate edilmis, parse edilemeyen) cache kayitlarini sil.
     Ayni WI + step_key icin tum completed step_output'larini NULL'lar."""

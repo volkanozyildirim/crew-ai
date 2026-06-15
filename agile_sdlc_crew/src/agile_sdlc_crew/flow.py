@@ -396,7 +396,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             except Exception:
                 pass
 
-    def _run_discover_repos(self, candidate_repos: list[str], evidence: dict | None = None) -> None:
+    def _run_discover_repos(self, candidate_repos: list[str], evidence: dict | None = None, repo_history: list[dict] | None = None) -> None:
         """LLM'e en alakali aday repo'larin summary'lerini ver, hedef repo'yu sec.
 
         Vector + BM25 hibrid arama genelde 0.02-0.03 araliginda skor verir
@@ -466,6 +466,20 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 + "\n".join(ev_lines)
             )
         prompt_user += evidence_block
+        if repo_history:
+            hist_lines = []
+            for s in repo_history:
+                hist_lines.append(
+                    f"- {s['repo']} (skor {s['score']}, benzer iş: "
+                    + ", ".join(f"#{w}" for w in s.get('supporting_wis', [])[:3])
+                    + "; örnek dosyalar: "
+                    + ", ".join(s.get('file_paths_evidence', [])[:3]) + ")"
+                )
+            prompt_user += (
+                "\n\n# BENZER GEÇMİŞ İŞLER (başarılı PR'lar şu repolarda yapıldı — ADVISORY)\n"
+                "Bu sinyal repo ADI benzerliğinden GÜÇLÜ, birebir KOD KANITINDAN zayıftır.\n"
+                + "\n".join(hist_lines)
+            )
         prompt_user += (
             "\n\nGOREV: Bu is kalemi (WI) yukaridaki aday repo'lardan HANGISINDE "
             "yapilmalidir? Tek bir repo sec. Oncelik sirasi:\n"
@@ -1014,6 +1028,25 @@ class AgileSDLCFlow(Flow[PipelineState]):
             msg += f" ({regenerated} regenerate edildi)"
         _log(msg)
 
+        # Geçmiş-iş repo önerisi açıksa ve indeks boşsa DB'den geri-doldur
+        # (indeks boş kaldıkça her başlatmada denenir; boşken maliyet tek SQL sorgusu,
+        #  ilk başarılı iş sonrası record_count ile erken çıkar)
+        from agile_sdlc_crew import pipeline_config as _pc_bf
+        if _pc_bf.get("CREW_REPO_HISTORY_SUGGEST"):
+            try:
+                _info = self._vector_store.storage.get_scope_info("/repo-decisions")
+                _empty = not _info or _info.record_count == 0
+            except Exception:
+                _empty = True
+            if _empty:
+                try:
+                    n = self._vector_store.backfill_repo_decisions(self._db)
+                    _log(f"  Repo-decision indeksi geri-dolduruldu: {n} iş")
+                except Exception as e:
+                    _log(f"  Repo-decision backfill hatası: {e}")
+            else:
+                _log(f"  Repo-decision indeksi mevcut ({_info.record_count} kayıt), backfill atlandı")
+
         # repo_mgr ve vector_store'u crew'a aktar (agent tool'lari icin)
         self._agile_crew.local_repo_mgr = self._repo_mgr
         self._agile_crew.vector_store = self._vector_store
@@ -1492,6 +1525,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         # Hedef repo tahmini — 4 katman:
         # 0/1. _select_repo_by_name (tam isim + parca eslesmesi)
+        # 1.5. Geçmiş-iş önerisi (suggest_repo_from_history)
         # 2. Kod grep: WI'daki teknik terimler repo kodlarinda geciyorsa
         # 3. Vector semantic search (fallback)
         import re as _re_ko
@@ -1510,6 +1544,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
             if _matched:
                 kickoff_repo = _matched
                 _log(f"  Kickoff hedef repo ({_method}): {kickoff_repo}")
+
+            # Katman 1.5: Geçmiş-iş önerisi (isim eşleşmesi yoksa, grep'ten önce)
+            if not kickoff_repo and _pc_ko.get("CREW_REPO_HISTORY_SUGGEST") and self._vector_store:
+                try:
+                    _sug = self._vector_store.suggest_repo_from_history(
+                        self.state.requirements_text[:600],
+                        exclude_wi=self.state.work_item_id,
+                        known_repos=self.state.known_repos,
+                    )
+                    _min_score = _pc_ko.get("CREW_REPO_HISTORY_MIN_SCORE")
+                    if _sug and _sug[0]["score"] >= _min_score:
+                        kickoff_repo = _sug[0]["repo"]
+                        _log(f"  Kickoff hedef repo (geçmiş-iş): {kickoff_repo} (skor {_sug[0]['score']})")
+                except Exception as e:
+                    _log(f"  Kickoff geçmiş-iş önerisi hatası: {e}")
 
             # Katman 2: Kod grep (teknik terimler)
             if not kickoff_repo:
@@ -1776,7 +1825,29 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception as e:
             _log(f"  Symbol-grep hatasi: {e} — atlaniyor")
 
-        self._run_discover_repos(candidate_repos[:25], evidence=symbol_evidence)
+        # Geçmiş-iş repo önerisi (advisory) — candidate'e zorla dahil + discover'a kanıt
+        repo_history_suggestions: list[dict] = []
+        from agile_sdlc_crew import pipeline_config as _pc_rh
+        if _pc_rh.get("CREW_REPO_HISTORY_SUGGEST") and self._vector_store:
+            try:
+                _q_hist = f"{self.state.requirements_text[:500]} {self.state.kickoff_text[:300]}"
+                repo_history_suggestions = self._vector_store.suggest_repo_from_history(
+                    _q_hist, exclude_wi=self.state.work_item_id,
+                    known_repos=self.state.known_repos,
+                )
+                if repo_history_suggestions:
+                    _hist_repos = [s["repo"] for s in repo_history_suggestions]
+                    candidate_repos = _hist_repos + [r for r in candidate_repos if r not in _hist_repos]
+                    _log(f"  Geçmiş-iş repo önerisi: " + ", ".join(
+                        f"{s['repo']}({s['score']})" for s in repo_history_suggestions
+                    ))
+            except Exception as e:
+                _log(f"  Geçmiş-iş önerisi hatası: {e}")
+
+        self._run_discover_repos(
+            candidate_repos[:25], evidence=symbol_evidence,
+            repo_history=repo_history_suggestions,
+        )
 
         # Repo Ozetleri context'i: top 15 ozet (Discover karari context'e
         # ayri bir blok olarak zaten eklendi; burada tum adaylar kalir ki
@@ -1842,6 +1913,18 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     _log(f"  Cache temizleme hatasi (kritik degil): {clear_err}")
 
         ctx = self._build_step_context("technical_design_task")
+        if repo_history_suggestions:
+            _hist_txt = "\n".join(
+                f"- {s['repo']} (skor {s['score']}; örnek dosyalar: "
+                + ", ".join(s.get('file_paths_evidence', [])[:3]) + ")"
+                for s in repo_history_suggestions
+            )
+            ctx += (
+                "\n\n# BENZER GEÇMİŞ İŞLER (Repo Kararı — ADVISORY)\n"
+                "Aşağıdaki repolarda benzer işler başarıyla tamamlandı. Repo adı "
+                "benzerliğinden güçlü sinyaldir; yine de kendi kanıtınla karar ver.\n"
+                f"{_hist_txt}\n"
+            )
 
         # ── Python on-hazirlik: WI + repo + DOSYA ICERIKLERI ──────────────
         # Hedef: agent tool cagirmadan JSON plani uretsin.
@@ -1901,6 +1984,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         # grep_matched_files: repo tespitinde bulunan dosya yollari — pre-fetch'te okunur
         grep_matched_files: list[str] = []
+
+        # Katman 1.5: Geçmiş-iş önerisi (isim eşleşmesi yoksa, grep'ten önce)
+        if not prefetch_repo and repo_history_suggestions:
+            _min_score = _pc_rh.get("CREW_REPO_HISTORY_MIN_SCORE")
+            if repo_history_suggestions[0]["score"] >= _min_score:
+                prefetch_repo = repo_history_suggestions[0]["repo"]
+                _log(f"  Adim 4 hedef repo (geçmiş-iş): {prefetch_repo} (skor {repo_history_suggestions[0]['score']})")
 
         # Katman 2: Kod grep — teknik terimler repo kodlarinda geciyorsa
         if not prefetch_repo:
@@ -3290,6 +3380,22 @@ class AgileSDLCFlow(Flow[PipelineState]):
             f"{completion_text[:3000]}\n\n"
             f"---\n*Agile SDLC Crew - Pipeline tamamlandi*"
         )
+
+        # Geçmiş-iş repo indeksine yaz — yalnızca başarılı PR (buraya ulaşmak
+        # PR oluştu + review onayladı demek; dry-run bu metodun başında döner).
+        from agile_sdlc_crew import pipeline_config as _pc_rh
+        if (
+            _pc_rh.get("CREW_REPO_HISTORY_SUGGEST")
+            and self._vector_store and self.state.repo_name and self.state.pr_id
+        ):
+            try:
+                self._vector_store.index_repo_decision(
+                    self.state.work_item_id, self.state.repo_name, self.state.pr_id,
+                    self.state.plan, self.state.requirements_text[:2000],
+                )
+                _log("  📚 Repo kararı geçmiş indekse yazıldı")
+            except Exception as e:
+                _log(f"  Repo kararı indeksleme hatası: {e}")
 
         _log(f"\n{'='*60}")
         _log("  PIPELINE TAMAMLANDI!")

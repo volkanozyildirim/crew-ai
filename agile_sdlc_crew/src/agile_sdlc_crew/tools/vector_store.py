@@ -8,6 +8,7 @@ Scope'lar:
 - /sdlc/repo-summaries → her repo'nun REPO_SUMMARY.md ozeti
 - /sdlc/repos/{repo}/code → kod chunk'lari
 - /sdlc/jobs/{work_item_id}/{step} → tamamlanan step ciktilari
+- /repo-decisions → basarili her is icin WI icerigi + degisen dosya yollari/route'lari → repo eslesmesi (1 kayit/WI)
 """
 
 import hashlib
@@ -98,6 +99,18 @@ def _chunk_file(content: str, file_path: str) -> list[dict]:
 
 def _content_hash(content: str) -> str:
     return hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
+def _extract_routes(text: str) -> list[str]:
+    """Metinden route/endpoint ve dosya-adı token'larini cikar (repo-decision indeksi icin).
+    flow.py'deki repo-tespit regex desenleriyle tutarli."""
+    import re as _re
+    routes: set[str] = set()
+    for m in _re.finditer(r'/api/[\w/]+', text):
+        routes.add(m.group(0))
+    for m in _re.finditer(r'\b(\w+\.(?:php|py|ts|tsx|js|jsx|go|cs|java|vue))\b', text):
+        routes.add(m.group(1))
+    return sorted(routes)
 
 
 def _extract_focused_sections(md_content: str, repo_name: str) -> str:
@@ -602,6 +615,133 @@ class VectorStore:
             return []
 
     # ── Job Gecmisi ────────────────────────────────
+
+    def index_repo_decision(self, work_item_id: str, repo: str, pr_id: str, plan: dict, wi_content: str):
+        """Basarili bir isin 'icerik+dosya yollari -> repo' kaydini /repo-decisions
+        scope'una yaz. Idempotent: ayni work_item_id zaten varsa atlar."""
+        if not repo or not work_item_id:
+            return
+        scope = "/repo-decisions"
+        wi = str(work_item_id)
+        # Idempotency: ayni WI zaten indekste mi? (index_repo_summary deseni)
+        try:
+            info = self.storage.get_scope_info(scope)
+            if info and info.record_count > 0:
+                for r in self.storage.list_records(scope, limit=10_000):
+                    if r.metadata.get("work_item_id") == wi:
+                        return
+        except Exception as e:
+            log.debug(f"  Repo-decision dedup kontrolu atlandi: {e}")
+        changes = plan.get("changes", []) if isinstance(plan, dict) else []
+        file_paths = [c.get("file_path", "") for c in changes if c.get("file_path")]
+        routes = _extract_routes(f"{wi_content or ''} " + " ".join(file_paths))
+        content = (
+            f"WI #{wi}\n{(wi_content or '')[:2000]}\n"
+            f"Degisen dosyalar: {', '.join(file_paths)}\n"
+            f"Route/endpoint: {', '.join(routes)}"
+        )
+        try:
+            self._save_record(
+                content=content[:5000],
+                scope=scope,
+                categories=["repo-decision"],
+                metadata={
+                    "work_item_id": wi,
+                    "repo": repo,
+                    "pr_id": str(pr_id or ""),
+                    "file_paths": file_paths[:50],
+                    "routes": routes[:50],
+                },
+                importance=0.8,
+            )
+        except Exception as e:
+            log.warning(f"  Repo-decision indeks hatasi (WI#{wi}): {e}")
+
+    def suggest_repo_from_history(
+        self, query: str, path_hints: list[str] | None = None,
+        limit: int = 3, exclude_wi: str | None = None,
+        known_repos: list[str] | None = None,
+    ) -> list[dict]:
+        """Gecmis basarili islerden repo onerisi. Sonuclari repo'ya gore gruplar:
+        repo_score = max(tekil_skorlar) + 0.05*(n-1), 1.0'da sinirli.
+        Donen: [{repo, score, supporting_wis, file_paths_evidence}] (skora gore sirali).
+
+        known_repos=None -> filtre yok; known_repos=[] -> hicbir repo gecmez (hepsi elenir)."""
+        try:
+            q = query
+            if path_hints:
+                q = q + " " + " ".join(path_hints)
+            results = self._search(q, "/repo-decisions", limit=max(limit * 5, 15))
+        except Exception as e:
+            log.warning(f"  suggest_repo_from_history arama hatasi: {e}")
+            return []
+        by_repo: dict[str, dict] = {}
+        ex = str(exclude_wi) if exclude_wi is not None else None
+        for record, score in results:
+            repo = record.metadata.get("repo", "")
+            wi = record.metadata.get("work_item_id", "")
+            if not repo:
+                continue
+            if not wi:
+                continue
+            if ex and wi == ex:
+                continue
+            if known_repos is not None and repo not in known_repos:
+                continue
+            entry = by_repo.setdefault(
+                repo, {"scores": [], "supporting_wis": [], "file_paths_evidence": []}
+            )
+            entry["scores"].append(score)
+            entry["supporting_wis"].append(wi)
+            entry["file_paths_evidence"].extend(record.metadata.get("file_paths", [])[:3])
+        out = []
+        for repo, entry in by_repo.items():
+            n = len(entry["scores"])
+            repo_score = min(1.0, max(entry["scores"]) + 0.05 * (n - 1))
+            out.append({
+                "repo": repo,
+                "score": round(repo_score, 3),
+                "supporting_wis": entry["supporting_wis"][:5],
+                "file_paths_evidence": list(dict.fromkeys(entry["file_paths_evidence"]))[:8],
+            })
+        out.sort(key=lambda x: x["score"], reverse=True)
+        return out[:limit]
+
+    def backfill_repo_decisions(self, db, limit: int = 1000) -> int:
+        """DB'deki basarili islerden /repo-decisions indeksini geri-doldur.
+        Idempotent (index_repo_decision zaten var olani atlar). Doldurulan sayi doner."""
+        from agile_sdlc_crew.main import _parse_architect_output
+        try:
+            jobs = db.list_successful_jobs_for_backfill(limit)
+        except Exception as e:
+            log.warning(f"  Backfill: is listesi alinamadi: {e}")
+            return 0
+        done = 0
+        for j in jobs:
+            wi = str(j.get("work_item_id") or "")
+            repo = j.get("repo_name") or ""
+            pr_id = j.get("pr_id") or ""
+            if not wi or not repo:
+                continue
+            td = db.get_cached_step_output("technical_design_task", wi)
+            if not td:
+                continue
+            try:
+                plan = _parse_architect_output(td)
+            except Exception:
+                continue
+            wi_content = (
+                db.get_cached_step_output("requirements_analysis_task", wi)
+                or plan.get("summary", "")
+            )
+            try:
+                self.index_repo_decision(wi, repo, pr_id, plan, wi_content)
+                done += 1
+            except Exception as exc:
+                log.warning(f"  Backfill: WI#{wi} indekslenemedi: {exc}")
+                continue
+        log.info(f"  📚 Repo-decision backfill: {done} is islendi")
+        return done
 
     def save_step_output(self, work_item_id: str, step_key: str, output: str, metadata: dict | None = None):
         """Tamamlanan step ciktisini embed et."""
