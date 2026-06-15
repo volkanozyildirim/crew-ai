@@ -628,11 +628,14 @@ class VectorStore:
                         out.add(str(wi))
         except Exception as e:
             log.debug(f"  existing_repo_decision_wis atlandi: {e}")
+        log.debug(f"  existing_repo_decision_wis: {len(out)} WI indekste")
         return out
 
     def index_repo_decision(self, work_item_id: str, repo: str, pr_id: str, plan: dict, wi_content: str, skip_dedup_check: bool = False):
         """Basarili bir isin 'icerik+dosya yollari -> repo' kaydini /repo-decisions
-        scope'una yaz. Idempotent: ayni work_item_id zaten varsa atlar."""
+        scope'una yaz. Varsayilan: idempotent (ayni work_item_id zaten varsa atlar).
+        skip_dedup_check=True ise ic tarama atlanir; tekillik garantisi cagirana aittir
+        (toplu backfill icin existing_repo_decision_wis ile birlikte kullanilir)."""
         if not repo or not work_item_id:
             return
         scope = "/repo-decisions"
