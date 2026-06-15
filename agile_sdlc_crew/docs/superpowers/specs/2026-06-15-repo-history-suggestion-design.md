@@ -49,7 +49,7 @@ Mevcut `/jobs/<wi>/<step>` scope'undan **ayrı**. İş başına **tek kayıt**:
   semantiği, BM25 → path/route token'larının birebir lexical eşleşmesi. İkinci bir
   embed/scope gerekmez.
 
-- **metadata:** `{work_item_id, repo, pr_id, file_paths: [...], routes: [...], indexed_at}`
+- **metadata:** `{work_item_id, repo, pr_id, file_paths: [...], routes: [...]}`
 - **categories:** `["repo-decision"]`, **importance:** 0.8
 
 ## 2. Yazma yolu (sadece başarılı PR)
