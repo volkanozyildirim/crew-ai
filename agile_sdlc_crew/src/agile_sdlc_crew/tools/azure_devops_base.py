@@ -632,8 +632,13 @@ class AzureDevOpsClient:
             f"{requests.utils.quote(team, safe='')}/_apis/work/teamsettings/teamfieldvalues"
         )
         params = {"api-version": self.API_VERSION}
-        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
-        resp.raise_for_status()
+        try:
+            resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+            if resp.status_code == 404:
+                return ""
+            resp.raise_for_status()
+        except requests.RequestException:
+            return ""
         return (resp.json().get("defaultValue") or "").strip()
 
     def query_done_work_items(
