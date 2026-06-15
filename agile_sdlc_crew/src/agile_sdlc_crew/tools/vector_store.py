@@ -707,6 +707,38 @@ class VectorStore:
         out.sort(key=lambda x: x["score"], reverse=True)
         return out[:limit]
 
+    def backfill_repo_decisions(self, db, limit: int = 1000) -> int:
+        """DB'deki basarili islerden /repo-decisions indeksini geri-doldur.
+        Idempotent (index_repo_decision zaten var olani atlar). Doldurulan sayi doner."""
+        from agile_sdlc_crew.main import _parse_architect_output
+        try:
+            jobs = db.list_successful_jobs_for_backfill(limit)
+        except Exception as e:
+            log.warning(f"  Backfill: is listesi alinamadi: {e}")
+            return 0
+        done = 0
+        for j in jobs:
+            wi = str(j.get("work_item_id") or "")
+            repo = j.get("repo_name") or ""
+            pr_id = j.get("pr_id") or ""
+            if not wi or not repo:
+                continue
+            td = db.get_cached_step_output("technical_design_task", wi)
+            if not td:
+                continue
+            try:
+                plan = _parse_architect_output(td)
+            except Exception:
+                continue
+            wi_content = (
+                db.get_cached_step_output("requirements_analysis_task", wi)
+                or plan.get("summary", "")
+            )
+            self.index_repo_decision(wi, repo, pr_id, plan, wi_content)
+            done += 1
+        log.info(f"  📚 Repo-decision backfill: {done} is islendi")
+        return done
+
     def save_step_output(self, work_item_id: str, step_key: str, output: str, metadata: dict | None = None):
         """Tamamlanan step ciktisini embed et."""
         if not output or len(output.strip()) < 20:
