@@ -1618,6 +1618,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             raise RuntimeError(f"Kickoff toplantisi basarisiz: {e}")
 
         self.state.kickoff_text = kickoff_text
+        _log(f"  📏 kickoff: {len(kickoff_text or '')} char")
         self._step_done("kickoff_meeting_task", kickoff_text[:3000])
 
         # Per-agent ciktilarini + grade gecmisini job_id basina JSON'a yaz
