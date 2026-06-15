@@ -657,6 +657,52 @@ class VectorStore:
         except Exception as e:
             log.warning(f"  Repo-decision indeks hatasi (WI#{wi}): {e}")
 
+    def suggest_repo_from_history(
+        self, query: str, path_hints: list[str] | None = None,
+        limit: int = 3, exclude_wi: str | None = None,
+        known_repos: list[str] | None = None,
+    ) -> list[dict]:
+        """Gecmis basarili islerden repo onerisi. Sonuclari repo'ya gore gruplar:
+        repo_score = max(tekil_skorlar) + 0.05*(n-1), 1.0'da sinirli.
+        Donen: [{repo, score, supporting_wis, file_paths_evidence}] (skora gore sirali)."""
+        try:
+            q = query
+            if path_hints:
+                q = q + " " + " ".join(path_hints)
+            results = self._search(q, "/repo-decisions", limit=max(limit * 5, 15))
+        except Exception as e:
+            log.warning(f"  suggest_repo_from_history arama hatasi: {e}")
+            return []
+        by_repo: dict[str, dict] = {}
+        ex = str(exclude_wi) if exclude_wi is not None else None
+        for record, score in results:
+            repo = record.metadata.get("repo", "")
+            wi = record.metadata.get("work_item_id", "")
+            if not repo:
+                continue
+            if ex and wi == ex:
+                continue
+            if known_repos is not None and repo not in known_repos:
+                continue
+            e = by_repo.setdefault(
+                repo, {"scores": [], "supporting_wis": [], "file_paths_evidence": []}
+            )
+            e["scores"].append(score)
+            e["supporting_wis"].append(wi)
+            e["file_paths_evidence"].extend(record.metadata.get("file_paths", [])[:3])
+        out = []
+        for repo, e in by_repo.items():
+            n = len(e["scores"])
+            repo_score = min(1.0, max(e["scores"]) + 0.05 * (n - 1))
+            out.append({
+                "repo": repo,
+                "score": round(repo_score, 3),
+                "supporting_wis": e["supporting_wis"][:5],
+                "file_paths_evidence": list(dict.fromkeys(e["file_paths_evidence"]))[:8],
+            })
+        out.sort(key=lambda x: x["score"], reverse=True)
+        return out[:limit]
+
     def save_step_output(self, work_item_id: str, step_key: str, output: str, metadata: dict | None = None):
         """Tamamlanan step ciktisini embed et."""
         if not output or len(output.strip()) < 20:
