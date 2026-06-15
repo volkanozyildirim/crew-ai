@@ -379,6 +379,7 @@ header {
       <select class="sprint-select" id="sprintSel" onchange="loadBoard()"><option value="">Önce takım seçin...</option></select>
       <span class="sprint-info" id="sprintInfo"></span>
       <button class="sm-btn ghost" onclick="loadTeams()" style="padding:4px 7px">&#8635;</button>
+      <button class="sm-btn" onclick="openBackfill()" title="Seçili takımın geçmiş done+PR'lı işlerini indeksle" style="padding:4px 10px;font-size:12px">📚 Geçmiş İşleri Tara</button>
     </div>
     <div class="sprint-summary" id="summary" style="display:none"></div>
     <div id="kanban"><div class="board-empty">Takım ve sprint seçerek board'u görüntüleyin.</div></div>
@@ -2377,6 +2378,86 @@ async function showDiff(jobId){
 function closeDiff(){const o=document.getElementById('diffOverlay');if(o)o.classList.remove('open');}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDiff();});
 
+// ── Backfill ──────────────────────────────────────────────────────────────
+let _bfPoll=null;
+function openBackfill(){
+  const team=(document.getElementById('teamSel')||{}).value||'';
+  if(!team){alert('Önce bir takım seçin');return;}
+  document.getElementById('bfTeam').textContent=team;
+  document.getElementById('backfillModal').style.display='flex';
+  document.getElementById('bfStartBtn').style.display='';
+  document.getElementById('bfCancelBtn').style.display='none';
+  fetchBackfill();
+}
+function closeBackfill(){
+  document.getElementById('backfillModal').style.display='none';
+  if(_bfPoll){clearInterval(_bfPoll);_bfPoll=null;}
+}
+async function startBackfill(){
+  const team=document.getElementById('bfTeam').textContent;
+  document.getElementById('bfStartBtn').style.display='none';
+  document.getElementById('bfCancelBtn').style.display='';
+  try{
+    const r=await fetch('/api/backfill/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team})});
+    if(r.status===409){alert('Backfill zaten çalışıyor');}
+  }catch(e){alert('Başlatma hatası: '+e);}
+  if(!_bfPoll)_bfPoll=setInterval(fetchBackfill,2000);
+  fetchBackfill();
+}
+async function cancelBackfill(){
+  try{await fetch('/api/backfill/cancel',{method:'POST'});}catch(e){}
+}
+async function fetchBackfill(){
+  try{
+    const r=await fetch('/api/backfill/status?t='+Date.now());
+    if(!r.ok)return;
+    const p=await r.json();
+    renderBackfill(p);
+  }catch(e){}
+}
+function renderBackfill(p){
+  const total=p.total||0, scanned=p.scanned||0;
+  const pct=total?Math.round(100*scanned/total):0;
+  document.getElementById('bfBar').style.width=pct+'%';
+  document.getElementById('bfStats').textContent=
+    `taranan ${scanned}/${total} | indekslenen ${p.indexed||0} | PR'lı ${p.with_pr||0} | atlanan ${p.skipped||0} | hata ${p.errors||0}`+
+    (p.current_wi?` | şu an WI#${p.current_wi}`:'');
+  const logEl=document.getElementById('bfLog');
+  logEl.textContent=(p.log||[]).map(l=>`${l.time}  ${l.message}`).join('\n');
+  logEl.scrollTop=logEl.scrollHeight;
+  const running=!!p.running;
+  document.getElementById('bfStartBtn').style.display=running?'none':'';
+  document.getElementById('bfCancelBtn').style.display=running?'':'none';
+  if(!running&&_bfPoll){clearInterval(_bfPoll);_bfPoll=null;}
+  if(running&&!_bfPoll)_bfPoll=setInterval(fetchBackfill,2000);
+}
+
 </script>
+
+<!-- Backfill Modal -->
+<div id="backfillModal" style="display:none;position:fixed;inset:0;z-index:280;background:rgba(0,0,0,0.78);backdrop-filter:blur(4px);" onclick="if(event.target===this)closeBackfill()">
+  <div style="position:absolute;top:10%;left:50%;transform:translateX(-50%);width:min(640px,92vw);background:var(--bg-card);border-radius:16px;border:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="font-size:18px">📚</span>
+        <h2 style="font-size:16px;font-weight:700">Azure DevOps Geçmiş İş Taraması</h2>
+      </div>
+      <button onclick="closeBackfill()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div style="padding:16px 20px">
+      <div style="margin-bottom:12px;font-size:13px">Takım: <b id="bfTeam">-</b></div>
+      <div style="background:#222;border-radius:6px;height:18px;overflow:hidden;margin-bottom:8px">
+        <div id="bfBar" style="height:100%;width:0%;background:#6c5ce7;transition:width .3s"></div>
+      </div>
+      <div id="bfStats" style="font-size:13px;color:var(--text-dim);margin-bottom:8px"></div>
+      <div id="bfLog" style="font-family:monospace;font-size:12px;background:#111;border-radius:6px;padding:8px;height:200px;overflow:auto;white-space:pre-wrap;color:var(--text-dim)"></div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button id="bfStartBtn" onclick="startBackfill()" class="sm-btn">Başlat</button>
+        <button id="bfCancelBtn" onclick="cancelBackfill()" class="sm-btn" style="display:none;background:var(--danger)">İptal</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
