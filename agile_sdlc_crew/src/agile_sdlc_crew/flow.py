@@ -1246,7 +1246,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 if rel.get("attributes", {}).get("name") == "Pull Request":
                     url = rel.get("url", "")
                     # vstfs:///Git/PullRequestId/{projectId}%2f{repoId}%2f{prId}
-                    pr_match = _re_pr.search(r'PullRequestId/[^%]+%2f([^%]+)%2f(\d+)', url)
+                    # NOT: ayrac %2F (buyuk) veya %2f olabiliyor → IGNORECASE sart
+                    # (aksi halde %2F'li WI'larin mevcut PR'i/yorumlari bulunamaz)
+                    pr_match = _re_pr.search(r'PullRequestId/[^%]+%2f([^%]+)%2f(\d+)', url, _re_pr.IGNORECASE)
                     if pr_match:
                         _pr_links.append({
                             "repo_id": pr_match.group(1),
