@@ -103,8 +103,8 @@ SCHEMA: list[dict] = [
         "key": "CREW_AZ_DONE_STATES",
         "label": "Azure 'Done' Durumları",
         "type": "str",
-        "default": "Done,Closed,Resolved",
-        "desc": "Backfill'de 'tamamlanmış' sayılan WI durumları (virgülle ayrılmış).",
+        "default": "Done",
+        "desc": "Backfill'de 'tamamlanmış' sayılan WI durumları (virgülle ayrılmış). Sadece Done okunur; ek durum gerekirse 'Done,Closed' gibi genişlet.",
     },
 
     # ── Maliyet kontrolu ──
