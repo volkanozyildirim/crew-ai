@@ -144,9 +144,9 @@ SCHEMA: list[dict] = [
         "key": "CREW_REVIEW_MAX_RETRIES",
         "label": "Review Max Retry",
         "type": "int",
-        "default": 2,
+        "default": 1,
         "min": 0,
-        "desc": "Code review reddedince kac kez yeniden gelistirme dongusu calisir.",
+        "desc": "Code review reddedince kac kez yeniden gelistirme dongusu calisir. Her retry pahali (developer+reviewer yeniden calisir); 1 onerilir.",
     },
 
     # ── Context bütçeleri ──
