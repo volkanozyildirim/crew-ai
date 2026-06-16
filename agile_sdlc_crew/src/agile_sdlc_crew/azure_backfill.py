@@ -185,11 +185,19 @@ class AzureBackfillRunner:
             self._log(f"{len(items)} done WI bulundu; taraniyor (guncelden eskiye)")
 
             seen = self.vs.existing_repo_decision_wis()
-            if seen:
-                self._log(f"{len(seen)} WI zaten indekste, atlanacak")
+            # Zaten-indeksli WI'lari Azure'a SORMADAN ele (fetch'ten once) — re-run'larda
+            # gereksiz PR/changes API cagrilarini ve yavasligi onler.
+            todo = [it for it in items if str(it.get("id")) not in seen]
+            preskip = len(items) - len(todo)
+            if preskip:
+                with self._lock:
+                    self._p["skipped"] += preskip
+                    self._p["scanned"] += preskip
+                    self._write()
+                self._log(f"{preskip} WI zaten indekste — Azure'a sorulmadan atlandi")
 
             with ThreadPoolExecutor(max_workers=self.workers) as ex:
-                futures = {ex.submit(self._fetch, it): it for it in items}
+                futures = {ex.submit(self._fetch, it): it for it in todo}
                 for fut in as_completed(futures):
                     if self._cancel.is_set():
                         break
