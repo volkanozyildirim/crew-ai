@@ -117,8 +117,13 @@ class AzureBackfillRunner:
             "running": True, "cancelled": False, "team": team,
             "started_at": datetime.now().isoformat(timespec="seconds"), "finished_at": "",
             "total": 0, "scanned": 0, "with_pr": 0, "indexed": 0, "skipped": 0, "errors": 0,
-            "current_wi": None, "log": [],
+            "current_wi": None,
+            "log": [{"time": datetime.now().strftime("%H:%M:%S"), "message": "Başlatılıyor…"}],
         }
+        # İlk progress'i HEMEN yaz (start_backfill icinde, yavas Azure cagrilarindan
+        # once) — aksi halde frontend ilk poll'da onceki run'in 'running:false'
+        # dosyasini okuyup polling'i durduruyor (progress gorunmuyor).
+        self._write()
 
     def cancel(self):
         self._cancel.set()
