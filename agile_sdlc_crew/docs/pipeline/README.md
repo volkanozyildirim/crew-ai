@@ -8,6 +8,19 @@ verdiğini** tek yerden okuyabilmek.
 > Tek doğru kaynak koddur: `src/agile_sdlc_crew/flow.py` (orkestrasyon),
 > `config/tasks.yaml` (görev talimatları), `config/agents.yaml` (ajan personaları).
 > Bu dokümanlar o koddan türetilmiştir; davranış değişince dokümanı da güncelleyin.
+>
+> **Satır numaraları yaklaşıktır** (kod değiştikçe kayar). Bir referansı bulmak için
+> satır no'ya değil, belirtilen **fonksiyon/metot adına** göre grep'leyin.
+
+## Pipeline dışı ilgili özellikler
+
+- **Geçmiş-iş repo önerisi** (advisory): başarılı işleri `/repo-decisions` vector
+  indeksine alıp repo kararına öneri besler. Bkz. KN-33 + KN-15/KN-17.
+  Spec: `docs/superpowers/specs/2026-06-15-repo-history-suggestion-design.md`.
+- **Azure DevOps backfill**: dashboard board butonu, takımın done+merge'li işlerini
+  tarayıp `/repo-decisions`'a yazar (async + concurrent, `azure_backfill.py`,
+  `/api/backfill/{start,status,cancel}`).
+  Spec: `docs/superpowers/specs/2026-06-15-azure-devops-backfill-design.md`.
 
 ## Akış (CrewAI yolu)
 
