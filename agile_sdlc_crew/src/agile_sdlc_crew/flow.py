@@ -740,6 +740,52 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  SM Review hatasi: {e}")
             return True, ""
 
+    def _prefetch_pr_changes_context(self, max_files: int = 12, per_file: int = 6000) -> str:
+        """Reviewer'in get_pr_changes/dosya-okuma tool'larini (her biri ayri claude_cli
+        subprocess'i) cagirmadan inceleyebilmesi icin: PR'da degisen dosyalarin
+        feature-branch icerigini context'e hazirla. Architect pre-fetch deseni.
+        Hata olursa bos string — reviewer yine tool'larla okuyabilir."""
+        repo = self.state.repo_name
+        branch = self.state.branch_name
+        if not repo or not branch:
+            return ""
+        files: list[str] = []
+        for ch in (self.state.plan.get("changes") or []):
+            fp = ch.get("file_path")
+            if fp and fp not in files:
+                files.append(fp)
+        for p in (self.state.all_pushes or []):
+            fp = p.get("file")
+            if fp and fp not in files:
+                files.append(fp)
+        if not files:
+            return ""
+        parts = [
+            f"\n# PR DEĞİŞİKLİKLERİ (PR #{self.state.pr_id}, repo {repo}, branch {branch} — feature branch içerikleri HAZIR)",
+            "⚡ Aşağıdaki dosya içerikleri context'te zaten var. get_pr_changes / browse_repo "
+            "ÇAĞIRMA — doğrudan bu içerikleri WI gereksinimlerine ve kabul kriterlerine göre incele. "
+            "Sadece context'te OLMAYAN bir dosyaya ihtiyaç duyarsan tool kullan.",
+        ]
+        n = 0
+        for fp in files[:max_files]:
+            content = ""
+            try:
+                content = self._client.get_file_content(repo, fp, branch)
+            except Exception:
+                try:
+                    content = self._repo_mgr.get_file_content(repo, fp, branch)
+                except Exception:
+                    content = ""
+            if not content or not content.strip():
+                continue
+            trunc = content[:per_file] + ("\n... (kısaltıldı)" if len(content) > per_file else "")
+            parts.append(f"\n## {fp}\n```\n{trunc}\n```")
+            n += 1
+        if n == 0:
+            return ""
+        _log(f"  Review pre-fetch: {n} değişen dosya context'e eklendi (tool adımları kısaldı)")
+        return "\n".join(parts)
+
     def _review_retry_loop(self):
         """Reviewer RED verdikten sonra: implement → push → review dongusune girer.
         Branch ve PR zaten var — sadece dosyalari duzeltip push eder, sonra tekrar review.
@@ -839,6 +885,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         # Tekrar review
         ctx = self._build_step_context("review_pr_task")
+        ctx += self._prefetch_pr_changes_context()
         review_crew = self._agile_crew.create_review_crew()
         review_result = review_crew.kickoff(inputs={
             "work_item_id": self.state.work_item_id,
@@ -3053,6 +3100,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             review_text = review_detail.get("response", "")
         else:
             ctx = self._build_step_context("review_pr_task")
+            ctx += self._prefetch_pr_changes_context()
             review_crew = self._agile_crew.create_review_crew()
             review_result = review_crew.kickoff(inputs={
                 "work_item_id": self.state.work_item_id,

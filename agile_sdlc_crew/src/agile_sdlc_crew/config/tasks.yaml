@@ -657,8 +657,14 @@ review_pr_task:
     pipeline halts on your verdict.
 
     YOUR STEPS:
-    1. Use "get_pr_changes" to list changed files in PR
-    2. Read each changed file (branch: {target_branch})
+    ⚡ COST/SPEED: If context has a "PR DEĞİŞİKLİKLERİ" heading, the changed files
+    and their feature-branch contents are ALREADY provided there. In that case DO
+    NOT call get_pr_changes or browse_repo — review directly from context. Only use
+    tools for a file you genuinely need that is NOT already in context.
+    1. Determine changed files: use the "PR DEĞİŞİKLİKLERİ" block if present;
+       otherwise use "get_pr_changes".
+    2. Read each changed file: from the "PR DEĞİŞİKLİKLERİ" block if present;
+       otherwise read it (branch: {target_branch}).
     3. Apply the checklists below:
 
     ACCEPTANCE CRITERIA CHECK (FIRST):
