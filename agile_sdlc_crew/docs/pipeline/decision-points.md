@@ -55,6 +55,7 @@ Her giriş şu yapıdadır: **Nerede** (adım + kaynak satır) · **Karar** (han
 - **Girdi:** WI relations'daki PR bağlantıları, PR statüleri (active/completed/abandoned).
 - **Sonuç:** En yeniden eskiye: ilk **active** → yoksa ilk **completed** → tümü **abandoned** ise yeni PR. Seçilen PR'ın resolve edilmemiş yorumları context'e + `_pr_threads_to_respond`'a.
 - **Neden:** Önceki denemeden kalan insan feedback'ini sürdürmek; abandoned'ları görmezden gelmek.
+- **NOT:** PR-link url ayracı `%2F` (büyük) olabildiğinden parse regex `re.IGNORECASE` ile çalışır (aksi halde bu org'daki WI'ların mevcut PR'ı/yorumları bulunamıyordu).
 
 ## KN-07 — HAL: değişiklik yoksa followup
 - **Nerede:** `01a-hal-planning` · `flow.py:1081-1098`
@@ -225,11 +226,18 @@ Her giriş şu yapıdadır: **Nerede** (adım + kaynak satır) · **Karar** (han
 - **Neden:** Verdict pipeline-kritik; hem İngilizce (yeni) hem Türkçe (legacy) token desteklenir.
 
 ## KN-31 — Review retry döngüsü + max retry  ⛔ AKIŞ KAPISI
-- **Nerede:** `09-code-review` · `_review_retry_loop` `flow.py:729-880`, `flow.py:3007-3035`
+- **Nerede:** `09-code-review` · `_review_retry_loop` (`flow.py`), `step8_code_review`
 - **Karar:** RED sonrası tekrar geliştirme yapılsın mı, kaç kez?
-- **Girdi:** `_review_attempt` vs `CREW_REVIEW_MAX_RETRIES` (default 2).
+- **Girdi:** `_review_attempt` vs `CREW_REVIEW_MAX_RETRIES` (**default 1**).
 - **Sonuç:** Limit altında → reviewer'ın bahsettiği dosyaları yeniden implement+push+review. Limit aşılırsa WI'ya hata yorumu + `RuntimeError`.
-- **Neden:** Otomatik düzeltme döngüsü; sonsuz döngüyü ve fake-APPROVE'u önlemek.
+- **Neden:** Otomatik düzeltme döngüsü; sonsuz döngüyü ve fake-APPROVE'u önlemek. Her retry pahalı (developer+reviewer yeniden çalışır), bu yüzden default 1'e çekildi (eskiden 2).
+
+## KN-34 — Review PR pre-fetch (claude_cli adım/maliyet azaltma)
+- **Nerede:** `09-code-review` · `_prefetch_pr_changes_context` (`flow.py`), step8 + retry döngüsü
+- **Karar:** Reviewer PR'daki değişen dosyaları tool ile mi okusun yoksa context'te hazır mı bulsun?
+- **Girdi:** `state.plan.changes` + `state.all_pushes`'tan değişen dosyalar; feature-branch içerikleri.
+- **Sonuç:** Değişen dosyaların içerikleri "PR DEĞİŞİKLİKLERİ" bloğu olarak context'e konur; tasks.yaml reviewer'a "bunlar varsa get_pr_changes/browse_repo çağırma" der.
+- **Neden:** claude_cli'da her ReAct tool adımı ayrı subprocess (yavaş). Pre-fetch adım sayısını → subprocess sayısını → inceleme süresini düşürür (architect KN-17 pre-fetch deseni).
 
 ## KN-32 — Tamamlanma: dry-run rapor vs WI yorumu
 - **Nerede:** `12-completion-report` · `flow.py:3259-3261`, `_write_dry_run_report`
