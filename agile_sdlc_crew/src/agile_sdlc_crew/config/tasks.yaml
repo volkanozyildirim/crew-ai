@@ -535,6 +535,12 @@ implement_change_task:
     (Python side handles integration). Default mode is FULL FILE unless
     told otherwise.
 
+    ⚠️ APPLY TO ALL OCCURRENCES: the same logic may appear in MULTIPLE code
+    paths/branches in this file (e.g. a new-API branch AND a legacy branch,
+    or several version checks). Apply the change to EVERY relevant occurrence
+    — not just the first. If you have repo tools, grep the file for the
+    pattern first to find every spot. Leaving one path unchanged fails review.
+
     PLAN:
     Repo: {target_repo}
     File: {target_file}

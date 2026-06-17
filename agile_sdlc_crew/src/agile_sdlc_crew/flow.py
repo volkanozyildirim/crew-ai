@@ -194,6 +194,49 @@ def _review_rejected(review_text: str) -> bool:
     return False
 
 
+def _coalesce_plan_changes(changes: list) -> list:
+    """Ayni dosyayi hedefleyen birden fazla plan degisikligini TEK girise birlestir.
+
+    Aksi halde implement her degisikligi bagimsiz full-file push olarak isler ve
+    ikinci push birincinin duzeltmesini EZER (WI #66687 Kargoist.php: architect
+    v2 dali + legacy dali icin iki ayri 'edit' uretti; ikincisi birincisini ezdi,
+    reviewer hakli olarak 'v2 still * 1.20' dedi). Birlesik giris, current/new
+    kodu temizlenmis holistic bir full-file pass'e gider: developer dosyayi bir
+    kez okur, TUM degisiklikleri uygular, tek dosya dondurur.
+    """
+    groups: dict = {}
+    order: list = []
+    for c in changes:
+        fp = (c.get("file_path") or "").strip()
+        if not fp:
+            continue
+        if fp not in groups:
+            groups[fp] = []
+            order.append(fp)
+        groups[fp].append(c)
+    out = []
+    for fp in order:
+        grp = groups[fp]
+        if len(grp) == 1:
+            out.append(grp[0])
+            continue
+        descs = [c.get("description", "") for c in grp if c.get("description")]
+        types = {c.get("change_type", "edit") for c in grp}
+        ctype = "add" if types == {"add"} else "edit"
+        out.append({
+            "file_path": fp,
+            "change_type": ctype,
+            "description": (
+                "Bu dosyada uygulanacak TÜM değişiklikler — HEPSİNİ uygula "
+                "(dosyada birden fazla kod yolu/dal olabilir, hiçbirini atlama):\n"
+                + "\n".join(f"{i + 1}. {d}" for i, d in enumerate(descs))
+            ),
+            "current_code": "",
+            "new_code": "",
+        })
+    return out
+
+
 # ── State Model ──────────────────────────────────────
 
 class _KickoffOnlyStop(Exception):
@@ -2699,6 +2742,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
         repo_name = self.state.repo_name
         branch_name = self.state.branch_name
         all_pushes = []
+
+        # Ayni dosyayi hedefleyen degisiklikleri birlestir — yoksa ikinci push
+        # birincinin duzeltmesini ezer (WI #66687 Kargoist.php v2+legacy dali).
+        _orig_n = len(plan.get("changes", []))
+        plan["changes"] = _coalesce_plan_changes(plan.get("changes", []))
+        if len(plan["changes"]) < _orig_n:
+            _log(f"  Aynı dosyayı hedefleyen değişiklikler birleştirildi: "
+                 f"{_orig_n} → {len(plan['changes'])} (clobber önleme)")
+        self.state.plan = plan
 
         # Plan ozeti — developer her dosyayi implement ederken TUM plani gorsun.
         # Dosyalar arasi bagimliliklari anlamasi icin kritik (ornek: frontend API yolunu
