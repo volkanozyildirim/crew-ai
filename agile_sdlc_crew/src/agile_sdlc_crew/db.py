@@ -53,6 +53,22 @@ CREATE TABLE IF NOT EXISTS job_steps (
     FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
     INDEX idx_job (job_id)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    job_id INT NULL,
+    step_key VARCHAR(50) DEFAULT '',
+    agent VARCHAR(50) DEFAULT '',
+    model VARCHAR(60) DEFAULT '',
+    provider VARCHAR(30) DEFAULT '',
+    turns INT DEFAULT 0,
+    tool_calls INT DEFAULT 0,
+    cost_usd DECIMAL(12,6) DEFAULT 0,
+    duration_ms INT DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_job (job_id),
+    INDEX idx_job_agent (job_id, agent)
+) ENGINE=InnoDB;
 """
 
 STEP_DEFINITIONS = [
@@ -102,6 +118,14 @@ def init_db():
         _ensure_column(cur, "jobs", "parent_job_id", "INT NULL")
         # Dry-run: development stays local; no push, no PR, no review
         _ensure_column(cur, "jobs", "dry_run", "TINYINT(1) DEFAULT 0")
+        # Maliyet & arac-cagri muhasebesi (denormalize toplamlar)
+        _ensure_column(cur, "jobs", "total_cost_usd", "DECIMAL(12,6) DEFAULT 0")
+        _ensure_column(cur, "jobs", "total_llm_calls", "INT DEFAULT 0")
+        _ensure_column(cur, "jobs", "total_tool_calls", "INT DEFAULT 0")
+        _ensure_column(cur, "jobs", "total_turns", "INT DEFAULT 0")
+        _ensure_column(cur, "job_steps", "cost_usd", "DECIMAL(12,6) DEFAULT 0")
+        _ensure_column(cur, "job_steps", "tool_calls", "INT DEFAULT 0")
+        _ensure_column(cur, "job_steps", "turns", "INT DEFAULT 0")
 
 
 def _ensure_column(cur, table: str, column: str, ddl: str):
@@ -283,9 +307,14 @@ def skip_steps(job_id: int, step_keys: list[str], reason: str = "Atlandı"):
 
 
 def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | None:
-    """Onceki completed job'lardan step output'u getir.
-    work_item_id verilirse o WI'ye ait son completed job'dan,
-    verilmezse herhangi bir completed job'dan alir."""
+    """Onceki job'lardan bu step'in BASARILI (completed) ciktisini getir.
+
+    ADIM-SEVIYESI resume: job'un tamami completed olmasa bile, o ADIM
+    completed ise ciktisi yeniden kullanilir. Boylece review/build'de FAIL
+    olan bir isin daha once tamamlanmis kickoff/tasarim/implement adimlari
+    tekrar kosulmadan reuse edilir (asil 'ucuz tekrar' senaryosu).
+    Guvenilirlik: tamamen completed job'lara ait adimlar oncelikli (ORDER BY).
+    """
     with get_conn() as conn:
         cur = conn.cursor()
         if work_item_id:
@@ -293,9 +322,9 @@ def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | Non
                 "SELECT js.output FROM job_steps js "
                 "JOIN jobs j ON js.job_id = j.id "
                 "WHERE js.step_key = %s AND j.work_item_id = %s "
-                "AND j.status = 'completed' AND js.status = 'completed' "
+                "AND js.status = 'completed' "
                 "AND js.output IS NOT NULL AND js.output != '' "
-                "ORDER BY js.finished_at DESC LIMIT 1",
+                "ORDER BY (j.status = 'completed') DESC, js.finished_at DESC LIMIT 1",
                 (step_key, work_item_id),
             )
         else:
@@ -303,9 +332,9 @@ def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | Non
                 "SELECT js.output FROM job_steps js "
                 "JOIN jobs j ON js.job_id = j.id "
                 "WHERE js.step_key = %s "
-                "AND j.status = 'completed' AND js.status = 'completed' "
+                "AND js.status = 'completed' "
                 "AND js.output IS NOT NULL AND js.output != '' "
-                "ORDER BY js.finished_at DESC LIMIT 1",
+                "ORDER BY (j.status = 'completed') DESC, js.finished_at DESC LIMIT 1",
                 (step_key,),
             )
         row = cur.fetchone()
