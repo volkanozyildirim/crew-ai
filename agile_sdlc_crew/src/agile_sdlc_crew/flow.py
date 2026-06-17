@@ -1051,9 +1051,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew.tools.tool_cache import reset_tool_cache
         reset_tool_cache()
         try:
-            from agile_sdlc_crew.tools.claude_cli_llm import clear_repo_ctx, clear_call_context
+            from agile_sdlc_crew.tools.claude_cli_llm import (
+                clear_repo_ctx, clear_call_context, reset_budget_flag,
+            )
             clear_repo_ctx()
             clear_call_context()
+            reset_budget_flag()
         except Exception:
             pass
         self._job_prompt_tokens = 0
@@ -1088,6 +1091,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _db.record_llm_call(rec)
                 try:
                     self._job_real_cost_usd += float(rec.get("cost_usd") or 0)
+                    # Mid-step cap: limit asildiysa sonraki claude cagrilarini
+                    # kisa-devre yap (kickoff gibi tek adimda asimi sinirlar).
+                    from agile_sdlc_crew import pipeline_config as _pc_b
+                    if self._job_real_cost_usd > float(_pc_b.get("CREW_MAX_JOB_COST")):
+                        _cli_acct.signal_budget_exceeded()
                 except Exception:
                     pass
 
