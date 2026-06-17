@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     tool_calls INT DEFAULT 0,
     cost_usd DECIMAL(12,6) DEFAULT 0,
     duration_ms INT DEFAULT 0,
+    input_tokens INT DEFAULT 0,
+    output_tokens INT DEFAULT 0,
+    cache_read_tokens INT DEFAULT 0,
+    cache_creation_tokens INT DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_job (job_id),
     INDEX idx_job_agent (job_id, agent)
@@ -126,6 +130,11 @@ def init_db():
         _ensure_column(cur, "job_steps", "cost_usd", "DECIMAL(12,6) DEFAULT 0")
         _ensure_column(cur, "job_steps", "tool_calls", "INT DEFAULT 0")
         _ensure_column(cur, "job_steps", "turns", "INT DEFAULT 0")
+        # Token muhasebesi (claude -p result.usage'dan)
+        _ensure_column(cur, "jobs", "total_input_tokens", "BIGINT DEFAULT 0")
+        _ensure_column(cur, "jobs", "total_output_tokens", "BIGINT DEFAULT 0")
+        for _c in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"):
+            _ensure_column(cur, "llm_calls", _c, "INT DEFAULT 0")
 
 
 def _ensure_column(cur, table: str, column: str, ddl: str):
@@ -379,24 +388,32 @@ def record_llm_call(rec: dict) -> None:
     cost = float(rec.get("cost_usd") or 0)
     turns = int(rec.get("turns") or 0)
     tools = int(rec.get("tool_calls") or 0)
+    itok = int(rec.get("input_tokens") or 0)
+    otok = int(rec.get("output_tokens") or 0)
+    cread = int(rec.get("cache_read_tokens") or 0)
+    ccreate = int(rec.get("cache_creation_tokens") or 0)
     try:
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute(
                 "INSERT INTO llm_calls "
-                "(job_id, step_key, agent, model, provider, turns, tool_calls, cost_usd, duration_ms) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "(job_id, step_key, agent, model, provider, turns, tool_calls, cost_usd, "
+                "duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (job_id, step_key, (rec.get("agent") or "")[:50],
                  (rec.get("model") or "")[:60], (rec.get("provider") or "")[:30],
-                 turns, tools, cost, int(rec.get("duration_ms") or 0)),
+                 turns, tools, cost, int(rec.get("duration_ms") or 0),
+                 itok, otok, cread, ccreate),
             )
             if job_id:
                 cur.execute(
                     "UPDATE jobs SET total_cost_usd = total_cost_usd + %s, "
                     "total_llm_calls = total_llm_calls + 1, "
                     "total_tool_calls = total_tool_calls + %s, "
-                    "total_turns = total_turns + %s WHERE id = %s",
-                    (cost, tools, turns, job_id),
+                    "total_turns = total_turns + %s, "
+                    "total_input_tokens = total_input_tokens + %s, "
+                    "total_output_tokens = total_output_tokens + %s WHERE id = %s",
+                    (cost, tools, turns, itok, otok, job_id),
                 )
                 if step_key:
                     cur.execute(
@@ -414,7 +431,8 @@ def get_job_cost_summary(job_id: int) -> dict:
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT total_cost_usd, total_llm_calls, total_tool_calls, total_turns "
+            "SELECT total_cost_usd, total_llm_calls, total_tool_calls, total_turns, "
+            "total_input_tokens, total_output_tokens "
             "FROM jobs WHERE id = %s", (job_id,),
         )
         totals = cur.fetchone() or {}
@@ -422,7 +440,10 @@ def get_job_cost_summary(job_id: int) -> dict:
             "SELECT agent, COUNT(*) AS calls, "
             "COALESCE(SUM(tool_calls),0) AS tool_calls, "
             "COALESCE(SUM(turns),0) AS turns, "
-            "COALESCE(SUM(cost_usd),0) AS cost_usd "
+            "COALESCE(SUM(cost_usd),0) AS cost_usd, "
+            "COALESCE(SUM(input_tokens),0) AS input_tokens, "
+            "COALESCE(SUM(output_tokens),0) AS output_tokens, "
+            "COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens "
             "FROM llm_calls WHERE job_id = %s GROUP BY agent "
             "ORDER BY cost_usd DESC", (job_id,),
         )

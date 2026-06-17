@@ -113,6 +113,10 @@ def _emit_call_record(model: str, meta: dict) -> None:
             "tool_calls": int(meta.get("tool_calls") or 0),
             "cost_usd": float(meta.get("cost_usd") or 0.0),
             "duration_ms": int(meta.get("duration_ms") or 0),
+            "input_tokens": int(meta.get("input_tokens") or 0),
+            "output_tokens": int(meta.get("output_tokens") or 0),
+            "cache_read_tokens": int(meta.get("cache_read_tokens") or 0),
+            "cache_creation_tokens": int(meta.get("cache_creation_tokens") or 0),
         })
     except Exception:
         pass
@@ -173,6 +177,13 @@ def _log_stream_event(ev: dict, text_parts: list, meta: dict | None = None) -> s
             meta["turns"] = int(turns)
         if isinstance(cost, (int, float)):
             meta["cost_usd"] = float(cost)
+        # Token kullanimi — claude -p result.usage bloğu
+        u = ev.get("usage") or {}
+        if isinstance(u, dict):
+            meta["input_tokens"] = int(u.get("input_tokens", 0) or 0)
+            meta["output_tokens"] = int(u.get("output_tokens", 0) or 0)
+            meta["cache_read_tokens"] = int(u.get("cache_read_input_tokens", 0) or 0)
+            meta["cache_creation_tokens"] = int(u.get("cache_creation_input_tokens", 0) or 0)
         cost_s = f", ${cost:.4f}" if isinstance(cost, (int, float)) else ""
         log.info(f"  ✓ claude bitti ({turns} tur, {dur}ms{cost_s})")
         return ev.get("result", "") or ""
