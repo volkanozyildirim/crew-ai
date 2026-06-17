@@ -698,6 +698,12 @@ function renderDetail(j){
   if(j.branch_name){if(repoBase)m+=`<div class="meta-tag">🌿 <a href="${esc(repoBase)}?version=GB${encodeURIComponent(j.branch_name)}" target="_blank" onclick="event.stopPropagation()">${esc(j.branch_name)}</a></div>`;else m+=`<div class="meta-tag">🌿 ${esc(j.branch_name)}</div>`;}
   if(j.pr_url)m+=`<div class="meta-tag">PR <a href="${esc(j.pr_url)}" target="_blank">#${esc(j.pr_id||'')}</a></div>`;
   if(j.error_message&&j.status==='failed')m+=`<div class="meta-tag" style="color:var(--danger);flex-basis:100%">⚠ ${esc(j.error_message)}</div>`;
+  // Maliyet & arac muhasebesi
+  if(j.cost&&j.cost.totals){const t=j.cost.totals;const c=Number(t.total_cost_usd||0);
+    if(c>0||t.total_llm_calls)m+=`<div class="meta-tag">💰 $${c.toFixed(2)} · ${t.total_llm_calls||0} çağrı · ${t.total_tool_calls||0} araç · ${t.total_turns||0} tur</div>`;}
+  if(j.cost&&j.cost.by_agent&&j.cost.by_agent.length){
+    const rows=j.cost.by_agent.filter(a=>a.agent).map(a=>`${esc(a.agent)}: $${Number(a.cost_usd||0).toFixed(2)} (${a.calls||0}ç/${a.tool_calls||0}a/${a.turns||0}t)`).join(' · ');
+    if(rows)m+=`<div class="meta-tag" style="flex-basis:100%;font-size:9px;opacity:.85">👥 ${rows}</div>`;}
   document.getElementById('detailMeta').innerHTML=m;
   document.getElementById('detailRetryBtn').style.display=(j.status==='failed'||j.status==='completed')?'inline-block':'none';
 

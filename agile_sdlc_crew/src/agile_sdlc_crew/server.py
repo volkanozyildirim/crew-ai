@@ -196,16 +196,25 @@ async def pr_fix(req: PRFixRequest):
     }, status_code=202)
 
 
+def _to_jsonable(obj):
+    """Decimal → float, datetime → isoformat (JSONResponse serialize edebilsin)."""
+    from decimal import Decimal
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return obj
+
+
 @app.get("/api/jobs")
 async def list_jobs():
     """Tum isleri listele."""
     jobs = db.get_all_jobs()
-    # datetime serialization
-    for j in jobs:
-        for k in ("created_at", "started_at", "finished_at"):
-            if j.get(k) and isinstance(j[k], datetime):
-                j[k] = j[k].isoformat()
-    return JSONResponse(jobs)
+    return JSONResponse(_to_jsonable(jobs))
 
 
 @app.get("/api/jobs/{job_id}")
@@ -221,7 +230,12 @@ async def get_job(job_id: int):
         for k in ("started_at", "finished_at"):
             if s.get(k) and isinstance(s[k], datetime):
                 s[k] = s[k].isoformat()
-    return JSONResponse(job)
+    # Maliyet & arac muhasebesi: toplamlar (job uzerinde) + per-agent kirilim
+    try:
+        job["cost"] = db.get_job_cost_summary(job_id)
+    except Exception:
+        job["cost"] = {"totals": {}, "by_agent": []}
+    return JSONResponse(_to_jsonable(job))
 
 
 @app.get("/api/jobs/{job_id}/diff")

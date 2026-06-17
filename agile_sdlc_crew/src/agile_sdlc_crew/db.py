@@ -371,6 +371,65 @@ def clear_cached_step_output(step_key: str, work_item_id: str) -> int:
         return cur.rowcount
 
 
+def record_llm_call(rec: dict) -> None:
+    """Bir LLM cagrisini llm_calls'a yaz + jobs/job_steps toplamlarini guncelle.
+    Muhasebe ASLA pipeline'i bozmamali — tum hatalar yutulur."""
+    job_id = rec.get("job_id")
+    step_key = (rec.get("step_key") or "")[:50]
+    cost = float(rec.get("cost_usd") or 0)
+    turns = int(rec.get("turns") or 0)
+    tools = int(rec.get("tool_calls") or 0)
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO llm_calls "
+                "(job_id, step_key, agent, model, provider, turns, tool_calls, cost_usd, duration_ms) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (job_id, step_key, (rec.get("agent") or "")[:50],
+                 (rec.get("model") or "")[:60], (rec.get("provider") or "")[:30],
+                 turns, tools, cost, int(rec.get("duration_ms") or 0)),
+            )
+            if job_id:
+                cur.execute(
+                    "UPDATE jobs SET total_cost_usd = total_cost_usd + %s, "
+                    "total_llm_calls = total_llm_calls + 1, "
+                    "total_tool_calls = total_tool_calls + %s, "
+                    "total_turns = total_turns + %s WHERE id = %s",
+                    (cost, tools, turns, job_id),
+                )
+                if step_key:
+                    cur.execute(
+                        "UPDATE job_steps SET cost_usd = cost_usd + %s, "
+                        "tool_calls = tool_calls + %s, turns = turns + %s "
+                        "WHERE job_id = %s AND step_key = %s",
+                        (cost, tools, turns, job_id, step_key),
+                    )
+    except Exception:
+        pass
+
+
+def get_job_cost_summary(job_id: int) -> dict:
+    """Job'un toplam maliyet/cagri/arac/tur'u + per-agent kirilimi."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT total_cost_usd, total_llm_calls, total_tool_calls, total_turns "
+            "FROM jobs WHERE id = %s", (job_id,),
+        )
+        totals = cur.fetchone() or {}
+        cur.execute(
+            "SELECT agent, COUNT(*) AS calls, "
+            "COALESCE(SUM(tool_calls),0) AS tool_calls, "
+            "COALESCE(SUM(turns),0) AS turns, "
+            "COALESCE(SUM(cost_usd),0) AS cost_usd "
+            "FROM llm_calls WHERE job_id = %s GROUP BY agent "
+            "ORDER BY cost_usd DESC", (job_id,),
+        )
+        by_agent = cur.fetchall()
+    return {"totals": totals, "by_agent": by_agent}
+
+
 def get_job(job_id: int) -> dict | None:
     with get_conn() as conn:
         cur = conn.cursor()

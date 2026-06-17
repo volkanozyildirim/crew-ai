@@ -419,6 +419,17 @@ class AgileSDLCFlow(Flow[PipelineState]):
         return _cb.measure(step_key, "\n".join(parts))
 
     def _step_start(self, step_key: str):
+        # Cagri muhasebesi: bu adimdaki claude cagrilari bu (job, step, agent)'a
+        # atfedilsin. Kickoff gibi cok-agent'li adimlarda crew tarafi persona
+        # bazinda override edebilir.
+        try:
+            from agile_sdlc_crew.tools import claude_cli_llm as _cli_acct
+            from agile_sdlc_crew.dashboard import TASK_AGENTS as _ta
+            _cli_acct.set_call_context(
+                self.state.job_id, step_key, _ta.get(step_key, ""),
+            )
+        except Exception:
+            pass
         if self.state.job_id:
             try:
                 self._db.start_step(self.state.job_id, step_key)
@@ -770,16 +781,20 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew import pipeline_config as _pc
         price_in = _pc.get("CREW_PRICE_INPUT_USD_PER_M")
         price_out = _pc.get("CREW_PRICE_OUTPUT_USD_PER_M")
-        cost = (
+        token_cost = (
             self._job_prompt_tokens * price_in + self._job_completion_tokens * price_out
         ) / 1_000_000.0
+        # claude_cli token vermiyor (Usage 0/0); gercek maliyet sink'ten gelir.
+        # Ikisinin maksimumunu al — guard claude_cli'de de gercekten calissin.
+        real_cost = getattr(self, "_job_real_cost_usd", 0.0)
+        cost = max(token_cost, real_cost)
 
         max_cost = _pc.get("CREW_MAX_JOB_COST")
         if step_name:
             local_tag = " [LOCAL]" if is_local else ""
             _log(
                 f"  💰 Token: {tt} (+{pt}i/{ct}o){local_tag} | Harici toplam: "
-                f"{self._job_total_tokens} ≈ ${cost:.3f} / ${max_cost:.2f}"
+                f"{self._job_total_tokens} | gerçek ${real_cost:.3f} ≈ ${cost:.3f} / ${max_cost:.2f}"
             )
         if cost > max_cost:
             _log(
@@ -1036,13 +1051,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew.tools.tool_cache import reset_tool_cache
         reset_tool_cache()
         try:
-            from agile_sdlc_crew.tools.claude_cli_llm import clear_repo_ctx
+            from agile_sdlc_crew.tools.claude_cli_llm import clear_repo_ctx, clear_call_context
             clear_repo_ctx()
+            clear_call_context()
         except Exception:
             pass
         self._job_prompt_tokens = 0
         self._job_completion_tokens = 0
         self._job_total_tokens = 0
+        self._job_real_cost_usd = 0.0   # claude_cli gercek maliyet toplami (budget guard)
         # discover_repos'un kanit-temelli repo karari — step4 otoritesi
         self._discovered_repo = ""
         self._discovered_alternatives = []
@@ -1060,6 +1077,24 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._reset_job_state()
 
         self._db = _db
+
+        # Cagri muhasebesi sink'ini bagla: her claude cagrisi llm_calls'a yazilir
+        # + jobs/job_steps toplamlari guncellenir + budget guard icin gercek
+        # maliyet biriktirilir.
+        try:
+            from agile_sdlc_crew.tools import claude_cli_llm as _cli_acct
+
+            def _cost_sink(rec):
+                _db.record_llm_call(rec)
+                try:
+                    self._job_real_cost_usd += float(rec.get("cost_usd") or 0)
+                except Exception:
+                    pass
+
+            _cli_acct.register_call_sink(_cost_sink)
+        except Exception:
+            pass
+
         self._agile_crew = AgileSDLCCrew()
         self._agile_crew.set_status_tracker(self._tracker)
         self._client = AzureDevOpsClient()
