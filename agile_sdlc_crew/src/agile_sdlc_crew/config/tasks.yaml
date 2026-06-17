@@ -722,7 +722,7 @@ review_pr_task:
   expected_output: >
     ## PR Review Result
 
-    **Verdict:** APPROVE / CHANGES_REQUIRED
+    **Verdict:** (choose exactly ONE word) APPROVE  —or—  CHANGES_REQUIRED
 
     **Acceptance Criteria Check:**
     - [Criterion 1]: MET / UNMET - [explanation]
@@ -739,6 +739,11 @@ review_pr_task:
 
     **Unrelated Changes:**
     - [list or "None"]
+
+    The VERY LAST line of your answer MUST be a machine-readable decision token,
+    exactly one of these two, with nothing else on the line:
+    REVIEW_DECISION: APPROVE
+    REVIEW_DECISION: CHANGES_REQUIRED
   agent: code_reviewer
 
 # ══════════════════════════════════════════════════════════════

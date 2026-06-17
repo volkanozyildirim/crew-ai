@@ -209,6 +209,13 @@ SCHEMA: list[dict] = [
         "default": False,
         "desc": "vendor/node_modules altindaki 3rd-party paketleri (composer.json/package.json'daki require listesinden) vector DB'ye index'le. Semantic search Butterfly/Laravel framework kodunda da arar. Per-paket max 300 chunk; CREW_VENDOR_INCLUDE env ile ek path eklenir.",
     },
+    {
+        "key": "CREW_CLI_REPO_TOOLS",
+        "label": "Architect Repo Araclari (claude -p --add-dir)",
+        "type": "bool",
+        "default": False,
+        "desc": "Teknik tasarimda architect'e klonlanmis hedef repoyu --add-dir ile, Read/Grep/Glob'u --allowedTools ile ver. Architect gercek kodu kesfeder (mevcut servisi bulup 'modify' yapar; yeni dosya halusine etmez). UYARI: agent ekstra tur/sure harcayabilir.",
+    },
 ]
 
 _SCHEMA_BY_KEY: dict[str, dict] = {f["key"]: f for f in SCHEMA}
