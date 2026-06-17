@@ -15,8 +15,48 @@ import logging
 import os
 import subprocess
 import threading
+from contextlib import contextmanager
 
 log = logging.getLogger("pipeline")
+
+# ── Repo-tool baglami (Part B: architect'i "gor kil") ──────────────────
+# claude_cli normalde duz metin LLM gibi cagrilir; CrewAI'in Python tool'lari
+# (browse_repo/search_code) subprocess'e ulasmaz. Ama `claude -p` ZATEN Claude
+# Code'dur — ona --add-dir ile klonlanmis repoyu ve --allowedTools ile yerel
+# Read/Grep/Glob araclarini verirsek gercek kodu kesfeder. Bu thread-local,
+# bir crew kickoff'u oncesinde set edilir; o pencerede claude cagrilarina
+# --add-dir/--allowedTools eklenir.
+_cli_ctx = threading.local()
+
+
+def _get_repo_ctx() -> tuple[list, str]:
+    return getattr(_cli_ctx, "add_dirs", []), getattr(_cli_ctx, "allowed_tools", "")
+
+
+def set_repo_ctx(add_dirs: list, allowed_tools: str = "Read,Grep,Glob,LS") -> None:
+    """Bu thread'deki sonraki claude_cli cagrilari verilen repolari --add-dir
+    ile gorsun. clear_repo_ctx ile temizlenmeli (genelde try/finally)."""
+    _cli_ctx.add_dirs = [str(d) for d in (add_dirs or [])]
+    _cli_ctx.allowed_tools = allowed_tools or ""
+
+
+def clear_repo_ctx() -> None:
+    _cli_ctx.add_dirs = []
+    _cli_ctx.allowed_tools = ""
+
+
+@contextmanager
+def repo_tools_context(add_dirs: list, allowed_tools: str = "Read,Grep,Glob,LS"):
+    """Bu blok icindeki claude_cli cagrilari verilen repolari --add-dir ile
+    gorur ve allowed_tools'u kullanabilir. Thread-local — ic ice/paralel
+    kickoff'larda yalniz set eden thread'i etkiler."""
+    prev = _get_repo_ctx()
+    _cli_ctx.add_dirs = [str(d) for d in (add_dirs or [])]
+    _cli_ctx.allowed_tools = allowed_tools or ""
+    try:
+        yield
+    finally:
+        _cli_ctx.add_dirs, _cli_ctx.allowed_tools = prev
 
 
 def _brief_input(inp: dict) -> str:
@@ -143,6 +183,15 @@ def claude_cli_completion(
         cmd.extend(["--system-prompt", system])
     if model:
         cmd.extend(["--model", model])
+
+    # Repo-tool baglami varsa: klonlanmis repoyu ve yerel arac iznini gecir.
+    # Boylece bu cagri gercek repoyu kesfedebilir (halusinasyon yerine).
+    add_dirs, allowed_tools = _get_repo_ctx()
+    for d in add_dirs:
+        cmd.extend(["--add-dir", d])
+    if allowed_tools:
+        cmd.extend(["--allowedTools", allowed_tools])
+
     env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"}
 
     stream = os.environ.get("CREW_CLAUDE_CLI_STREAM", "1") != "0"

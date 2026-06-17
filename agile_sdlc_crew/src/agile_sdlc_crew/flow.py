@@ -153,6 +153,47 @@ def _extract_dev_output(code_result) -> str:
     return _extract_code_from_output(code_result.raw or "")
 
 
+def _review_rejected(review_text: str) -> bool:
+    """Kod inceleme ciktisindan RED (CHANGES_REQUIRED) karari ver.
+
+    DIKKAT: Gecmiste tum metinde substring aranıyordu. Reviewer task'i
+    'CHANGES_REQUIRED' kelimesini kural metninde ~7 kez tekrarliyor ve
+    expected_output sablonunun verdict satiri birebir 'APPROVE / CHANGES_REQUIRED'.
+    Model sablonu/kurallari yansittiginda gercek bir APPROVE bile RED okunuyor
+    ve bos yere review-retry dongusune giriliyordu. Bu fonksiyon SADECE acik
+    karar tokenina bakar; belirsizlikte dongoyu tetiklememek icin RED degildir.
+    """
+    import re as _re_v
+    text = review_text or ""
+
+    # 1) En guclu sinyal: govdede hicbir yerde gecmeyen makine satiri.
+    decisions = _re_v.findall(
+        r"(?im)^[\s>*_#-]*REVIEW_DECISION\s*[:=]\s*([A-Za-z_]+)", text
+    )
+    if decisions:
+        last = decisions[-1].strip().upper()
+        return last.startswith("REJECT") or "CHANGES_REQUIRED" in last
+
+    # 2) Geri donus: yalniz 'Verdict:' SATIRINI parse et (tum metni degil).
+    vm = _re_v.search(
+        r"(?im)^[\s>*_#-]*(?:final[\s_]*)?(?:verdict|karar)\s*[:=]\s*(.+)$", text
+    )
+    if vm:
+        val = vm.group(1).upper()
+        has_reject = any(tok in val for tok in (
+            "CHANGES_REQUIRED", "CHANGES REQUIRED", "REJECT", "RED",
+            "REDDED", "DEĞİŞİKLİK GEREKLİ", "DEGISIKLIK GEREKLI",
+        ))
+        has_approve = "APPROVE" in val or "ONAY" in val
+        if has_reject and not has_approve:
+            return True
+        # Net APPROVE, ya da sablon echo'su (ikisi birden) / belirsiz → dongoye girme.
+        return False
+
+    # 3) Hic karar satiri yok → parse kacagi yuzunden pipeline'i bloklama.
+    return False
+
+
 # ── State Model ──────────────────────────────────────
 
 class _KickoffOnlyStop(Exception):
@@ -531,9 +572,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
             target = ""
 
         if target:
-            # state.repo_name'i set ETMIYORUZ — architect technical_design
-            # JSON'unda kendi repo_name'ini yazsin; bu sadece ONERI.
-            alt = ", ".join(parsed.get("alternatives", []) or [])
+            # discover_repos GERCEK symbol-grep kaniti uzerinde akil yuruten LLM
+            # adimi — repo karari icin en guvenilir sinyal. step4 bunu otorite
+            # olarak kullanir (architect tool'suzken kor; kendi repo_name'ini
+            # halusine edebiliyor — bkz. WI #66511 orkestra/webservice).
+            self._discovered_repo = target
+            self._discovered_alternatives = [
+                a for a in (parsed.get("alternatives", []) or []) if a in known
+            ]
             _log(f"  Discover repo onerisi: {target} — {reason[:200]}")
             self._step_done(
                 "discover_repos_task",
@@ -901,14 +947,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
         review_text = review_result.raw or ""
         self.state.review_text = review_text
 
-        # Re-check — still rejected? (accept both English and legacy Turkish tokens)
-        review_upper = review_text.upper()
-        still_rejected = any(marker in review_upper for marker in [
-            "CHANGES_REQUIRED", "CHANGES REQUIRED",
-            "DEGISIKLIK GEREKLI", "DEĞİŞİKLİK GEREKLİ",
-            "REJECTED", "REDDEDILDI", "REDDEDİLDİ",
-            "VERDICT: REJECT", "KARAR: RED", "KARAR:RED",
-        ])
+        # Re-check — still rejected? (yalniz acik karar tokenina bakar)
+        still_rejected = _review_rejected(review_text)
         if still_rejected:
             # step8_code_review'daki max retry kontrolune don
             review_attempt = getattr(self, "_review_attempt", 0)
@@ -946,9 +986,17 @@ class AgileSDLCFlow(Flow[PipelineState]):
         """Job basinda paylasimli/birikimli durumu sifirla (cross-job sizinti onleme)."""
         from agile_sdlc_crew.tools.tool_cache import reset_tool_cache
         reset_tool_cache()
+        try:
+            from agile_sdlc_crew.tools.claude_cli_llm import clear_repo_ctx
+            clear_repo_ctx()
+        except Exception:
+            pass
         self._job_prompt_tokens = 0
         self._job_completion_tokens = 0
         self._job_total_tokens = 0
+        # discover_repos'un kanit-temelli repo karari — step4 otoritesi
+        self._discovered_repo = ""
+        self._discovered_alternatives = []
 
     @start()
     def initialize(self):
@@ -2006,10 +2054,19 @@ class AgileSDLCFlow(Flow[PipelineState]):
         prefetch_repo = ""
         relevant = []
 
+        # Katman -2: discover_repos karari (EN GUCLU). Bu, symbol-grep kaniti +
+        # repo ozetleri uzerinde akil yuruten ayri LLM adimi; naive tie-break'ten
+        # daha guvenilir. WI #66511'de symbol-grep berabereydi (orkestra 1excl/4,
+        # webservice 1excl/4) ve tie-break yanlis repoya (orkestra) gitti; oysa
+        # discover_repos 'returnOffices yalnız webservice'te' diye dogru secmisti.
+        if getattr(self, "_discovered_repo", "") in self.state.known_repos:
+            prefetch_repo = self._discovered_repo
+            _log(f"  Adim 4 hedef repo (discover_repos otoritesi): {prefetch_repo}")
+
         # Katman -1: BIREBIR KOD KANITI (en guclu). Bir sembol yalnizca tek
         # repoda geciyorsa, fuzzy isim eslesmesini EZER. 'stock_api_list' →
         # 'stock-api' adi yanilgisini engeller (asil sahip orkestra).
-        if symbol_evidence:
+        if not prefetch_repo and symbol_evidence:
             ev_ranked = sorted(
                 symbol_evidence.items(),
                 key=lambda kv: (len(kv[1].get("exclusive", [])), len(kv[1].get("symbols", []))),
@@ -2232,19 +2289,39 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 #      zorunda kalmaz (claude_cli ReAct tool-loop'unda bos donuyor).
                 if prefetch_file_count < 3 and repo_dir.exists():
                     import subprocess as _sp_grep
-                    _term_src = f"{wi_title} {wi_desc_clean} {wi_criteria_clean} {self.state.requirements_text[:800]}"
+                    # JSON anahtari / Turkce gurultu engellemek icin blocklist.
+                    _STOP = {
+                        "functional_requirements", "technical_requirements",
+                        "acceptance_criteria", "out_of_scope", "open_questions",
+                        "work_item_id", "current_code", "new_code", "file_path",
+                        "change_type", "repo_name",
+                    }
                     grep_terms: list[str] = []
+                    # 1) EN DEGERLI: symbol_evidence'in bu repoda DOGRULADIGI semboller
+                    #    (WI'dan cikarilip repolarda birebir grep'lenmis — returnOffices gibi).
+                    _ev = symbol_evidence.get(prefetch_repo, {}) if symbol_evidence else {}
+                    for s in (_ev.get("exclusive", []) + _ev.get("symbols", [])):
+                        if s and s.lower() not in {x.lower() for x in grep_terms}:
+                            grep_terms.append(s)
+                    # 2) Sadece WI baslik+aciklamasindan gercek kod tanimlayicilari
+                    #    (requirements_text JSON'unu DAHIL ETME; IGNORECASE YOK —
+                    #     yoksa camelCase deseni her Turkce kelimeyi eslesir).
+                    _term_src = f"{wi_title} {wi_desc_clean} {wi_criteria_clean}"
                     for pat in (
-                        r'\b([a-z][a-z0-9]{2,}_[a-z0-9_]{2,})\b',   # snake_case: stock_api_list
-                        r'\b([a-z]+[A-Z][a-zA-Z]{3,})\b',           # camelCase: getStockList
+                        r'\b([a-z][a-z0-9]{2,}_[a-z0-9_]{2,})\b',   # snake_case: opening_hours
+                        r'\b([a-z]+[A-Z][a-zA-Z]{3,})\b',           # camelCase: returnOffices
                         r'/api/(\w+)',                              # endpoint: /api/stock
                     ):
-                        for m in _re.finditer(pat, _term_src, _re.IGNORECASE):
+                        for m in _re.finditer(pat, _term_src):
                             t = m.group(1)
+                            if not t.isascii():
+                                continue
+                            if t.lower() in _STOP:
+                                continue
                             if t.lower() not in {x.lower() for x in grep_terms}:
                                 grep_terms.append(t)
-                    # En spesifik (uzun) terimler once
-                    grep_terms.sort(key=len, reverse=True)
+                    # symbol_evidence terimleri once kalsin; gerisinde uzun (spesifik) once
+                    grep_terms.sort(key=lambda t: (t not in (_ev.get("exclusive", []) + _ev.get("symbols", [])), -len(t)))
                     seen_grep: set[str] = set()
                     if grep_terms:
                         _log(f"  Repo-ici grep terimleri: {grep_terms[:8]}")
@@ -2342,6 +2419,29 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 "ilgili dosyalari oku, sonra JSON plan uret."
             )
 
+        # ── Part B: architect'i "gor kil" — claude -p'ye klonlanmis repoyu
+        # --add-dir ile, Read/Grep/Glob'u --allowedTools ile ver. Boylece
+        # gercek kodu kesfeder (returnOffices'i halusine etmek yerine bulur).
+        # Env-toggle: CREW_CLI_REPO_TOOLS (default kapali — maliyet/sure etkisi var).
+        from agile_sdlc_crew.tools import claude_cli_llm as _cli
+        from agile_sdlc_crew import pipeline_config as _pc_cli
+        _cli_repo_tools = False
+        try:
+            _cli_repo_tools = bool(_pc_cli.get("CREW_CLI_REPO_TOOLS"))
+        except Exception:
+            pass
+        if _cli_repo_tools and prefetch_repo:
+            _cand = [prefetch_repo] + [
+                a for a in getattr(self, "_discovered_alternatives", []) if a != prefetch_repo
+            ]
+            _repo_dirs = [
+                str(self._repo_mgr.base_dir / r) for r in _cand[:3]
+                if (self._repo_mgr.base_dir / r).exists()
+            ]
+            if _repo_dirs:
+                _cli.set_repo_ctx(_repo_dirs, "Read,Grep,Glob,LS")
+                _log(f"  Architect repo araclari ACIK: --add-dir {len(_repo_dirs)} repo, Read/Grep/Glob")
+
         analysis_crew = self._agile_crew.create_analysis_crew()
         try:
             analysis_result = analysis_crew.kickoff(inputs={
@@ -2410,6 +2510,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
             raw_output = analysis_result.raw or ""
             plan = _parse_architect_output(raw_output)
 
+        # Architect kickoff'lari bitti — repo-tool baglamini temizle (sonraki
+        # adimlara sizmasin). Defensif olarak _reset_job_state'de de temizlenir.
+        _cli.clear_repo_ctx()
+
         self.state.requirements_text = self.state.requirements_text or raw_output
 
         repo_name = plan["repo_name"]
@@ -2417,6 +2521,26 @@ class AgileSDLCFlow(Flow[PipelineState]):
             repo_name = _resolve_repo_name(
                 repo_name, self.state.known_repos, self._client, self.state.work_item_id,
             )
+            plan["repo_name"] = repo_name
+
+        # ── Repo otoritesi: discover_repos kanit-temelli secimi architect'i ezer ──
+        # Architect tool'suzken kor olabilir ve repo_name'i halusine edebilir
+        # (WI #66511: architect 'orkestra' dedi, returnOffices aslinda webservice'te).
+        # discover_repos symbol-grep kaniti uzerine akil yurutup dogru repoyu sectiyse
+        # ve architect farkli bir repo verdiyse, discover_repos'a don.
+        _disc = getattr(self, "_discovered_repo", "")
+        if _disc and _disc in self.state.known_repos and repo_name != _disc:
+            _log(
+                f"  ⚠️ Repo otoritesi: architect '{repo_name}' dedi ama discover_repos "
+                f"'{_disc}' (kanit-temelli). '{_disc}' ile devam ediliyor."
+            )
+            _add_wi_comment(self._client, self.state.work_item_id,
+                f"## ℹ️ Repo Kararı Düzeltildi\n\n"
+                f"Teknik tasarım `{repo_name}` önerdi; kanıt-temelli repo keşfi `{_disc}` "
+                f"buldu (WI sembolleri bu repoda). `{_disc}` ile devam ediliyor.\n\n"
+                f"---\n*Agile SDLC Crew - Repo Authority*"
+            )
+            repo_name = _disc
             plan["repo_name"] = repo_name
 
         self.state.repo_name = repo_name
@@ -3137,13 +3261,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # loop back into dev (max CREW_REVIEW_MAX_RETRIES, default 2).
         # Accept both English (new) and Turkish (legacy) tokens.
         import os as _os_rev
-        review_upper = review_text.upper()
-        rejected = any(marker in review_upper for marker in [
-            "CHANGES_REQUIRED", "CHANGES REQUIRED",
-            "DEGISIKLIK GEREKLI", "DEĞİŞİKLİK GEREKLİ",
-            "REJECTED", "REDDEDILDI", "REDDEDİLDİ",
-            "VERDICT: REJECT", "KARAR: RED", "KARAR:RED",
-        ])
+        rejected = _review_rejected(review_text)
         from agile_sdlc_crew import pipeline_config as _pc_rev
         max_review_retries = _pc_rev.get("CREW_REVIEW_MAX_RETRIES")
         review_attempt = getattr(self, "_review_attempt", 0)
