@@ -535,6 +535,82 @@ class AzureDevOpsClient:
         resp2.raise_for_status()
         return resp2.json().get("changeEntries", [])
 
+    # ── Build / CI API'leri (PR test gate) ──
+
+    def get_pr_build(self, repo_id_or_name: str, pull_request_id: int) -> dict | None:
+        """PR'in en yeni CI build'ini dondur (branchName=refs/pull/{id}/merge).
+        None → bu repoda PR'i tetikleyen bir build pipeline'i yok demektir."""
+        project = self._find_repo_project(repo_id_or_name)
+        url = f"{self.org_url}/{project}/_apis/build/builds"
+        params = {
+            "api-version": self.API_VERSION,
+            "branchName": f"refs/pull/{pull_request_id}/merge",
+            "$top": 1,
+            "queryOrder": "queueTimeDescending",
+        }
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        vals = resp.json().get("value", [])
+        if not vals:
+            return None
+        b = vals[0]
+        return {
+            "build_id": b.get("id"),
+            "status": b.get("status"),       # notStarted|inProgress|completed|postponed|...
+            "result": b.get("result"),       # succeeded|failed|partiallySucceeded|canceled|None
+            "definition": (b.get("definition") or {}).get("name"),
+            "url": ((b.get("_links") or {}).get("web") or {}).get("href"),
+            "project": project,
+        }
+
+    def get_build_failure_summary(
+        self, project: str, build_id: int, max_chars: int = 4000
+    ) -> str:
+        """Basarisiz build'in failed task'lari + test outcome ozeti + 'Run tests'
+        log kuyrugu — developer'in testleri/kodu duzeltebilmesi icin context."""
+        parts: list[str] = []
+        # 1) timeline → failed task'lar (+ test log'u)
+        try:
+            url = f"{self.org_url}/{project}/_apis/build/builds/{build_id}/timeline"
+            resp = requests.get(url, headers=self._headers,
+                                params={"api-version": self.API_VERSION}, timeout=30)
+            if resp.ok:
+                for rec in resp.json().get("records", []):
+                    if rec.get("result") != "failed" or rec.get("type") not in ("Task", "Job", "Phase"):
+                        continue
+                    nm = rec.get("name", "?")
+                    issues = rec.get("issues", []) or []
+                    errs = "; ".join(
+                        i.get("message", "")[:300] for i in issues if i.get("type") == "error"
+                    )[:1500]
+                    parts.append(f"FAILED [{rec.get('type')}] {nm}" + (f": {errs}" if errs else ""))
+                    log_url = (rec.get("log") or {}).get("url")
+                    if log_url and "test" in nm.lower():
+                        try:
+                            lr = requests.get(log_url, headers=self._headers, timeout=30)
+                            if lr.ok:
+                                tail = "\n".join(lr.text.splitlines()[-60:])
+                                parts.append(f"--- {nm} log (son satirlar) ---\n{tail}")
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        # 2) test outcome ozeti (varsa)
+        try:
+            tr = requests.get(
+                f"{self.org_url}/{project}/_apis/test/ResultSummaryByBuild",
+                headers=self._headers,
+                params={"api-version": "7.1-preview.1", "buildId": build_id}, timeout=30,
+            )
+            if tr.ok:
+                agg = tr.json().get("aggregatedResultsAnalysis", {})
+                if agg.get("totalTests"):
+                    parts.append(f"Test ozet: {agg.get('totalTests')} test, sonuc: {agg.get('resultsByOutcome', {})}")
+        except Exception:
+            pass
+        out = "\n".join(parts).strip()
+        return out[:max_chars]
+
     # ── Sprint / Iteration API'leri ──
 
     def list_teams(self) -> list[dict]:

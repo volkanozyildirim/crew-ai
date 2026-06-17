@@ -65,6 +65,7 @@ STEP_DEFINITIONS = [
     ("implement_change_task", "Kod Yazma & Push", "senior_developer"),
     ("create_pr_task", "PR Oluşturma", "senior_developer"),
     ("review_pr_task", "Kod İnceleme", "code_reviewer"),
+    ("pr_build_gate", "PR Test Build", "senior_developer"),
     ("test_planning_task", "Test Planlama", "qa_engineer"),
     ("uat_task", "UAT Doğrulama", "uat_specialist"),
     ("completion_report_task", "Tamamlanma Raporu", "scrum_master"),

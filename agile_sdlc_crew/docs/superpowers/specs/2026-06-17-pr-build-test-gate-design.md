@@ -18,8 +18,8 @@ testleri lokalde çalıştırmaya (composer/pytest install, DB bağımlılığı
 ## Mimari
 
 ### Yeni adım: `pr_build_gate`
-Akış: `create_pr_task` → **`pr_build_gate`** → `review_pr_task`
-(gate review'dan ÖNCE: testler önce yeşil olsun, sonra review).
+Akış: `review_pr_task` → **`pr_build_gate`** → (`test_planning_task` ∥ `uat_task`)
+(gate review'dan SONRA: review-retry de push yaptığından son hâl test edilmiş olur).
 
 1. PR build'ini bul: `build/builds?branchName=refs/pull/{pr_id}/merge` (en yeni).
 2. Build yoksa kısa süre poll et (policy tetik gecikmesi). Hâlâ yoksa → repoda PR-test

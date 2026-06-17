@@ -216,6 +216,44 @@ SCHEMA: list[dict] = [
         "default": False,
         "desc": "Teknik tasarimda architect'e klonlanmis hedef repoyu --add-dir ile, Read/Grep/Glob'u --allowedTools ile ver. Architect gercek kodu kesfeder (mevcut servisi bulup 'modify' yapar; yeni dosya halusine etmez). UYARI: agent ekstra tur/sure harcayabilir.",
     },
+    {
+        "key": "CREW_PR_BUILD_GATE",
+        "label": "PR Build/Test Gate",
+        "type": "bool",
+        "default": False,
+        "desc": "PR olusunca Azure DevOps'un PR-test pipeline'ini (refs/pull/{id}/merge) poll et; testler patlarsa developer fix dongusune gir, build yesil olana kadar gate yap. Repoda PR-test pipeline'i yoksa atlanir. UYARI: build suresi kadar bekler.",
+    },
+    {
+        "key": "CREW_REQUIRE_TESTS",
+        "label": "Test Yazma Zorunlulugu",
+        "type": "bool",
+        "default": False,
+        "desc": "Repoda test altyapisi varsa (PR-test pipeline veya phpunit.xml/*Test/tests/ dizini), developer degisen davranis icin test ekler/gunceller; reviewer test eksikse CHANGES_REQUIRED verir.",
+    },
+    {
+        "key": "CREW_PR_BUILD_MAX_RETRIES",
+        "label": "PR Build Fix Max Retry",
+        "type": "int",
+        "default": 2,
+        "min": 0,
+        "desc": "PR build (test) basarisiz olunca kac kez otomatik duzeltme+yeniden-build dongusu calisir.",
+    },
+    {
+        "key": "CREW_PR_BUILD_POLL_TIMEOUT",
+        "label": "PR Build Poll Timeout (sn)",
+        "type": "int",
+        "default": 1200,
+        "min": 60,
+        "desc": "PR build'inin tamamlanmasi icin beklenecek azami sure (saniye). Asilirsa gate 'belirsiz' sayilip gecilir.",
+    },
+    {
+        "key": "CREW_PR_BUILD_POLL_INTERVAL",
+        "label": "PR Build Poll Interval (sn)",
+        "type": "int",
+        "default": 30,
+        "min": 5,
+        "desc": "PR build durumunun kac saniyede bir sorgulanacagi.",
+    },
 ]
 
 _SCHEMA_BY_KEY: dict[str, dict] = {f["key"]: f for f in SCHEMA}
