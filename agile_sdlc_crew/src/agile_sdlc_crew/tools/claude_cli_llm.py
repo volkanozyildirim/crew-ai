@@ -98,6 +98,26 @@ def register_call_sink(fn) -> None:
     _call_sink = fn
 
 
+# Mid-step budget cap: sink limit asildigini gorunce bayragi set eder;
+# sonraki claude cagrilari kisa-devre yapip bos doner (kickoff gibi tek
+# adimda 30+ cagri yapilan yerde asimi ~1 cagriyla sinirlar).
+_budget_exceeded = False
+
+
+def signal_budget_exceeded() -> None:
+    global _budget_exceeded
+    _budget_exceeded = True
+
+
+def reset_budget_flag() -> None:
+    global _budget_exceeded
+    _budget_exceeded = False
+
+
+def is_budget_exceeded() -> bool:
+    return _budget_exceeded
+
+
 def _emit_call_record(model: str, meta: dict) -> None:
     if _call_sink is None:
         return
@@ -255,6 +275,10 @@ def claude_cli_completion(
     ("You are Claude Code...") yerine bizim persona gibi davranir.
 
     Timeout pipeline_config'dan okunur (CREW_CLAUDE_CLI_TIMEOUT, default 300s)."""
+    # Budget asildiysa daha fazla pahali cagri yapma — kisa-devre.
+    if _budget_exceeded:
+        log.warning("  ⛔ Budget asildi — claude cagrisi atlandi (kisa-devre)")
+        return ""
     try:
         from agile_sdlc_crew import pipeline_config as _pc
         timeout_s = int(_pc.get("CREW_CLAUDE_CLI_TIMEOUT"))
