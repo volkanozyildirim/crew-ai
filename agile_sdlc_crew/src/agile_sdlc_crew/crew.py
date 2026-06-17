@@ -665,7 +665,20 @@ class AgileSDLCCrew:
                     out = out.replace(token, str(v))
             return out
 
+        # Kickoff key → agent_key (cagri muhasebesi per-persona atifi icin)
+        _kickoff_agent_keys = {
+            "kickoff_ba_task": "business_analyst",
+            "kickoff_arch_task": "software_architect",
+            "kickoff_dev_task": "senior_developer",
+            "kickoff_sm_close_task": "scrum_master",
+        }
         for key, agent, label, prior_keys in plan:
+            # Bu persona'nin claude cagrilari dogru agent'a atfedilsin
+            try:
+                from agile_sdlc_crew.tools.claude_cli_llm import set_call_agent
+                set_call_agent(_kickoff_agent_keys.get(key, ""))
+            except Exception:
+                pass
             cfg = self.tasks_config[key]
             base_desc_raw = cfg["description"]
             expected = cfg["expected_output"]

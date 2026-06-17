@@ -194,6 +194,49 @@ def _review_rejected(review_text: str) -> bool:
     return False
 
 
+def _coalesce_plan_changes(changes: list) -> list:
+    """Ayni dosyayi hedefleyen birden fazla plan degisikligini TEK girise birlestir.
+
+    Aksi halde implement her degisikligi bagimsiz full-file push olarak isler ve
+    ikinci push birincinin duzeltmesini EZER (WI #66687 Kargoist.php: architect
+    v2 dali + legacy dali icin iki ayri 'edit' uretti; ikincisi birincisini ezdi,
+    reviewer hakli olarak 'v2 still * 1.20' dedi). Birlesik giris, current/new
+    kodu temizlenmis holistic bir full-file pass'e gider: developer dosyayi bir
+    kez okur, TUM degisiklikleri uygular, tek dosya dondurur.
+    """
+    groups: dict = {}
+    order: list = []
+    for c in changes:
+        fp = (c.get("file_path") or "").strip()
+        if not fp:
+            continue
+        if fp not in groups:
+            groups[fp] = []
+            order.append(fp)
+        groups[fp].append(c)
+    out = []
+    for fp in order:
+        grp = groups[fp]
+        if len(grp) == 1:
+            out.append(grp[0])
+            continue
+        descs = [c.get("description", "") for c in grp if c.get("description")]
+        types = {c.get("change_type", "edit") for c in grp}
+        ctype = "add" if types == {"add"} else "edit"
+        out.append({
+            "file_path": fp,
+            "change_type": ctype,
+            "description": (
+                "Bu dosyada uygulanacak TÜM değişiklikler — HEPSİNİ uygula "
+                "(dosyada birden fazla kod yolu/dal olabilir, hiçbirini atlama):\n"
+                + "\n".join(f"{i + 1}. {d}" for i, d in enumerate(descs))
+            ),
+            "current_code": "",
+            "new_code": "",
+        })
+    return out
+
+
 # ── State Model ──────────────────────────────────────
 
 class _KickoffOnlyStop(Exception):
@@ -376,6 +419,17 @@ class AgileSDLCFlow(Flow[PipelineState]):
         return _cb.measure(step_key, "\n".join(parts))
 
     def _step_start(self, step_key: str):
+        # Cagri muhasebesi: bu adimdaki claude cagrilari bu (job, step, agent)'a
+        # atfedilsin. Kickoff gibi cok-agent'li adimlarda crew tarafi persona
+        # bazinda override edebilir.
+        try:
+            from agile_sdlc_crew.tools import claude_cli_llm as _cli_acct
+            from agile_sdlc_crew.dashboard import TASK_AGENTS as _ta
+            _cli_acct.set_call_context(
+                self.state.job_id, step_key, _ta.get(step_key, ""),
+            )
+        except Exception:
+            pass
         if self.state.job_id:
             try:
                 self._db.start_step(self.state.job_id, step_key)
@@ -727,16 +781,20 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew import pipeline_config as _pc
         price_in = _pc.get("CREW_PRICE_INPUT_USD_PER_M")
         price_out = _pc.get("CREW_PRICE_OUTPUT_USD_PER_M")
-        cost = (
+        token_cost = (
             self._job_prompt_tokens * price_in + self._job_completion_tokens * price_out
         ) / 1_000_000.0
+        # claude_cli token vermiyor (Usage 0/0); gercek maliyet sink'ten gelir.
+        # Ikisinin maksimumunu al — guard claude_cli'de de gercekten calissin.
+        real_cost = getattr(self, "_job_real_cost_usd", 0.0)
+        cost = max(token_cost, real_cost)
 
         max_cost = _pc.get("CREW_MAX_JOB_COST")
         if step_name:
             local_tag = " [LOCAL]" if is_local else ""
             _log(
                 f"  💰 Token: {tt} (+{pt}i/{ct}o){local_tag} | Harici toplam: "
-                f"{self._job_total_tokens} ≈ ${cost:.3f} / ${max_cost:.2f}"
+                f"{self._job_total_tokens} | gerçek ${real_cost:.3f} ≈ ${cost:.3f} / ${max_cost:.2f}"
             )
         if cost > max_cost:
             _log(
@@ -893,6 +951,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._track_and_check_budget(code_result, f"review_retry_implement_{i}")
 
             new_content = _extract_dev_output(code_result)
+            # Part B disk-readback: dev tool'la in-place edit ettiyse disk'i kullan
+            new_content = self._prefer_worktree_edit(
+                repo_name, file_path, new_content, existing_content
+            )
             if not new_content or len(new_content.strip()) < 30:
                 _log(f"    Developer bos/kisa cikti, atlaniyor")
                 continue
@@ -924,6 +986,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             )
             if push_result.get("success"):
                 _log(f"    Push OK: {file_path}")
+                self._restore_worktree_file(repo_name, file_path)
             else:
                 _log(f"    Push HATA: {push_result.get('error', '?')}")
 
@@ -932,6 +995,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Tekrar review
         ctx = self._build_step_context("review_pr_task")
         ctx += self._prefetch_pr_changes_context()
+        ctx += self._test_requirement_note(self.state.repo_name)
         review_crew = self._agile_crew.create_review_crew()
         review_result = review_crew.kickoff(inputs={
             "work_item_id": self.state.work_item_id,
@@ -987,13 +1051,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew.tools.tool_cache import reset_tool_cache
         reset_tool_cache()
         try:
-            from agile_sdlc_crew.tools.claude_cli_llm import clear_repo_ctx
+            from agile_sdlc_crew.tools.claude_cli_llm import clear_repo_ctx, clear_call_context
             clear_repo_ctx()
+            clear_call_context()
         except Exception:
             pass
         self._job_prompt_tokens = 0
         self._job_completion_tokens = 0
         self._job_total_tokens = 0
+        self._job_real_cost_usd = 0.0   # claude_cli gercek maliyet toplami (budget guard)
         # discover_repos'un kanit-temelli repo karari — step4 otoritesi
         self._discovered_repo = ""
         self._discovered_alternatives = []
@@ -1011,6 +1077,24 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._reset_job_state()
 
         self._db = _db
+
+        # Cagri muhasebesi sink'ini bagla: her claude cagrisi llm_calls'a yazilir
+        # + jobs/job_steps toplamlari guncellenir + budget guard icin gercek
+        # maliyet biriktirilir.
+        try:
+            from agile_sdlc_crew.tools import claude_cli_llm as _cli_acct
+
+            def _cost_sink(rec):
+                _db.record_llm_call(rec)
+                try:
+                    self._job_real_cost_usd += float(rec.get("cost_usd") or 0)
+                except Exception:
+                    pass
+
+            _cli_acct.register_call_sink(_cost_sink)
+        except Exception:
+            pass
+
         self._agile_crew = AgileSDLCCrew()
         self._agile_crew.set_status_tracker(self._tracker)
         self._client = AzureDevOpsClient()
@@ -2419,6 +2503,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 "ilgili dosyalari oku, sonra JSON plan uret."
             )
 
+        # Test zorunlulugu notu (CREW_REQUIRE_TESTS + repoda test varsa):
+        # architect plana test dosyalarini da dahil etsin.
+        if prefetch_repo:
+            ctx += self._test_requirement_note(prefetch_repo)
+
         # ── Part B: architect'i "gor kil" — claude -p'ye klonlanmis repoyu
         # --add-dir ile, Read/Grep/Glob'u --allowedTools ile ver. Boylece
         # gercek kodu kesfeder (returnOffices'i halusine etmek yerine bulur).
@@ -2694,6 +2783,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
         branch_name = self.state.branch_name
         all_pushes = []
 
+        # Ayni dosyayi hedefleyen degisiklikleri birlestir — yoksa ikinci push
+        # birincinin duzeltmesini ezer (WI #66687 Kargoist.php v2+legacy dali).
+        _orig_n = len(plan.get("changes", []))
+        plan["changes"] = _coalesce_plan_changes(plan.get("changes", []))
+        if len(plan["changes"]) < _orig_n:
+            _log(f"  Aynı dosyayı hedefleyen değişiklikler birleştirildi: "
+                 f"{_orig_n} → {len(plan['changes'])} (clobber önleme)")
+        self.state.plan = plan
+
         # Plan ozeti — developer her dosyayi implement ederken TUM plani gorsun.
         # Dosyalar arasi bagimliliklari anlamasi icin kritik (ornek: frontend API yolunu
         # backend route'tan bilmeli, service interface'ini model dosyasindan gormeli).
@@ -2884,6 +2982,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    Ne mevcut dosya ne de yeni kod var, atlaniyor")
                 continue
 
+            # Part B disk-readback: dev tool'la in-place edit ettiyse (buyuk
+            # dosyada full-file echo timeout'a giriyor) disk icerigini kullan.
+            final_content = self._prefer_worktree_edit(
+                repo_name, file_path, final_content, full_content
+            )
+
             # Kod dogrulama
             validated, final_content = _validate_code(
                 final_content, file_path, full_content, description, repo_name=repo_name
@@ -2960,6 +3064,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 all_pushes.append(push_result)
                 # Sonraki dosyalar bu dosyanin kodunu referans alabilsin
                 implemented_codes[file_path] = final_content[:3000]
+                # Dev in-place edit ettiyse calisma kopyasini geri al (sizinti onleme)
+                self._restore_worktree_file(repo_name, file_path)
             else:
                 _log(f"    Push hatasi: {push_result['error']}")
 
@@ -3302,8 +3408,287 @@ class AgileSDLCFlow(Flow[PipelineState]):
         )
 
     @listen(step8_code_review)
+    def pr_build_gate(self):
+        """Adim 8.5: PR CI build/test gate.
+
+        Azure DevOps her PR'da `<repo>-test` pipeline'ini `refs/pull/{id}/merge`
+        ref'inde calistirir. Bu adim o build'in sonucunu poll eder; testler
+        kirildiysa (failed/partiallySucceeded) developer fix dongusune girer,
+        build yesil olana kadar (max CREW_PR_BUILD_MAX_RETRIES) tekrar dener.
+        Env: CREW_PR_BUILD_GATE (default kapali — sure/maliyet etkisi var)."""
+        from agile_sdlc_crew.main import _add_wi_comment
+        from agile_sdlc_crew import pipeline_config as _pc
+
+        step_key = "pr_build_gate"
+        self._step_start(step_key)
+        if self.state.dry_run:
+            self._step_done(step_key, "DRY-RUN: atlandi (PR yok)")
+            return
+        if not _pc.get("CREW_PR_BUILD_GATE"):
+            self._step_done(step_key, "Devre disi (CREW_PR_BUILD_GATE=0)")
+            return
+        if not self.state.pr_id:
+            self._step_done(step_key, "Atlandi — PR yok")
+            return
+
+        _log("\n-- ADIM 8.5: PR build/test gate --")
+        max_retries = int(_pc.get("CREW_PR_BUILD_MAX_RETRIES"))
+        poll_timeout = int(_pc.get("CREW_PR_BUILD_POLL_TIMEOUT"))
+        poll_interval = int(_pc.get("CREW_PR_BUILD_POLL_INTERVAL"))
+
+        attempt = 0
+        while True:
+            outcome, build = self._poll_pr_build(poll_timeout, poll_interval)
+            if outcome == "no_pipeline":
+                _log("  PR build bulunamadi — bu repoda PR-test pipeline'i yok, gate atlaniyor")
+                self._step_done(step_key, "Repoda PR-test pipeline'i yok — gate atlandi")
+                return
+            if outcome == "timeout":
+                _log(f"  ⏱️ Build poll timeout ({poll_timeout}s) — sonuc belirsiz, gate gecildi sayildi")
+                self._step_done(step_key, f"Build poll timeout — son durum: {build.get('status') if build else '?'}")
+                return
+            # outcome == "completed"
+            result = (build or {}).get("result")
+            if result == "succeeded":
+                _log(f"  ✅ PR build BASARILI ({build.get('definition')}, build {build.get('build_id')})")
+                _add_wi_comment(self._client, self.state.work_item_id,
+                    f"## ✅ PR Test Build Geçti\n\n"
+                    f"`{build.get('definition')}` build #{build.get('build_id')} başarılı — testler yeşil.\n\n"
+                    f"---\n*Agile SDLC Crew - PR Build Gate*"
+                )
+                self._step_done(step_key, f"Build {build.get('build_id')} succeeded ({build.get('definition')})")
+                return
+
+            # failed / partiallySucceeded / canceled
+            summary = ""
+            try:
+                summary = self._client.get_build_failure_summary(build.get("project"), build.get("build_id"))
+            except Exception as e:
+                _log(f"  Build failure summary alinamadi: {e}")
+
+            if attempt >= max_retries:
+                _log(f"  🚨 PR build {max_retries} deneme sonrasi hala '{result}' — pipeline durduruluyor")
+                _add_wi_comment(self._client, self.state.work_item_id,
+                    f"## ❌ PR Test Build Başarısız — {max_retries} Düzeltme Sonrası\n\n"
+                    f"`{build.get('definition')}` build #{build.get('build_id')} sonucu: **{result}**\n\n"
+                    f"**Hata özeti:**\n```\n{summary[:2000]}\n```\n\n"
+                    f"Testleri manuel inceleyin.\n\n---\n*Agile SDLC Crew - PR Build Gate*"
+                )
+                self._step_fail(step_key, f"PR build {max_retries} deneme sonrasi {result}")
+                raise RuntimeError(f"PR build {result} ({max_retries} deneme sonrasi)")
+
+            attempt += 1
+            _log(f"  🔄 PR build '{result}' — testleri düzeltme döngüsüne giriliyor (deneme {attempt}/{max_retries})")
+            _add_wi_comment(self._client, self.state.work_item_id,
+                f"## 🔄 PR Test Build Başarısız — Düzeltme (Deneme {attempt}/{max_retries})\n\n"
+                f"`{build.get('definition')}` build #{build.get('build_id')} sonucu: **{result}**\n\n"
+                f"**Hata özeti:**\n```\n{summary[:1500]}\n```\n\n"
+                f"Otomatik düzeltme başlatılıyor...\n\n---\n*Agile SDLC Crew - PR Build Gate*"
+            )
+            self._fix_failing_build(summary)
+            # döngü başına dön — build yeniden tetiklenecek, tekrar poll
+
+    def _read_worktree_file(self, repo_name: str, file_path: str) -> str:
+        """Klonun calisma kopyasindaki dosyayi DOGRUDAN diskten oku (dev'in
+        tool'la yaptigi in-place edit'leri yakalar)."""
+        try:
+            p = self._repo_mgr.base_dir / repo_name / file_path.lstrip("/")
+            if p.exists() and p.is_file() and p.stat().st_size < 3_000_000:
+                return p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        return ""
+
+    def _restore_worktree_file(self, repo_name: str, file_path: str):
+        """Calisma kopyasini geri al (dev'in in-place edit'i sonraki job'a
+        sizmasin). En iyi caba — hata yutulur."""
+        try:
+            repo_dir = self._repo_mgr.base_dir / repo_name
+            self._repo_mgr._git(["checkout", "--", file_path.lstrip("/")], cwd=repo_dir)
+        except Exception:
+            pass
+
+    def _prefer_worktree_edit(self, repo_name: str, file_path: str,
+                              text_output: str, original: str) -> str:
+        """Dev dosyayi tool'la in-place duzenlediyse disk icerigini dondur.
+        Buyuk dosyada model tam dosyayi metin olarak echo edemeyip timeout'a
+        giriyor (WI #66687 Kargoist.php 69KB); ama disk'teki edit dogru ve tam.
+        Disk degismemisse (ornek: Python direct-edit yolu) text_output kalir."""
+        disk = self._read_worktree_file(repo_name, file_path)
+        if disk and disk.strip() != (original or "").strip() and len(disk) > len(text_output or ""):
+            _log(f"    Dev disk'te in-place düzenlemiş — disk içeriği push edilecek ({len(disk)} char)")
+            return disk
+        return text_output
+
+    def _repo_has_tests(self, repo_name: str) -> bool:
+        """Repo'da unit test altyapisi var mi? (phpunit.xml / *Test.php /
+        tests dizini / *_test.go / pytest)."""
+        repo_dir = self._repo_mgr.base_dir / repo_name
+        if not repo_dir.exists():
+            return False
+        for marker in ("phpunit.xml", "phpunit.xml.dist", "pytest.ini", "tests", "test"):
+            if (repo_dir / marker).exists():
+                return True
+        import subprocess as _sp
+        try:
+            res = _sp.run(
+                ["grep", "-rlm", "1", "-E",
+                 r"class [A-Za-z0-9_]+Test|def test_|func Test[A-Z]",
+                 "--include=*.php", "--include=*.py", "--include=*.go",
+                 str(repo_dir)],
+                capture_output=True, text=True, timeout=8,
+            )
+            return bool((res.stdout or "").strip())
+        except Exception:
+            return False
+
+    def _test_requirement_note(self, repo_name: str) -> str:
+        """CREW_REQUIRE_TESTS acik VE repoda test varsa, plan/inceleme icin
+        eklenecek test-zorunlulugu notu (yoksa bos string)."""
+        from agile_sdlc_crew import pipeline_config as _pc_rt
+        try:
+            if not _pc_rt.get("CREW_REQUIRE_TESTS"):
+                return ""
+        except Exception:
+            return ""
+        if not self._repo_has_tests(repo_name):
+            return ""
+        return (
+            "\n\n# TEST ZORUNLULUĞU (bu repoda unit test altyapısı VAR)\n"
+            "- Değişen davranış için ilgili test dosyalarını da güncelle/ekle "
+            "(aynı PR'da). Mevcut testleri kırma.\n"
+            "- Plan/değişiklik listesine ilgili test dosyalarını (ör. *Test.php, "
+            "tests/) DAHİL ET; yoksa yeni test ekle.\n"
+            "- Test eklenm/güncellenmediyse bu eksiklik incelemede CHANGES_REQUIRED sebebidir."
+        )
+
+    def _poll_pr_build(self, timeout_s: int, interval_s: int) -> tuple[str, dict | None]:
+        """PR build'ini tamamlanana kadar poll et.
+        Donus: ("completed", build) | ("no_pipeline", None) | ("timeout", build|None)."""
+        import time as _t
+        waited = 0
+        last = None
+        grace = 120  # build tetiklenmesi icin taninan sure (policy gecikmesi)
+        while waited < timeout_s:
+            try:
+                build = self._client.get_pr_build(self.state.repo_name, int(self.state.pr_id))
+            except Exception as e:
+                _log(f"  Build sorgu hatasi: {e}")
+                build = None
+            if build is None:
+                if waited >= grace:
+                    return ("no_pipeline", None)
+            else:
+                last = build
+                if build.get("status") == "completed":
+                    return ("completed", build)
+                _log(f"  Build {build.get('build_id')} {build.get('status')}… ({waited}s/{timeout_s}s)")
+            _t.sleep(interval_s)
+            waited += interval_s
+        return ("timeout", last)
+
+    def _fix_failing_build(self, failure_summary: str):
+        """Build'i kiran testleri/kodu duzelt: plan'daki kaynak dosyalar + hata
+        ozetinden cozulen test dosyalari developer'a verilir, push edilir.
+        Branch + PR zaten var; push build'i yeniden tetikler."""
+        import re as _re_fb
+        from agile_sdlc_crew.pipeline import push_file
+        from agile_sdlc_crew.tools import claude_cli_llm as _cli
+        from agile_sdlc_crew import pipeline_config as _pc_fb
+
+        _log("\n-- BUILD FIX: Testler/kod düzeltiliyor --")
+        plan = self.state.plan or {}
+        repo_name = self.state.repo_name
+        branch = self.state.branch_name
+        repo_dir = self._repo_mgr.base_dir / repo_name
+
+        # 1) Plan'daki kaynak dosyalar
+        fix_files: list[str] = [
+            c.get("file_path") for c in plan.get("changes", []) if c.get("file_path")
+        ]
+        # 2) Hata ozetinden test sinif adlarini cozumle (ornek: ReturnOrderTest)
+        test_classes = set(_re_fb.findall(r'\b([A-Z][A-Za-z0-9_]*Test)\b', failure_summary or ""))
+        for cls in list(test_classes)[:5]:
+            try:
+                import subprocess as _sp
+                res = _sp.run(
+                    ["grep", "-rl", "--include=*.php", "--include=*.py",
+                     "--include=*.js", "--include=*.go", f"class {cls}", str(repo_dir)],
+                    capture_output=True, text=True, timeout=8,
+                )
+                for f in (res.stdout or "").strip().split("\n"):
+                    if f and ("vendor/" not in f and "node_modules/" not in f):
+                        rel = "/" + f[len(str(repo_dir)):].lstrip("/")
+                        if rel not in fix_files:
+                            fix_files.append(rel)
+            except Exception:
+                pass
+
+        if not fix_files:
+            _log("  Düzeltilecek dosya çözümlenemedi — atlaniyor")
+            return
+
+        # Part B: developer repoyu --add-dir ile görsün (test dosyasini okuyabilsin)
+        _repo_tools = False
+        try:
+            _repo_tools = bool(_pc_fb.get("CREW_CLI_REPO_TOOLS"))
+        except Exception:
+            pass
+        if _repo_tools and repo_dir.exists():
+            _cli.set_repo_ctx([str(repo_dir)], "Read,Grep,Glob,LS")
+        try:
+            for i, file_path in enumerate(fix_files):
+                _log(f"  Build-fix implement [{i+1}/{len(fix_files)}]: {file_path}")
+                try:
+                    existing = self._client.get_file_content(repo_name, file_path, branch)
+                except Exception:
+                    existing = ""
+                ctx = self._build_step_context("implement_change_task")
+                ctx += (
+                    f"\n\n# PR BUILD TEST HATASI (DÜZELT)\n"
+                    f"Aşağıdaki CI build hatası testlerin kırıldığını gösteriyor. Bu dosyadaki "
+                    f"kodu/testleri hatayı giderecek şekilde düzelt; mevcut davranışı koru, "
+                    f"değişen davranış için test ekle/güncelle.\n```\n{failure_summary[:2500]}\n```"
+                )
+                code_crew = self._agile_crew.create_code_crew()
+                code_result = code_crew.kickoff(inputs={
+                    "work_item_id": self.state.work_item_id,
+                    "target_repo": repo_name,
+                    "target_file": file_path,
+                    "change_description": "PR build test hatasını gider (test/kaynak düzelt)",
+                    "current_code": "",
+                    "new_code": "",
+                    "full_content": existing,
+                    "previous_context": ctx,
+                })
+                self._track_and_check_budget(code_result, f"build_fix_{i}")
+                new_content = _extract_dev_output(code_result)
+                # Part B disk-readback: dev tool'la in-place edit ettiyse disk'i kullan
+                new_content = self._prefer_worktree_edit(
+                    repo_name, file_path, new_content, existing
+                )
+                if not new_content or len(new_content.strip()) < 30:
+                    _log("    Developer boş/kısa çıktı, atlanıyor")
+                    continue
+                # Güvenlik: büyük kod kaybı (mevcut implement ile aynı eşik)
+                if existing and len(existing.strip()) > 500 and len(new_content.strip()) < len(existing.strip()) * 0.5:
+                    _log("    🚨 GÜVENLİK: dosya >%50 küçüldü, build-fix push İPTAL")
+                    continue
+                push_result = push_file(
+                    repo_name, branch, file_path, new_content,
+                    f"fix: PR build test hatasi - {file_path.rsplit('/',1)[-1]} (WI #{self.state.work_item_id})",
+                    repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
+                )
+                _log(f"    {'Push OK' if push_result.get('success') else 'Push HATA: ' + str(push_result.get('error','?'))}: {file_path}")
+                if push_result.get("success"):
+                    self._restore_worktree_file(repo_name, file_path)
+        finally:
+            _cli.clear_repo_ctx()
+        _log("  Build-fix tamam — build yeniden tetiklenecek")
+
+    @listen(pr_build_gate)
     def step9_test_planning(self):
-        """Adim 9: Test Planlama — code_review sonrasi PARALEL calisir (UAT ile birlikte).
+        """Adim 9: Test Planlama — pr_build_gate sonrasi PARALEL calisir (UAT ile birlikte).
         DRY-RUN: PR yok, atlanir."""
         from agile_sdlc_crew.main import (
             _extract_code_from_output, _validate_code, _add_wi_comment,
@@ -3436,9 +3821,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
             f"*Agile SDLC Crew - Test*"
         )
 
-    @listen(step8_code_review)
+    @listen(pr_build_gate)
     def step10_uat(self):
-        """Adim 10: UAT Dogrulama — code_review sonrasi PARALEL calisir (Test ile birlikte).
+        """Adim 10: UAT Dogrulama — pr_build_gate sonrasi PARALEL calisir (Test ile birlikte).
         DRY-RUN: PR yok, atlanir."""
         from agile_sdlc_crew.main import _add_wi_comment
 

@@ -53,6 +53,22 @@ CREATE TABLE IF NOT EXISTS job_steps (
     FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
     INDEX idx_job (job_id)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    job_id INT NULL,
+    step_key VARCHAR(50) DEFAULT '',
+    agent VARCHAR(50) DEFAULT '',
+    model VARCHAR(60) DEFAULT '',
+    provider VARCHAR(30) DEFAULT '',
+    turns INT DEFAULT 0,
+    tool_calls INT DEFAULT 0,
+    cost_usd DECIMAL(12,6) DEFAULT 0,
+    duration_ms INT DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_job (job_id),
+    INDEX idx_job_agent (job_id, agent)
+) ENGINE=InnoDB;
 """
 
 STEP_DEFINITIONS = [
@@ -65,6 +81,7 @@ STEP_DEFINITIONS = [
     ("implement_change_task", "Kod Yazma & Push", "senior_developer"),
     ("create_pr_task", "PR Oluşturma", "senior_developer"),
     ("review_pr_task", "Kod İnceleme", "code_reviewer"),
+    ("pr_build_gate", "PR Test Build", "senior_developer"),
     ("test_planning_task", "Test Planlama", "qa_engineer"),
     ("uat_task", "UAT Doğrulama", "uat_specialist"),
     ("completion_report_task", "Tamamlanma Raporu", "scrum_master"),
@@ -101,6 +118,14 @@ def init_db():
         _ensure_column(cur, "jobs", "parent_job_id", "INT NULL")
         # Dry-run: development stays local; no push, no PR, no review
         _ensure_column(cur, "jobs", "dry_run", "TINYINT(1) DEFAULT 0")
+        # Maliyet & arac-cagri muhasebesi (denormalize toplamlar)
+        _ensure_column(cur, "jobs", "total_cost_usd", "DECIMAL(12,6) DEFAULT 0")
+        _ensure_column(cur, "jobs", "total_llm_calls", "INT DEFAULT 0")
+        _ensure_column(cur, "jobs", "total_tool_calls", "INT DEFAULT 0")
+        _ensure_column(cur, "jobs", "total_turns", "INT DEFAULT 0")
+        _ensure_column(cur, "job_steps", "cost_usd", "DECIMAL(12,6) DEFAULT 0")
+        _ensure_column(cur, "job_steps", "tool_calls", "INT DEFAULT 0")
+        _ensure_column(cur, "job_steps", "turns", "INT DEFAULT 0")
 
 
 def _ensure_column(cur, table: str, column: str, ddl: str):
@@ -282,9 +307,14 @@ def skip_steps(job_id: int, step_keys: list[str], reason: str = "Atlandı"):
 
 
 def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | None:
-    """Onceki completed job'lardan step output'u getir.
-    work_item_id verilirse o WI'ye ait son completed job'dan,
-    verilmezse herhangi bir completed job'dan alir."""
+    """Onceki job'lardan bu step'in BASARILI (completed) ciktisini getir.
+
+    ADIM-SEVIYESI resume: job'un tamami completed olmasa bile, o ADIM
+    completed ise ciktisi yeniden kullanilir. Boylece review/build'de FAIL
+    olan bir isin daha once tamamlanmis kickoff/tasarim/implement adimlari
+    tekrar kosulmadan reuse edilir (asil 'ucuz tekrar' senaryosu).
+    Guvenilirlik: tamamen completed job'lara ait adimlar oncelikli (ORDER BY).
+    """
     with get_conn() as conn:
         cur = conn.cursor()
         if work_item_id:
@@ -292,9 +322,9 @@ def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | Non
                 "SELECT js.output FROM job_steps js "
                 "JOIN jobs j ON js.job_id = j.id "
                 "WHERE js.step_key = %s AND j.work_item_id = %s "
-                "AND j.status = 'completed' AND js.status = 'completed' "
+                "AND js.status = 'completed' "
                 "AND js.output IS NOT NULL AND js.output != '' "
-                "ORDER BY js.finished_at DESC LIMIT 1",
+                "ORDER BY (j.status = 'completed') DESC, js.finished_at DESC LIMIT 1",
                 (step_key, work_item_id),
             )
         else:
@@ -302,9 +332,9 @@ def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | Non
                 "SELECT js.output FROM job_steps js "
                 "JOIN jobs j ON js.job_id = j.id "
                 "WHERE js.step_key = %s "
-                "AND j.status = 'completed' AND js.status = 'completed' "
+                "AND js.status = 'completed' "
                 "AND js.output IS NOT NULL AND js.output != '' "
-                "ORDER BY js.finished_at DESC LIMIT 1",
+                "ORDER BY (j.status = 'completed') DESC, js.finished_at DESC LIMIT 1",
                 (step_key,),
             )
         row = cur.fetchone()
@@ -339,6 +369,65 @@ def clear_cached_step_output(step_key: str, work_item_id: str) -> int:
             (step_key, work_item_id),
         )
         return cur.rowcount
+
+
+def record_llm_call(rec: dict) -> None:
+    """Bir LLM cagrisini llm_calls'a yaz + jobs/job_steps toplamlarini guncelle.
+    Muhasebe ASLA pipeline'i bozmamali — tum hatalar yutulur."""
+    job_id = rec.get("job_id")
+    step_key = (rec.get("step_key") or "")[:50]
+    cost = float(rec.get("cost_usd") or 0)
+    turns = int(rec.get("turns") or 0)
+    tools = int(rec.get("tool_calls") or 0)
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO llm_calls "
+                "(job_id, step_key, agent, model, provider, turns, tool_calls, cost_usd, duration_ms) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (job_id, step_key, (rec.get("agent") or "")[:50],
+                 (rec.get("model") or "")[:60], (rec.get("provider") or "")[:30],
+                 turns, tools, cost, int(rec.get("duration_ms") or 0)),
+            )
+            if job_id:
+                cur.execute(
+                    "UPDATE jobs SET total_cost_usd = total_cost_usd + %s, "
+                    "total_llm_calls = total_llm_calls + 1, "
+                    "total_tool_calls = total_tool_calls + %s, "
+                    "total_turns = total_turns + %s WHERE id = %s",
+                    (cost, tools, turns, job_id),
+                )
+                if step_key:
+                    cur.execute(
+                        "UPDATE job_steps SET cost_usd = cost_usd + %s, "
+                        "tool_calls = tool_calls + %s, turns = turns + %s "
+                        "WHERE job_id = %s AND step_key = %s",
+                        (cost, tools, turns, job_id, step_key),
+                    )
+    except Exception:
+        pass
+
+
+def get_job_cost_summary(job_id: int) -> dict:
+    """Job'un toplam maliyet/cagri/arac/tur'u + per-agent kirilimi."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT total_cost_usd, total_llm_calls, total_tool_calls, total_turns "
+            "FROM jobs WHERE id = %s", (job_id,),
+        )
+        totals = cur.fetchone() or {}
+        cur.execute(
+            "SELECT agent, COUNT(*) AS calls, "
+            "COALESCE(SUM(tool_calls),0) AS tool_calls, "
+            "COALESCE(SUM(turns),0) AS turns, "
+            "COALESCE(SUM(cost_usd),0) AS cost_usd "
+            "FROM llm_calls WHERE job_id = %s GROUP BY agent "
+            "ORDER BY cost_usd DESC", (job_id,),
+        )
+        by_agent = cur.fetchall()
+    return {"totals": totals, "by_agent": by_agent}
 
 
 def get_job(job_id: int) -> dict | None:

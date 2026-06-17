@@ -59,6 +59,65 @@ def repo_tools_context(add_dirs: list, allowed_tools: str = "Read,Grep,Glob,LS")
         _cli_ctx.add_dirs, _cli_ctx.allowed_tools = prev
 
 
+# ── Cagri muhasebesi (per-job/per-agent maliyet & arac sayimi) ──────────
+# Flow her crew kickoff'undan once set_call_context ile (job_id, step_key,
+# agent) baglar; her claude -p cagrisi tamamlaninca olculen cost/turns/tool
+# sayisi kayitli sink'e gonderilir (db.record_llm_call). Thread-local —
+# paralel step'lerde izole.
+_acct_ctx = threading.local()
+_call_sink = None
+
+
+def set_call_context(job_id=None, step_key: str = "", agent: str = "") -> None:
+    _acct_ctx.job_id = job_id
+    _acct_ctx.step_key = step_key or ""
+    _acct_ctx.agent = agent or ""
+
+
+def clear_call_context() -> None:
+    _acct_ctx.job_id = None
+    _acct_ctx.step_key = ""
+    _acct_ctx.agent = ""
+
+
+def set_call_agent(agent: str) -> None:
+    """Sadece agent alanini guncelle (job_id/step_key korunur). Kickoff gibi
+    cok-personali adimlarda her persona icin ayri atif yapmaya yarar."""
+    _acct_ctx.agent = agent or ""
+
+
+def _get_call_context() -> tuple:
+    return (getattr(_acct_ctx, "job_id", None),
+            getattr(_acct_ctx, "step_key", ""),
+            getattr(_acct_ctx, "agent", ""))
+
+
+def register_call_sink(fn) -> None:
+    """db.record_llm_call gibi bir alici bagla; her cagri sonrasi cagrilir."""
+    global _call_sink
+    _call_sink = fn
+
+
+def _emit_call_record(model: str, meta: dict) -> None:
+    if _call_sink is None:
+        return
+    job_id, step_key, agent = _get_call_context()
+    try:
+        _call_sink({
+            "job_id": job_id,
+            "step_key": step_key,
+            "agent": agent,
+            "model": (meta.get("model") or model or "")[:60],
+            "provider": "claude_cli",
+            "turns": int(meta.get("turns") or 0),
+            "tool_calls": int(meta.get("tool_calls") or 0),
+            "cost_usd": float(meta.get("cost_usd") or 0.0),
+            "duration_ms": int(meta.get("duration_ms") or 0),
+        })
+    except Exception:
+        pass
+
+
 def _brief_input(inp: dict) -> str:
     """Tool input'undan kisa, okunur bir ozet cikar."""
     if not isinstance(inp, dict):
@@ -69,11 +128,15 @@ def _brief_input(inp: dict) -> str:
     return ",".join(list(inp.keys())[:3])
 
 
-def _log_stream_event(ev: dict, text_parts: list) -> str | None:
-    """Tek stream-json event'ini canli logla. result event'inde final metni dondur."""
+def _log_stream_event(ev: dict, text_parts: list, meta: dict | None = None) -> str | None:
+    """Tek stream-json event'ini canli logla. result event'inde final metni dondur.
+    meta verilirse model/turns/cost/duration/tool_calls oraya toplanir."""
+    if meta is None:
+        meta = {}
     t = ev.get("type")
     if t == "system" and ev.get("subtype") == "init":
         model = ev.get("model", "?")
+        meta["model"] = model
         ntools = len(ev.get("tools", []) or [])
         log.info(f"  🤖 claude basladi: model={model}, {ntools} tool")
         return None
@@ -87,6 +150,7 @@ def _log_stream_event(ev: dict, text_parts: list) -> str | None:
                 if snip:
                     log.info(f"  💬 {snip}")
             elif bt == "tool_use":
+                meta["tool_calls"] = meta.get("tool_calls", 0) + 1
                 log.info(f"  🔧 {b.get('name', '?')}({_brief_input(b.get('input', {}))})")
             elif bt == "thinking":
                 log.info("  🤔 düşünüyor…")
@@ -104,15 +168,23 @@ def _log_stream_event(ev: dict, text_parts: list) -> str | None:
         dur = int(ev.get("duration_ms", 0) or 0)
         turns = ev.get("num_turns", "?")
         cost = ev.get("total_cost_usd")
+        meta["duration_ms"] = dur
+        if isinstance(turns, (int, float)):
+            meta["turns"] = int(turns)
+        if isinstance(cost, (int, float)):
+            meta["cost_usd"] = float(cost)
         cost_s = f", ${cost:.4f}" if isinstance(cost, (int, float)) else ""
         log.info(f"  ✓ claude bitti ({turns} tur, {dur}ms{cost_s})")
         return ev.get("result", "") or ""
     return None
 
 
-def _run_streaming(cmd: list, env: dict, timeout_s: int) -> str:
+def _run_streaming(cmd: list, env: dict, timeout_s: int, meta: dict | None = None) -> str:
     """stream-json modunda calistir, event'leri canli logla, final metni dondur.
-    Timeout watchdog thread ile uygulanir (kill → pipe EOF → dongu biter)."""
+    Timeout watchdog thread ile uygulanir (kill → pipe EOF → dongu biter).
+    meta verilirse cost/turns/tool_calls/model oraya toplanir."""
+    if meta is None:
+        meta = {}
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, stdin=subprocess.DEVNULL, env=env, bufsize=1,
@@ -142,7 +214,7 @@ def _run_streaming(cmd: list, env: dict, timeout_s: int) -> str:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            res = _log_stream_event(ev, text_parts)
+            res = _log_stream_event(ev, text_parts, meta)
             if res is not None:
                 final_text = res
     finally:
@@ -196,10 +268,13 @@ def claude_cli_completion(
 
     stream = os.environ.get("CREW_CLAUDE_CLI_STREAM", "1") != "0"
     if stream:
+        meta: dict = {}
         try:
-            return _run_streaming(
-                cmd + ["--output-format", "stream-json", "--verbose"], env, timeout_s
+            text = _run_streaming(
+                cmd + ["--output-format", "stream-json", "--verbose"], env, timeout_s, meta
             )
+            _emit_call_record(model, meta)
+            return text
         except FileNotFoundError:
             log.warning("  Claude CLI bulunamadi (PATH'te 'claude' yok)")
             return ""
