@@ -19,3 +19,6 @@ src/agile_sdlc_crew/web/status.json
 
 # Eski/yerel completion raporlari
 completion_report.md
+
+# Claude Code local (personal) notes
+.claude.local.md

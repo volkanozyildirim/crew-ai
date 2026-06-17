@@ -56,11 +56,11 @@ initialize ─► [router] ─► hal_planning            (─► step5)
                        └► crew_step1_requirements ─► step0_kickoff_meeting
                           ─► crew_step4_technical_design ─► step5_create_branch
                           ─► step6_implement_code ─► step7_create_pr
-                          ─► step8_code_review ─► (and_) step9_test_planning + step10_uat
+                          ─► step8_code_review ─► pr_build_gate ─► (and_) step9_test_planning + step10_uat
                           ─► step11_completion_report
 ```
 
-Each step calls `self._step_start/_step_done/_step_fail/_resume_step` to update both the dashboard tracker and the MySQL `job_steps` table. Resume is supported: `_try_resume_step` reads prior successful output for the same WI from MySQL and skips re-execution. `run_pipeline()` in `main.py` is a thin wrapper that constructs the flow and calls `flow.kickoff(...)`.
+Each step calls `self._step_start/_step_done/_step_fail/_resume_step` to update both the dashboard tracker and the MySQL `job_steps` table. Resume (`CREW_ENABLE_RESUME`, default **false**): `_try_resume_step` reuses a step's completed output from a PRIOR job of the same WI — it is **step-level**, so completed steps of a *failed* job are reused too (`get_cached_step_output` prefers fully-completed jobs via `ORDER BY (j.status='completed') DESC`). Only `requirements_analysis_task` + `kickoff_meeting_task` actually call it. `run_pipeline()` in `main.py` is a thin wrapper that constructs the flow and calls `flow.kickoff(...)`.
 
 ### LLM selection: `llm/` package + `config/llm_profiles.yaml`
 
@@ -75,9 +75,13 @@ The `LLM_ARCHITECT / LLM_DEVELOPER / ...` lambdas in `crew.py` are now thin `bui
 Loadbearing rules baked into the resolver and profiles:
 - Architect default is **always** premium remote (`architect_premium` = `vertex_ai/claude-sonnet-4-6`). `CREW_USE_LOCAL_LLM=1` does *not* downgrade architect — explicit per-agent env or `llm_profile:` is required.
 - Developer downgrades to `developer_local_coder` (qwen2.5-coder:7b) only when both `CREW_USE_LOCAL_LLM=1` and `CREW_LOCAL_DEVELOPER!=0`.
-- Kickoff crew (step0) uses local Ollama unconditionally — cost-sensitive multi-task focus group.
+- Kickoff (step0): the active `run_kickoff_meeting` path uses `_build_kickoff_agents` → `build_for_agent(...)` → dashboard `config/agent_llm_overrides.yaml` (currently claude_cli; architect/dev=opus). It is **NOT** local Ollama. (The legacy `create_kickoff_crew` is unused.)
 
 `crew.py` monkey-patches `litellm.completion` near the top to strip the trailing assistant message (Vertex Claude doesn't support prefill) and disables SSL verification globally for httpx. Leave both alone unless you understand why.
+
+### claude_cli gotcha: the tool bridge is broken
+
+CrewAI's Python tools (`browse_repo`, `search_code`, `AzureDevOpsBrowseRepoTool`) **never reach** claude_cli agents. `claude -p` is a self-contained Claude Code agent with its own sandbox tools; CrewAI's ReAct tool-execution loop can't bridge into the subprocess, so agents say "tools not available/invokable" and hallucinate blindly (this caused the wrong-repo + new-file bugs). Mitigations: (a) **pre-fetch** file contents in Python into the prompt context (the `_prefetch_*` patterns); (b) `CREW_CLI_REPO_TOOLS=1` → `claude_cli_llm.set_repo_ctx`/`repo_tools_context` passes `--add-dir <clone> --allowedTools Read,Grep,Glob,LS` so the agent explores the real cloned repo with its native tools (and may edit in place → the pipeline reads the edited file from disk via `_prefer_worktree_edit`, then restores the worktree). Repos are FULL clones under `~/.crew_repos/<repo>`. Also: claude_cli reports **0 tokens** to CrewAI — see Cost guard.
 
 ### Work item / SCM provider abstraction: `providers/`
 
@@ -95,10 +99,16 @@ In `tools/`. The Azure DevOps tools share `AzureDevOpsClient` (`azure_devops_bas
 
 ### Cost guard
 
-`flow.py` calls `_track_and_check_budget` after each crew kickoff; if cumulative USD exceeds `CREW_MAX_JOB_COST` (default 3.0) the pipeline aborts and posts a comment to the WI. Pricing is approximated via `CREW_PRICE_INPUT_USD_PER_M` / `CREW_PRICE_OUTPUT_USD_PER_M` (default Sonnet pricing). When changing models, update the pricing envs together.
+`flow.py` calls `_track_and_check_budget` after each crew kickoff (limit `CREW_MAX_JOB_COST`, default 3.0). **claude_cli reports 0 tokens to CrewAI**, so the token×price approximation (`CREW_PRICE_*`) is ~0 — real cost comes from the `claude -p` result JSON (`total_cost_usd` + `usage` tokens). Every claude call is recorded via the `claude_cli_llm` sink into the `llm_calls` table + denormalized `jobs`/`job_steps` totals (per-agent breakdown: `db.get_job_cost_summary`); the guard uses `max(token_approx, real)`. **Mid-step cap**: since the guard only runs at step boundaries and kickoff is one step with ~37 calls, the sink calls `claude_cli_llm.signal_budget_exceeded()` once the running total passes the limit → subsequent claude calls short-circuit (return "") so overshoot is ~1 call, not 2×+.
+
+### PR build/test gate
+
+`pr_build_gate` (env `CREW_PR_BUILD_GATE`) runs between `step8_code_review` and step9/step10. Azure DevOps runs a `<repo>-test` build on every PR (`refs/pull/{id}/merge`); the gate polls `AzureDevOpsClient.get_pr_build`, and if tests fail loops the developer to fix them (source + test files) until green (`CREW_PR_BUILD_MAX_RETRIES`). No pipeline on the repo → gate is skipped. `CREW_REQUIRE_TESTS` makes the architect include test files in the plan and the reviewer reject PRs missing test coverage.
 
 ## Notes for editing
 
 - All step keys (e.g. `kickoff_meeting_task`) are stable identifiers used in `tasks.yaml`, `STEP_DEFINITIONS`, `dashboard.TASK_DISPLAY_NAMES`, MySQL, and `status.json` — renaming one means renaming everywhere.
 - New pipeline behaviors should be env-toggleable (existing pattern: `CREW_KICKOFF_MEETING`, `CREW_SM_REVIEW`, `CREW_ANALYZE_WI_MEDIA`). Default to off if there's any cost or risk impact.
 - `.env` is auto-loaded by `server.py` and `main.py` via python-dotenv from the repo root.
+- **Restarting the server orphan-fails any running job** (`db.fail_orphan_running_jobs` runs on startup). Don't restart while a job runs — check `/api/health` shows `running:0` first. (The worker drains the queue serially, one job at a time.)
+- `db.py` uses pymysql **DictCursor** — rows are dicts (`row['Field']`, e.g. `SHOW COLUMNS` → `r['Field']`). The `jobs` error column is `error_message`, not `error`.
