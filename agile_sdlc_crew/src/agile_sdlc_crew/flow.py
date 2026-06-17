@@ -936,6 +936,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._track_and_check_budget(code_result, f"review_retry_implement_{i}")
 
             new_content = _extract_dev_output(code_result)
+            # Part B disk-readback: dev tool'la in-place edit ettiyse disk'i kullan
+            new_content = self._prefer_worktree_edit(
+                repo_name, file_path, new_content, existing_content
+            )
             if not new_content or len(new_content.strip()) < 30:
                 _log(f"    Developer bos/kisa cikti, atlaniyor")
                 continue
@@ -967,6 +971,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             )
             if push_result.get("success"):
                 _log(f"    Push OK: {file_path}")
+                self._restore_worktree_file(repo_name, file_path)
             else:
                 _log(f"    Push HATA: {push_result.get('error', '?')}")
 
@@ -2942,6 +2947,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    Ne mevcut dosya ne de yeni kod var, atlaniyor")
                 continue
 
+            # Part B disk-readback: dev tool'la in-place edit ettiyse (buyuk
+            # dosyada full-file echo timeout'a giriyor) disk icerigini kullan.
+            final_content = self._prefer_worktree_edit(
+                repo_name, file_path, final_content, full_content
+            )
+
             # Kod dogrulama
             validated, final_content = _validate_code(
                 final_content, file_path, full_content, description, repo_name=repo_name
@@ -3018,6 +3029,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 all_pushes.append(push_result)
                 # Sonraki dosyalar bu dosyanin kodunu referans alabilsin
                 implemented_codes[file_path] = final_content[:3000]
+                # Dev in-place edit ettiyse calisma kopyasini geri al (sizinti onleme)
+                self._restore_worktree_file(repo_name, file_path)
             else:
                 _log(f"    Push hatasi: {push_result['error']}")
 
@@ -3440,6 +3453,38 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._fix_failing_build(summary)
             # döngü başına dön — build yeniden tetiklenecek, tekrar poll
 
+    def _read_worktree_file(self, repo_name: str, file_path: str) -> str:
+        """Klonun calisma kopyasindaki dosyayi DOGRUDAN diskten oku (dev'in
+        tool'la yaptigi in-place edit'leri yakalar)."""
+        try:
+            p = self._repo_mgr.base_dir / repo_name / file_path.lstrip("/")
+            if p.exists() and p.is_file() and p.stat().st_size < 3_000_000:
+                return p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        return ""
+
+    def _restore_worktree_file(self, repo_name: str, file_path: str):
+        """Calisma kopyasini geri al (dev'in in-place edit'i sonraki job'a
+        sizmasin). En iyi caba — hata yutulur."""
+        try:
+            repo_dir = self._repo_mgr.base_dir / repo_name
+            self._repo_mgr._git(["checkout", "--", file_path.lstrip("/")], cwd=repo_dir)
+        except Exception:
+            pass
+
+    def _prefer_worktree_edit(self, repo_name: str, file_path: str,
+                              text_output: str, original: str) -> str:
+        """Dev dosyayi tool'la in-place duzenlediyse disk icerigini dondur.
+        Buyuk dosyada model tam dosyayi metin olarak echo edemeyip timeout'a
+        giriyor (WI #66687 Kargoist.php 69KB); ama disk'teki edit dogru ve tam.
+        Disk degismemisse (ornek: Python direct-edit yolu) text_output kalir."""
+        disk = self._read_worktree_file(repo_name, file_path)
+        if disk and disk.strip() != (original or "").strip() and len(disk) > len(text_output or ""):
+            _log(f"    Dev disk'te in-place düzenlemiş — disk içeriği push edilecek ({len(disk)} char)")
+            return disk
+        return text_output
+
     def _repo_has_tests(self, repo_name: str) -> bool:
         """Repo'da unit test altyapisi var mi? (phpunit.xml / *Test.php /
         tests dizini / *_test.go / pytest)."""
@@ -3583,6 +3628,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 })
                 self._track_and_check_budget(code_result, f"build_fix_{i}")
                 new_content = _extract_dev_output(code_result)
+                # Part B disk-readback: dev tool'la in-place edit ettiyse disk'i kullan
+                new_content = self._prefer_worktree_edit(
+                    repo_name, file_path, new_content, existing
+                )
                 if not new_content or len(new_content.strip()) < 30:
                     _log("    Developer boş/kısa çıktı, atlanıyor")
                     continue
@@ -3596,6 +3645,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
                 )
                 _log(f"    {'Push OK' if push_result.get('success') else 'Push HATA: ' + str(push_result.get('error','?'))}: {file_path}")
+                if push_result.get("success"):
+                    self._restore_worktree_file(repo_name, file_path)
         finally:
             _cli.clear_repo_ctx()
         _log("  Build-fix tamam — build yeniden tetiklenecek")
