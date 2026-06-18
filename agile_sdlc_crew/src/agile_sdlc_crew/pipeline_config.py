@@ -217,6 +217,13 @@ SCHEMA: list[dict] = [
         "desc": "Teknik tasarimda architect'e klonlanmis hedef repoyu --add-dir ile, Read/Grep/Glob'u --allowedTools ile ver. Architect gercek kodu kesfeder (mevcut servisi bulup 'modify' yapar; yeni dosya halusine etmez). UYARI: agent ekstra tur/sure harcayabilir.",
     },
     {
+        "key": "CREW_PLAN_GATE",
+        "label": "Plan Completeness Gate",
+        "type": "bool",
+        "default": False,
+        "desc": "Teknik tasarım sonrası, her FR/AC'nin plandaki bir değişikliğe karşılık geldiğini ucuz (haiku) denetçiyle doğrula; boşluk varsa architect'i geri bildirimle bir kez yeniden çalıştırıp planı genişlet. Eksik-kapsam planların implement'e ulaşmasını engeller.",
+    },
+    {
         "key": "CREW_PR_BUILD_GATE",
         "label": "PR Build/Test Gate",
         "type": "bool",

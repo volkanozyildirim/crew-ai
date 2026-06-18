@@ -890,6 +890,88 @@ class AgileSDLCFlow(Flow[PipelineState]):
         _log(f"  Review pre-fetch: {n} değişen dosya context'e eklendi (tool adımları kısaldı)")
         return "\n".join(parts)
 
+    def _amend_plan(self, feedback: str, reason_label: str = "plan_amend") -> dict | None:
+        """Architect'i mevcut plan + feedback ile yeniden çalıştır → planı GENİŞLET/
+        DÜZELT (eksik dosya/servis ekle, regresyonu gider, TÜM FR/AC'yi kapsa).
+        Normalize edilmiş yeni planı döndürür (veya None). repo_name korunur."""
+        from agile_sdlc_crew.tools import claude_cli_llm as _cli
+        from agile_sdlc_crew import pipeline_config as _pc_ap
+        cur_plan = self.state.plan or {}
+        try:
+            cur_json = _json.dumps(cur_plan, ensure_ascii=False, indent=2)[:8000]
+        except Exception:
+            cur_json = str(cur_plan)[:8000]
+        ctx = self._build_step_context("technical_design_task")
+        ctx += (
+            f"\n\n# MEVCUT PLAN (DÜZELTİLECEK)\n```json\n{cur_json}\n```"
+            f"\n\n# GERİ BİLDİRİM — bu eksiklik/hataları TAM gider\n{(feedback or '')[:3000]}"
+        )
+        amend_instr = (
+            "Mevcut plan EKSİK/HATALI. Yukarıdaki geri bildirimi tam karşılayacak "
+            "şekilde planı YENİDEN üret: doğru değişiklikleri KORU, eksik dosya/servisleri "
+            "EKLE, regresyonları (silinip yerine eklenmeyen kod) DÜZELT, TÜM FR/AC'yi kapsa. "
+            "SADECE geçerli JSON plan döndür — açıklama yazma."
+        )
+        _repo_dirs = []
+        try:
+            if _pc_ap.get("CREW_CLI_REPO_TOOLS") and self.state.repo_name:
+                _d = self._repo_mgr.base_dir / self.state.repo_name
+                if _d.exists():
+                    _repo_dirs = [str(_d)]
+                    _cli.set_repo_ctx(_repo_dirs, "Read,Grep,Glob,LS")
+        except Exception:
+            pass
+        try:
+            crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
+            res = crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "target_repo": self.state.repo_name or "",
+                "previous_context": ctx,
+                "scrum_master_feedback": amend_instr,
+            })
+            self._track_and_check_budget(res, reason_label)
+            new_plan = _parse_architect_output(res.raw or "")
+        except Exception as e:
+            _log(f"  Plan amend hatası: {e}")
+            return None
+        finally:
+            _cli.clear_repo_ctx()
+        new_plan["repo_name"] = self.state.repo_name or new_plan.get("repo_name", "")
+        new_plan["changes"] = _coalesce_plan_changes(new_plan.get("changes", []))
+        return new_plan
+
+    def _check_plan_completeness(self, plan: dict) -> list:
+        """Plan tüm FR/AC'leri kapsıyor mu? Kapsanmayan madde id listesini döndür.
+        Ucuz (haiku) tek çağrılık denetçi."""
+        from agile_sdlc_crew.tools.claude_cli_llm import claude_cli_completion
+        reqs = (self.state.requirements_text or "")[:4000]
+        if not reqs:
+            return []
+        changes_txt = "\n".join(
+            f"- {c.get('file_path','?')}: {(c.get('description','') or '')[:200]}"
+            for c in plan.get("changes", [])
+        ) or "(değişiklik yok)"
+        prompt = (
+            "Sen bir plan denetçisisin. Aşağıda iş gereksinimleri (FR/TR/AC) ve teknik "
+            "plan değişiklikleri var. Plandaki değişikliklerin AÇIKÇA karşılamadığı "
+            "FR/AC madde id'lerini bul (ör. AC4, FR5). Şüphedeysen kapsanmamış say.\n\n"
+            f"# GEREKSİNİMLER\n{reqs}\n\n# PLAN DEĞİŞİKLİKLERİ\n{changes_txt}\n\n"
+            'SADECE şu formatta JSON döndür: {"uncovered": ["AC4","FR5"], "reason": "kısa"}'
+        )
+        try:
+            out = claude_cli_completion(
+                prompt, model="haiku",
+                system="Plan completeness auditor. Output only JSON.",
+            )
+            s = out.find("{"); e = out.rfind("}")
+            if s < 0 or e <= s:
+                return []
+            d = _json.loads(out[s:e + 1])
+            return [str(x) for x in (d.get("uncovered") or [])]
+        except Exception as e:
+            _log(f"  Plan completeness check hatası (atlanıyor): {e}")
+            return []
+
     def _review_retry_loop(self):
         """Reviewer RED verdikten sonra: implement → push → review dongusune girer.
         Branch ve PR zaten var — sadece dosyalari duzeltip push eder, sonra tekrar review.
@@ -897,32 +979,26 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew.main import _extract_code_from_output, _validate_code, _add_wi_comment
         from agile_sdlc_crew.pipeline import push_file
 
-        _log("\n-- REVIEW RETRY: Dosyalar duzeltiliyor --")
+        _log("\n-- REVIEW RETRY: Plan yeniden düzenleniyor (re-plan) --")
 
-        plan = self.state.plan
+        review_feedback = self.state.review_text or ""
+        # A (re-plan): Architect'i review feedback'iyle yeniden çalıştır → AMENDED
+        # plan. Eski davranış sadece plandaki MEVCUT dosyaları yeniden yazıyordu;
+        # review "şu servis/dosya eksik / regresyon var" dediğinde eksik kapsam
+        # asla eklenemiyordu (WI #66328: TPL/newOrderDetail planda yoktu → retry
+        # ekleyemedi → kalıcı RED). Amend, eksik dosyaları ekler + regresyonu giderir.
+        amended = self._amend_plan(review_feedback, "review_retry_replan")
+        if amended and amended.get("changes"):
+            self.state.plan = amended
+            plan = amended
+            _log(f"  Re-plan tamam: {len(plan.get('changes', []))} dosya (eksikler eklendi)")
+        else:
+            plan = self.state.plan
+            _log("  Re-plan başarısız/boş — mevcut planla devam")
+
         repo_name = self.state.repo_name
         branch = self.state.branch_name
-
-        # Reviewer feedback'inden hangi dosyalarin sorunlu oldugunu cikar
-        # Sadece bahsedilen dosyalari tekrar implement et — geri kalani dokunma
-        import re as _re_retry
-        review_feedback = self.state.review_text or ""
-        review_lower = review_feedback.lower()
-        changes_to_fix = []
-        for change in plan.get("changes", []):
-            fp = change.get("file_path", "")
-            if not fp:
-                continue
-            # Dosya adi veya son parcasi reviewer metninde geciyorsa sorunlu
-            fname = fp.rsplit("/", 1)[-1].lower()
-            if fname in review_lower or fp.lower() in review_lower:
-                changes_to_fix.append(change)
-        # Eger reviewer spesifik dosya belirtmediyse tum dosyalari duzelt
-        if not changes_to_fix:
-            changes_to_fix = [c for c in plan.get("changes", []) if c.get("file_path")]
-            _log(f"  Reviewer spesifik dosya belirtmedi, tum {len(changes_to_fix)} dosya duzeltilecek")
-        else:
-            _log(f"  Reviewer {len(changes_to_fix)}/{len(plan.get('changes', []))} dosyada sorun bildirdi")
+        changes_to_fix = [c for c in plan.get("changes", []) if c.get("file_path")]
 
         for i, change in enumerate(changes_to_fix):
             file_path = change.get("file_path", "")
@@ -2642,10 +2718,37 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         self.state.repo_name = repo_name
         self.state.plan = plan
+
+        # ── B: Plan completeness gate ──────────────────────────────────────
+        # Architect planı eksik FR/AC ile gelebilir (WI #66328: logo yarım +
+        # TPL/newOrderDetail hiç yok → review'da kalıcı RED). Implement'ten ÖNCE
+        # her FR/AC'nin bir değişikliğe karşılık geldiğini denetle; boşluk varsa
+        # architect'i geri bildirimle bir kez yeniden çalıştır. Env: CREW_PLAN_GATE.
+        try:
+            from agile_sdlc_crew import pipeline_config as _pc_pg
+            if _pc_pg.get("CREW_PLAN_GATE"):
+                uncovered = self._check_plan_completeness(plan)
+                if uncovered:
+                    _log(f"  ⚠️ Plan gate: kapsanmayan FR/AC: {uncovered} — plan genişletiliyor")
+                    fb = (
+                        "Plan şu gereksinim maddelerini kapsamıyor: "
+                        + ", ".join(uncovered)
+                        + ". Bunları karşılayacak değişiklikleri (eksik dosya/servisler) plana EKLE."
+                    )
+                    amended = self._amend_plan(fb, "plan_gate_amend")
+                    if amended and amended.get("changes"):
+                        plan = amended
+                        self.state.plan = plan
+                        still = self._check_plan_completeness(plan)
+                        _log(f"  Plan gate sonrası: {len(plan.get('changes', []))} dosya"
+                             + (f", hâlâ eksik: {still}" if still else ", tüm FR/AC kapsandı"))
+        except Exception as _e_pg:
+            _log(f"  Plan gate hatası (atlanıyor): {_e_pg}")
+
         # technical_design_task ciktisi JSON — cache'den parse edilebilmesi icin
         # tam veya en azindan buyuk pencereli sakla (onceden [:3000] ile kesilip
         # sonraki run'da JSON bozuk geliyordu)
-        self._step_done("technical_design_task", raw_output[:50_000])
+        self._step_done("technical_design_task", _json.dumps(plan, ensure_ascii=False)[:50_000])
         _log(f"  Teknik tasarim tamamlandi")
 
     # ── Convergence: her iki planlama yolu buraya akar ──
