@@ -897,6 +897,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         Normalize edilmiş yeni planı döndürür (veya None). repo_name korunur."""
         from agile_sdlc_crew.tools import claude_cli_llm as _cli
         from agile_sdlc_crew import pipeline_config as _pc_ap
+        from agile_sdlc_crew.main import _parse_architect_output
         cur_plan = self.state.plan or {}
         try:
             cur_json = _json.dumps(cur_plan, ensure_ascii=False, indent=2)[:8000]
