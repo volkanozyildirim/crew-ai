@@ -5,6 +5,7 @@ donusturur. State yonetimi, HAL/CrewAI dallanmasi ve quality gate'ler
 deklaratif olarak tanimlanir.
 """
 
+import json as _json
 import logging
 from typing import Any
 
