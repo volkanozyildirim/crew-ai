@@ -541,6 +541,12 @@ implement_change_task:
     — not just the first. If you have repo tools, grep the file for the
     pattern first to find every spot. Leaving one path unchanged fails review.
 
+    ⚠️ LARGE FILES — IN-PLACE EDIT: if you have repo tools (Read/Edit) AND the
+    file is large (say > 1500 lines / 50KB), DO NOT echo the whole file as text
+    (it gets truncated and the push is rejected). Instead use the Edit tool to
+    make the minimal in-place change(s) on disk; the pipeline reads the edited
+    file straight from disk. Verify with a quick read/lint after editing.
+
     PLAN:
     Repo: {target_repo}
     File: {target_file}

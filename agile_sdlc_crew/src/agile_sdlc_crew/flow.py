@@ -924,13 +924,25 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception:
             pass
         try:
-            crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
-            res = crew.kickoff(inputs={
-                "work_item_id": self.state.work_item_id,
-                "target_repo": self.state.repo_name or "",
-                "previous_context": ctx,
-                "scrum_master_feedback": amend_instr,
-            })
+            # Guardrail ON: architect'i geçerli JSON plan döndürmeye zorlar
+            # (guardrail OFF iken bazen düz metin döndürüp parse'ı bozuyordu).
+            try:
+                crew = self._agile_crew.create_analysis_crew()
+                res = crew.kickoff(inputs={
+                    "work_item_id": self.state.work_item_id,
+                    "target_repo": self.state.repo_name or "",
+                    "previous_context": ctx,
+                    "scrum_master_feedback": amend_instr,
+                })
+            except Exception:
+                # Guardrail retry'ları tükendi → guardrail'siz fallback
+                crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
+                res = crew.kickoff(inputs={
+                    "work_item_id": self.state.work_item_id,
+                    "target_repo": self.state.repo_name or "",
+                    "previous_context": ctx,
+                    "scrum_master_feedback": amend_instr,
+                })
             self._track_and_check_budget(res, reason_label)
             new_plan = _parse_architect_output(res.raw or "")
         except Exception as e:
@@ -1002,6 +1014,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
         branch = self.state.branch_name
         changes_to_fix = [c for c in plan.get("changes", []) if c.get("file_path")]
 
+        # Büyük dosyalarda in-place edit için repo araçlarını aç (truncate önleme;
+        # _amend_plan kendi ctx'ini kapattı, implement için yeniden aç).
+        from agile_sdlc_crew.tools import claude_cli_llm as _cli_rr
+        self._enable_impl_repo_tools()
+
         for i, change in enumerate(changes_to_fix):
             file_path = change.get("file_path", "")
 
@@ -1068,6 +1085,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             else:
                 _log(f"    Push HATA: {push_result.get('error', '?')}")
 
+        _cli_rr.clear_repo_ctx()  # implement repo-tool baglamini kapat (re-review oncesi)
         _log("  Review retry: dosyalar guncellendi, tekrar review yapiliyor")
 
         # Tekrar review
@@ -2882,10 +2900,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._db.update_job(self.state.job_id, repo_name=repo_name, branch_name=self.state.branch_name)
 
     @listen(step5_create_branch)
+    def _enable_impl_repo_tools(self) -> bool:
+        """Implement için repo-tool bağlamını aç: claude -p'ye --add-dir <klon> +
+        Read/Grep/Glob/LS/Edit/Write. Dev büyük dosyaları in-place edit edebilir
+        (aksi halde 300KB+ dosyada tam-dosya echo truncate oluyor — WI #66328
+        Customer.php 307KB). clear_repo_ctx ile kapatılmalı (try/finally).
+        CREW_CLI_REPO_TOOLS kapalıysa / repo yoksa hiçbir şey yapmaz."""
+        from agile_sdlc_crew.tools import claude_cli_llm as _cli
+        from agile_sdlc_crew import pipeline_config as _pc
+        try:
+            if _pc.get("CREW_CLI_REPO_TOOLS") and self.state.repo_name:
+                d = self._repo_mgr.base_dir / self.state.repo_name
+                if d.exists():
+                    _cli.set_repo_ctx([str(d)], "Read,Grep,Glob,LS,Edit,Write")
+                    _log("  Implement repo araçları AÇIK (--add-dir, in-place edit)")
+                    return True
+        except Exception:
+            pass
+        return False
+
     def step6_implement_code(self):
         """Adim 6: Kod Gelistirme - dosya dongusu."""
         from agile_sdlc_crew.main import _extract_code_from_output, _validate_code
         from agile_sdlc_crew.pipeline import push_file
+        from agile_sdlc_crew.tools import claude_cli_llm as _cli_impl
         import os.path as _osp
 
         _log("\n-- ADIM 6: Kod gelistirme --")
@@ -2904,6 +2942,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  Aynı dosyayı hedefleyen değişiklikler birleştirildi: "
                  f"{_orig_n} → {len(plan['changes'])} (clobber önleme)")
         self.state.plan = plan
+
+        # Büyük dosyalarda in-place edit için repo araçlarını aç (truncate önleme).
+        self._enable_impl_repo_tools()
 
         # Plan ozeti — developer her dosyayi implement ederken TUM plani gorsun.
         # Dosyalar arasi bagimliliklari anlamasi icin kritik (ornek: frontend API yolunu
@@ -3182,6 +3223,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             else:
                 _log(f"    Push hatasi: {push_result['error']}")
 
+        _cli_impl.clear_repo_ctx()  # implement repo-tool baglamini kapat
         self.state.all_pushes = all_pushes
         self._step_done("implement_change_task", f"{len(all_pushes)} dosya push edildi")
 
