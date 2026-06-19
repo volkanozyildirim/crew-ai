@@ -2899,7 +2899,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         if self.state.job_id:
             self._db.update_job(self.state.job_id, repo_name=repo_name, branch_name=self.state.branch_name)
 
-    @listen(step5_create_branch)
     def _enable_impl_repo_tools(self) -> bool:
         """Implement için repo-tool bağlamını aç: claude -p'ye --add-dir <klon> +
         Read/Grep/Glob/LS/Edit/Write. Dev büyük dosyaları in-place edit edebilir
@@ -2919,6 +2918,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             pass
         return False
 
+    @listen(step5_create_branch)
     def step6_implement_code(self):
         """Adim 6: Kod Gelistirme - dosya dongusu."""
         from agile_sdlc_crew.main import _extract_code_from_output, _validate_code
