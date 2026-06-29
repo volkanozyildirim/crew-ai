@@ -912,7 +912,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
             "Mevcut plan EKSİK/HATALI. Yukarıdaki geri bildirimi tam karşılayacak "
             "şekilde planı YENİDEN üret: doğru değişiklikleri KORU, eksik dosya/servisleri "
             "EKLE, regresyonları (silinip yerine eklenmeyen kod) DÜZELT, TÜM FR/AC'yi kapsa. "
-            "SADECE geçerli JSON plan döndür — açıklama yazma."
+            "SADECE geçerli JSON plan döndür — açıklama yazma. "
+            "KEŞİF SINIRI: repo araçların varsa en fazla ~6 hedefli grep/read; eksik "
+            "dosyaları bulunca DUR ve planı üret, tüm repoyu tarama."
         )
         _repo_dirs = []
         try:
@@ -2606,6 +2608,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 "Context'te henuz dosya icerigi yok. browse_repo ile hedef repo'daki "
                 "ilgili dosyalari oku, sonra JSON plan uret."
             )
+        # Kesfi sinirla: repo araclariyla otonom derin kesife dalip sismesin.
+        ctx_hint += (
+            "\n\n⏱️ KEŞİF SINIRI: Repo araçların (Grep/Read) varsa VERİMLİ kullan — "
+            "en fazla ~6 HEDEFLİ grep/read yap, ilgili dosya(lar)ı bulunca DUR ve "
+            "JSON planı üret. Tüm repoyu/dizinleri tarama, spekülatif arama yapma. "
+            "Amaç hızlı ve doğru plan, kapsamlı keşif değil."
+        )
 
         # Test zorunlulugu notu (CREW_REQUIRE_TESTS + repoda test varsa):
         # architect plana test dosyalarini da dahil etsin.

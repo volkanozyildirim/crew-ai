@@ -298,6 +298,17 @@ def claude_cli_completion(
         cmd.extend(["--add-dir", d])
     if allowed_tools:
         cmd.extend(["--allowedTools", allowed_tools])
+    # Repo-tool'lu cagrilar (architect/implement) otonom derin kesife dalip
+    # 27-tur/$1.6 gibi sisebiliyor. Cagri-basi $ cap ile sinirla (hard limit;
+    # claude --max-budget-usd sadece --print ile calisir). CREW_CLI_CALL_MAX_USD.
+    if add_dirs:
+        try:
+            from agile_sdlc_crew import pipeline_config as _pc_cap
+            _cap = float(_pc_cap.get("CREW_CLI_CALL_MAX_USD") or 0)
+        except Exception:
+            _cap = 0.0
+        if _cap > 0:
+            cmd.extend(["--max-budget-usd", str(_cap)])
 
     env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"}
 

@@ -217,6 +217,14 @@ SCHEMA: list[dict] = [
         "desc": "Teknik tasarimda architect'e klonlanmis hedef repoyu --add-dir ile, Read/Grep/Glob'u --allowedTools ile ver. Architect gercek kodu kesfeder (mevcut servisi bulup 'modify' yapar; yeni dosya halusine etmez). UYARI: agent ekstra tur/sure harcayabilir.",
     },
     {
+        "key": "CREW_CLI_CALL_MAX_USD",
+        "label": "Çağrı-başı Maks $ (repo-tool keşif cap)",
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "desc": "Repo araçlı (--add-dir) claude çağrılarına çağrı-başı dolar cap'i (claude --max-budget-usd). Architect/implement otonom derin keşfe dalıp tek çağrıda 27-tur/$1.6 şişebiliyor; bu onu sınırlar. 0 = limitsiz.",
+    },
+    {
         "key": "CREW_PLAN_GATE",
         "label": "Plan Completeness Gate",
         "type": "bool",
