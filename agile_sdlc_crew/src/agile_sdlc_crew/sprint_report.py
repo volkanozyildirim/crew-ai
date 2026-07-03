@@ -556,8 +556,10 @@ def _fill_content_slide(slide, summaries: list[GroupSummary], start_no: int):
         return
     # görseller açık ve slaytta tek parent -> sağda rozete yer bırak (kutuyu daralt)
     do_badge = _visuals_enabled() and len(summaries) == 1
-    if do_badge:
-        box.width = Inches(8.6)
+    # tüm içerik slaytlarında AYNI hizalama (şablonun kutu top'ları farklı olabiliyor)
+    box.left = Inches(1.5)
+    box.top = Inches(1.3)
+    box.width = Inches(8.6) if do_badge else Inches(11.6)
     tf = box.text_frame
     tf.clear()
     tf.word_wrap = True
@@ -588,8 +590,11 @@ def _fill_content_slide(slide, summaries: list[GroupSummary], start_no: int):
         for b in s.bullets:
             bp = tf.add_paragraph()
             bp.level = 1
+            bp.space_before = Pt(4)
+            bp.space_after = Pt(4)
+            bp.line_spacing = 1.1
             br = bp.add_run()
-            br.text = b
+            br.text = f"•  {b}"  # görünür madde imi
             br.font.size = Pt(14)
             br.font.bold = False
         no += 1
@@ -614,7 +619,7 @@ def _set_slide_title(slide, text: str):
 
 def _fill_digest_slide(slide, summaries: list[GroupSummary]):
     """'Diğer Çalışmalar' slaytı: her proje = başlık satırı (SP·%) + 1 cümle özet."""
-    from pptx.util import Emu, Pt
+    from pptx.util import Emu, Inches, Pt
 
     # ortadaki ayraç çizgilerini kaldır
     for sh in list(slide.shapes):
@@ -627,6 +632,9 @@ def _fill_digest_slide(slide, summaries: list[GroupSummary]):
     box = _content_textbox(slide)
     if box is None:
         return
+    box.left = Inches(1.5)  # içerik slaytlarıyla aynı hiza
+    box.top = Inches(1.3)
+    box.width = Inches(11.6)
     tf = box.text_frame
     tf.clear()
     tf.word_wrap = True
@@ -702,7 +710,7 @@ def _add_velocity_chart(slide, data: dict):
     """Değerlendirme slaytına son-N sprint clustered column chart (Planlanan/Toplam/Tamamlanan)."""
     from pptx.chart.data import CategoryChartData
     from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
-    from pptx.util import Inches
+    from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
 
     cd = CategoryChartData()
@@ -722,6 +730,11 @@ def _add_velocity_chart(slide, data: dict):
         ser = ch.plots[0].series[i]
         ser.format.fill.solid()
         ser.format.fill.fore_color.rgb = RGBColor(*rgb)
+    # x ekseni (sprint adları) etiketlerini küçült
+    try:
+        ch.category_axis.tick_labels.font.size = Pt(9)
+    except Exception:
+        pass
     return ch
 
 

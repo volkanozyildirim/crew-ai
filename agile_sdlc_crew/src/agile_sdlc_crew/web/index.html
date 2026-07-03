@@ -2456,6 +2456,23 @@ function openSprintReport(){
   document.getElementById('srDownload').style.display='none';
   document.getElementById('srStartBtn').style.display='';
   document.getElementById('sprintReportModal').style.display='flex';
+  loadSrConfig();
+}
+async function loadSrConfig(){
+  const el=document.getElementById('srConfig');
+  if(!el)return;
+  el.textContent='Ayarlar yükleniyor…';
+  try{
+    const r=await fetch('/api/sprint-report/config?t='+Date.now());
+    const d=await r.json();
+    const on=v=>v?'<span style="color:#5AC878">✓</span>':'<span style="color:#e06666">✗</span>';
+    const base=p=>(p||'').split('/').pop();
+    el.innerHTML=
+      '<b style="color:var(--text)">⚙️ Aktif ayarlar</b><br>'+
+      `AI özet ${on(d.ai_summary)} · Görseller ${on(d.visuals)} · Azure grafikleri ${on(d.azure_charts)}<br>`+
+      `Ayrı slayt eşiği: <b>&gt;%${d.min_pct}</b> · Diğer Çalışmalar: <b>${d.digest_per_slide}</b>/slayt · Velocity: son <b>${d.velocity_sprints}</b> sprint<br>`+
+      `Şablon: <span title="${esc(d.template)}">${esc(base(d.template))}</span> · Ekip görseli: <span title="${esc(d.team_image)}">${esc(base(d.team_image))}</span>`;
+  }catch(e){ el.textContent='Ayarlar alınamadı.'; }
 }
 function closeSprintReport(){
   document.getElementById('sprintReportModal').style.display='none';
@@ -2536,9 +2553,11 @@ async function pollSprintReport(){
       <div style="margin-bottom:6px;font-size:13px">Takım: <b id="srTeam">-</b></div>
       <div style="margin-bottom:12px;font-size:13px">Sprint: <b id="srSprint">-</b></div>
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">
-        Sprintteki işler parent'a (Epic/Feature) göre gruplanıp FLO şablonlu bir <b>.pptx</b> üretilir.
-        Metrik slaytları (burndown, 3 aylık) boş bırakılır — Azure Analytics ekran görüntülerini elle ekleyebilirsin.
+        Sprintteki işler parent'a (Epic/Feature) göre gruplanıp FLO şablonlu bir <b>.pptx</b> üretilir:
+        en çok efor (SP) alan projeler domain rozetiyle ayrı slaytta, kalanlar "Diğer Çalışmalar" özetinde.
+        Burndown ve son 6 sprint velocity grafikleri Azure'dan <b>otomatik</b> çizilir.
       </div>
+      <div id="srConfig" style="font-size:11px;color:var(--text-dim);background:#111;border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;line-height:1.7"></div>
       <div id="srStatus" style="font-size:13px;min-height:20px;margin-bottom:12px"></div>
       <div style="display:flex;gap:8px;align-items:center">
         <button id="srStartBtn" onclick="startSprintReport()" class="sm-btn">Oluştur</button>

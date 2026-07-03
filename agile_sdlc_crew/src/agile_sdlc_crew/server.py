@@ -1643,6 +1643,23 @@ async def sprint_report_status(report_id: str = ""):
     return JSONResponse(out)
 
 
+@app.get("/api/sprint-report/config")
+async def sprint_report_config():
+    """Popup'ta gösterilecek aktif sprint raporu ayarları (env'den)."""
+    from agile_sdlc_crew import sprint_report as sr
+    return JSONResponse({
+        "enabled": _sprint_report_enabled(),
+        "ai_summary": sr._ai_enabled(),
+        "visuals": sr._visuals_enabled(),
+        "azure_charts": sr._azure_charts_enabled(),
+        "min_pct": sr._min_pct(),
+        "digest_per_slide": sr._digest_per_slide(),
+        "velocity_sprints": sr._velocity_sprints(),
+        "template": sr.template_path(),
+        "team_image": sr.team_image_path(),
+    })
+
+
 @app.get("/api/sprint-report/download/{report_id}")
 async def sprint_report_download(report_id: str):
     """Uretilen .pptx dosyasini indir."""
