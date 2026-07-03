@@ -122,6 +122,11 @@ class BackfillRequest(BaseModel):
     team: str = ""
 
 
+class SprintReportRequest(BaseModel):
+    team: str = ""
+    iteration_path: str = ""
+
+
 # ── API Routes ──
 
 @app.get("/")
@@ -132,7 +137,8 @@ async def dashboard():
 @app.get("/api/health")
 async def health():
     stats = db.get_queue_stats()
-    return JSONResponse({"status": "ok", **stats})
+    sr_on = os.environ.get("CREW_SPRINT_REPORT", "0") not in ("0", "false", "False", "")
+    return JSONResponse({"status": "ok", "sprint_report_enabled": sr_on, **stats})
 
 
 @app.get("/api/status")
@@ -1575,6 +1581,83 @@ async def backfill_cancel():
     from agile_sdlc_crew import azure_backfill
     cancelled = azure_backfill.request_cancel()
     return JSONResponse({"cancelled": cancelled}, status_code=202 if cancelled else 409)
+
+
+# ── Sprint Report (.pptx) ──
+
+_sprint_reports: dict[str, dict] = {}
+_sprint_report_lock = threading.Lock()
+_sprint_report_seq = [0]
+
+
+def _sprint_report_enabled() -> bool:
+    return os.environ.get("CREW_SPRINT_REPORT", "0") not in ("0", "false", "False", "")
+
+
+@app.post("/api/sprint-report")
+async def sprint_report_start(req: SprintReportRequest):
+    """Secilen takim+sprint icin FLO sablonlu .pptx sprint raporu uret (async thread)."""
+    if not _sprint_report_enabled():
+        return JSONResponse(
+            {"error": "Sprint raporu kapali (CREW_SPRINT_REPORT=1 ile ac)"}, status_code=409
+        )
+    if not (req.iteration_path or "").strip():
+        return JSONResponse({"error": "iteration_path gerekli"}, status_code=400)
+
+    with _sprint_report_lock:
+        _sprint_report_seq[0] += 1
+        report_id = f"{int(time.time())}_{_sprint_report_seq[0]}"
+        _sprint_reports[report_id] = {"status": "running", "team": req.team}
+
+    def _run():
+        try:
+            from agile_sdlc_crew import sprint_report
+            res = sprint_report.generate_sprint_report(
+                team=req.team,
+                iteration_path=req.iteration_path.strip(),
+                report_id=report_id,
+            )
+            with _sprint_report_lock:
+                _sprint_reports[report_id] = {"status": "done", "team": req.team, **res}
+            pipeline_log.info(f"Sprint raporu {report_id} tamam: {res.get('file_path')}")
+        except Exception as e:
+            with _sprint_report_lock:
+                _sprint_reports[report_id] = {"status": "error", "error": str(e)}
+            pipeline_log.error(f"Sprint raporu {report_id} basarisiz: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return JSONResponse({"report_id": report_id, "status": "running"}, status_code=202)
+
+
+@app.get("/api/sprint-report/status")
+async def sprint_report_status(report_id: str = ""):
+    """Sprint raporu uretim durumu."""
+    with _sprint_report_lock:
+        info = _sprint_reports.get(report_id)
+    if not info:
+        return JSONResponse({"error": "report_id bulunamadi"}, status_code=404)
+    out = dict(info)
+    if out.get("status") == "done":
+        out["download_url"] = f"/api/sprint-report/download/{report_id}"
+    out.pop("file_path", None)  # sunucu-ic yolu disari verme
+    return JSONResponse(out)
+
+
+@app.get("/api/sprint-report/download/{report_id}")
+async def sprint_report_download(report_id: str):
+    """Uretilen .pptx dosyasini indir."""
+    with _sprint_report_lock:
+        info = _sprint_reports.get(report_id)
+    if not info or info.get("status") != "done":
+        return JSONResponse({"error": "Rapor hazir degil"}, status_code=404)
+    path = info.get("file_path", "")
+    if not path or not os.path.exists(path):
+        return JSONResponse({"error": "Dosya bulunamadi"}, status_code=404)
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        filename=info.get("file_name", os.path.basename(path)),
+    )
 
 
 # ── Static files ──

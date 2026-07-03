@@ -22,3 +22,10 @@ completion_report.md
 
 # Claude Code local (personal) notes
 .claude.local.md
+
+# Sprint report materyalleri (şablon/ekip görseli/ikonlar/çıktılar) — asla commit edilmez
+sprint_report_template.pptx
+sprint_report_team.*
+sprint_report_icons/
+sprint_reports/
+*.pptx

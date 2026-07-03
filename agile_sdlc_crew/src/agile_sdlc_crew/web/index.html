@@ -380,6 +380,7 @@ header {
       <span class="sprint-info" id="sprintInfo"></span>
       <button class="sm-btn ghost" onclick="loadTeams()" style="padding:4px 7px">&#8635;</button>
       <button class="sm-btn" onclick="openBackfill()" title="Seçili takımın geçmiş done+PR'lı işlerini indeksle" style="padding:4px 10px;font-size:12px">📚 Geçmiş İşleri Tara</button>
+      <button class="sm-btn" onclick="openSprintReport()" title="Seçili sprintin işlerini parent'a göre gruplayıp .pptx sprint raporu üret" style="padding:4px 10px;font-size:12px">📊 Sprint Raporu</button>
     </div>
     <div class="sprint-summary" id="summary" style="display:none"></div>
     <div id="kanban"><div class="board-empty">Takım ve sprint seçerek board'u görüntüleyin.</div></div>
@@ -2441,6 +2442,59 @@ function renderBackfill(p){
   if(running&&!_bfPoll)_bfPoll=setInterval(fetchBackfill,2000);
 }
 
+// ── Sprint Report (.pptx) ──────────────────────────────────────────────────
+let _srPoll=null,_srId=null;
+function openSprintReport(){
+  const team=(document.getElementById('teamSel')||{}).value||'';
+  const sel=document.getElementById('sprintSel');
+  const iter=(sel||{}).value||'';
+  if(!team){alert('Önce bir takım seçin');return;}
+  if(!iter){alert('Önce bir sprint seçin');return;}
+  document.getElementById('srTeam').textContent=team;
+  document.getElementById('srSprint').textContent=(sel.selectedOptions[0]||{}).text||iter;
+  document.getElementById('srStatus').textContent='';
+  document.getElementById('srDownload').style.display='none';
+  document.getElementById('srStartBtn').style.display='';
+  document.getElementById('sprintReportModal').style.display='flex';
+}
+function closeSprintReport(){
+  document.getElementById('sprintReportModal').style.display='none';
+  if(_srPoll){clearInterval(_srPoll);_srPoll=null;}
+}
+async function startSprintReport(){
+  const team=document.getElementById('srTeam').textContent;
+  const iteration_path=(document.getElementById('sprintSel')||{}).value||'';
+  document.getElementById('srStartBtn').style.display='none';
+  document.getElementById('srDownload').style.display='none';
+  document.getElementById('srStatus').textContent='⏳ Rapor üretiliyor… (parent gruplama + AI özet — birkaç dakika sürebilir)';
+  try{
+    const r=await fetch('/api/sprint-report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team,iteration_path})});
+    const d=await r.json();
+    if(!r.ok){document.getElementById('srStatus').textContent='Hata: '+(d.error||r.status);document.getElementById('srStartBtn').style.display='';return;}
+    _srId=d.report_id;
+    if(_srPoll)clearInterval(_srPoll);
+    _srPoll=setInterval(pollSprintReport,3000);
+  }catch(e){document.getElementById('srStatus').textContent='Başlatma hatası: '+e;document.getElementById('srStartBtn').style.display='';}
+}
+async function pollSprintReport(){
+  if(!_srId)return;
+  try{
+    const r=await fetch('/api/sprint-report/status?report_id='+encodeURIComponent(_srId)+'&t='+Date.now());
+    const d=await r.json();
+    if(d.status==='done'){
+      clearInterval(_srPoll);_srPoll=null;
+      document.getElementById('srStatus').textContent=`✅ Hazır — ${d.group_count} proje, ${d.item_count} iş kalemi`+(d.ai?' (AI özetli)':'');
+      const a=document.getElementById('srDownload');
+      a.href=d.download_url;a.style.display='inline-flex';
+      document.getElementById('srStartBtn').style.display='';
+    }else if(d.status==='error'){
+      clearInterval(_srPoll);_srPoll=null;
+      document.getElementById('srStatus').textContent='Hata: '+(d.error||'bilinmiyor');
+      document.getElementById('srStartBtn').style.display='';
+    }
+  }catch(e){}
+}
+
 </script>
 
 <!-- Backfill Modal -->
@@ -2463,6 +2517,32 @@ function renderBackfill(p){
       <div style="margin-top:12px;display:flex;gap:8px">
         <button id="bfStartBtn" onclick="startBackfill()" class="sm-btn">Başlat</button>
         <button id="bfCancelBtn" onclick="cancelBackfill()" class="sm-btn" style="display:none;background:var(--danger)">İptal</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Sprint Report Modal -->
+<div id="sprintReportModal" style="display:none;position:fixed;inset:0;z-index:280;background:rgba(0,0,0,0.78);backdrop-filter:blur(4px);" onclick="if(event.target===this)closeSprintReport()">
+  <div style="position:absolute;top:14%;left:50%;transform:translateX(-50%);width:min(560px,92vw);background:var(--bg-card);border-radius:16px;border:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="font-size:18px">📊</span>
+        <h2 style="font-size:16px;font-weight:700">Sprint Raporu Oluştur</h2>
+      </div>
+      <button onclick="closeSprintReport()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div style="padding:16px 20px">
+      <div style="margin-bottom:6px;font-size:13px">Takım: <b id="srTeam">-</b></div>
+      <div style="margin-bottom:12px;font-size:13px">Sprint: <b id="srSprint">-</b></div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">
+        Sprintteki işler parent'a (Epic/Feature) göre gruplanıp FLO şablonlu bir <b>.pptx</b> üretilir.
+        Metrik slaytları (burndown, 3 aylık) boş bırakılır — Azure Analytics ekran görüntülerini elle ekleyebilirsin.
+      </div>
+      <div id="srStatus" style="font-size:13px;min-height:20px;margin-bottom:12px"></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="srStartBtn" onclick="startSprintReport()" class="sm-btn">Oluştur</button>
+        <a id="srDownload" class="sm-btn" style="display:none;text-decoration:none;align-items:center;gap:6px;background:var(--success,#2ecc71)" download>⬇️ .pptx İndir</a>
       </div>
     </div>
   </div>

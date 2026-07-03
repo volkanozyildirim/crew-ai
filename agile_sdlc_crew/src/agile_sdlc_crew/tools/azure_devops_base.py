@@ -1,5 +1,6 @@
 import base64
 import os
+import re
 
 import requests
 
@@ -651,6 +652,20 @@ class AzureDevOpsClient:
             wi_url = item.get("_links", {}).get("html", {}).get("href", "")
             if not wi_url:
                 wi_url = f"{self.org_url}/{self.project}/_workitems/edit/{item.get('id', '')}"
+            # Story point: bu org Custom.StoryPoints kullaniyor; standart alanlara fallback
+            sp = 0.0
+            for sp_field in (
+                "Custom.StoryPoints",
+                "Microsoft.VSTS.Scheduling.StoryPoints",
+                "Microsoft.VSTS.Scheduling.Effort",
+            ):
+                val = fields.get(sp_field)
+                if val is not None:
+                    try:
+                        sp = float(val)
+                        break
+                    except (TypeError, ValueError):
+                        continue
             result.append({
                 "id": item.get("id"),
                 "title": fields.get("System.Title", ""),
@@ -658,12 +673,76 @@ class AzureDevOpsClient:
                 "type": fields.get("System.WorkItemType", ""),
                 "assignedTo": assigned.get("displayName", "") if isinstance(assigned, dict) else "",
                 "priority": fields.get("Microsoft.VSTS.Common.Priority", 4),
+                "storyPoints": sp,
                 "tags": fields.get("System.Tags", ""),
                 "iterationPath": fields.get("System.IterationPath", ""),
                 "areaPath": fields.get("System.AreaPath", ""),
                 "url": wi_url,
             })
         return result
+
+    def analytics_query(self, odata_query: str) -> list:
+        """Azure DevOps Analytics OData sorgusu calistir (burndown/velocity icin).
+        odata_query: 'v4.0-preview/' sonrasi gelen kisim, or.
+        'WorkItemSnapshot?$apply=filter(...)/...'. Doner: 'value' listesi."""
+        analytics = self.org_url.replace("://dev.azure.com", "://analytics.dev.azure.com")
+        url = f"{analytics}/{self.project}/_odata/v4.0-preview/{odata_query}"
+        resp = requests.get(url, headers=self._headers, timeout=60)
+        resp.raise_for_status()
+        return resp.json().get("value", [])
+
+    def get_work_item_parents(self, work_item_ids: list) -> dict:
+        """Verilen work item'larin parent'ini cozer.
+        Doner: {child_id(int): {"parent_id", "parent_title", "parent_type"}}.
+        Parent'i olmayan cocuk map'te yer almaz."""
+        ids = [int(i) for i in work_item_ids if i]
+        if not ids:
+            return {}
+
+        def _parent_from_item(item: dict):
+            f = item.get("fields", {})
+            pid = f.get("System.Parent")
+            if pid:
+                return int(pid)
+            for rel in item.get("relations", []) or []:
+                if rel.get("rel") == "System.LinkTypes.Hierarchy-Reverse":
+                    m = re.search(r"/workItems/(\d+)", rel.get("url", ""), re.IGNORECASE)
+                    if m:
+                        return int(m.group(1))
+            return None
+
+        # 1) cocuklarin parent id'leri
+        child_to_parent: dict[int, int] = {}
+        for i in range(0, len(ids), 200):
+            batch = ",".join(str(x) for x in ids[i : i + 200])
+            wiql = f"SELECT [System.Id] FROM WorkItems WHERE [System.Id] IN ({batch})"
+            for item in self.query_work_items(wiql):
+                pid = _parent_from_item(item)
+                if pid:
+                    child_to_parent[int(item.get("id"))] = pid
+
+        # 2) parent baslik/tip
+        parent_ids = sorted(set(child_to_parent.values()))
+        parent_info: dict[int, dict] = {}
+        for i in range(0, len(parent_ids), 200):
+            batch = ",".join(str(x) for x in parent_ids[i : i + 200])
+            wiql = f"SELECT [System.Id] FROM WorkItems WHERE [System.Id] IN ({batch})"
+            for item in self.query_work_items(wiql):
+                f = item.get("fields", {})
+                parent_info[int(item.get("id"))] = {
+                    "title": f.get("System.Title", ""),
+                    "type": f.get("System.WorkItemType", ""),
+                }
+
+        out = {}
+        for cid, pid in child_to_parent.items():
+            info = parent_info.get(pid, {})
+            out[cid] = {
+                "parent_id": pid,
+                "parent_title": info.get("title", ""),
+                "parent_type": info.get("type", ""),
+            }
+        return out
 
     def query_work_items(self, wiql: str, limit: int = 0) -> list[dict]:
         url = f"{self._base_api_url}/wit/wiql"

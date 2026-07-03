@@ -631,6 +631,28 @@ class VectorStore:
         log.debug(f"  existing_repo_decision_wis: {len(out)} WI indekste")
         return out
 
+    def repo_decision_records(self) -> dict:
+        """/repo-decisions kayitlarini work_item_id -> {content, repo, pr_id, file_paths}
+        seklinde dondurur (sprint raporu 'ne yapildi' baglami icin)."""
+        out: dict[str, dict] = {}
+        try:
+            info = self.storage.get_scope_info("/repo-decisions")
+            if not info or info.record_count <= 0:
+                return out
+            for r in self.storage.list_records("/repo-decisions", limit=100_000):
+                wi = r.metadata.get("work_item_id")
+                if not wi:
+                    continue
+                out[str(wi)] = {
+                    "content": r.content or "",
+                    "repo": r.metadata.get("repo", ""),
+                    "pr_id": r.metadata.get("pr_id", ""),
+                    "file_paths": r.metadata.get("file_paths", []),
+                }
+        except Exception as e:
+            log.debug(f"  repo_decision_records atlandi: {e}")
+        return out
+
     def index_repo_decision(self, work_item_id: str, repo: str, pr_id: str, plan: dict, wi_content: str, skip_dedup_check: bool = False):
         """Basarili bir isin 'icerik+dosya yollari -> repo' kaydini /repo-decisions
         scope'una yaz. Varsayilan: idempotent (ayni work_item_id zaten varsa atlar).
