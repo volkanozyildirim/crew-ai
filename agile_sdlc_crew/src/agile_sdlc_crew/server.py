@@ -1586,6 +1586,7 @@ async def backfill_cancel():
 # ── Sprint Report (.pptx) ──
 
 _sprint_reports: dict[str, dict] = {}
+_sprint_running: dict[str, str] = {}  # "team|iteration" -> report_id (aktif üretim)
 _sprint_report_lock = threading.Lock()
 _sprint_report_seq = [0]
 
@@ -1601,20 +1602,31 @@ async def sprint_report_start(req: SprintReportRequest):
         return JSONResponse(
             {"error": "Sprint raporu kapali (CREW_SPRINT_REPORT=1 ile ac)"}, status_code=409
         )
-    if not (req.iteration_path or "").strip():
+    iteration_path = (req.iteration_path or "").strip()
+    if not iteration_path:
         return JSONResponse({"error": "iteration_path gerekli"}, status_code=400)
 
+    key = f"{req.team}|{iteration_path}"
     with _sprint_report_lock:
+        # mükerrer engeli: aynı sprint için üretim sürüyorsa mevcut olana bağla
+        existing = _sprint_running.get(key)
+        if existing:
+            return JSONResponse(
+                {"report_id": existing, "status": "running",
+                 "message": "Bu sprint için rapor zaten üretiliyor"},
+                status_code=409,
+            )
         _sprint_report_seq[0] += 1
         report_id = f"{int(time.time())}_{_sprint_report_seq[0]}"
         _sprint_reports[report_id] = {"status": "running", "team": req.team}
+        _sprint_running[key] = report_id
 
     def _run():
         try:
             from agile_sdlc_crew import sprint_report
             res = sprint_report.generate_sprint_report(
                 team=req.team,
-                iteration_path=req.iteration_path.strip(),
+                iteration_path=iteration_path,
                 report_id=report_id,
             )
             with _sprint_report_lock:
@@ -1624,6 +1636,10 @@ async def sprint_report_start(req: SprintReportRequest):
             with _sprint_report_lock:
                 _sprint_reports[report_id] = {"status": "error", "error": str(e)}
             pipeline_log.error(f"Sprint raporu {report_id} basarisiz: {e}")
+        finally:
+            with _sprint_report_lock:
+                if _sprint_running.get(key) == report_id:
+                    del _sprint_running[key]
 
     threading.Thread(target=_run, daemon=True).start()
     return JSONResponse({"report_id": report_id, "status": "running"}, status_code=202)
