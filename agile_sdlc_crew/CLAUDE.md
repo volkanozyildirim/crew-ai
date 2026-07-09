@@ -93,9 +93,13 @@ CrewAI's Python tools (`browse_repo`, `search_code`, `AzureDevOpsBrowseRepoTool`
 - `db.py` — MySQL via pymysql. Tables `jobs` and `job_steps` (schema in `SCHEMA` constant, auto-created). `STEP_DEFINITIONS` is the canonical step list and order; keep it in sync with the flow when adding/removing steps.
 - `dashboard.py` — `StatusTracker` writes `web/status.json`; `start_dashboard_server` is the legacy stdlib HTTP server used by the CLI path. The FastAPI server in `server.py` is the production path.
 
+### Embedding selection: `embed/` package + `config/embed_config.yaml`
+
+Mirrors the LLM registry. Providers (`embed/providers/*`): `fastembed`, `ollama`, `openai`. Resolver (`embed/resolver.py`) precedence: `config/embed_config.yaml` (written by the dashboard) → `CREW_EMBED_PROVIDER/MODEL/BASE_URL` env → provider default (`fastembed` + `BAAI/bge-small-en-v1.5`). Runtime default in use today is `fastembed` / `intfloat/multilingual-e5-large` (1024-dim, multilingual for Turkish content). No LLM is involved — text is embedded directly. **Gotcha:** changing the model/dim auto-resets the LanceDB table (`_reset_table_if_dim_mismatch`) — old vectors are dropped, not migrated.
+
 ### Tools (CrewAI tools the agents call)
 
-In `tools/`. The Azure DevOps tools share `AzureDevOpsClient` (`azure_devops_base.py`); `local_repo.LocalRepoManager` clones repos under `CREW_REPOS_DIR` (default `~/.crew_repos`) and is the tool layer's git interface; `vector_store.VectorStore` embeds `REPO_SUMMARY.md` into a local vector DB at `CREW_VECTOR_DB` for semantic repo lookup; `tool_cache.py` deduplicates repeated tool calls within a single pipeline run (reset in `initialize`). `claude_cli_llm.py` is the litellm custom provider implementation, not a tool agents call.
+In `tools/`. The Azure DevOps tools share `AzureDevOpsClient` (`azure_devops_base.py`); `local_repo.LocalRepoManager` clones repos under `CREW_REPOS_DIR` (default `~/.crew_repos`) and is the tool layer's git interface; `vector_store.VectorStore` embeds `REPO_SUMMARY.md` (and targeted plan-file code chunks) into a local LanceDB at `CREW_VECTOR_DB`; retrieval is hybrid — `bm25_search.HybridSearcher` fuses BM25 lexical hits with vector results (`CREW_HYBRID_SEARCH`, default on) so exact identifiers/paths rank well. Agent-facing search tools: `semantic_search`, `find_relevant_repos`. `tool_cache.py` deduplicates repeated tool calls within a single pipeline run (reset in `initialize`). `claude_cli_llm.py` is the litellm custom provider implementation, not a tool agents call.
 
 ### Cost guard
 
@@ -115,3 +119,4 @@ In `tools/`. The Azure DevOps tools share `AzureDevOpsClient` (`azure_devops_bas
 - **Review verdict**: `step8_code_review` / `_review_retry_loop` decide rejection via `_review_rejected()` — it parses ONLY the `REVIEW_DECISION:` sentinel / the `Verdict:` line, never a whole-text substring. (Whole-text matching caused a false-RED retry loop: the `tasks.yaml` template/rules repeat "CHANGES_REQUIRED".) Keep the sentinel in `review_pr_task` expected_output.
 - **Repo decision & implement**: step4 makes `discover_repos`'s repo authoritative — if the architect's `repo_name` diverges it's overridden (`_discovered_repo`). step6 `_coalesce_plan_changes` merges multiple plan changes to the SAME file into one holistic pass (else the 2nd push clobbers the 1st).
 - **Debugging claude_cli**: `claude -p "..." --output-format json` returns a list of events; the `result` event carries `usage` (input/output/cache tokens), `total_cost_usd`, `num_turns`.
+- **Sprint report** (`CREW_SPRINT_REPORT=1`, `sprint_report.py`): dashboard button groups a sprint's work items by parent and generates a FLO-branded `.pptx`. The template is **not** in git — it lives locally under `~/.crew_repos`.
