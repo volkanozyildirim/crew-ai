@@ -362,6 +362,13 @@ technical_design_task:
   description: >
     TASK: Produce a development plan for Azure DevOps work item #{work_item_id}.
 
+    🎯 SCOPE LOCK: Plan ONLY what the work item requires — nothing more. Do NOT
+    add refactors, renames, "while we're here" cleanups, or unrequested
+    improvements to `changes[]`. Every change must trace to a WI requirement/AC.
+    If you notice other worthwhile improvements OUTSIDE the WI scope, do NOT put
+    them in `changes[]`; list them in a separate top-level "suggestions" array
+    (short strings) — they will be posted as PR/WI comments, not implemented.
+
     ⚠️ CRITICAL: Your FINAL output MUST be a JSON plan (with work_item_id,
     repo_name, summary, changes[], acceptance_criteria fields). AFTER you
     finish all tool calls, produce the JSON from gathered info. NEVER write
@@ -516,6 +523,12 @@ implement_change_task:
   description: >
     TASK: Apply the change plan below EXACTLY. Your output is the FULL FILE
     WITH THE CHANGE APPLIED — every line from start to end.
+
+    🎯 SCOPE LOCK: Apply ONLY the requested change. Do NOT refactor, rename,
+    reformat, "improve", or touch unrelated code — even if you see something
+    that could be better. Keep the rest of the file byte-for-byte identical.
+    Out-of-scope edits break the review and the production system. (If a reviewer
+    item is attached below, address exactly those items — nothing extra.)
 
     ╔══════════════════════════════════════════════════════════════╗
     ║ CRITICAL: FULL-FILE CONTRACT                                 ║
@@ -724,6 +737,14 @@ review_pr_task:
     - [ ] No performance issues (N+1, unnecessary loops, big memory)?
     - [ ] No syntax errors / missing imports?
 
+    3.5. Judge STRICTLY against the WORK ITEM scope: the PR must do exactly what
+       the WI asks — no less, no more. Missing WI requirement or a bug in the
+       requested change = blocker/major. Extra/out-of-scope changes = blocker/major.
+       Nice-to-have improvements that are NOT required by the WI = minor (these
+       become comments, never a rejection reason). List EVERY problem as a
+       structured item (file, line, severity, problem, required_fix) in the
+       REVIEW_ISSUES_JSON block below.
+
     4. Use "add_pr_comment" to comment the result on the PR
     5. Also comment on the work item ({work_item_id})
 
@@ -752,8 +773,62 @@ review_pr_task:
     **Unrelated Changes:**
     - [list or "None"]
 
+    **Issue List (structured, JSON):**
+    List EVERY concrete problem as one item. severity rules:
+      - blocker/major = MUST fix (blocks approval): a WI requirement is unmet, a
+        bug/regression in the requested change, OR out-of-scope changes are present.
+      - minor = suggestion / nice-to-have improvement → does NOT block; it will be
+        posted as a PR/WI comment, not a rejection reason. Do NOT reject over minors.
+    REVIEW_ISSUES_JSON:
+    ```json
+    {"issues": [{"file": "path/to/file.ext", "line": 42, "severity": "blocker", "problem": "...", "required_fix": "..."}]}
+    ```
+    (If APPROVE with no blocker/major issues: {"issues": []}. Do NOT include an "id"
+    field — the pipeline assigns ids. Verdict is CHANGES_REQUIRED only if at least
+    one blocker/major issue exists.)
+
     The VERY LAST line of your answer MUST be a machine-readable decision token,
     exactly one of these two, with nothing else on the line:
+    REVIEW_DECISION: APPROVE
+    REVIEW_DECISION: CHANGES_REQUIRED
+  agent: code_reviewer
+
+verify_review_task:
+  description: >
+    TASK: Verify whether previously-reported review issues for PR #{pr_id}
+    ({target_repo}, branch {target_branch}) have been fixed. TOOLS ARE DISABLED —
+    use ONLY the diff already provided in context (a "PR DEĞİŞİKLİKLERİ" block).
+
+    OPEN ISSUES TO VERIFY (JSON, each has a fixed "id" — use these EXACT ids,
+    do NOT invent new ones for this list):
+    {issues_json}
+
+    YOUR STEPS:
+    1. For EACH id above, decide "closed" or "open": check whether required_fix
+       was actually applied in the current PR diff for that file.
+    2. Do NOT search for or report issues outside this list in this channel.
+       This is a CLOSED-ENDED verification — scope discipline is mandatory.
+    3. SEPARATELY, a narrow regression check: look ONLY at the files changed in
+       this round for any NEW severity=blocker regression the fix itself
+       introduced (broke something that used to work). blocker ONLY — no
+       minor/major/style here. If none, return empty new_findings.
+    4. For any id marked "closed" you MUST include a short "evidence" quote or
+       line reference from the current code proving the fix — a bare "closed"
+       with no evidence is not acceptable.
+
+    {previous_context}
+  expected_output: >
+    ## Review Verification Result
+
+    **Per-item verdicts:**
+    - [id]: closed/open — [evidence or reason still open]
+
+    REVIEW_VERIFY_JSON:
+    ```json
+    {"results": [{"id": "R1", "status": "closed", "evidence": "..."}], "new_findings": [{"file": "...", "line": 10, "severity": "blocker", "problem": "...", "required_fix": "..."}]}
+    ```
+
+    The VERY LAST line of your answer MUST be exactly one of:
     REVIEW_DECISION: APPROVE
     REVIEW_DECISION: CHANGES_REQUIRED
   agent: code_reviewer

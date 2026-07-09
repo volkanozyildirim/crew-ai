@@ -71,7 +71,18 @@ def _build_plan(repo: str, paths: list[str]) -> dict:
 def read_progress() -> dict:
     try:
         if PROGRESS_FILE.exists():
-            return json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
+            p = json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
+            # Bayat 'running:true' uzlastirmasi: dosya calisiyor diyorsa ama BU
+            # process'te canli runner yoksa (is_running False), onceki run'in
+            # daemon thread'i finally'ye ulasmadan olmustur (ornek: mid-backfill
+            # sunucu restart'i — env degisikligi sonrasi yeniden ayaga kalkma).
+            # Frontend modal aksi halde kalici 'running' fantom durumunda kilitlenir
+            # (Baslat gizli, Iptal 409). Bayat durumu bitmis olarak raporla.
+            if p.get("running") and not is_running():
+                p["running"] = False
+                if not p.get("finished_at"):
+                    p["finished_at"] = "(kesildi — sunucu yeniden başlatıldı)"
+            return p
     except Exception:
         pass
     return {"running": False}

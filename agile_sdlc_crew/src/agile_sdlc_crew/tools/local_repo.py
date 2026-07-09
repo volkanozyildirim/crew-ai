@@ -51,13 +51,30 @@ class LocalRepoManager:
             return f"{scheme}://{pat}@{rest}"
         return clone_url
 
+    def set_remote_auth(self, repo_name: str) -> bool:
+        """Mevcut klonun 'origin' remote URL'sini GUNCEL env PAT'i ile yeniden
+        yaz. PAT rotasyona ugradiginda eski klon ilk clone'daki (artik gecersiz)
+        token'i tasiyip git fetch/push auth'ta duser; origin/main guncellenemez
+        ve branch bayat main'den acilir → PR alakasiz drift ile kirlenir.
+        Bu helper her fetch'ten once cagrilarak token'i tazeler.
+        Dondurur: set-url basarili mi."""
+        repo_dir = self.base_dir / repo_name
+        cur = self._git(["remote", "get-url", "origin"], cwd=repo_dir)
+        if cur.returncode != 0:
+            return False
+        authed = self._auth_url((cur.stdout or "").strip())
+        r = self._git(["remote", "set-url", "origin", authed], cwd=repo_dir)
+        return r.returncode == 0
+
     def ensure_repo(self, repo_name: str, clone_url: str, fetch: bool = True) -> Path:
         """Repo yoksa clone et, varsa opsiyonel fetch et. Local path dondur.
         fetch=False → sadece clone (yoksa), fetch yapmaz — hizli init icin."""
         repo_dir = self.base_dir / repo_name
 
         if repo_dir.exists() and (repo_dir / ".git").exists():
-            # Zaten var
+            # Zaten var — remote URL'sini GUNCEL PAT'e tasi (rotasyon sonrasi
+            # eski token'la auth'ta dusmesin, origin/main tazelenebilsin).
+            self.set_remote_auth(repo_name)
             if fetch:
                 log.info(f"  Local repo fetch: {repo_name}")
                 result = self._git(["fetch", "--all", "--prune"], cwd=repo_dir)

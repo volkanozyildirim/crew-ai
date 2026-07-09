@@ -48,6 +48,17 @@ SCHEMA: list[dict] = [
         "desc": "Her adim sonrasi SM kalite kontrolu. Ek LLM cagrisi yapar — maliyeti artirir.",
     },
     {
+        "key": "CREW_STRUCTURED_REVIEW",
+        "label": "Yapısal Review Madde Takibi",
+        "type": "bool",
+        "default": True,
+        "desc": "Reviewer'in REVIEW_ISSUES_JSON madde listesini parse edip developer'a "
+                "dogrudan aktarma + verify_review_task ile madde-madde kapanma dogrulamasi "
+                "(yakinsayan dongu). Sadece blocker/major maddeler bloklar; minor → oneri "
+                "(yorum, RED sebebi degil). Reviewer JSON uretemezse eski davranisa (ham "
+                "review_text → _amend_plan → tum plan dosyalarini yeniden yaz) doner.",
+    },
+    {
         "key": "CREW_ANALYZE_WI_MEDIA",
         "label": "WI Görsel/Link Analizi",
         "type": "bool",
@@ -148,6 +159,14 @@ SCHEMA: list[dict] = [
         "min": 0,
         "desc": "Code review reddedince kac kez yeniden gelistirme dongusu calisir. Her retry pahali (developer+reviewer yeniden calisir); 1 onerilir.",
     },
+    {
+        "key": "CREW_TECH_DESIGN_MAX_ATTEMPTS",
+        "label": "Teknik Tasarim Max Deneme",
+        "type": "int",
+        "default": 3,
+        "min": 1,
+        "desc": "Architect tool'suz plan uretimi (Faz B) parse tutmazsa kac kez yeniden dener. Faz B ucuz (tool'suz, cap/timeout yok); keşif→emit iki-fazli akista storm'a karsi ust sinir.",
+    },
 
     # ── Context bütçeleri ──
     {
@@ -178,11 +197,19 @@ SCHEMA: list[dict] = [
     # ── Claude CLI subprocess ──
     {
         "key": "CREW_CLAUDE_CLI_TIMEOUT",
-        "label": "Claude CLI Timeout (sn)",
+        "label": "Claude CLI Timeout (sn) — toplam ömür",
         "type": "int",
         "default": 300,
         "min": 30,
-        "desc": "Claude CLI provider subprocess timeout. Karmasik kod uretiminde Opus 60-180s alabilir; 120s'lik eski sabit yetmiyordu.",
+        "desc": "Claude CLI subprocess TOPLAM-ömür hard timeout'u. Aşılınca tüm process-group SIGKILL. Karmasik kod uretiminde Opus 60-180s alabilir.",
+    },
+    {
+        "key": "CREW_CLAUDE_CLI_IDLE_TIMEOUT",
+        "label": "Claude CLI Idle Timeout (sn)",
+        "type": "int",
+        "default": 90,
+        "min": 0,
+        "desc": "Event-arası sessizlik hard timeout'u. claude -p ağında sessizce (HİÇ stream event üretmeden) takılırsa bu kadar saniye içinde SIGKILL (toplam-ömür beklemeden). job 169'da 283s tam sessiz stall yaşandı; bu onu ~idle_s içinde keser. 0 = kapalı (sadece toplam-ömür).",
     },
 
     # ── Resume kontrolu ──
@@ -223,6 +250,27 @@ SCHEMA: list[dict] = [
         "default": 0.0,
         "min": 0.0,
         "desc": "Repo araçlı (--add-dir) claude çağrılarına çağrı-başı dolar cap'i (claude --max-budget-usd). Architect/implement otonom derin keşfe dalıp tek çağrıda 27-tur/$1.6 şişebiliyor; bu onu sınırlar. 0 = limitsiz.",
+    },
+    {
+        "key": "CREW_CLI_EFFORT",
+        "label": "claude -p Efor Seviyesi (baseline)",
+        "type": "str",
+        "default": "low",
+        "desc": "Pipeline claude -p çağrılarına --effort ile zorlanan BASELINE efor (low/medium/high/xhigh/max). Kullanıcının global ~/.claude/settings.json effortLevel (high/xhigh) ayarını DEVRALMASIN — otomatik pipeline'da düşük efor yeterli, yüksek efor her çağrıyı çok yavaşlatır. NOT: haiku efor desteklemez → yalnız efor-destekli modellerde eklenir. Boş = ekleme (global ayarı devral).",
+    },
+    {
+        "key": "CREW_CLI_EFFORT_ARCHITECT",
+        "label": "Mimar Efor Seviyesi",
+        "type": "str",
+        "default": "high",
+        "desc": "Yazılım mimarı (software_architect) çağrıları için efor — planı o ürettiği için en kritik agent, baseline'dan YÜKSEK olur (low/medium/high/xhigh/max). Diğer agent'lar CREW_CLI_EFFORT (baseline) kullanır. Hard timeout (CREW_CLAUDE_CLI_TIMEOUT) yüksek efordaki takılmaları yine keser. Boş = baseline kullan.",
+    },
+    {
+        "key": "CREW_CLI_DISABLE_ADVISOR",
+        "label": "claude -p Advisor Kapat",
+        "type": "bool",
+        "default": True,
+        "desc": "Pipeline claude -p çağrılarında global advisorModel'i (--settings ile) boşaltıp advisor'ı kapat. Otomatik çağrıların her birinde ekstra danışman modeline (fable vb.) gitmesi = fazladan gecikme/maliyet.",
     },
     {
         "key": "CREW_PLAN_GATE",

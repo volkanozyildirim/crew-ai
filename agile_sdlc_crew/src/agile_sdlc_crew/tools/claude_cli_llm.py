@@ -13,8 +13,10 @@ capture_output (sessiz, tek seferde) davranisina doner.
 import json
 import logging
 import os
+import signal
 import subprocess
 import threading
+import time
 from contextlib import contextmanager
 
 log = logging.getLogger("pipeline")
@@ -57,6 +59,26 @@ def repo_tools_context(add_dirs: list, allowed_tools: str = "Read,Grep,Glob,LS")
         yield
     finally:
         _cli_ctx.add_dirs, _cli_ctx.allowed_tools = prev
+
+
+# ── Tool'suz (emit) mod ──────────────────────────────────────────────────
+# clear_repo_ctx() sadece --add-dir/--max-budget-usd'yi kaldirir; ama claude -p
+# varsayilan Bash/Read araclariyla home dizinine (~/.crew_repos) yine erisip
+# repoyu okuyabiliyor. Gercekten tool'suz bir "emit" cagrisi icin bu bayrak
+# --disallowedTools ile kesif/dosya araclarini KAPATIR → model mecburen
+# context'ten cevap uretir (architect JSON planini yazmak zorunda kalir).
+# Kesif→emit iki-fazli architect akisinda emit fazi bunu kullanir.
+_TOOLLESS_DENY = "Bash,Read,Grep,Glob,LS,Edit,Write,WebFetch,WebSearch,Task,NotebookEdit,MultiEdit"
+
+
+def _get_toolless() -> bool:
+    return bool(getattr(_cli_ctx, "toolless", False))
+
+
+def set_toolless(on: bool = True) -> None:
+    """Bu thread'deki sonraki claude_cli cagrilari kesif/dosya araclarini
+    KULLANAMASIN (--disallowedTools). clear ile kapatilmali (try/finally)."""
+    _cli_ctx.toolless = bool(on)
 
 
 # ── Cagri muhasebesi (per-job/per-agent maliyet & arac sayimi) ──────────
@@ -210,26 +232,56 @@ def _log_stream_event(ev: dict, text_parts: list, meta: dict | None = None) -> s
     return None
 
 
-def _run_streaming(cmd: list, env: dict, timeout_s: int, meta: dict | None = None) -> str:
+def _kill_proc_tree(proc) -> None:
+    """claude -p alt-surec AGACINI oldur. claude parent'i kill etmek yetmiyor:
+    Node/engine cocuk surecleri stdout pipe'ini acik tutup okuma dongusunu
+    kilitliyordu (23 dk'lik hang'in sebebi — timeout kesemiyordu). Kendi
+    process-group'unda (start_new_session) baslatip TUM grubu SIGKILL'liyoruz."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _run_streaming(cmd: list, env: dict, timeout_s: int, meta: dict | None = None,
+                   idle_s: int = 0) -> str:
     """stream-json modunda calistir, event'leri canli logla, final metni dondur.
-    Timeout watchdog thread ile uygulanir (kill → pipe EOF → dongu biter).
+    Iki watchdog (sure asilinca TUM process-group SIGKILL → pipe EOF → dongu biter):
+      • toplam-omur: timeout_s (hard limit).
+      • idle: idle_s>0 ise, event-arasi sessizlik idle_s'yi asarsa oldur. Gerekce:
+        claude -p bazen aginda sessizce (HIC stream event uretmeden) dakikalarca
+        takiliyor ve kendi ic retry'si bizim toplam-omur watchdog'undan HEMEN once
+        'gracefully' bitip SIGKILL'e firsat vermiyordu (job 169: 283s tam sessizlik).
+        Idle watchdog bu stall'i ~idle_s icinde yakalar.
     meta verilirse cost/turns/tool_calls/model oraya toplanir."""
     if meta is None:
         meta = {}
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, stdin=subprocess.DEVNULL, env=env, bufsize=1,
+        start_new_session=True,  # kendi process-group'u → tum agac oldurulebilir
     )
-    timed_out = {"v": False}
     done = threading.Event()
+    start = time.monotonic()
+    last = {"t": start}
+    reason = {"v": None}
 
     def _watchdog():
-        if not done.wait(timeout_s):
-            timed_out["v"] = True
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        poll = min(5, idle_s) if idle_s > 0 else timeout_s
+        while not done.wait(poll):
+            now = time.monotonic()
+            if now - start >= timeout_s:
+                reason["v"] = f"toplam-sure {timeout_s}s"
+                break
+            if idle_s > 0 and (now - last["t"]) >= idle_s:
+                reason["v"] = f"idle {idle_s}s (event yok)"
+                break
+        if reason["v"] is not None:
+            log.warning(f"  ⏱️ Hard timeout ({reason['v']}) — claude surec grubu SIGKILL")
+            _kill_proc_tree(proc)
 
     wd = threading.Thread(target=_watchdog, daemon=True)
     wd.start()
@@ -238,6 +290,7 @@ def _run_streaming(cmd: list, env: dict, timeout_s: int, meta: dict | None = Non
     text_parts: list = []
     try:
         for line in proc.stdout:
+            last["t"] = time.monotonic()  # idle watchdog icin: her satirda tazele
             line = line.strip()
             if not line:
                 continue
@@ -253,16 +306,21 @@ def _run_streaming(cmd: list, env: dict, timeout_s: int, meta: dict | None = Non
         try:
             proc.wait(timeout=5)
         except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            _kill_proc_tree(proc)
 
-    if timed_out["v"]:
-        log.warning(f"  Claude CLI timeout ({timeout_s}s)")
-    if final_text is not None:
+    if reason["v"] is not None:
+        log.warning(f"  Claude CLI timeout ({reason['v']})")
+    # Kesik/hatali/timeout sonuc BOS donebilir (result event is_error → "").
+    # Bos donmek CrewAI'da "Invalid response - None or empty" → retry firtinasi
+    # tetikliyor. Bunun yerine stream sirasinda biriken assistant metnini kurtar:
+    # kesilen kesfin bulgulari (ve varsa yazilmis JSON) bir sonraki faza tasinsin.
+    if final_text is not None and final_text.strip():
         return final_text
-    return "".join(text_parts).strip()
+    salvaged = "".join(text_parts).strip()
+    if salvaged:
+        log.info(f"  ♻️ Bos/kesik sonuc — {len(salvaged)} char stream metni kurtarildi")
+        return salvaged
+    return final_text or ""
 
 
 def claude_cli_completion(
@@ -282,14 +340,43 @@ def claude_cli_completion(
     try:
         from agile_sdlc_crew import pipeline_config as _pc
         timeout_s = int(_pc.get("CREW_CLAUDE_CLI_TIMEOUT"))
+        idle_s = int(_pc.get("CREW_CLAUDE_CLI_IDLE_TIMEOUT") or 0)
     except Exception:
         timeout_s = int(os.environ.get("CREW_CLAUDE_CLI_TIMEOUT", "300"))
+        idle_s = int(os.environ.get("CREW_CLAUDE_CLI_IDLE_TIMEOUT", "0") or 0)
 
     cmd = ["claude", "-p", prompt]
     if system:
         cmd.extend(["--system-prompt", system])
     if model:
         cmd.extend(["--model", model])
+
+    # Efor + advisor: claude -p, kullanicinin ~/.claude/settings.json ayarlarini
+    # okur (effortLevel, advisorModel). Otomatik pipeline cagrilarinda global
+    # 'high/xhigh' efor + 'fable' advisor DEVRALINMASIN — her cagriyi cok
+    # yavaslatir/pahalastirir (23dk hang + asiri thinking sebeplerinden).
+    #   --effort: dusuk efora zorla. NOT: haiku efor DESTEKLEMEZ → sadece efor
+    #     destekli modellerde (opus/sonnet/…) ekle.
+    #   --settings: advisorModel'i bosalt → bu cagrilar advisor'a danismasin.
+    try:
+        from agile_sdlc_crew import pipeline_config as _pc_cli2
+        _effort = str(_pc_cli2.get("CREW_CLI_EFFORT") or "").strip().lower()
+        _arch_effort = str(_pc_cli2.get("CREW_CLI_EFFORT_ARCHITECT") or "").strip().lower()
+        _disable_adv = bool(_pc_cli2.get("CREW_CLI_DISABLE_ADVISOR"))
+    except Exception:
+        _effort, _arch_effort, _disable_adv = "low", "high", True
+    # Yazilim mimari en kritik agent (plani o uretiyor) → daha YUKSEK efor.
+    # Diger agent'lar (BA/reviewer/kickoff persona/haiku-denetci) baseline'da (low)
+    # kalir. Agent, call-context'ten okunur (_step_start → TASK_AGENTS eslemesi;
+    # kickoff persona'lari crew.py set_call_agent ile).
+    _agent = (_get_call_context()[2] or "")
+    if _agent == "software_architect" and _arch_effort:
+        _effort = _arch_effort
+    _model_l = (model or "").lower()
+    if _effort in ("low", "medium", "high", "xhigh", "max") and "haiku" not in _model_l:
+        cmd.extend(["--effort", _effort])
+    if _disable_adv:
+        cmd.extend(["--settings", '{"advisorModel":""}'])
 
     # Repo-tool baglami varsa: klonlanmis repoyu ve yerel arac iznini gecir.
     # Boylece bu cagri gercek repoyu kesfedebilir (halusinasyon yerine).
@@ -298,6 +385,12 @@ def claude_cli_completion(
         cmd.extend(["--add-dir", d])
     if allowed_tools:
         cmd.extend(["--allowedTools", allowed_tools])
+    # Tool'suz (emit) mod: --add-dir YOK ama claude'un varsayilan Bash/Read'i
+    # home'a (~/.crew_repos) erisip repoyu yine okuyabiliyor. --disallowedTools
+    # ile kesif/dosya araclarini kapat → model context'ten cevap uretmek
+    # zorunda (architect emit fazi). Sadece repo-tool'u OLMAYAN cagrilarda.
+    if _get_toolless() and not add_dirs:
+        cmd.extend(["--disallowedTools", _TOOLLESS_DENY])
     # Repo-tool'lu cagrilar (architect/implement) otonom derin kesife dalip
     # 27-tur/$1.6 gibi sisebiliyor. Cagri-basi $ cap ile sinirla (hard limit;
     # claude --max-budget-usd sadece --print ile calisir). CREW_CLI_CALL_MAX_USD.
@@ -317,7 +410,8 @@ def claude_cli_completion(
         meta: dict = {}
         try:
             text = _run_streaming(
-                cmd + ["--output-format", "stream-json", "--verbose"], env, timeout_s, meta
+                cmd + ["--output-format", "stream-json", "--verbose"], env, timeout_s, meta,
+                idle_s=idle_s,
             )
             _emit_call_record(model, meta)
             return text

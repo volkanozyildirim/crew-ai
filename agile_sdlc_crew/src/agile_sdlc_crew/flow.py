@@ -195,6 +195,88 @@ def _review_rejected(review_text: str) -> bool:
     return False
 
 
+def _parse_review_issues(review_text: str) -> list[dict]:
+    """REVIEW_ISSUES_JSON blogunu parse eder. ID'ler HER ZAMAN burada atanir
+    (R1, R2, ...) — LLM'in urettigi id varsa bile YOK SAYILIR (turlar arasi
+    deterministik numaralandirma icin). Parse hatasi/blok yoksa [] doner —
+    caller bunu 'legacy fallback' sinyali olarak okur."""
+    import re as _re_i
+    txt = review_text or ""
+    m = _re_i.search(r"REVIEW_ISSUES_JSON\s*:?\s*```json\s*(\{.*?\})\s*```", txt, _re_i.S)
+    if not m:
+        m = _re_i.search(r"REVIEW_ISSUES_JSON\s*:?\s*(\{.*\})", txt, _re_i.S)
+    if not m:
+        return []
+    try:
+        raw_issues = (_json.loads(m.group(1)).get("issues")) or []
+    except Exception as e:
+        _log(f"  REVIEW_ISSUES_JSON parse hatasi: {e}")
+        return []
+    out = []
+    for i, it in enumerate(raw_issues):
+        if not isinstance(it, dict) or not it.get("file"):
+            continue
+        out.append({
+            "id": f"R{i + 1}",  # LLM'in kendi id'si GOZ ARDI edilir
+            "file": str(it.get("file", "")).strip(),
+            "line": it.get("line"),
+            "severity": (str(it.get("severity") or "major")).strip().lower(),
+            "problem": str(it.get("problem", "")).strip(),
+            "required_fix": str(it.get("required_fix", "")).strip(),
+            "status": "open",
+            "note": "",
+        })
+    return out
+
+
+def _parse_review_verify(text: str) -> tuple[dict, list]:
+    """REVIEW_VERIFY_JSON'daki (results, new_findings) ikilisini parse eder.
+    Parse hatasinda ({}, []) doner — hicbir id guncellenmez (guvenli yon: hepsi
+    'open' kalir). new_findings sadece severity=blocker filtrelenir."""
+    import re as _re_v
+    txt = text or ""
+    m = _re_v.search(r"REVIEW_VERIFY_JSON\s*:?\s*```json\s*(\{.*?\})\s*```", txt, _re_v.S)
+    if not m:
+        m = _re_v.search(r"REVIEW_VERIFY_JSON\s*:?\s*(\{.*\})", txt, _re_v.S)
+    if not m:
+        return {}, []
+    try:
+        data = _json.loads(m.group(1))
+    except Exception as e:
+        _log(f"  REVIEW_VERIFY_JSON parse hatasi: {e}")
+        return {}, []
+    results = {}
+    for r in (data.get("results") or []):
+        rid = r.get("id")
+        if rid:
+            results[str(rid)] = {
+                "status": (str(r.get("status") or "open")).strip().lower(),
+                "note": r.get("evidence") or r.get("note") or "",
+            }
+    new_findings = [
+        nf for nf in (data.get("new_findings") or [])
+        if isinstance(nf, dict) and nf.get("file")
+        and (str(nf.get("severity") or "")).strip().lower() == "blocker"
+    ]
+    return results, new_findings
+
+
+def _format_issues_md(issues: list) -> str:
+    """WI yorumu icin madde listesini markdown'a cevirir."""
+    if not issues:
+        return "(acik madde yok)"
+    lines = []
+    for i in issues:
+        loc = f" (satir {i['line']})" if i.get("line") else ""
+        lines.append(
+            f"- **[{i.get('id', '?')}] [{i.get('severity', '?')}]** "
+            f"`{i.get('file', '?')}`{loc}: {i.get('problem', '')}\n"
+            f"  → GEREKLI: {i.get('required_fix', '')}"
+            + (f"\n  → Not: {i['note']}" if i.get("note") else "")
+        )
+    return "\n".join(lines)
+
+
 def _coalesce_plan_changes(changes: list) -> list:
     """Ayni dosyayi hedefleyen birden fazla plan degisikligini TEK girise birlestir.
 
@@ -274,6 +356,11 @@ class PipelineState(BaseModel):
     # BA analizi sonrasi belirlenen kabul kriterleri — teknik tasarim,
     # kod gelistirme, inceleme ve UAT'ta bağlayıcı tek kaynak.
     acceptance_criteria: list[str] = Field(default_factory=list)
+    # Yapisal review madde takibi (CREW_STRUCTURED_REVIEW). id'ler Python'da
+    # atanir (R1.. ilk turda, N1.. verify'da bulunan yeni blocker regresyonlar),
+    # asla LLM'den gelen id'ye guvenilmez.
+    # {id, file, line, severity, problem, required_fix, status(open|closed), note}
+    review_issues: list[dict] = Field(default_factory=list)
 
 
 # ── Flow ─────────────────────────────────────────────
@@ -294,6 +381,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
     _job_prompt_tokens: int = PrivateAttr(default=0)
     _job_completion_tokens: int = PrivateAttr(default=0)
     _job_total_tokens: int = PrivateAttr(default=0)
+    # Per-item review retry sayaci (teshis amacli — global CREW_REVIEW_MAX_RETRIES
+    # kararini ETKILEMEZ, sadece "hangi madde kac turdur acik" gostermek icin).
+    _review_item_attempts: dict = PrivateAttr(default_factory=dict)
+    # Onceki turun acik id kumesi — ilerleme kontrolu (ayni kume tekrar gelirse
+    # CREW_REVIEW_MAX_RETRIES dolmadan erken durdur).
+    _review_prev_open_ids: Any = PrivateAttr(default=None)
     # ── Helper Methods (dekoratorsuz) ────────────────
 
     def _build_step_context(self, step_key: str) -> str:
@@ -926,27 +1019,38 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception:
             pass
         try:
-            # Guardrail ON: architect'i geçerli JSON plan döndürmeye zorlar
-            # (guardrail OFF iken bazen düz metin döndürüp parse'ı bozuyordu).
+            # Faz A — keşif: guardrail KAPALI → TEK deneme (guardrail retry'ları
+            # pahalı --add-dir keşfini tekrarlayıp storm yaratmasın). Repo tool'lar
+            # yukarıda opsiyonel açıldı.
+            _amend_raw = ""
             try:
-                crew = self._agile_crew.create_analysis_crew()
+                crew = self._agile_crew.create_analysis_crew_toolless()
                 res = crew.kickoff(inputs={
                     "work_item_id": self.state.work_item_id,
                     "target_repo": self.state.repo_name or "",
                     "previous_context": ctx,
                     "scrum_master_feedback": amend_instr,
                 })
-            except Exception:
-                # Guardrail retry'ları tükendi → guardrail'siz fallback
-                crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
-                res = crew.kickoff(inputs={
-                    "work_item_id": self.state.work_item_id,
-                    "target_repo": self.state.repo_name or "",
-                    "previous_context": ctx,
-                    "scrum_master_feedback": amend_instr,
-                })
-            self._track_and_check_budget(res, reason_label)
-            new_plan = _parse_architect_output(res.raw or "")
+                self._track_and_check_budget(res, reason_label)
+                _amend_raw = res.raw or ""
+            except Exception as _amd_e:
+                _log(f"  Amend Faz A hatası ({_amd_e}) — tool'suz üretime geçiliyor")
+            new_plan = None
+            if _amend_raw.strip():
+                try:
+                    new_plan = _parse_architect_output(_amend_raw)
+                except ValueError:
+                    new_plan = None
+            if new_plan is None:
+                # Faz B — tool'suz garantili üretim (Faz A bulgularını taşı,
+                # boş dönemez, storm yapamaz).
+                new_plan, _, _ = self._architect_emit_json(
+                    ctx, self.state.repo_name or "", _amend_raw,
+                    feedback=amend_instr, label=reason_label,
+                )
+            if new_plan is None:
+                _log("  Plan amend: geçerli JSON üretilemedi, mevcut plan korunuyor")
+                return None
         except Exception as e:
             _log(f"  Plan amend hatası: {e}")
             return None
@@ -955,6 +1059,119 @@ class AgileSDLCFlow(Flow[PipelineState]):
         new_plan["repo_name"] = self.state.repo_name or new_plan.get("repo_name", "")
         new_plan["changes"] = _coalesce_plan_changes(new_plan.get("changes", []))
         return new_plan
+
+    def _architect_explore(self, base_ctx: str, target_repo: str, ctx_hint: str) -> str:
+        """Faz A — TEK keşif denemesi (repo-tool'lu, guardrail KAPALI).
+
+        Çağıran repo ctx'ini (set_repo_ctx) önceden kurmuş olmalı. Guardrail
+        kapalı → tek deneme (retry storm yok). claude kesilse/cap'e çarpsa bile
+        _run_streaming salvage'ı sayesinde biriken keşif metni (okunan gerçek
+        kod, grep sonuçları, akıl yürütme) döner. Bu metin Faz B'ye taşınır."""
+        crew = self._agile_crew.create_analysis_crew_toolless()
+        try:
+            res = crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "target_repo": target_repo or "",
+                "previous_context": base_ctx,
+                "scrum_master_feedback": ctx_hint,
+            })
+            self._track_and_check_budget(res, "technical_design_task (explore)")
+            return res.raw or ""
+        except Exception as e:
+            _log(f"  Faz A keşif hatası ({e}) — bulgusuz devam")
+            return ""
+
+    def _architect_emit_json(
+        self, base_ctx: str, target_repo: str, findings: str = "",
+        feedback: str = "", label: str = "technical_design_task",
+        first_pass: bool = False,
+    ):
+        """Faz B — tool'suz architect EMIT: planı context'ten (+ varsa keşif
+        bulgularından) üretir. Araçlar --disallowedTools ile GERÇEKTEN kapalı
+        (set_toolless) → model keşfe dalamaz, JSON yazmak zorunda → boş/storm
+        imkansız.
+
+        first_pass=True: henüz keşif YOK. Pre-fetch context yetiyorsa planı yaz;
+          değiştireceğin dosya/fonksiyon context'te YOKSA tahmin etme, tam olarak
+          'NEED_EXPLORE: <ne lazım>' yaz → çağıran Faz A keşfini tetikler. Tek deneme.
+        first_pass=False: SADECE JSON üret; parse tutmazsa geri bildirimle
+          bounded retry (CREW_TECH_DESIGN_MAX_ATTEMPTS).
+
+        Döner: (plan|None, raw, need_explore:bool)."""
+        from agile_sdlc_crew.tools import claude_cli_llm as _cli
+        from agile_sdlc_crew import pipeline_config as _pc
+        from agile_sdlc_crew.main import _parse_architect_output
+
+        _cli.clear_repo_ctx()    # --add-dir / --max-budget-usd yok
+        _cli.set_toolless(True)  # --disallowedTools: keşif/dosya araçları KAPALI
+        try:
+            emit_ctx = base_ctx
+            if findings and findings.strip():
+                emit_ctx = base_ctx + (
+                    "\n\n# KEŞİF BULGULARI (repo incelemenden)\n"
+                    "Aşağıda hedef repo'yu incelerken çıkardığın gerçek kod/bilgiler "
+                    "var. Bunları ve yukarıdaki context'i kullanarak planı üret.\n\n"
+                    f"{findings[:8000]}"
+                )
+
+            # ARAÇ YOK direktifi: tasks.yaml açıklaması hâlâ "browse_repo/search_code
+            # kullan" diyor; agent tools=[] olduğu için çağıramaz ama metinsel
+            # karışıklığı (araç deneyip 'INSUFFICIENT' düzyazı üretme) kesmek için
+            # açıkça belirt.
+            NO_TOOLS = (
+                "🚫 BU ADIMDA ARAÇ YOK — browse_repo/search_code/find_relevant_repos/"
+                "list_repos ÇAĞIRMA, mevcut değiller. Görev açıklamasında araç kullanımı "
+                "geçse bile YOK SAY. SADECE aşağıdaki context'teki bilgiyle çalış. "
+            )
+            if first_pass:
+                instr = NO_TOOLS + (
+                    "Context'teki bilgiyle (pre-fetch dosya içerikleri + WI + kickoff) "
+                    "geçerli JSON planı üret. Değiştireceğin dosyayı/fonksiyonu context'te "
+                    "GÖREBİLİYORSAN planı yaz. GÖREMİYORSAN (ilgili kod context'te yok) "
+                    "TAHMİN ETME — tam olarak şunu yaz: 'NEED_EXPLORE: <hangi dosya/kod "
+                    "lazım>'. Başka açıklama yazma."
+                )
+            else:
+                instr = NO_TOOLS + (
+                    "Keşif tamamlandı, bulgular aşağıda. ARTIK SADECE geçerli JSON planı "
+                    "üret. Açıklama/yorum/INSUFFICIENT YAZMA — SADECE JSON. Placeholder "
+                    "kullanma (dosya yolu/sınıf/tablo adları somut olsun)."
+                )
+
+            max_attempts = 1 if first_pass else int(_pc.get("CREW_TECH_DESIGN_MAX_ATTEMPTS") or 3)
+            fb_note = feedback or ""
+            plan = None
+            raw = ""
+            for attempt in range(1, max_attempts + 1):
+                crew = self._agile_crew.create_analysis_crew_toolless()
+                res = crew.kickoff(inputs={
+                    "work_item_id": self.state.work_item_id,
+                    "target_repo": target_repo or "",
+                    "previous_context": emit_ctx,
+                    "scrum_master_feedback": (instr + " " + fb_note).strip(),
+                })
+                self._track_and_check_budget(res, f"{label} (emit {attempt})")
+                raw = res.raw or ""
+                if first_pass and "NEED_EXPLORE" in raw.upper():
+                    _log("  Faz B (ilk geçiş): context yetersiz → Faz A keşfi isteniyor")
+                    return None, raw, True
+                try:
+                    plan = _parse_architect_output(raw)
+                    _log(f"  Faz B: tool'suz plan üretildi (deneme {attempt})")
+                    return plan, raw, False
+                except ValueError as e:
+                    _log(f"  Faz B parse hatası (deneme {attempt}/{max_attempts}): {e}")
+                    if first_pass:
+                        _log("  İlk geçişte JSON çıkmadı → Faz A keşfine düşülüyor")
+                        return None, raw, True
+                    fb_note = (
+                        f"⚠️ Önceki çıktın geçerli JSON değildi: {e}. "
+                        "Düzelt ve SADECE geçerli JSON döndür."
+                    )
+                    plan = None
+            return plan, raw, False
+        finally:
+            _cli.set_toolless(False)
 
     def _check_plan_completeness(self, plan: dict) -> list:
         """Plan tüm FR/AC'leri kapsıyor mu? Kapsanmayan madde id listesini döndür.
@@ -989,49 +1206,100 @@ class AgileSDLCFlow(Flow[PipelineState]):
             return []
 
     def _review_retry_loop(self):
-        """Reviewer RED verdikten sonra: implement → push → review dongusune girer.
-        Branch ve PR zaten var — sadece dosyalari duzeltip push eder, sonra tekrar review.
-        Bu metod step8_code_review icerisinden cagrilir, max iteration kontrolu orada yapilir."""
+        """Reviewer RED verdikten sonra yakinsayan duzeltme dongusu.
+
+        YAPISAL yol (CREW_STRUCTURED_REVIEW + reviewer madde listesi urettiyse):
+        reviewer'in BLOCKING (blocker/major) maddelerini DOGRUDAN developer'a
+        aktarir (architect re-plan filtresi olmadan), sadece o dosyalari duzeltir,
+        sonra verify_review_task ile madde-madde KAPANMA dogrular (acik-uctu yeni
+        review DEGIL). minor maddeler bloklamaz — yoruma gider. Ayni acik-id kumesi
+        tekrarlarsa erken durur (ilerleme yok).
+        LEGACY yol (structured degilse / reviewer JSON uretemediyse): eski davranis
+        — ham review_text -> _amend_plan -> tum plan dosyalarini yeniden yaz -> tam
+        acik-uctu re-review."""
         from agile_sdlc_crew.main import _extract_code_from_output, _validate_code, _add_wi_comment
         from agile_sdlc_crew.pipeline import push_file
+        from agile_sdlc_crew.tools import claude_cli_llm as _cli_rr
+        from agile_sdlc_crew import pipeline_config as _pc_rr
 
-        _log("\n-- REVIEW RETRY: Plan yeniden düzenleniyor (re-plan) --")
+        _log("\n-- REVIEW RETRY --")
 
-        review_feedback = self.state.review_text or ""
-        # A (re-plan): Architect'i review feedback'iyle yeniden çalıştır → AMENDED
-        # plan. Eski davranış sadece plandaki MEVCUT dosyaları yeniden yazıyordu;
-        # review "şu servis/dosya eksik / regresyon var" dediğinde eksik kapsam
-        # asla eklenemiyordu (WI #66328: TPL/newOrderDetail planda yoktu → retry
-        # ekleyemedi → kalıcı RED). Amend, eksik dosyaları ekler + regresyonu giderir.
-        amended = self._amend_plan(review_feedback, "review_retry_replan")
-        if amended and amended.get("changes"):
-            self.state.plan = amended
-            plan = amended
-            _log(f"  Re-plan tamam: {len(plan.get('changes', []))} dosya (eksikler eklendi)")
-        else:
-            plan = self.state.plan
-            _log("  Re-plan başarısız/boş — mevcut planla devam")
+        all_open = [i for i in self.state.review_issues if i.get("status") == "open"]
+        # Sadece blocker/major BLOKLAR; minor = oneri → yoruma gider, dongoyu surmez.
+        open_issues = [i for i in all_open if i.get("severity") in ("blocker", "major")]
+        minor_open = [i for i in all_open if i.get("severity") not in ("blocker", "major")]
+        structured = bool(_pc_rr.get("CREW_STRUCTURED_REVIEW")) and bool(open_issues)
+
+        # minor/oneri maddelerini bir kez WI'ya yorum olarak gecir, bloklamaktan cikar.
+        if _pc_rr.get("CREW_STRUCTURED_REVIEW") and minor_open:
+            _add_wi_comment(self._client, self.state.work_item_id,
+                f"## 💡 İyileştirme Önerileri (bloklamaz)\n\n"
+                f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
+                f"{_format_issues_md(minor_open)}\n\n"
+                f"*Agile SDLC Crew - Review Suggestions*")
+            for i in minor_open:
+                i["status"] = "closed"
+                i["note"] = "minor/oneri — yoruma gecti, bloklamiyor"
 
         repo_name = self.state.repo_name
         branch = self.state.branch_name
-        changes_to_fix = [c for c in plan.get("changes", []) if c.get("file_path")]
 
-        # Büyük dosyalarda in-place edit için repo araçlarını aç (truncate önleme;
-        # _amend_plan kendi ctx'ini kapattı, implement için yeniden aç).
-        from agile_sdlc_crew.tools import claude_cli_llm as _cli_rr
+        if not structured:
+            # ── LEGACY: ham review_text -> amend -> tum dosyalar ──
+            amended = self._amend_plan(self.state.review_text or "", "review_retry_replan")
+            if amended and amended.get("changes"):
+                self.state.plan = amended
+                _log(f"  Re-plan tamam: {len(amended.get('changes', []))} dosya")
+            changes_to_fix = [c for c in self.state.plan.get("changes", []) if c.get("file_path")]
+        else:
+            # ── YAPISAL: plan-seviyesi (eksik dosya) vs kod-seviyesi (mevcut dosya) ──
+            plan_files = {c.get("file_path") for c in (self.state.plan.get("changes") or [])}
+            plan_level = [i for i in open_issues if i["file"] not in plan_files]
+            if plan_level:
+                # Sadece plan-gap maddelerini architect'e ver (HAM review_text degil)
+                feedback_txt = "\n".join(
+                    f"- [{i['severity']}] {i['file']}"
+                    + (f" (satir {i['line']})" if i.get("line") else "")
+                    + f": {i['problem']} -> GEREKLI: {i['required_fix']}"
+                    for i in plan_level
+                )
+                amended = self._amend_plan(feedback_txt, "review_retry_replan")
+                if amended and amended.get("changes"):
+                    self.state.plan = amended
+                    plan_files = {c.get("file_path") for c in amended.get("changes", [])}
+            code_level_files = {i["file"] for i in open_issues if i["file"] in plan_files}
+            changes_to_fix = [
+                c for c in self.state.plan.get("changes", [])
+                if c.get("file_path") in code_level_files
+            ]
+
         self._enable_impl_repo_tools()
 
         for i, change in enumerate(changes_to_fix):
             file_path = change.get("file_path", "")
-
             _log(f"  Retry implement [{i+1}/{len(changes_to_fix)}]: {file_path}")
 
-            # Onceki push'taki icerigi al (mevcut dosya) — reviewer geri bildirimi ile duzelt
             existing_content = ""
             try:
                 existing_content = self._client.get_file_content(repo_name, file_path, branch)
             except Exception:
                 existing_content = change.get("new_code", "")
+
+            # Reviewer maddelerini DOGRUDAN developer'a aktar (yapisal yolda)
+            change_description = change.get("description", "")
+            if structured:
+                issues_for_file = [i for i in open_issues if i["file"] == file_path]
+                if issues_for_file:
+                    digest = "\n".join(
+                        f"- (id {i['id']}, {i['severity']}) satir {i.get('line', '?')}: "
+                        f"{i['problem']} -> {i['required_fix']}"
+                        for i in issues_for_file
+                    )
+                    change_description = (
+                        change_description
+                        + "\n\n# REVIEWER'IN DOGRUDAN MADDELERI (SADECE bunlari kapat, ekstra degisiklik YAPMA)\n"
+                        + digest
+                    )
 
             ctx = self._build_step_context("implement_change_task")
             code_crew = self._agile_crew.create_code_crew()
@@ -1039,7 +1307,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 "work_item_id": self.state.work_item_id,
                 "target_repo": repo_name,
                 "target_file": file_path,
-                "change_description": change.get("description", ""),
+                "change_description": change_description,
                 "current_code": change.get("current_code", ""),
                 "new_code": change.get("new_code", ""),
                 "full_content": existing_content,
@@ -1048,7 +1316,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._track_and_check_budget(code_result, f"review_retry_implement_{i}")
 
             new_content = _extract_dev_output(code_result)
-            # Part B disk-readback: dev tool'la in-place edit ettiyse disk'i kullan
             new_content = self._prefer_worktree_edit(
                 repo_name, file_path, new_content, existing_content
             )
@@ -1056,23 +1323,18 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    Developer bos/kisa cikti, atlaniyor")
                 continue
 
-            # ── Guvenlik Kontrolleri (push oncesi) — main implement ile ayni ──
+            # ── Guvenlik Kontrolleri (push oncesi) ──
             orig_len = len(existing_content.strip()) if existing_content else 0
             new_len = len(new_content.strip())
             orig_lines = existing_content.count("\n") if existing_content else 0
             new_lines = new_content.count("\n")
-
-            # Cok az icerik — 3 satirdan kisa veya 50 char altinda
             if new_len < 50 or new_lines < 3:
-                _log(f"    GUVENLIK: cok kisa icerik ({new_lines} satir, {new_len} char), retry push iptal")
+                _log(f"    GUVENLIK: cok kisa icerik ({new_lines} satir, {new_len} char), push iptal")
                 continue
-
-            # Buyuk kod kaybi — orijinal >500 char ve %50'den kisa => agent bozuk cikti verdi
             if existing_content and orig_len > 500 and new_len < orig_len * 0.5:
                 _log(
                     f"    🚨 GUVENLIK ALARMI (retry): dosya %{100 - int(100 * new_len / orig_len)} kuculdu "
-                    f"({orig_lines} → {new_lines} satir, {orig_len} → {new_len} char). "
-                    f"Agent timeout/truncate sonrasi tam dosya yerine parca dondu. Retry push IPTAL."
+                    f"({orig_lines} → {new_lines} satir). Push IPTAL."
                 )
                 continue
 
@@ -1087,59 +1349,119 @@ class AgileSDLCFlow(Flow[PipelineState]):
             else:
                 _log(f"    Push HATA: {push_result.get('error', '?')}")
 
-        _cli_rr.clear_repo_ctx()  # implement repo-tool baglamini kapat (re-review oncesi)
-        _log("  Review retry: dosyalar guncellendi, tekrar review yapiliyor")
+        _cli_rr.clear_repo_ctx()
+        _log("  Review retry: dosyalar guncellendi, dogrulama yapiliyor")
 
-        # Tekrar review
-        ctx = self._build_step_context("review_pr_task")
-        ctx += self._prefetch_pr_changes_context()
-        ctx += self._test_requirement_note(self.state.repo_name)
-        review_crew = self._agile_crew.create_review_crew()
-        review_result = review_crew.kickoff(inputs={
-            "work_item_id": self.state.work_item_id,
-            "requirements": self.state.requirements_text[:3000],
-            "target_repo": self.state.repo_name,
-            "target_branch": self.state.branch_name,
-            "pr_id": self.state.pr_id,
-            "pr_url": self.state.pr_url,
-            "previous_context": ctx,
-            "scrum_master_feedback": "",
-        })
-        self._track_and_check_budget(review_result, "review_pr_task (retry)")
-        review_text = review_result.raw or ""
-        self.state.review_text = review_text
+        if not structured:
+            # ── LEGACY re-review (tam acik-uctu, degismedi) ──
+            ctx = self._build_step_context("review_pr_task")
+            ctx += self._prefetch_pr_changes_context()
+            ctx += self._test_requirement_note(self.state.repo_name)
+            review_crew = self._agile_crew.create_review_crew()
+            review_result = review_crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "requirements": self.state.requirements_text[:3000],
+                "target_repo": self.state.repo_name,
+                "target_branch": self.state.branch_name,
+                "pr_id": self.state.pr_id,
+                "pr_url": self.state.pr_url,
+                "previous_context": ctx,
+                "scrum_master_feedback": "",
+            })
+            self._track_and_check_budget(review_result, "review_pr_task (retry)")
+            self.state.review_text = review_result.raw or ""
+            still_rejected = _review_rejected(self.state.review_text)
+            remaining_summary = self.state.review_text[:2000]
+        else:
+            # ── YAPISAL verify: madde-madde kapanma + dar blocker-regresyon taramasi ──
+            for i in open_issues:
+                self._review_item_attempts[i["id"]] = self._review_item_attempts.get(i["id"], 0) + 1
 
-        # Re-check — still rejected? (yalniz acik karar tokenina bakar)
-        still_rejected = _review_rejected(review_text)
+            ctx = self._build_step_context("review_pr_task")
+            ctx += self._prefetch_pr_changes_context()
+            ctx += self._test_requirement_note(self.state.repo_name)
+            issues_json = _json.dumps(
+                [{k: v for k, v in i.items() if k != "status"} for i in open_issues],
+                ensure_ascii=False,
+            )
+            verify_crew = self._agile_crew.create_verify_review_crew()
+            vres = verify_crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "target_repo": self.state.repo_name,
+                "target_branch": self.state.branch_name,
+                "pr_id": self.state.pr_id,
+                "pr_url": self.state.pr_url,
+                "issues_json": issues_json,
+                "previous_context": ctx,
+            })
+            self._track_and_check_budget(vres, "verify_review_task")
+            results, new_findings = _parse_review_verify(vres.raw or "")
+
+            for i in self.state.review_issues:
+                r = results.get(i["id"])
+                if r:
+                    i["status"] = r.get("status", i["status"])
+                    i["note"] = r.get("note", "")
+
+            # Yeni blocker regresyonlar (bu turda degisen dosyalar dahil — kapanmis
+            # maddelerin regresyonu buradan Nx olarak yeniden yakalanir).
+            base_n = sum(1 for i in self.state.review_issues if str(i.get("id", "")).startswith("N"))
+            for j, nf in enumerate(new_findings):
+                self.state.review_issues.append({
+                    "id": f"N{base_n + j + 1}",
+                    "file": str(nf.get("file", "")).strip(),
+                    "line": nf.get("line"),
+                    "severity": "blocker",
+                    "problem": str(nf.get("problem", "")).strip(),
+                    "required_fix": str(nf.get("required_fix", "")).strip(),
+                    "status": "open",
+                    "note": "verify sirasinda bulunan yeni regresyon",
+                })
+
+            still_open = [
+                i for i in self.state.review_issues
+                if i.get("status") == "open" and i.get("severity") in ("blocker", "major")
+            ]
+            still_rejected = bool(still_open)
+            remaining_summary = _format_issues_md(still_open)
+
+            # Ilerleme kontrolu: onceki turla ayni acik-id kumesiyse erken durdur
+            cur_ids = {i["id"] for i in still_open}
+            if still_rejected and self._review_prev_open_ids is not None and cur_ids == self._review_prev_open_ids:
+                _log("  ⚠️ Review retry: bu turda hicbir madde kapanmadi — ilerleme yok, erken durduruluyor")
+                self._review_attempt = _pc_rr.get("CREW_REVIEW_MAX_RETRIES")
+            self._review_prev_open_ids = cur_ids
+
         if still_rejected:
-            # step8_code_review'daki max retry kontrolune don
             review_attempt = getattr(self, "_review_attempt", 0)
-            from agile_sdlc_crew import pipeline_config as _pc_rev2
-            max_review_retries = _pc_rev2.get("CREW_REVIEW_MAX_RETRIES")
+            max_review_retries = _pc_rr.get("CREW_REVIEW_MAX_RETRIES")
             if review_attempt < max_review_retries:
                 self._review_attempt = review_attempt + 1
-                _log(f"  🔄 Reviewer hala RED — tekrar deneniyor (deneme {self._review_attempt}/{max_review_retries})")
+                _log(f"  🔄 Hala acik blocking madde var — tekrar (deneme {self._review_attempt}/{max_review_retries})")
                 self._review_retry_loop()
                 return
-            else:
-                _log(f"  🚨 Reviewer {max_review_retries} deneme sonrasi hala RED — pipeline durduruluyor")
-                _add_wi_comment(self._client, self.state.work_item_id,
-                    f"## ❌ Kod İnceleme — {max_review_retries} Düzeltme Sonrası Hâlâ Başarısız\n\n"
-                    f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
-                    f"**Son Değerlendirme:**\n{review_text[:2000]}\n\n"
-                    f"---\n*Agile SDLC Crew - Review Retry Exhausted*"
-                )
-                self._step_fail("review_pr_task", f"Reviewer: {max_review_retries} deneme sonrasi RED")
-                raise RuntimeError(f"Reviewer {max_review_retries} deneme sonrasi reddediyor")
+            _log(f"  🚨 {max_review_retries} deneme sonrasi hala acik madde var — pipeline durduruluyor")
+            _add_wi_comment(self._client, self.state.work_item_id,
+                f"## ❌ Kod İnceleme — {max_review_retries} Düzeltme Sonrası Hâlâ Başarısız\n\n"
+                f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
+                f"**Kapanmayan Maddeler:**\n{remaining_summary}\n\n"
+                f"---\n*Agile SDLC Crew - Review Retry Exhausted*"
+            )
+            self._step_fail("review_pr_task", f"Reviewer: {max_review_retries} deneme sonrasi hala acik madde")
+            raise RuntimeError(f"Reviewer {max_review_retries} deneme sonrasi reddediyor")
 
-        # Onay geldi
-        self._step_done("review_pr_task", review_text[:3000])
+        # Onay
+        self._step_done("review_pr_task", (self.state.review_text or remaining_summary)[:3000])
         _log(f"  ✅ Review retry basarili — kod onaylandi")
+        closed_summary = _format_issues_md(
+            [i for i in self.state.review_issues if i.get("status") == "closed"]
+        ) if structured else ""
         _add_wi_comment(self._client, self.state.work_item_id,
             f"## ✅ Kod İnceleme (Düzeltme Sonrası Onay)\n\n"
             f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
-            f"{review_text[:2000]}\n\n"
-            f"*Agile SDLC Crew - Review Retry Onay*"
+            + (f"**Kapatılan Maddeler:**\n{closed_summary}\n\n" if structured
+               else f"{(self.state.review_text or '')[:2000]}\n\n")
+            + f"*Agile SDLC Crew - Review Retry Onay*"
         )
 
     # ── Flow Start ───────────────────────────────────
@@ -2621,10 +2943,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
         if prefetch_repo:
             ctx += self._test_requirement_note(prefetch_repo)
 
-        # ── Part B: architect'i "gor kil" — claude -p'ye klonlanmis repoyu
-        # --add-dir ile, Read/Grep/Glob'u --allowedTools ile ver. Boylece
-        # gercek kodu kesfeder (returnOffices'i halusine etmek yerine bulur).
-        # Env-toggle: CREW_CLI_REPO_TOOLS (default kapali — maliyet/sure etkisi var).
+        # ── Repo klon dizinleri — keşif GEREKİRSE Faz A'da --add-dir ile verilir ──
+        # Env-toggle: CREW_CLI_REPO_TOOLS. B-first akışta repo ctx'i UPFRONT SET
+        # ETMİYORUZ; önce tool'suz Faz B pre-fetch'ten denesin, o "NEED_EXPLORE"
+        # derse burada hesaplanan dizinleri açarız.
         from agile_sdlc_crew.tools import claude_cli_llm as _cli
         from agile_sdlc_crew import pipeline_config as _pc_cli
         _cli_repo_tools = False
@@ -2632,6 +2954,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _cli_repo_tools = bool(_pc_cli.get("CREW_CLI_REPO_TOOLS"))
         except Exception:
             pass
+        _repo_dirs = []
         if _cli_repo_tools and prefetch_repo:
             _cand = [prefetch_repo] + [
                 a for a in getattr(self, "_discovered_alternatives", []) if a != prefetch_repo
@@ -2640,77 +2963,52 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 str(self._repo_mgr.base_dir / r) for r in _cand[:3]
                 if (self._repo_mgr.base_dir / r).exists()
             ]
+
+        # ── ARCHITECT: B-first (ucuz, tool'suz) → gerekirse keşif (A) → B ──
+        # Neden B-first: pre-fetch (grep-eşleşen gerçek dosyalar) çoğu WI için
+        # yeterli; tool'suz emit saniyeler sürer (~$0.2) ve boş/storm YAPAMAZ
+        # (araçlar --disallowedTools ile kapalı → model JSON yazmak zorunda).
+        # Yalnız context değiştirilecek kodu içermiyorsa architect 'NEED_EXPLORE'
+        # der → o ZAMAN bir kez repo-tool'lu keşif (Faz A) yapılıp bulgularla
+        # tekrar tool'suz emit edilir. Keşif "gerektiğinde" çalışır → çoğu WI
+        # keşfi atlar (ucuz); gereken WI'de bir tek keşif turu (storm yok).
+        plan, raw_output, need_explore = self._architect_emit_json(
+            ctx, prefetch_repo, first_pass=True, label="technical_design_task",
+        )
+
+        if plan is None:
             if _repo_dirs:
+                # Faz A: pre-fetch yetmedi → bir kez repo-tool'lu keşif, sonra emit
                 _cli.set_repo_ctx(_repo_dirs, "Read,Grep,Glob,LS")
-                _log(f"  Architect repo araclari ACIK: --add-dir {len(_repo_dirs)} repo, Read/Grep/Glob")
+                _log(f"  Faz A keşif AÇIK: --add-dir {len(_repo_dirs)} repo (B ilk geçişte yetersiz)")
+                findings = self._architect_explore(ctx, prefetch_repo, ctx_hint)
+                _cli.clear_repo_ctx()
+                plan, raw_output, _ = self._architect_emit_json(
+                    ctx, prefetch_repo, findings=findings, label="technical_design_task",
+                )
+            else:
+                # Repo klonu yok → keşif imkansız; bulgusuz bounded emit dene
+                plan, raw_output, _ = self._architect_emit_json(
+                    ctx, prefetch_repo, findings=raw_output, label="technical_design_task",
+                )
 
-        analysis_crew = self._agile_crew.create_analysis_crew()
-        try:
-            analysis_result = analysis_crew.kickoff(inputs={
-                "work_item_id": self.state.work_item_id,
-                "target_repo": prefetch_repo or "",
-                "previous_context": ctx,
-                "scrum_master_feedback": ctx_hint,
-            })
-        except Exception as e:
-            # Guardrail retry'lari tukendi (veya kickoff hatasi) — guardrail'siz
-            # crew ile manuel fallback. Mevcut parse onarimi yine devrede.
-            # NOT: Tukenen guardrail retry'larinin token'lari exception ile dustugu
-            # icin budget'a sayilmaz (hafif under-count); sadece guardrails ACIK +
-            # exhaustion yolunda olur, cost guard yine fallback sonucunu sayar.
-            _log(f"  Guardrail/kickoff hatasi ({e}), guardrail'siz fallback kickoff")
-            analysis_crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
-            analysis_result = analysis_crew.kickoff(inputs={
-                "work_item_id": self.state.work_item_id,
-                "target_repo": prefetch_repo or "",
-                "previous_context": ctx,
-                "scrum_master_feedback": ctx_hint,
-            })
-        self._track_and_check_budget(analysis_result, "technical_design_task")
-        raw_output = analysis_result.raw or ""
-
-        # Parse hatasi — onceki ciktiyi context'e ekleyip tekrar dene
-        # (Guardrail KAPALIYKEN birincil retry; ACIKKEN guardrail zaten parse
-        #  garantiledigi icin bu blok genelde tetiklenmez — yine de fallback kalir.)
-        try:
-            plan = _parse_architect_output(raw_output)
-        except ValueError as e:
-            _log(f"  Parse hatasi ({e}), guardrail'siz architect ile retry")
-            retry_ctx = ctx + (
-                f"\n\n# ONCEKI DENEME CIKTISI\n"
-                f"(Asagidaki bilgilerden JSON uret — tool cagirma, direkt JSON yaz)\n\n"
-                f"{raw_output[:6000]}"
+        if plan is None:
+            raise RuntimeError(
+                "Architect geçerli teknik plan üretemedi (teknik tasarım). "
+                "WI teknik olarak yetersiz olabilir veya LLM erişilemiyor."
             )
-            analysis_crew = self._agile_crew.create_analysis_crew(with_guardrail=False)
-            analysis_result = analysis_crew.kickoff(inputs={
-                "work_item_id": self.state.work_item_id,
-                "target_repo": prefetch_repo or "",
-                "previous_context": retry_ctx,
-                "scrum_master_feedback": (
-                    f"⚠️ Onceki denemende plan validation hatasi:\n{e}\n\n"
-                    "Hatayi gider ve SADECE gecerli JSON plan uret. "
-                    "Tool cagirma, aciklama yazma — SADE JSON. "
-                    "Placeholder kullanma (timestamp/class/tablo adlari somut olmali)."
-                ),
-            })
-            self._track_and_check_budget(analysis_result, "technical_design_task (retry)")
-            raw_output = analysis_result.raw or ""
-            plan = _parse_architect_output(raw_output)
 
-        # SM Review
+        # SM Review — iyileştirme isterse tool'suz üretim ile tekrar (storm yok).
         approved, feedback = self._scrum_review("Teknik Tasarim", raw_output[:3000])
         if not approved:
-            _log("  SM iyilestirme istedi, tekrar calistiriliyor...")
-            analysis_crew = self._agile_crew.create_analysis_crew()
-            analysis_result = analysis_crew.kickoff(inputs={
-                "work_item_id": self.state.work_item_id,
-                "target_repo": "",
-                "previous_context": ctx,
-                "scrum_master_feedback": f"SCRUM MASTER GERI BILDIRIMI:\n{feedback}",
-            })
-            self._track_and_check_budget(analysis_result, "technical_design_task (SM retry)")
-            raw_output = analysis_result.raw or ""
-            plan = _parse_architect_output(raw_output)
+            _log("  SM iyileştirme istedi — tool'suz üretim ile tekrar...")
+            _p2, _r2, _ = self._architect_emit_json(
+                ctx, prefetch_repo, findings=raw_output,
+                feedback=f"SCRUM MASTER GERİ BİLDİRİMİ:\n{feedback}",
+                label="technical_design_task (SM)",
+            )
+            if _p2 is not None:
+                plan, raw_output = _p2, _r2
 
         # Architect kickoff'lari bitti — repo-tool baglamini temizle (sonraki
         # adimlara sizmasin). Defensif olarak _reset_job_state'de de temizlenir.
@@ -2725,28 +3023,37 @@ class AgileSDLCFlow(Flow[PipelineState]):
             )
             plan["repo_name"] = repo_name
 
-        # ── Repo otoritesi: discover_repos kanit-temelli secimi architect'i ezer ──
-        # Architect tool'suzken kor olabilir ve repo_name'i halusine edebilir
-        # (WI #66511: architect 'orkestra' dedi, returnOffices aslinda webservice'te).
-        # discover_repos symbol-grep kaniti uzerine akil yurutup dogru repoyu sectiyse
-        # ve architect farkli bir repo verdiyse, discover_repos'a don.
+        # ── Repo kararı: ARCHITECT'İN son kararı geçerli (kullanıcı politikası) ──
+        # Architect artık Faz A'da klonlanmış repoları --add-dir ile GERÇEKTEN
+        # keşfediyor → repo_name'i kanıt-temelli. discover_repos yalnızca özet-
+        # temelli bir ÖN ÖNERİ; farklı dese bile architect'in kararını EZMEZ.
+        # (Eski davranış discover'ı zorluyordu — architect tool'suz/kör olduğu
+        #  varsayımıyla; artık keşif-yapan architect daha güvenilir, kaldırıldı.)
         _disc = getattr(self, "_discovered_repo", "")
-        if _disc and _disc in self.state.known_repos and repo_name != _disc:
+        if _disc and repo_name != _disc:
             _log(
-                f"  ⚠️ Repo otoritesi: architect '{repo_name}' dedi ama discover_repos "
-                f"'{_disc}' (kanit-temelli). '{_disc}' ile devam ediliyor."
+                f"  Repo: architect '{repo_name}' (KABUL — keşif-temelli); "
+                f"discover_repos '{_disc}' önermişti ama architect kararı geçerli."
             )
-            _add_wi_comment(self._client, self.state.work_item_id,
-                f"## ℹ️ Repo Kararı Düzeltildi\n\n"
-                f"Teknik tasarım `{repo_name}` önerdi; kanıt-temelli repo keşfi `{_disc}` "
-                f"buldu (WI sembolleri bu repoda). `{_disc}` ile devam ediliyor.\n\n"
-                f"---\n*Agile SDLC Crew - Repo Authority*"
-            )
-            repo_name = _disc
-            plan["repo_name"] = repo_name
 
         self.state.repo_name = repo_name
         self.state.plan = plan
+
+        # ── Kapsam disiplini: architect'in kapsam-disi iyilestirme onerileri
+        # (plan.suggestions) koda GIRMEZ — WI'ya yorum olarak iletilir. ──
+        try:
+            _sugg = plan.get("suggestions") or []
+            if _sugg:
+                _sugg_md = "\n".join(f"- {str(s).strip()}" for s in _sugg if str(s).strip())
+                if _sugg_md:
+                    from agile_sdlc_crew.main import _add_wi_comment
+                    _add_wi_comment(self._client, self.state.work_item_id,
+                        f"## 💡 Kapsam-Dışı İyileştirme Önerileri (Mimar)\n\n"
+                        f"WI kapsamına dahil EDİLMEDİ; ayrı iş olarak değerlendirilebilir:\n\n"
+                        f"{_sugg_md}\n\n*Agile SDLC Crew - Architect Suggestions*")
+                    _log(f"  Kapsam-dışı {len(_sugg)} öneri WI'ya yorum olarak iletildi (koda girmedi)")
+        except Exception as _se:
+            _log(f"  Öneri yorumu hatasi (kritik degil): {_se}")
 
         # ── B: Plan completeness gate ──────────────────────────────────────
         # Architect planı eksik FR/AC ile gelebilir (WI #66328: logo yarım +
@@ -2799,15 +3106,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # + eski local feature branch'i sil — bir onceki job'dan kalan
         # stale commit'leri temizle (push'lar API'ye gidiyor ama file_exists
         # ve get_file_content local'e bakabiliyor, eski state sorun cikarabilir).
+        _main_fresh = True  # asagidaki except her hatayi yutuyor; bayat main
+                            # fail-fast'ini yutulmasin diye bayrakla tasi.
         try:
             repo_dir = self._repo_mgr.base_dir / repo_name
             branch_name_for_cleanup = f"feature/{self.state.work_item_id}"
             if repo_dir.exists() and (repo_dir / ".git").exists():
                 _log(f"  Hedef repo fetch: {repo_name}")
-                # once main'i guncelle
+                # PAT rotasyona ugramis olabilir → remote URL'yi GUNCEL PAT'e
+                # tasi, sonra main'i getir. Fetch DUSERSE origin/main bayat kalir
+                # ve bayat main'den branch acmak PR'i alakasiz drift ile kirletir.
+                self._repo_mgr.set_remote_auth(repo_name)
                 fetch_result = self._repo_mgr._git(["fetch", "origin", "main"], cwd=repo_dir)
                 if fetch_result.returncode != 0:
-                    _log(f"  fetch uyarisi: {fetch_result.stderr[:150]}")
+                    _main_fresh = False
+                    _log(f"  ⛔ main fetch BASARISIZ (auth?): {fetch_result.stderr[:150]}")
                 # main'e don (feature branch'i checkoutlu olabilir)
                 self._repo_mgr._git(["checkout", "main"], cwd=repo_dir)
                 # local origin/main'e hard reset — kesinlikle temiz main
@@ -2880,6 +3193,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._step_done("code_embedding_task", "Hedef odakli embed (plan dosyalari)")
         except Exception as e:
             _log(f"  Local repo checkout hatasi: {e}")
+
+        # Fail-fast: main tazelenemzediyse (git auth) bayat main'den branch
+        # ACMA — PR alakasiz drift ile kirlenir (WI #68328'de gorulen sorun).
+        if not self.state.dry_run and not _main_fresh:
+            raise RuntimeError(
+                "Hedef repo main güncellenemedi (git fetch auth hatası) — bayat "
+                "main'den branch açmak PR'ı alakasız değişikliklerle kirletir, "
+                "durduruldu. AZURE_DEVOPS_PAT geçerli/yetkili mi kontrol edin."
+            )
 
         _log("\n-- ADIM 5: Branch olusturuluyor --")
         self._step_start("create_branch_task")
@@ -3526,6 +3848,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 review_text = review_result.raw or ""
 
         self.state.review_text = review_text
+
+        # Yapisal madde listesini parse et (CREW_STRUCTURED_REVIEW). Parse [] donerse
+        # (reviewer JSON uretmedi) _review_retry_loop otomatik legacy yola duser.
+        from agile_sdlc_crew import pipeline_config as _pc_sr
+        if _pc_sr.get("CREW_STRUCTURED_REVIEW"):
+            self.state.review_issues = _parse_review_issues(review_text)
+        else:
+            self.state.review_issues = []
 
         # 🚨 RESPECT REVIEWER VERDICT — if CHANGES_REQUIRED / REJECTED,
         # loop back into dev (max CREW_REVIEW_MAX_RETRIES, default 2).

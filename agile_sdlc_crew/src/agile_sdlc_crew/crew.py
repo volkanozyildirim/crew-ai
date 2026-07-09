@@ -1061,16 +1061,31 @@ class AgileSDLCCrew:
         )
 
     def create_analysis_crew_toolless(self) -> Crew:
-        """Tool'suz architect — sadece verilen context ile JSON uretir.
-        max_tokens yuksek tutulur: JSON plan buyuk olabiliyor, 8192 yetmiyor."""
+        """GERÇEKTEN tool'suz architect — Agent(tools=[]).
+
+        Neden kritik: software_architect() agent'ina her zaman browse_repo/
+        search_code/find_relevant_repos CrewAI tool'lari bagli. Bu tool'lar
+        claude_cli'ye gercek fonksiyon olarak ULASMIYOR (bkz. CLAUDE.md gotcha),
+        ama CrewAI prompt'a tanittigi + tasks.yaml "search_code kullan" dedigi
+        icin model bunlari cagirmaya calisip cop sonuc aliyor, tur harciyor,
+        sonunda JSON yerine "INSUFFICIENT:" duzyazi uretiyor → parse hatasi.
+        tools=[] verince CrewAI prompt'a HIC tool tanitmaz → model cagirmayi
+        deneyemez → dogrudan JSON uretir.
+
+        Kullanim: (1) Emit fazi — claude_cli set_toolless(True) ile birlikte tam
+        tool'suz. (2) Explore fazi — repo erisimi --add-dir (set_repo_ctx) native
+        Claude araclariyla saglanir; CrewAI tool'una gerek yok.
+        LLM = architect profili (claude_cli/opus) — vertex'e KAYMASIN."""
+        from agile_sdlc_crew import pipeline_config as _pc
         arch = Agent(
             config=self._agent_config_with_knowledge(
-                "software_architect", "backend_tech_design"
+                "software_architect", "backend_tech_design", "frontend_nextjs"
             ),
-            llm=_create_llm("vertex_ai/claude-sonnet-4-6", max_tokens=16384),
+            llm=self.llm_architect,
             verbose=True,
-            max_iter=3,
+            max_iter=_pc.get("CREW_ARCHITECT_MAX_ITER"),
             tools=[],
+            **self._knowledge_kwargs("backend_tech_design", "frontend_nextjs"),
         )
         t1 = self._task("technical_design_task", arch)
         return Crew(
@@ -1109,9 +1124,53 @@ class AgileSDLCCrew:
         )
 
     def create_review_crew(self) -> Crew:
-        """Reviewer: PR'i is kalemiyle karsilastir."""
-        reviewer = self.code_reviewer()
+        """Reviewer: PR'i is kalemiyle karsilastir — TOOL'SUZ.
+
+        PR diff'i + WI Python tarafinda context'e pre-fetch ediliyor
+        (flow._prefetch_pr_changes_context). code_reviewer()'a bagli CrewAI
+        tool'lari (get_pr_changes/browse_repo/read_file) claude_cli'ye ULASMIYOR
+        (CLAUDE.md gotcha) — reviewer bunlari cagirmaya calisip cop alip
+        "Azure DevOps tools not available" deyip FALSE-RED veriyordu (job 171:
+        PR #39889 iki kez haksiz RED). tools=[] → prompt'a tool tanitilmaz →
+        reviewer pre-fetch edilmis diff'i DOGRUDAN inceler. (Cagri tarafinda
+        ayrica set_toolless(True) ile claude native araclari da kapatilir.)"""
+        reviewer = Agent(
+            config=self._agent_config_with_knowledge(
+                "code_reviewer", "backend_code_review"
+            ),
+            llm=self.llm_reviewer,
+            verbose=True,
+            max_iter=3,
+            tools=[],
+            **self._knowledge_kwargs("backend_code_review"),
+        )
         t1 = self._task("review_pr_task", reviewer)
+
+        return Crew(
+            agents=[reviewer],
+            tasks=[t1],
+            process=Process.sequential,
+            verbose=True,
+            memory=False,
+        )
+
+    def create_verify_review_crew(self) -> Crew:
+        """Reviewer: onceki review'in acik madde listesini id-bazli DOGRULAR — TOOL'SUZ.
+        create_review_crew ile ayni tool'suz reviewer kurulumu; sadece
+        task=verify_review_task. Kapali-uctu dogrulama (verilen id'ler closed/open)
+        + dar-kapsamli yeni-regresyon taramasi (REVIEW_VERIFY_JSON.new_findings,
+        yalniz severity=blocker). Yakinsayan review dongusunun dogrulama ayagi."""
+        reviewer = Agent(
+            config=self._agent_config_with_knowledge(
+                "code_reviewer", "backend_code_review"
+            ),
+            llm=self.llm_reviewer,
+            verbose=True,
+            max_iter=3,
+            tools=[],
+            **self._knowledge_kwargs("backend_code_review"),
+        )
+        t1 = self._task("verify_review_task", reviewer)
 
         return Crew(
             agents=[reviewer],

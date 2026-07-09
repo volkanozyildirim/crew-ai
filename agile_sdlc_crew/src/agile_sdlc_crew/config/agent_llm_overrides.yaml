@@ -7,7 +7,7 @@
 
 agents:
   business_analyst:
-    max_tokens: 32768
+    max_tokens: 16384
     model: sonnet
     provider: claude_cli
   code_reviewer:
@@ -20,10 +20,10 @@ agents:
     provider: claude_cli
   scrum_master:
     max_tokens: 16384
-    model: haiku
+    model: sonnet
     provider: claude_cli
   senior_developer:
-    max_tokens: 131072
+    max_tokens: 65536
     model: opus
     provider: claude_cli
   software_architect:
@@ -32,5 +32,5 @@ agents:
     provider: claude_cli
   uat_specialist:
     max_tokens: 16384
-    model: haiku
+    model: sonnet
     provider: claude_cli
