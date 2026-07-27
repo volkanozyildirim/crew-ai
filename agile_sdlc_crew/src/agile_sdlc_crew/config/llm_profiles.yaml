@@ -78,6 +78,23 @@ profiles:
     model: sonnet
     max_tokens: 4096
 
+  # ── Ucuz CLI alternatifleri (maliyet optimizasyonu — OPT-IN) ──────
+  # Default DEGIL. Maliyeti dusurmek isteyen, architect/reviewer'i Opus yerine
+  # Sonnet'e cekmek icin env ile secer (kod degisikligi yok):
+  #   CREW_LLM_PROFILE_SOFTWARE_ARCHITECT=architect_cli_sonnet
+  #   CREW_LLM_PROFILE_CODE_REVIEWER=reviewer_cli
+  # NOT: "premium remote" invariant'i korunur (Sonnet de premium; LOCAL degil).
+  # Sonnet plan/review kalitesi Opus'tan dusuk olabilir → bir WI ile dogrula.
+  architect_cli_sonnet:
+    provider: claude_cli
+    model: sonnet
+    max_tokens: 32768
+
+  reviewer_cli:
+    provider: claude_cli
+    model: sonnet
+    max_tokens: 16384
+
   # ── Anthropic API (direkt) ────────────────────────────────────
   developer_anthropic:
     provider: anthropic

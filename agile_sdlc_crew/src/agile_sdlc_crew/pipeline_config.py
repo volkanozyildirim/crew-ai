@@ -163,12 +163,19 @@ SCHEMA: list[dict] = [
         "key": "CREW_TECH_DESIGN_MAX_ATTEMPTS",
         "label": "Teknik Tasarim Max Deneme",
         "type": "int",
-        "default": 3,
+        "default": 2,
         "min": 1,
-        "desc": "Architect tool'suz plan uretimi (Faz B) parse tutmazsa kac kez yeniden dener. Faz B ucuz (tool'suz, cap/timeout yok); keşif→emit iki-fazli akista storm'a karsi ust sinir.",
+        "desc": "Architect tool'suz plan uretimi (Faz B) parse tutmazsa kac kez yeniden dener. 2 onerilir: 1. deneme format hatasiysa 2. genelde duzeltir; 3+ nadiren yardim eder, sadece Opus cagrisi yakar (refuzal zaten erken kesilir).",
     },
 
     # ── Context bütçeleri ──
+    {
+        "key": "CREW_SUMMARIZE_FORWARD",
+        "label": "Ozet-Ileri Besleme",
+        "type": "bool",
+        "default": False,
+        "desc": "Acikken: cok adima tasinan buyuk metinler (requirements) her prompt'ta HAM yerine bir kez Haiku ile ozetlenip tekrar kullanilir → tekrarlanan input token azalir. KAPALI (default): sadece truncate. Bilgi kaybi riski var → bir WI ile dogrula.",
+    },
     {
         "key": "CREW_DEV_CONTEXT_BUDGET",
         "label": "Developer Context Bütçesi",
@@ -278,6 +285,20 @@ SCHEMA: list[dict] = [
         "type": "bool",
         "default": False,
         "desc": "Teknik tasarım sonrası, her FR/AC'nin plandaki bir değişikliğe karşılık geldiğini ucuz (haiku) denetçiyle doğrula; boşluk varsa architect'i geri bildirimle bir kez yeniden çalıştırıp planı genişlet. Eksik-kapsam planların implement'e ulaşmasını engeller.",
+    },
+    {
+        "key": "CREW_PLAN_PATH_GATE",
+        "label": "Plan Yol/Entegrasyon Gate",
+        "type": "bool",
+        "default": False,
+        "desc": "Teknik tasarım sonrası plandaki dosya yollarını GERÇEK repo klonuyla karşılaştır (LLM çağrısı yok): (a) yeni dosyanın üst dizini repoda yoksa uydurma yol, (b) plan hiçbir mevcut kaynak dosyasını değiştirmiyorsa entegrasyon/çağrı noktası yok. Sorun varsa architect'i somut geri bildirimle bir kez yeniden çalıştırır. Uydurma yollu ve çağrılmayan-kod planlarının implement'e ulaşıp review'da kalıcı RED almasını engeller.",
+    },
+    {
+        "key": "CREW_REVIEW_RETRY_REPLAN",
+        "label": "Review Retry Yapısal Re-plan",
+        "type": "bool",
+        "default": False,
+        "desc": "Review retry'da maddeyi sadece anchor'landığı dosyaya göre değil, required_fix metninde geçen dosyalara ve planın yapısal geçerliliğine göre de sınıflandır. Başka bir dosyaya dokunmayı gerektiren maddeler (ör. 'çağrı noktası ekle') architect re-plan'ına gider ve re-plan'ın eklediği dosyalar implement listesine alınır. Aksi halde bu maddeler tek-dosya düzenlemesiyle asla kapanmaz ve retry döngüsü yakınsamaz.",
     },
     {
         "key": "CREW_PR_BUILD_GATE",

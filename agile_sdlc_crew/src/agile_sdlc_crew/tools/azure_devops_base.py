@@ -375,6 +375,61 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
+    def delete_branch(self, repo_id_or_name: str, branch_name: str) -> bool:
+        """Remote branch'i siler. Branch yoksa False doner (hata firlatmaz).
+
+        Basarisiz bir kosunun biraktigi bayat feature branch'i temizlemek icin:
+        create_branch mevcut branch'i SIFIRLAMAZ ('zaten mevcut' der), bu yuzden
+        eski commit'ler yeni kosunun PR diff'ine karisir."""
+        branches = self.list_branches(repo_id_or_name)
+        target = f"refs/heads/{branch_name}"
+        object_id = None
+        for b in branches:
+            if b.get("name") == target:
+                object_id = b.get("objectId")
+                break
+        if not object_id:
+            return False
+        url = f"{self._repo_api_url(repo_id_or_name)}/refs"
+        params = {"api-version": self.API_VERSION}
+        body = [
+            {
+                "name": target,
+                "oldObjectId": object_id,
+                "newObjectId": "0000000000000000000000000000000000000000",
+            }
+        ]
+        resp = requests.post(
+            url, headers=self._headers, json=body, params=params, timeout=30
+        )
+        resp.raise_for_status()
+        return True
+
+    def abandon_pull_request(
+        self,
+        repo_id_or_name: str,
+        pull_request_id: int,
+        reason: str = "",
+    ) -> dict:
+        """PR'i abandoned durumuna alir (silmez — Azure DevOps'ta PR silinemez).
+
+        Basarisiz/terk edilmis bir pipeline kosusunun biraktigi PR'i kapatmak icin
+        kullanilir; ayni branch'te yeni kosu baslatildiginda bayat diff karismaz.
+        reason verilirse abandon'dan ONCE PR'a gerekce yorumu birakilir."""
+        if reason:
+            try:
+                self.add_pr_comment(repo_id_or_name, pull_request_id, reason)
+            except Exception:
+                pass  # yorum kritik degil, abandon'i engellemesin
+        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}"
+        params = {"api-version": self.API_VERSION}
+        resp = requests.patch(
+            url, headers=self._headers, json={"status": "abandoned"},
+            params=params, timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def add_pr_comment(
         self,
         repo_id_or_name: str,
