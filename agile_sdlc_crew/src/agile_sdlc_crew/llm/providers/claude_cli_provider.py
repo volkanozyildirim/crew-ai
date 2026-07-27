@@ -50,7 +50,17 @@ def _register_litellm_handler() -> None:
             prompt = "\n\n".join(prompt_parts)
             system = "\n\n".join(p for p in system_parts if p)
 
-            cli_model = model.split("/", 1)[1] if "/" in model else ""
+            # litellm, custom provider handler'ina model'i PREFIX'I SOYARAK
+            # gecirir (get_llm_provider: model = model.split("/", 1)[1]), yani
+            # burada 'claude-cli/sonnet' degil 'sonnet' gelir. Eski kod prefix
+            # yoksa "" donuyordu → `--model` bayragi HIC eklenmiyor, `claude -p`
+            # kendi default modelini (opus) kullaniyordu. Sonuc: agents.yaml /
+            # agent_llm_overrides.yaml'daki sonnet/haiku ayarlari SESSIZCE
+            # yok sayiliyor, her agent opus'ta kosuyordu (job #179: sonnet
+            # ayarli business_analyst'in cagrisi claude-opus-5[1m] olarak kayitli,
+            # 379 token'lik repo secimi $0.55). Prefix varsa soy, yoksa oldugu
+            # gibi kullan.
+            cli_model = model.split("/", 1)[1] if "/" in model else model
             max_tokens = kwargs.get("max_tokens", 4096)
             result = claude_cli_completion(
                 prompt, max_tokens=max_tokens, model=cli_model, system=system

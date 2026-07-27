@@ -277,6 +277,63 @@ def _format_issues_md(issues: list) -> str:
     return "\n".join(lines)
 
 
+def _norm_path(p: str) -> str:
+    """Plan ve review-maddesi yollarini karsilastirilabilir hale getirir.
+
+    LLM ayni dosyayi bazen '/app/Model/X.php' bazen 'app/Model/X.php' diye yaziyor
+    (job #178 slash'li, job #179 slash'siz). Duz string karsilastirmasi bu yuzden
+    BOS kesisim veriyordu → reviewer'in sikayet ettigi dosyalar retry'da hic
+    duzeltilmiyor, her madde gereksizce plan-level sayilip architect'e gidiyordu.
+    Buyuk/kucuk harf DONUSTURULMEZ: repo yollari case-sensitive."""
+    return (p or "").strip().replace("\\", "/").lstrip("/")
+
+
+def _paths_in_text(text: str) -> set[str]:
+    """Metinde gecen dosya-yolu benzeri token'lari cikarir.
+
+    Review maddesinin 'required_fix'/'problem' metni, maddenin anchor'landigi
+    dosyadan BASKA bir dosyaya isaret edebilir (ornek: "mevcut split servisini
+    degistirip su cagriyi ekleyin"). Bu token'lar plan dosyalariyla
+    karsilastirilarak maddenin kod-seviyesi mi plan-seviyesi mi oldugu ayirt
+    edilir — bkz. _review_retry_loop."""
+    import re as _re_pt
+    if not text:
+        return set()
+    pat = _re_pt.compile(
+        r'[A-Za-z0-9_./\\-]*[A-Za-z0-9_-]+'
+        r'\.(?:blade\.php|php|py|pyi|ts|tsx|js|jsx|vue|go|cs|java|rb|kt|swift|'
+        r'sql|yaml|yml|json|tpl|twig|xml)\b'
+    )
+    out = set()
+    for m in pat.finditer(text):
+        tok = m.group(0).replace("\\", "/").strip().strip(",;:'\"()[]`")
+        if not tok or tok.startswith("."):
+            continue
+        # Yol bilgisi olmayan cıplak dosya adı ('composer.json') gurultu yapar;
+        # sadece dizin iceren ya da CamelCase sinif dosyasi olanlari al.
+        if "/" not in tok and not _re_pt.match(r'^[A-Z][A-Za-z0-9_]*\.', tok):
+            continue
+        out.add(_norm_path(tok))
+    return out
+
+
+def _is_test_path(rel_path: str) -> bool:
+    """Yol bir test dosyasi mi? (Entegrasyon degerlendirmesinde test dosyalari
+    'mevcut kaynak dosyasi degisikligi' saymaz — yeni test eklemek normaldir.)"""
+    p = (rel_path or "").replace("\\", "/").lower()
+    if not p:
+        return False
+    if any(seg in p for seg in ("/test/", "/tests/", "/spec/", "test/", "tests/")):
+        return True
+    base = p.rsplit("/", 1)[-1]
+    return (
+        base.startswith("test_")
+        or base.endswith(("test.php", "tests.php", "_test.py", "_test.go"))
+        or ".test." in base
+        or ".spec." in base
+    )
+
+
 def _coalesce_plan_changes(changes: list) -> list:
     """Ayni dosyayi hedefleyen birden fazla plan degisikligini TEK girise birlestir.
 
@@ -389,6 +446,43 @@ class AgileSDLCFlow(Flow[PipelineState]):
     _review_prev_open_ids: Any = PrivateAttr(default=None)
     # ── Helper Methods (dekoratorsuz) ────────────────
 
+    def _forward_text(self, kind: str, full_text: str, cap: int) -> str:
+        """④ Ozet-ileri besleme: cok adima tasinan buyuk bir metni ( or.
+        requirements) her prompt'ta HAM gondermek yerine BIR KEZ Haiku ile
+        sikistirip ozeti tekrar kullan → evrimleşen kuyruk kuculur, tekrarlanan
+        input token duser. CREW_SUMMARIZE_FORWARD kapali (default) ise mevcut
+        davranis: sadece truncate. Ozet job-basi cache'lenir (per-flow instance)."""
+        if not full_text:
+            return ""
+        try:
+            from agile_sdlc_crew import pipeline_config as _pc
+            on = bool(_pc.get("CREW_SUMMARIZE_FORWARD"))
+        except Exception:
+            on = False
+        if not on or len(full_text) <= cap:
+            return full_text[:cap]
+        cache = getattr(self, "_fwd_summaries", None)
+        if cache is None:
+            cache = {}
+            self._fwd_summaries = cache
+        if kind in cache:
+            return cache[kind]
+        try:
+            from agile_sdlc_crew.tools.claude_cli_llm import claude_cli_completion
+            out = claude_cli_completion(
+                f"Asagidaki metni teknik detay/karar/kisit KAYBETMEDEN en fazla "
+                f"~{cap} karaktere sikistir. Turkce, madde madde. SADECE ozet:\n\n"
+                f"{full_text[:20000]}",
+                model="haiku",
+                system="Teknik ozetleyici. Ciktida sadece ozet olsun.",
+            )
+            summ = (out or "").strip() or full_text[:cap]
+        except Exception as e:
+            _log(f"  Ozet-ileri besleme hatasi ({kind}), truncate'e dusuluyor: {e}")
+            summ = full_text[:cap]
+        cache[kind] = summ
+        return summ
+
     def _build_step_context(self, step_key: str) -> str:
         """Step'e ozel, tipli bilgilerden derlenen yapisal context.
         Her agent, kendi adimi icin gereken bilgiyi burada alir."""
@@ -432,7 +526,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         # Requirements (step 1 sonrasi — kickoff dahil, artik requirements once calisiyor)
         if s.requirements_text and step_key != "requirements_analysis_task":
-            parts.append(f"\n# Is Analizi (Gereksinimler)\n{s.requirements_text[:_cb.cap('REQUIREMENTS')]}")
+            parts.append(f"\n# Is Analizi (Gereksinimler)\n{self._forward_text('requirements', s.requirements_text, _cb.cap('REQUIREMENTS'))}")
 
         # Kabul kriterleri — BA analizinden sonra belirlenir, pipeline boyunca
         # baglayici tek kaynak: tasarim, gelistirme, inceleme ve UAT buna gore yapilir.
@@ -938,11 +1032,22 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  SM Review hatasi: {e}")
             return True, ""
 
-    def _prefetch_pr_changes_context(self, max_files: int = 12, per_file: int = 6000) -> str:
+    def _prefetch_pr_changes_context(
+        self, max_files: int = 12, per_file: int = 6000, diff_mode: bool = False,
+    ) -> str:
         """Reviewer'in get_pr_changes/dosya-okuma tool'larini (her biri ayri claude_cli
         subprocess'i) cagirmadan inceleyebilmesi icin: PR'da degisen dosyalarin
         feature-branch icerigini context'e hazirla. Architect pre-fetch deseni.
-        Hata olursa bos string — reviewer yine tool'larla okuyabilir."""
+        Hata olursa bos string — reviewer yine tool'larla okuyabilir.
+
+        diff_mode=True: tam dosya yerine base↔branch UNIFIED DIFF'i verir. Tool'suz
+        VERIFY adimi icin sart: tam dosya `per_file` ile BASTAN kesildigi icin
+        buyuk dosyalarda (job #179: StockSource.php 54 KB, Upgrade.php 260 KB)
+        duzeltmenin yapildigi ~900./~4977. satirlar context'e hic girmiyordu →
+        verifier "kanit yok" deyip maddeyi kalici 'open' birakiyordu. Diff sadece
+        degisen bloklari icerir: hem kucuk hem tam isabetli. Diff BOS cikarsa bu
+        da bilgidir — duzeltme gercekten uygulanmamis demektir."""
+        import difflib as _difflib
         repo = self.state.repo_name
         branch = self.state.branch_name
         if not repo or not branch:
@@ -958,30 +1063,88 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 files.append(fp)
         if not files:
             return ""
-        parts = [
-            f"\n# PR DEĞİŞİKLİKLERİ (PR #{self.state.pr_id}, repo {repo}, branch {branch} — feature branch içerikleri HAZIR)",
-            "⚡ Aşağıdaki dosya içerikleri context'te zaten var. get_pr_changes / browse_repo "
-            "ÇAĞIRMA — doğrudan bu içerikleri WI gereksinimlerine ve kabul kriterlerine göre incele. "
-            "Sadece context'te OLMAYAN bir dosyaya ihtiyaç duyarsan tool kullan.",
-        ]
-        n = 0
-        for fp in files[:max_files]:
-            content = ""
+
+        def _head(fp: str) -> str:
             try:
-                content = self._client.get_file_content(repo, fp, branch)
+                return self._client.get_file_content(repo, fp, branch)
             except Exception:
                 try:
-                    content = self._repo_mgr.get_file_content(repo, fp, branch)
+                    return self._repo_mgr.get_file_content(repo, fp, branch)
                 except Exception:
-                    content = ""
+                    return ""
+
+        base_ref = ""
+        if diff_mode:
+            for cand in ("main", "master"):
+                try:
+                    self._client.get_file_content(repo, files[0], cand)
+                    base_ref = cand
+                    break
+                except Exception:
+                    continue
+            if not base_ref:
+                # Base okunamiyorsa (ilk dosya yeni olabilir) yine main varsay;
+                # per-dosya base fetch'i asagida ayrica denenir.
+                base_ref = "main"
+
+        if diff_mode:
+            parts = [
+                f"\n# PR DEĞİŞİKLİKLERİ — DIFF (PR #{self.state.pr_id}, repo {repo}, "
+                f"{base_ref} → {branch})",
+                "⚡ Aşağıdakiler unified diff formatında GERÇEK değişikliklerdir "
+                "(kısaltma yok, tüm değişen bloklar burada). `-` satırlar eskisi, "
+                "`+` satırlar yenisi. Bir dosya için 'DEĞİŞİKLİK YOK' yazıyorsa o "
+                "dosyada gerçekten hiçbir değişiklik yapılmamıştır.",
+            ]
+        else:
+            parts = [
+                f"\n# PR DEĞİŞİKLİKLERİ (PR #{self.state.pr_id}, repo {repo}, branch {branch} — feature branch içerikleri HAZIR)",
+                "⚡ Aşağıdaki dosya içerikleri context'te zaten var. get_pr_changes / browse_repo "
+                "ÇAĞIRMA — doğrudan bu içerikleri WI gereksinimlerine ve kabul kriterlerine göre incele. "
+                "Sadece context'te OLMAYAN bir dosyaya ihtiyaç duyarsan tool kullan.",
+            ]
+        n = 0
+        for fp in files[:max_files]:
+            content = _head(fp)
             if not content or not content.strip():
                 continue
-            trunc = content[:per_file] + ("\n... (kısaltıldı)" if len(content) > per_file else "")
-            parts.append(f"\n## {fp}\n```\n{trunc}\n```")
+            if not diff_mode:
+                trunc = content[:per_file] + ("\n... (kısaltıldı)" if len(content) > per_file else "")
+                parts.append(f"\n## {fp}\n```\n{trunc}\n```")
+                n += 1
+                continue
+            # ── diff_mode: base ile karsilastir ──
+            base_content = None
+            try:
+                base_content = self._client.get_file_content(repo, fp, base_ref)
+            except Exception:
+                base_content = None
+            if base_content is None:
+                # Base'te yok → yeni dosya; tamamini ver (diff = tum dosya)
+                trunc = content[:per_file] + ("\n... (kısaltıldı)" if len(content) > per_file else "")
+                parts.append(f"\n## {fp}  (YENİ DOSYA)\n```\n{trunc}\n```")
+                n += 1
+                continue
+            diff_lines = list(_difflib.unified_diff(
+                base_content.splitlines(), content.splitlines(),
+                fromfile=f"{base_ref}/{fp}", tofile=f"{branch}/{fp}",
+                lineterm="", n=4,
+            ))
+            if not diff_lines:
+                parts.append(f"\n## {fp}\n**DEĞİŞİKLİK YOK** — bu dosya {base_ref} ile birebir aynı.")
+                n += 1
+                continue
+            body = "\n".join(diff_lines)
+            if len(body) > per_file:
+                body = body[:per_file] + "\n... (diff kısaltıldı — kalan hunk'lar için tool kullan)"
+            parts.append(f"\n## {fp}\n```diff\n{body}\n```")
             n += 1
         if n == 0:
             return ""
-        _log(f"  Review pre-fetch: {n} değişen dosya context'e eklendi (tool adımları kısaldı)")
+        _log(
+            f"  Review pre-fetch: {n} değişen dosya context'e eklendi "
+            + ("(DIFF modu — kısaltma yok)" if diff_mode else "(tool adımları kısaldı)")
+        )
         return "\n".join(parts)
 
     def _amend_plan(self, feedback: str, reason_label: str = "plan_amend") -> dict | None:
@@ -1098,6 +1261,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
           bounded retry (CREW_TECH_DESIGN_MAX_ATTEMPTS).
 
         Döner: (plan|None, raw, need_explore:bool)."""
+        import re as _re
         from agile_sdlc_crew.tools import claude_cli_llm as _cli
         from agile_sdlc_crew import pipeline_config as _pc
         from agile_sdlc_crew.main import _parse_architect_output
@@ -1164,6 +1328,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     if first_pass:
                         _log("  İlk geçişte JSON çıkmadı → Faz A keşfine düşülüyor")
                         return None, raw, True
+                    # ② Retry-storm kes: model JSON yerine "veri yok" düzyazısı
+                    # (INSUFFICIENT/YETERSIZ) döndürdüyse, aynı bulgularla tekrar
+                    # sormak JSON üretmez — sadece Opus çağrısı yakar (job #175:
+                    # 3× INSUFFICIENT). Bir kez gör, döngüden çık.
+                    if _re.search(r'(INSUFFICIENT|YETERSIZ)', raw[:800], _re.IGNORECASE):
+                        _log("  Faz B: yetersizlik düzyazısı (refüzal) — retry-storm atlanıyor")
+                        break
                     fb_note = (
                         f"⚠️ Önceki çıktın geçerli JSON değildi: {e}. "
                         "Düzelt ve SADECE geçerli JSON döndür."
@@ -1205,6 +1376,113 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  Plan completeness check hatası (atlanıyor): {e}")
             return []
 
+    def _validate_plan_paths(self, plan: dict, repo_name: str, base_ref: str = "") -> list:
+        """Plan dosya yollarini repo'nun BASE agaci ile karsilastirir. LLM cagrisi
+        YOK (butun repolar initialize'da klonlanmis durumda).
+
+        Iki sinif yapisal hata yakalar:
+          1. **Uydurma yol** — yeni dosyanin ust dizini repoda YOK. Architect
+             tool'suz EMIT fazinda var olmayan bir yapi hayal edebiliyor
+             (WI #69378: `/app/Library/Order/Split/...` ama repoda
+             `app/Library/Order` diye bir dizin yok).
+          2. **Entegrasyon yok** — plandaki hicbir degisiklik MEVCUT bir kaynak
+             dosyasina dokunmuyor, hepsi yeni dosya. Yeni kod hicbir yerden
+             cagrilmaz → uretimde davranis DEGISMEZ, reviewer kalici RED verir
+             (job #178: 3 yeni dosya, sifir cagri noktasi).
+
+        Kontrol `git cat-file` ile BASE ref uzerinden yapilir, calisma dizini
+        uzerinden DEGIL: review retry'da klon feature branch'inde ve planin yeni
+        dosyalari diske yazilmis durumda olur — dosya sistemine bakmak "bu dosya
+        zaten var" der ve entegrasyon eksigini gizler. Git yoksa dosya sistemine
+        duser (step4'te klon main'de oldugu icin dogru sonuc verir).
+
+        Donen: insan-okunur problem satirlari (bos liste = temiz/dogrulanamadi)."""
+        changes = [c for c in (plan.get("changes") or []) if c.get("file_path")]
+        if not changes or not repo_name:
+            return []
+        try:
+            root = self._repo_mgr.repo_path(repo_name)
+        except Exception:
+            return []
+        if not root.exists() or not (root / ".git").exists():
+            return []  # klon yok → dogrulanamaz, gate sessizce atlanir
+
+        # ── BASE ref sec: feature branch'teki yeni dosyalar dogrulamayi kirlemesin
+        ref = ""
+        for cand in ([base_ref] if base_ref else []) + [
+            "origin/main", "origin/master", "main", "master",
+        ]:
+            if not cand:
+                continue
+            try:
+                if self._repo_mgr._git(
+                    ["rev-parse", "--verify", "--quiet", cand], cwd=root,
+                ).returncode == 0:
+                    ref = cand
+                    break
+            except Exception:
+                break
+
+        def _kind(rel_path: str) -> str:
+            """'blob' (dosya) | 'tree' (dizin) | '' (yok)."""
+            if ref:
+                try:
+                    r = self._repo_mgr._git(
+                        ["cat-file", "-t", f"{ref}:{rel_path}"], cwd=root,
+                    )
+                    return r.stdout.strip() if r.returncode == 0 else ""
+                except Exception:
+                    pass
+            p = root / rel_path
+            return "blob" if p.is_file() else ("tree" if p.is_dir() else "")
+
+        problems = []
+        existing_src = []
+        new_files = []
+        for c in changes:
+            rel = str(c.get("file_path") or "").strip().replace("\\", "/").lstrip("/")
+            if not rel:
+                continue
+            if _kind(rel) == "blob":
+                if not _is_test_path(rel):
+                    existing_src.append(rel)
+                continue
+            new_files.append(rel)
+            parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+            if parent and _kind(parent) != "tree":
+                # Var olan en yakin ust dizini bul → architect'e somut capa ver
+                anchor = parent
+                while anchor and _kind(anchor) != "tree":
+                    anchor = anchor.rsplit("/", 1)[0] if "/" in anchor else ""
+                problems.append(
+                    f"UYDURMA YOL: '{rel}' — üst dizin '{parent}' repoda YOK. "
+                    f"Var olan en yakın dizin: '{anchor or '(repo kökü)'}'."
+                )
+        if not existing_src:
+            problems.append(
+                f"ENTEGRASYON YOK: plandaki {len(changes)} değişiklikten hiçbiri MEVCUT bir "
+                f"kaynak dosyasını değiştirmiyor (hepsi yeni: "
+                f"{', '.join(new_files[:5])}{' …' if len(new_files) > 5 else ''}). "
+                "Yeni kod hiçbir yerden çağrılmayacağı için üretimde davranış değişmez."
+            )
+        return problems
+
+    def _plan_fix_feedback(self, problems: list) -> str:
+        """_validate_plan_paths problemlerini architect'e verilecek geri bildirime
+        cevirir (step4 gate + review retry re-plan ayni metni kullanir)."""
+        return (
+            "Plan GERÇEK repo yapısıyla uyuşmuyor:\n"
+            + "\n".join(f"- {p}" for p in problems)
+            + "\n\nDÜZELT:\n"
+            "(a) Dosya yollarını repoda GERÇEKTEN var olan dizinlere göre yaz — "
+            "uydurma dizin/yol YOK. Emin değilsen repo araçlarınla (Grep/Glob/LS) doğrula.\n"
+            "(b) Yeni kodu ÇAĞIRACAK mevcut dosyayı (giriş noktası: servis/job/"
+            "controller/task) plana EKLE ve o dosyada yapılacak değişikliği tanımla. "
+            "Sadece yeni dosya eklemek yetmez — çağrı noktası olmadan davranış değişmez.\n"
+            "(c) WI mevcut bir kuralın yeniden kullanılmasını istiyorsa, o mevcut "
+            "sınıfı/metodu repoda bul ve ona DELEGE et — sıfırdan paralel kural yazma."
+        )
+
     def _review_retry_loop(self):
         """Reviewer RED verdikten sonra yakinsayan duzeltme dongusu.
 
@@ -1244,6 +1522,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
         repo_name = self.state.repo_name
         branch = self.state.branch_name
 
+        plan_level = []
+        new_plan_files = set()
+
         if not structured:
             # ── LEGACY: ham review_text -> amend -> tum dosyalar ──
             amended = self._amend_plan(self.state.review_text or "", "review_retry_replan")
@@ -1253,8 +1534,47 @@ class AgileSDLCFlow(Flow[PipelineState]):
             changes_to_fix = [c for c in self.state.plan.get("changes", []) if c.get("file_path")]
         else:
             # ── YAPISAL: plan-seviyesi (eksik dosya) vs kod-seviyesi (mevcut dosya) ──
-            plan_files = {c.get("file_path") for c in (self.state.plan.get("changes") or [])}
-            plan_level = [i for i in open_issues if i["file"] not in plan_files]
+            # Yollar _norm_path ile karsilastirilir: plan '/app/X.php', reviewer
+            # 'app/X.php' yazabiliyor ve duz karsilastirma BOS kesisim veriyordu.
+            plan_files = {
+                _norm_path(c.get("file_path"))
+                for c in (self.state.plan.get("changes") or []) if c.get("file_path")
+            }
+
+            # Maddenin 'file' alani plan icinde olsa BILE, required_fix baska bir
+            # dosyaya dokunmayi gerektiriyorsa madde kod-seviyesi DEGIL plan-
+            # seviyesidir: developer'a target_file=issue['file'] verirsek o baska
+            # dosyaya dokunamaz → madde ASLA kapanmaz (job #178 R1: cagri noktasi
+            # mevcut bir dosyaya eklenmeliydi, madde ise yeni resolver'a
+            # anchor'lanmisti → 1 retry sonrasi hala acik → pipeline durdu).
+            def _needs_other_file(issue: dict) -> bool:
+                txt = f"{issue.get('problem', '')} {issue.get('required_fix', '')}"
+                return bool(
+                    _paths_in_text(txt) - plan_files - {_norm_path(issue.get("file"))}
+                )
+
+            # Ayrica: plan YAPISAL olarak bozuksa (uydurma yol / hic entegrasyon
+            # yok) hicbir madde tek-dosya duzenlemesiyle kapanamaz — planin
+            # kendisi duzelmeli. Bu durumda TUM bloklayan maddeler architect'e gider.
+            # Flag kapaliysa TUM yeni yonlendirme devre disi → eski davranis
+            # (madde yalnizca 'file' alanina gore siniflanir).
+            _routing = bool(_pc_rr.get("CREW_REVIEW_RETRY_REPLAN"))
+            struct_probs = []
+            if _routing:
+                try:
+                    struct_probs = self._validate_plan_paths(self.state.plan, repo_name)
+                except Exception as _e_vp:
+                    _log(f"  Plan yol dogrulama hatasi (atlaniyor): {_e_vp}")
+                if struct_probs:
+                    for _p in struct_probs:
+                        _log(f"  ⚠️ Plan yapısal sorun: {_p}")
+
+            plan_level = [
+                i for i in open_issues
+                if _norm_path(i["file"]) not in plan_files
+                or (_routing and (_needs_other_file(i) or struct_probs))
+            ]
+            prev_plan_files = set(plan_files)
             if plan_level:
                 # Sadece plan-gap maddelerini architect'e ver (HAM review_text degil)
                 feedback_txt = "\n".join(
@@ -1263,14 +1583,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     + f": {i['problem']} -> GEREKLI: {i['required_fix']}"
                     for i in plan_level
                 )
+                if struct_probs:
+                    feedback_txt += "\n\n" + self._plan_fix_feedback(struct_probs)
                 amended = self._amend_plan(feedback_txt, "review_retry_replan")
                 if amended and amended.get("changes"):
                     self.state.plan = amended
-                    plan_files = {c.get("file_path") for c in amended.get("changes", [])}
-            code_level_files = {i["file"] for i in open_issues if i["file"] in plan_files}
+                    plan_files = {
+                        _norm_path(c.get("file_path"))
+                        for c in amended.get("changes", []) if c.get("file_path")
+                    }
+            # Amend'in EKLEDIGI dosyalar (cagri noktasi/eksik servis) henuz hic
+            # yazilmadi ve hicbir maddenin 'file' alani onlara esit degil — bu
+            # yuzden ayrica implement listesine alinmalari sart. Yoksa plan
+            # genisler ama kod yazilmaz, madde acik kalir ve dongu yakinsamaz.
+            new_plan_files = (plan_files - prev_plan_files) if _routing else set()
+            if new_plan_files:
+                _log(f"  Re-plan {len(new_plan_files)} yeni dosya ekledi (entegrasyon): "
+                     + ", ".join(sorted(new_plan_files)[:4]))
+            code_level_files = {
+                _norm_path(i["file"]) for i in open_issues
+                if _norm_path(i["file"]) in plan_files
+            } | new_plan_files
             changes_to_fix = [
                 c for c in self.state.plan.get("changes", [])
-                if c.get("file_path") in code_level_files
+                if _norm_path(c.get("file_path")) in code_level_files
             ]
 
         self._enable_impl_repo_tools()
@@ -1288,7 +1624,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
             # Reviewer maddelerini DOGRUDAN developer'a aktar (yapisal yolda)
             change_description = change.get("description", "")
             if structured:
-                issues_for_file = [i for i in open_issues if i["file"] == file_path]
+                issues_for_file = [
+                    i for i in open_issues
+                    if _norm_path(i["file"]) == _norm_path(file_path)
+                ]
                 if issues_for_file:
                     digest = "\n".join(
                         f"- (id {i['id']}, {i['severity']}) satir {i.get('line', '?')}: "
@@ -1298,6 +1637,24 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     change_description = (
                         change_description
                         + "\n\n# REVIEWER'IN DOGRUDAN MADDELERI (SADECE bunlari kapat, ekstra degisiklik YAPMA)\n"
+                        + digest
+                    )
+                elif _norm_path(file_path) in new_plan_files and plan_level:
+                    # Re-plan'in EKLEDIGI dosya: hicbir madde buraya anchor'lanmis
+                    # degil (reviewer bu dosyayi bilmiyordu) — ama bu dosya tam da
+                    # asagidaki maddeleri kapatmak icin plana girdi. Gerekceyi ver,
+                    # yoksa developer neden dokunduğunu bilemez.
+                    digest = "\n".join(
+                        f"- ({i.get('severity', '?')}) {i.get('file', '?')}: "
+                        f"{i.get('problem', '')} -> {i.get('required_fix', '')}"
+                        for i in plan_level
+                    )
+                    change_description = (
+                        change_description
+                        + "\n\n# BU DOSYA NEDEN DEGISIYOR — kapatilacak review maddeleri\n"
+                        + "Asagidaki maddeler BU dosyada yapilacak degisiklikle kapanir "
+                        "(ornek: yeni servisi cagiran giris noktasi). Sadece bunu yap, "
+                        "ilgisiz degisiklik YAPMA.\n"
                         + digest
                     )
 
@@ -1378,7 +1735,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 self._review_item_attempts[i["id"]] = self._review_item_attempts.get(i["id"], 0) + 1
 
             ctx = self._build_step_context("review_pr_task")
-            ctx += self._prefetch_pr_changes_context()
+            # VERIFY tool'suz calisiyor → tam dosya yerine DIFF ver. Tam dosya
+            # bastan kesiliyor ve buyuk dosyalarda duzeltmenin oldugu satirlar
+            # context'e hic girmiyor (job #179: R1/R2 "kanit yok" ile open kaldi).
+            # per_file diff icin daha yuksek: diff'ler tam dosyadan cok kucuk
+            # (job #179 dorttegi toplam ~13 KB, tam-dosya modu ~24 KB) ama test
+            # dosyasi diff'i 8 KB'a cikabiliyor ve 6 KB'da kesilince "test
+            # eklenmis mi" kaniti kayboluyordu.
+            ctx += self._prefetch_pr_changes_context(diff_mode=True, per_file=12000)
             ctx += self._test_requirement_note(self.state.repo_name)
             issues_json = _json.dumps(
                 [{k: v for k, v in i.items() if k != "status"} for i in open_issues],
@@ -3081,6 +3445,48 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception as _e_pg:
             _log(f"  Plan gate hatası (atlanıyor): {_e_pg}")
 
+        # ── B2: Plan yol/entegrasyon gate ──────────────────────────────────
+        # Architect tool'suz EMIT fazinda var olmayan dizinler uydurabiliyor ve
+        # sadece yeni dosyadan olusan (cagri noktasi olmayan) plan uretebiliyor.
+        # Ikisi de implement'e ulasirsa reviewer KALICI RED verir ve is bosa gider
+        # (job #178: /app/Library/Order yok + 3 yeni dosya, sifir entegrasyon →
+        # $6.61 yakip review'da durdu). Burada LLM'siz (dosya sistemi) dogrula;
+        # sorun varsa architect'i somut geri bildirimle BIR kez yeniden calistir.
+        # Env: CREW_PLAN_PATH_GATE.
+        try:
+            from agile_sdlc_crew import pipeline_config as _pc_pv
+            if _pc_pv.get("CREW_PLAN_PATH_GATE"):
+                _probs = self._validate_plan_paths(plan, repo_name)
+                if _probs:
+                    for _p in _probs:
+                        _log(f"  ⚠️ Plan yol gate: {_p}")
+                    _amended_pv = self._amend_plan(
+                        self._plan_fix_feedback(_probs), "plan_path_gate_amend",
+                    )
+                    if _amended_pv and _amended_pv.get("changes"):
+                        _still = self._validate_plan_paths(
+                            _amended_pv, _amended_pv.get("repo_name") or repo_name,
+                        )
+                        if len(_still) < len(_probs):
+                            plan = _amended_pv
+                            self.state.plan = plan
+                            _log(
+                                f"  Plan yol gate sonrası: {len(plan.get('changes', []))} dosya"
+                                + (f", hâlâ {len(_still)} sorun" if _still
+                                   else ", yollar + entegrasyon doğrulandı")
+                            )
+                        else:
+                            # Amend iyilestirme saglamadi → eskisini koru (daha kotu
+                            # bir planla implement'e girmektense mevcut plan kalsin).
+                            _log(
+                                f"  Plan yol gate: re-plan iyileştirme sağlamadı "
+                                f"({len(_still)} sorun) — mevcut plan korunuyor"
+                            )
+                else:
+                    _log("  Plan yol gate: yollar + entegrasyon noktası doğrulandı")
+        except Exception as _e_pv:
+            _log(f"  Plan yol gate hatası (atlanıyor): {_e_pv}")
+
         # technical_design_task ciktisi JSON — cache'den parse edilebilmesi icin
         # tam veya en azindan buyuk pencereli sakla (onceden [:3000] ile kesilip
         # sonraki run'da JSON bozuk geliyordu)
@@ -3377,6 +3783,18 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     _log(f"    Arama hatasi: {search_err}, yeni dosya olacak")
                     change_type = "add"
 
+            # Agent'a giden yol: --add-dir klonundaki MUTLAK yol olmali. Plan
+            # yolu '/app/..' gibi basta-/'li gelebilir; claude_cli agent bunu
+            # literal FS yolu sanip 'find /' ile idle-timeout'a girer → bos
+            # yanit → CrewAI "Invalid response - None or empty" ile job crash
+            # (job #175). Klonda dosya varsa mutlak yolu ver ki 'find' yerine
+            # dogrudan Read etsin; yoksa (yeni dosya) normalize relative'e dus.
+            try:
+                _abs = self._repo_mgr.base_dir / repo_name / file_path.lstrip("/")
+                agent_target_file = str(_abs) if _abs.is_file() else file_path.lstrip("/")
+            except Exception:
+                agent_target_file = file_path.lstrip("/")
+
             if change_type == "add" and new_code:
                 if full_content:
                     final_content = full_content.rstrip() + "\n\n" + new_code + "\n"
@@ -3410,7 +3828,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         code_result = code_crew.kickoff(inputs={
                             "work_item_id": self.state.work_item_id,
                             "target_repo": repo_name,
-                            "target_file": file_path,
+                            "target_file": agent_target_file,
                             "change_description": (
                                 f"{description}\n\n"
                                 f"⚠️ CIKTIN: SADECE YENI KOD BLOGU olmali, TAM DOSYA DEGIL.\n"
@@ -3451,7 +3869,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 code_result = code_crew.kickoff(inputs={
                     "work_item_id": self.state.work_item_id,
                     "target_repo": repo_name,
-                    "target_file": file_path,
+                    "target_file": agent_target_file,
                     "change_description": description,
                     "current_code": full_content[:6000],
                     "new_code": f"[Degisiklik aciklamasi: {description}]",
@@ -3759,18 +4177,25 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"  PR thread okuma hatasi: {e}")
         if pr_threads and pr_repo and pr_id_old:
             _log(f"\n-- PR YORUMLARINA YANIT ({len(pr_threads)} yorum) --")
-            plan_files = {ch.get("file_path", ""): ch.get("description", "") for ch in self.state.plan.get("changes", [])}
-            pushed_files = {p.get("file", "") for p in self.state.all_pushes}
+            # Yollar _norm_path ile: Azure thread'i '/app/X.php', plan/push kaydi
+            # 'app/X.php' olabiliyor → duz karsilastirma yanlis dala sokup
+            # "bu dosya planda yer almiyor" yaniti veriyordu.
+            plan_files = {
+                _norm_path(ch.get("file_path", "")): ch.get("description", "")
+                for ch in self.state.plan.get("changes", [])
+            }
+            pushed_files = {_norm_path(p.get("file", "")) for p in self.state.all_pushes}
 
             for t in pr_threads:
                 thread_id = t["thread_id"]
                 file_path = t.get("file_path")
+                norm_fp = _norm_path(file_path)
                 comment_content = t["content"]
 
                 try:
-                    if file_path and file_path in pushed_files:
+                    if file_path and norm_fp in pushed_files:
                         # Dosya duzeltildi — ne yapildigini acikla
-                        desc = plan_files.get(file_path, "")
+                        desc = plan_files.get(norm_fp, "")
                         self._client.reply_to_pr_thread(
                             pr_repo, pr_id_old, thread_id,
                             f"**Duzeltildi.**\n\n"
@@ -3780,7 +4205,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         )
                         self._client.resolve_pr_thread(pr_repo, pr_id_old, thread_id)
                         _log(f"  ✅ Thread #{thread_id} ({file_path}): duzeltildi + resolve")
-                    elif file_path and file_path not in plan_files:
+                    elif file_path and norm_fp not in plan_files:
                         # Dosya planda yok — neden yapilmadigini acikla
                         self._client.reply_to_pr_thread(
                             pr_repo, pr_id_old, thread_id,
