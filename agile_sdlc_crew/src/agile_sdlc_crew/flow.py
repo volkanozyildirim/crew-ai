@@ -2360,8 +2360,17 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     self._job_real_cost_usd += float(rec.get("cost_usd") or 0)
                     # Mid-step cap: limit asildiysa sonraki claude cagrilarini
                     # kisa-devre yap (kickoff gibi tek adimda asimi sinirlar).
+                    #
+                    # ZARFI KULLAN. Job #181 tam burada oldu: zarf L/$18 demisti
+                    # ama bu kontrol sabit CREW_MAX_JOB_COST'u ($10) okuyordu →
+                    # $10.62'de bayrak kalkti, sonraki tum cagrilar bos dondu,
+                    # is "Invalid response from LLM call - None or empty" ile
+                    # dustu. Adim-sinirindaki guard zarfi kullanirken ara-adim
+                    # kisa-devresinin kullanmamasi, iki tavanin ayrisip isin
+                    # DUSUK olanda olmesine yol aciyor.
                     from agile_sdlc_crew import pipeline_config as _pc_b
-                    if self._job_real_cost_usd > float(_pc_b.get("CREW_MAX_JOB_COST")):
+                    _cap = self._envelope_budget(_pc_b.get("CREW_MAX_JOB_COST"))
+                    if self._job_real_cost_usd > _cap:
                         _cli_acct.signal_budget_exceeded()
                 except Exception:
                     pass
