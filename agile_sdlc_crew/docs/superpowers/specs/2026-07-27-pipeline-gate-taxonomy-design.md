@@ -247,8 +247,14 @@ stream'e event gitmiyor; sabit 90s idle bunu hang sanıyor.
 | Faz | idle | hard |
 |---|---|---|
 | Repo-araçlı (keşif, implement) | 240s | 900s |
-| Tool'suz emit | 90s | 300s |
-| Denetçi (haiku) | 60s | 120s |
+| Tool'suz emit | 90s | 300s (mevcut değer) |
+| Denetçi (haiku) | 90s | 300s (mevcut değer) |
+
+**Kural: yalnızca gevşet, asla sık.** Faz değerleri yapılandırılmış tabanla
+`max()` alınır. Sıkmak, düzeltilen hatanın (verimli işi öldürmek) aynısını geri
+getirir; hızlı olması *beklenen* bir fazın yavaş çalışması bir uyarı sinyalidir,
+öldürme gerekçesi değil. Bu yüzden emit ve denetçi fazları pratikte mevcut
+90s/300s tabanında kalır ve tabloda yalnızca hedef olarak listelenir.
 
 Watchdog kaldırılmıyor — gerçek hang'ler için gerekli — faza göre kalibre
 ediliyor.

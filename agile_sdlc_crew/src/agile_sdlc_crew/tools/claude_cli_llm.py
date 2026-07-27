@@ -345,6 +345,44 @@ def claude_cli_completion(
         timeout_s = int(os.environ.get("CREW_CLAUDE_CLI_TIMEOUT", "300"))
         idle_s = int(os.environ.get("CREW_CLAUDE_CLI_IDLE_TIMEOUT", "0") or 0)
 
+    # ── FAZ-FARKINDALI TIMEOUT ────────────────────────────────────────────
+    # Sabit idle timeout, uzun dusunen modelle bagdasmyor: Opus 5'te
+    # thinking.display varsayilani "omitted" → model dusunurken stream'e event
+    # GITMIYOR. Watchdog bunu "hang" saniyor. Job #179: 13.5 dakikalik verimli
+    # kesif (StockSource/Registry/INTERNAL_MERCHANT_IDS/Merchant/migration
+    # taramasi tamamlanmis) tam dusunme aninda SIGKILL edildi:
+    #   ⏱️ Hard timeout (idle 90s (event yok)) — claude surec grubu SIGKILL
+    #   Faz A kesif hatasi (None or empty) — bulgusuz devam
+    # Sonuc sadece sure kaybi degil KALITE kaybi: plan bulgusuz uretildi →
+    # completeness gate AC5/AC6/FR3 bosluğu buldu → $1.27/280s amend → hala
+    # TR3 eksik. Tek config degeri hem 13.5 dk hem ~$1.5 hem kalite bosluğu.
+    #
+    # Watchdog KALDIRILMIYOR (gercek hang'ler icin gerekli) — faza gore
+    # kalibre ediliyor. Faz, cagrinin kendi baglamindan tespit edilir:
+    #   repo-aracli (--add-dir) = kesif/implement → uzun dusunme NORMAL
+    #   tool'suz emit           = JSON yazmali    → hizli olmali
+    #   haiku denetci           = zaten hizli
+    _phase_add_dirs, _ = _get_repo_ctx()
+    if _phase_add_dirs:
+        _phase, _p_idle, _p_hard = "repo-araclı", 240, 900
+    elif "haiku" in (model or "").lower():
+        _phase, _p_idle, _p_hard = "denetci", 60, 120
+    elif _get_toolless():
+        _phase, _p_idle, _p_hard = "tool'suz emit", 90, 300
+    else:
+        _phase, _p_idle, _p_hard = "", 0, 0
+    if _p_idle:
+        # Dashboard'dan gelen deger daha comertse ONA saygi duy (kullanici
+        # bilerek yukseltmis olabilir); yalnizca cok siki olani gevset.
+        _new_idle = max(idle_s, _p_idle) if idle_s else _p_idle
+        _new_hard = max(timeout_s, _p_hard)
+        if (_new_idle, _new_hard) != (idle_s, timeout_s):
+            log.info(
+                f"  ⏳ Faz '{_phase}': idle {idle_s}s→{_new_idle}s, "
+                f"hard {timeout_s}s→{_new_hard}s"
+            )
+        idle_s, timeout_s = _new_idle, _new_hard
+
     cmd = ["claude", "-p", prompt]
     if system:
         cmd.extend(["--system-prompt", system])
