@@ -214,6 +214,7 @@ header {
 .jdot.running { background:var(--accent); animation:pulse 1s infinite; }
 .jdot.completed { background:var(--success); }
 .jdot.failed { background:var(--danger); }
+    .jdot.needs_human { background:var(--warning,#f0ad4e); }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 .jwi { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--accent-light); }
 .jtitle { flex:1; font-size:12px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -650,7 +651,7 @@ function renderJobs(jobs){
       ${hasDiff?`<button class="job-retry" onclick="event.stopPropagation();showDiff(${j.id})" title="Diff goster" style="background:rgba(108,92,231,0.15);color:var(--accent-light)">📊</button>`:''}
       ${isDry&&j.status==='completed'?`<button class="job-retry" onclick="event.stopPropagation();showDryRunReport(${j.id})" title="Dry-run raporunu goster" style="background:rgba(255,196,0,0.15);color:#ffc400">📄</button>`:''}
       ${(!isDry&&j.pr_url)?`<span class="jmeta"><a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()" style="color:var(--accent-light)">PR</a></span>`:''}
-      ${(j.status==='failed'||j.status==='completed')?`<button class="job-retry" onclick="event.stopPropagation();retryJob(${j.id})" title="Tekrar dene">↻</button>`:''}
+      ${(j.status==='failed'||j.status==='completed'||j.status==='needs_human')?`<button class="job-retry" onclick="event.stopPropagation();retryJob(${j.id})" title="Tekrar dene">↻</button>`:''}
       <button class="job-del" onclick="event.stopPropagation();delJob(${j.id},'${j.status}')">&times;</button>
     </div>`}).join('');
 }

@@ -1,5 +1,6 @@
 """MySQL job queue ve step logging."""
 
+import logging
 import os
 import json
 from datetime import datetime
@@ -7,6 +8,8 @@ from contextlib import contextmanager
 
 import pymysql
 import pymysql.cursors
+
+log = logging.getLogger("pipeline")
 
 
 DB_CONFIG = {
@@ -24,7 +27,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id INT AUTO_INCREMENT PRIMARY KEY,
     work_item_id VARCHAR(20) NOT NULL,
     wi_title VARCHAR(255) DEFAULT '',
-    status ENUM('queued','running','completed','failed') DEFAULT 'queued',
+    status ENUM('queued','running','completed','failed','needs_human') DEFAULT 'queued',
     use_hal TINYINT(1) DEFAULT 1,
     repo_name VARCHAR(100) DEFAULT '',
     branch_name VARCHAR(100) DEFAULT '',
@@ -116,6 +119,22 @@ def init_db():
 
         # Kickoff debug akisi icin eklenen kolonlar — INFORMATION_SCHEMA
         # ile yoklayip yoksa ekle (eski DB'ler icin idempotent).
+        # Mevcut kurulumlarda jobs.status ENUM'una 'needs_human' ekle (idempotent).
+        # 'failed' DEGIL: pipeline kullanilabilir is uretip kendi kapisini
+        # gecemediginde kullanilir — PR acik kalir, sayimlarda basarisiz gorunmez.
+        try:
+            cur.execute("SHOW COLUMNS FROM jobs LIKE 'status'")
+            _row = cur.fetchone()
+            if _row and "needs_human" not in (_row.get("Type") or ""):
+                cur.execute(
+                    "ALTER TABLE jobs MODIFY status "
+                    "ENUM('queued','running','completed','failed','needs_human') "
+                    "DEFAULT 'queued'"
+                )
+                log.info("jobs.status ENUM'una 'needs_human' eklendi")
+        except Exception as e:
+            log.warning(f"jobs.status ENUM guncellenemedi (atlaniyor): {e}")
+
         _ensure_column(cur, "jobs", "kickoff_only", "TINYINT(1) DEFAULT 0")
         _ensure_column(cur, "jobs", "kickoff_feedback", "TEXT")
         _ensure_column(cur, "jobs", "kickoff_approved", "TINYINT(1) DEFAULT 0")
@@ -251,6 +270,21 @@ def complete_job(job_id: int, **extra):
 
 def fail_job(job_id: int, error: str):
     update_job(job_id, status="failed", finished_at=datetime.now(), error_message=error[:2000])
+
+
+def needs_human_job(job_id: int, reason: str):
+    """Is 'insan mudahalesi gerekli' durumuna alinir — 'failed' DEGIL.
+
+    Pipeline kullanilabilir is uretip kendi kalite kapisini gecemediginde
+    kullanilir: PR acik kalir, teshis PR ve WI yorumuna yazilir, is sayimlarda
+    'basarisiz' olarak gorunmez. Job #178+#179'da $16.21 harcandi ve geriye
+    teshissiz iki yetim PR kaldi; tek sebep 'reviewer razi olmadi = job oldu'
+    denklemiydi.
+
+    TERMINAL durum: worker yeniden almaz, ama /api/jobs/{id}/retry ile elle
+    kuyruga alinabilir."""
+    update_job(job_id, status="needs_human", finished_at=datetime.now(),
+               error_message=reason[:2000])
 
 
 def fail_orphan_running_jobs(reason: str = "Sunucu yeniden baslatildi, is yarida kaldi") -> int:
@@ -488,5 +522,8 @@ def get_queue_stats() -> dict:
             "running": stats.get("running", 0),
             "completed": stats.get("completed", 0),
             "failed": stats.get("failed", 0),
+            # 'needs_human' TERMINAL ama basarisiz DEGIL — ayri sayilir, yoksa
+            # bu isler sayimlarda tamamen kaybolur.
+            "needs_human": stats.get("needs_human", 0),
             "total": sum(stats.values()),
         }
