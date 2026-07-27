@@ -174,6 +174,16 @@ def _brief_input(inp: dict) -> str:
     return ",".join(list(inp.keys())[:3])
 
 
+# En son claude cagrisinda CLI'in BILDIRDIGI model (istenen degil, gerceklesen).
+# Acilis dogrulamasi bunu okur: istenen ile gerceklesen ayrisirsa config kaymistir.
+_LAST_CALL_MODEL: str = ""
+
+
+def last_call_model() -> str:
+    """En son claude cagrisinda CLI'in bildirdigi model adi."""
+    return _LAST_CALL_MODEL
+
+
 def _log_stream_event(ev: dict, text_parts: list, meta: dict | None = None) -> str | None:
     """Tek stream-json event'ini canli logla. result event'inde final metni dondur.
     meta verilirse model/turns/cost/duration/tool_calls oraya toplanir."""
@@ -183,6 +193,8 @@ def _log_stream_event(ev: dict, text_parts: list, meta: dict | None = None) -> s
     if t == "system" and ev.get("subtype") == "init":
         model = ev.get("model", "?")
         meta["model"] = model
+        global _LAST_CALL_MODEL
+        _LAST_CALL_MODEL = model
         ntools = len(ev.get("tools", []) or [])
         log.info(f"  🤖 claude basladi: model={model}, {ntools} tool")
         return None

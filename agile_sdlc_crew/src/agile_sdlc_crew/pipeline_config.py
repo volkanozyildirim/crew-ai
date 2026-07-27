@@ -287,6 +287,13 @@ SCHEMA: list[dict] = [
         "desc": "Teknik tasarım sonrası, her FR/AC'nin plandaki bir değişikliğe karşılık geldiğini ucuz (haiku) denetçiyle doğrula; boşluk varsa architect'i geri bildirimle bir kez yeniden çalıştırıp planı genişlet. Eksik-kapsam planların implement'e ulaşmasını engeller.",
     },
     {
+        "key": "CREW_VARIABLE_ENVELOPE",
+        "label": "Değişken Bütçe Zarfı (S/M/L)",
+        "type": "bool",
+        "default": False,
+        "desc": "İş bütçesini ve review retry sayısını WI karmaşıklığına göre belirle: FR+TR+AC sayısı, plan dosya sayısı, keşif gerekip gerekmediği. S=$5/1 retry, M=$10/2, L=$18/3. İki aşamada hesaplanır (analiz sonrası kaba, plan sonrası kesin) ve YALNIZCA YÜKSELİR — aşağı düzeltme, halihazırda harcanmış bütçenin altında bir tavan üretip işi anında öldürebilir. Kapalıysa CREW_MAX_JOB_COST ve CREW_REVIEW_MAX_RETRIES sabitleri geçerli. Job #179 L sınıfına giriyordu ve M zarfında ($10) boğuldu.",
+    },
+    {
         "key": "CREW_CONTRACT_GATE",
         "label": "Dosyalar-Arası Sözleşme Kapısı",
         "type": "bool",

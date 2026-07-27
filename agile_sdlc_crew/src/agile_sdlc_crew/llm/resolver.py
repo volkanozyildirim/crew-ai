@@ -279,3 +279,58 @@ def reset_cache() -> None:
     _load_profiles_doc.cache_clear()
     _load_agents_doc.cache_clear()
     _load_overrides_doc.cache_clear()
+
+
+def assert_models_reachable(agent_keys: list | None = None) -> list:
+    """Her farkli modele bir minik cagri yapip CLI'in BILDIRDIGI modeli dogrular.
+
+    Gozlemlenemeyen config, kayan config'tir: litellm custom provider'a model'i
+    PREFIX'I SOYARAK gecirdigi icin `if "/" in model else ""` bos donuyordu →
+    `--model` hic eklenmiyor, TUM agent'lar CLI default'unda (opus) kosuyordu.
+    agents.yaml / agent_llm_overrides.yaml'daki sonnet ayarlari AYLARCA sessizce
+    yok sayildi. Bu sinifi ancak calisan bir dogrulama yakalar.
+
+    Deploy basina ~$0.45 (3 farkli model x ~$0.15), job basina DEGIL.
+    Doner: uyusmazlik aciklamalari (bos liste = her sey yerinde)."""
+    import logging
+
+    from agile_sdlc_crew.llm.resolver import build_for_agent
+
+    log = logging.getLogger("pipeline")
+    keys = agent_keys or [
+        "software_architect", "senior_developer", "code_reviewer",
+        "business_analyst", "qa_engineer", "uat_specialist", "scrum_master",
+    ]
+    # Ayni modele birden fazla agent baglanmis olabilir — model basina TEK cagri.
+    wanted: dict = {}
+    for k in keys:
+        try:
+            m = getattr(build_for_agent(k), "model", "") or ""
+        except Exception as e:
+            log.warning(f"  model dogrulama: {k} cozumlenemedi ({e})")
+            continue
+        if m.startswith("claude-cli/"):
+            wanted.setdefault(m.split("/", 1)[1], []).append(k)
+
+    if not wanted:
+        return []
+
+    from agile_sdlc_crew.tools.claude_cli_llm import claude_cli_completion, last_call_model
+
+    problems = []
+    for alias, agents in sorted(wanted.items()):
+        try:
+            claude_cli_completion("ok", model=alias, max_tokens=16)
+            got = (last_call_model() or "").lower()
+        except Exception as e:
+            problems.append(f"{alias} ({', '.join(agents)}): cagri basarisiz — {e}")
+            continue
+        # 'sonnet' -> 'claude-sonnet-5', 'opus' -> 'claude-opus-5' beklenir.
+        if alias.lower() not in got:
+            problems.append(
+                f"{alias} istendi ama CLI '{got}' bildirdi — {', '.join(agents)} "
+                f"yanlis modelde kosuyor"
+            )
+        else:
+            log.info(f"  ✓ model dogrulandi: {alias} → {got} ({', '.join(agents)})")
+    return problems

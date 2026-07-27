@@ -1765,6 +1765,24 @@ async def startup():
     orphan = db.fail_orphan_running_jobs()
     if orphan:
         pipeline_log.info(f"Sunucu baslatildi: {orphan} takili kalmis is failed olarak isaretlendi")
+
+    # ── Model config drift dogrulamasi ────────────────────────────────────
+    # Gozlemlenemeyen config kayan config'tir: litellm custom provider'a model'i
+    # prefix'i soyarak gecirdigi icin `--model` hic eklenmiyordu ve TUM agent'lar
+    # CLI default'unda kosuyordu; agent_llm_overrides.yaml'daki sonnet ayarlari
+    # AYLARCA sessizce yok sayildi. Bu sinifi ancak calisan bir dogrulama yakalar.
+    # Deploy basina ~$0.45, job basina DEGIL. Env: CREW_STARTUP_MODEL_CHECK.
+    if os.environ.get("CREW_STARTUP_MODEL_CHECK", "0") not in ("0", "false", "False", ""):
+        try:
+            from agile_sdlc_crew.llm.resolver import assert_models_reachable
+            probs = assert_models_reachable()
+            for p in probs:
+                pipeline_log.error(f"MODEL CONFIG UYUSMAZLIGI: {p}")
+            if not probs:
+                pipeline_log.info("Model config dogrulandi — istenen modeller CLI'a ulasiyor")
+        except Exception as e:
+            pipeline_log.warning(f"Model dogrulama atlandi: {e}")
+
     _ensure_worker()
 
 
