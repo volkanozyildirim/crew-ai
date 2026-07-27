@@ -626,6 +626,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
     # Onceki turun acik id kumesi — ilerleme kontrolu (ayni kume tekrar gelirse
     # CREW_REVIEW_MAX_RETRIES dolmadan erken durdur).
     _review_prev_open_ids: Any = PrivateAttr(default=None)
+    # WI karmasikligina gore belirlenen butce/retry zarfi (S/M/L). Yalnizca yukselir.
+    _envelope: Any = PrivateAttr(default=None)
+    # Teknik tasarimda Faz A kesfi gerekti mi — zarf sinyali.
+    _needed_explore: bool = PrivateAttr(default=False)
     # ── Helper Methods (dekoratorsuz) ────────────────
 
     def _forward_text(self, kind: str, full_text: str, cap: int) -> str:
@@ -1159,7 +1163,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
         real_cost = getattr(self, "_job_real_cost_usd", 0.0)
         cost = max(token_cost, real_cost)
 
-        max_cost = _pc.get("CREW_MAX_JOB_COST")
+        # Zarf aktifse WI karmasikligina gore belirlenen butce gecerli;
+        # yoksa yapilandirilmis sabit deger.
+        max_cost = self._envelope_budget(_pc.get("CREW_MAX_JOB_COST"))
         if step_name:
             local_tag = " [LOCAL]" if is_local else ""
             _log(
@@ -1687,6 +1693,57 @@ class AgileSDLCFlow(Flow[PipelineState]):
             )
         return problems
 
+    def _apply_envelope(self, stage: str) -> None:
+        """WI karmasikligina gore butce/retry zarfini belirler (S/M/L).
+
+        Iki asamada cagrilir: 'requirements' (kaba) ve 'plan' (kesin). Sinyaller
+        yapisal — hepsi zaten uretiliyor, ek LLM cagrisi YOK:
+          FR+TR+AC sayisi · plan dosya sayisi · yeni/mevcut orani · kesif gerekti mi
+
+        ZARF YALNIZCA YUKSELIR. Iki asamanin sonucu farkliysa buyuk olan gecerli:
+        asagi duzeltme, halihazirda harcanmis butcenin ALTINDA bir tavan uretip
+        isi aninda oldurebilir.
+
+        Job #179 L sinifina giriyor (13 gereksinim, kesif gerekti) ve M zarfinda
+        ($10) bogulmustu — $9.60'ta review'da oldu."""
+        from agile_sdlc_crew import pipeline_config as _pc_env
+        if not _pc_env.get("CREW_VARIABLE_ENVELOPE"):
+            return
+        n_req = len(_requirement_ids(self.state.requirements_text or ""))
+        changes = (self.state.plan or {}).get("changes") or []
+        n_files = len(changes)
+        explored = bool(getattr(self, "_needed_explore", False))
+
+        if stage == "plan" and (n_req >= 6 or n_files >= 5 or explored):
+            cls, budget, retries = "L", 18.0, 3
+        elif stage == "requirements" and n_req >= 6:
+            cls, budget, retries = "L", 18.0, 3
+        elif stage == "requirements" and n_req <= 3:
+            cls, budget, retries = "S", 5.0, 1
+        elif stage == "plan" and n_req <= 3 and n_files <= 2 and not explored:
+            cls, budget, retries = "S", 5.0, 1
+        else:
+            cls, budget, retries = "M", 10.0, 2
+
+        prev = getattr(self, "_envelope", None)
+        # Yalnizca yukselt: sinif sirasi S < M < L
+        _rank = {"S": 0, "M": 1, "L": 2}
+        if prev and _rank[prev["class"]] >= _rank[cls]:
+            return
+        self._envelope = {"class": cls, "budget": budget, "retries": retries}
+        _log(f"  📐 Zarf [{stage}]: {cls} — bütçe ${budget:.0f}, review retry {retries} "
+             f"({n_req} gereksinim, {n_files} dosya, keşif={'var' if explored else 'yok'})"
+             + (f" (önceki: {prev['class']})" if prev else ""))
+
+    def _envelope_budget(self, default: float) -> float:
+        """Aktif zarfin butcesi; zarf yoksa yapilandirilmis deger."""
+        env = getattr(self, "_envelope", None)
+        return float(env["budget"]) if env else float(default)
+
+    def _envelope_retries(self, default: int) -> int:
+        env = getattr(self, "_envelope", None)
+        return int(env["retries"]) if env else int(default)
+
     def _verify_issue_loc(self, loc: dict) -> bool:
         """Review itirazinin gosterdigi {file, line, quote} gercekten var mi?
 
@@ -2155,7 +2212,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         if still_rejected:
             review_attempt = getattr(self, "_review_attempt", 0)
-            max_review_retries = _pc_rr.get("CREW_REVIEW_MAX_RETRIES")
+            max_review_retries = self._envelope_retries(_pc_rr.get("CREW_REVIEW_MAX_RETRIES"))
             if review_attempt < max_review_retries:
                 self._review_attempt = review_attempt + 1
                 _log(f"  🔄 Hala acik blocking madde var — tekrar (deneme {self._review_attempt}/{max_review_retries})")
@@ -2509,6 +2566,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._tracker, hal=hal, repo_mgr=self._repo_mgr,
         )
         self.state.plan = plan
+        self._apply_envelope("plan")
         self._step_done("technical_design_task", f"Repo: {repo_name}, {len(plan.get('changes', []))} dosya")
 
         # Planlama yorumu
@@ -2859,6 +2917,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         else:
             _log("  Kabul kriteri bulunamadi (WI'de tanimsiz)")
 
+        self._apply_envelope("requirements")
         self._step_done("requirements_analysis_task", requirements_text[:3000])
         _log(f"  Is analizi tamamlandi")
 
@@ -3739,6 +3798,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 # Faz A: pre-fetch yetmedi → bir kez repo-tool'lu keşif, sonra emit
                 _cli.set_repo_ctx(_repo_dirs, "Read,Grep,Glob,LS")
                 _log(f"  Faz A keşif AÇIK: --add-dir {len(_repo_dirs)} repo (B ilk geçişte yetersiz)")
+                self._needed_explore = True
                 findings = self._architect_explore(ctx, prefetch_repo, ctx_hint)
                 _cli.clear_repo_ctx()
                 plan, raw_output, _ = self._architect_emit_json(
@@ -3879,6 +3939,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # technical_design_task ciktisi JSON — cache'den parse edilebilmesi icin
         # tam veya en azindan buyuk pencereli sakla (onceden [:3000] ile kesilip
         # sonraki run'da JSON bozuk geliyordu)
+        self._apply_envelope("plan")
         self._step_done("technical_design_task", _json.dumps(plan, ensure_ascii=False)[:50_000])
         _log(f"  Teknik tasarim tamamlandi")
 
@@ -4764,7 +4825,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                      "reviewer RED'i geçersiz, APPROVE sayılıyor")
             rejected = bool(_open_blocking)
         from agile_sdlc_crew import pipeline_config as _pc_rev
-        max_review_retries = _pc_rev.get("CREW_REVIEW_MAX_RETRIES")
+        max_review_retries = self._envelope_retries(_pc_rev.get("CREW_REVIEW_MAX_RETRIES"))
         review_attempt = getattr(self, "_review_attempt", 0)
         if rejected:
             if review_attempt >= max_review_retries:
