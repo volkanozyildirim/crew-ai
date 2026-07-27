@@ -252,11 +252,18 @@ def _parse_review_issues(review_text: str) -> list[dict]:
 
 
 def _php_signatures(source: str) -> dict:
-    """PHP kaynagindaki metot adi → (zorunlu, toplam) parametre sayisi.
+    """PHP kaynagindaki metot adi → {(zorunlu, toplam)} imza KUMESI.
 
     Tam parser degil; `function ad(...)` imzasini yakalayip virgul sayar.
     Varsayilan degerli parametreler (`$x = 1`) ve variadic (`...$rest`) ayirt
-    edilir — variadic imza sinirsiz argüman kabul eder, kontrolden muaf tutulur."""
+    edilir — variadic (-1) sinirsiz argüman kabul eder.
+
+    Deger KUME cunku metot adlari repo genelinde TEKIL DEGIL: `get`, `update`,
+    `bulkInsert` onlarca sinifta farkli imzalarla tanimli. Ad → tek imza
+    esleme yapmak, query-builder `->get()` cagrisini config `->get($key)`
+    imzasiyla karsilastirip kitlesel yanlis alarm uretir (job #180: 20+ yanlis
+    alarm, asil implementasyon dosyasi bloklandi). Cagri kontrolu yalnizca
+    TEK BIR imzasi olan adlar icin yapilir."""
     import re as _re_ps
     out: dict = {}
     for m in _re_ps.finditer(
@@ -264,14 +271,13 @@ def _php_signatures(source: str) -> dict:
     ):
         name, params = m.group(1), m.group(2).strip()
         if "..." in params:
-            out[name] = (0, -1)  # variadic → sinirsiz
-            continue
-        if not params:
-            out[name] = (0, 0)
-            continue
-        parts = [p.strip() for p in params.split(",") if p.strip()]
-        required = sum(1 for p in parts if "=" not in p)
-        out[name] = (required, len(parts))
+            sig = (0, -1)  # variadic → sinirsiz
+        elif not params:
+            sig = (0, 0)
+        else:
+            parts = [p.strip() for p in params.split(",") if p.strip()]
+            sig = (sum(1 for p in parts if "=" not in p), len(parts))
+        out.setdefault(name, set()).add(sig)
     return out
 
 
@@ -1790,7 +1796,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         return _norm(quote) in _norm(content)
 
-    def _check_cross_file_contract(self, file_path: str, new_content: str) -> list:
+    def _check_cross_file_contract(
+        self, file_path: str, new_content: str, old_content: str = "",
+    ) -> list:
         """Push edilecek icerigin repo ile SOZLESME uyumunu dogrular (LLM yok).
 
         `_validate_code` `php -l`'i GECICI dosyada IZOLE calistirir — bu yuzden
@@ -1820,28 +1828,51 @@ class AgileSDLCFlow(Flow[PipelineState]):
             return []
 
         problems: list = []
-        # Repo genelindeki imzalari topla (klon uzerinde, tek gecis)
+        # Repo genelindeki imzalari topla (klon uzerinde, tek gecis).
+        # Ad → imza KUMESI; birden fazla farkli imzasi olan ad AMBIGUOUS'tur.
         sigs: dict = {}
         try:
             for p in root.rglob("*.php"):
                 if "/vendor/" in p.as_posix() or "/node_modules/" in p.as_posix():
                     continue
                 try:
-                    sigs.update(_php_signatures(p.read_text(errors="ignore")))
+                    for _n, _s in _php_signatures(p.read_text(errors="ignore")).items():
+                        sigs.setdefault(_n, set()).update(_s)
                 except Exception:
                     continue
         except Exception:
             return []
-        # Push edilecek icerigin kendi imzalari da gecerli
-        sigs.update(_php_signatures(new_content))
+        for _n, _s in _php_signatures(new_content).items():
+            sigs.setdefault(_n, set()).update(_s)
         if not sigs:
             return []
 
+        # YALNIZCA EKLENEN SATIRLAR kontrol edilir. Tum dosyayi taramak, mevcut
+        # (dokunulmamis) kodu developer'in hatasi gibi raporlar — job #180'de
+        # boyle oldu ve asil implementasyon dosyasi bloklandi.
+        checked_lines: set | None = None
+        if old_content:
+            import difflib as _dl_cf
+            checked_lines = set()
+            _ln = 0
+            for tag, _i1, _i2, j1, j2 in _dl_cf.SequenceMatcher(
+                None, old_content.splitlines(), new_content.splitlines(),
+            ).get_opcodes():
+                if tag in ("replace", "insert"):
+                    checked_lines |= set(range(j1 + 1, j2 + 1))
+            _ln = len(checked_lines)
+            if not checked_lines:
+                return []
+
         # ── 1. Arity ──
         for name, argc, line in _php_call_arity(new_content):
+            if checked_lines is not None and line not in checked_lines:
+                continue  # dokunulmamis satir — developer'in sorumlulugunda degil
             if name not in sigs:
                 continue  # repoda tanimli degil (framework/dinamik) → atla
-            req, total = sigs[name]
+            if len(sigs[name]) != 1:
+                continue  # ayni ad birden fazla imzayla tanimli → cozumlenemez
+            req, total = next(iter(sigs[name]))
             if total == -1:
                 continue  # variadic
             if argc > total:
@@ -2102,7 +2133,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 continue
             # Dosyalar-arasi sozlesme (arity) — retry'da da bloklar
             if _pc_rr.get("CREW_CONTRACT_GATE"):
-                _cp_rr = self._check_cross_file_contract(file_path, new_content)
+                _cp_rr = self._check_cross_file_contract(
+                    file_path, new_content, existing_content or "")
                 for _c in _cp_rr:
                     _log(f"    🚨 SÖZLEŞME (retry): {_c}")
                 if _cp_rr:
@@ -4410,7 +4442,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
             # 4. Dosyalar-arasi sozlesme (LLM yok) — php -l izole calistigi icin
             # goremedigi sinif: arity uyusmazligi. Env: CREW_CONTRACT_GATE.
             if _pc_cg.get("CREW_CONTRACT_GATE"):
-                _cprobs = self._check_cross_file_contract(file_path, final_content)
+                _cprobs = self._check_cross_file_contract(
+                    file_path, final_content, full_content or "")
                 for _cp in _cprobs:
                     _log(f"    🚨 SÖZLEŞME: {_cp}")
                 if _cprobs:
