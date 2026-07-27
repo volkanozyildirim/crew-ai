@@ -287,6 +287,13 @@ SCHEMA: list[dict] = [
         "desc": "Teknik tasarım sonrası, her FR/AC'nin plandaki bir değişikliğe karşılık geldiğini ucuz (haiku) denetçiyle doğrula; boşluk varsa architect'i geri bildirimle bir kez yeniden çalıştırıp planı genişlet. Eksik-kapsam planların implement'e ulaşmasını engeller.",
     },
     {
+        "key": "CREW_ISSUE_GATE",
+        "label": "İtiraz Kapısı (Katman 0)",
+        "type": "bool",
+        "default": False,
+        "desc": "Reviewer itirazlarını LLM'siz deterministik kurala göre bloklayıcı/düşürülen olarak ayır. Bir itiraz ancak blocker/major VE (geçerli requirement_ids VEYA doğrulanmış repo emsali) ise bloklar; kanıtı (evidence file/line/quote) doğrulanamayan itiraz düşer. Düşürülenler kaybolmaz — PR yorumu olur ama job'ı öldürmez. Reviewer'ın verdiği veri olarak ele alınır, hüküm olarak değil: job #179'un iki yanlış blokörü (uydurma convention, ürün kararı) bu filtreden geçemezdi.",
+    },
+    {
         "key": "CREW_PLAN_PATH_GATE",
         "label": "Plan Yol/Entegrasyon Gate",
         "type": "bool",

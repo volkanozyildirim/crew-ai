@@ -781,11 +781,42 @@ review_pr_task:
         posted as a PR/WI comment, not a rejection reason. Do NOT reject over minors.
     REVIEW_ISSUES_JSON:
     ```json
-    {"issues": [{"file": "path/to/file.ext", "line": 42, "severity": "blocker", "problem": "...", "required_fix": "..."}]}
+    {"issues": [{
+      "file": "path/to/file.ext",
+      "line": 42,
+      "severity": "blocker",
+      "problem": "...",
+      "required_fix": "...",
+      "requirement_ids": ["AC1", "FR2"],
+      "evidence": {"file": "path/to/file.ext", "line": 42, "quote": "exact source line you are objecting to"},
+      "precedent": {"file": "path/to/other.ext", "line": 218, "quote": "exact line proving the convention exists"},
+      "fix_targets": ["path/to/file/that/must/change.ext"]
+    }]}
     ```
     (If APPROVE with no blocker/major issues: {"issues": []}. Do NOT include an "id"
     field — the pipeline assigns ids. Verdict is CHANGES_REQUIRED only if at least
     one blocker/major issue exists.)
+
+    FIELD RULES — the pipeline verifies these mechanically. An issue that fails
+    verification does NOT block the PR; it is posted as a non-blocking comment.
+    So fill them accurately or your objection will be ignored:
+
+    - "requirement_ids": the FR/TR/AC ids from the requirements this issue
+      violates. Use ONLY ids that actually exist in the requirements. An issue
+      with no requirement id is treated as a preference, not a defect. Do NOT
+      invent ids to make an issue block.
+    - "evidence": REQUIRED. The exact file/line/quote showing the problem. The
+      pipeline reads the file and checks the quote is really there. Copy the
+      source text verbatim — do not paraphrase.
+    - "precedent": REQUIRED ONLY IF you claim the code violates a project
+      convention ("should use X", "the standard here is Y"). Point at an
+      existing place in the repo that demonstrates that convention. The
+      pipeline verifies it. If you cannot find such a place, the convention
+      does not exist — drop the objection.
+    - "fix_targets": which file(s) must actually change to close this issue.
+      This is often NOT the file where you observed the problem. Example: if a
+      new class is never called, the fix belongs in the existing caller, so
+      list the caller here.
 
     The VERY LAST line of your answer MUST be a machine-readable decision token,
     exactly one of these two, with nothing else on the line:
