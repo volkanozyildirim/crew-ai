@@ -1516,8 +1516,46 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
     def _check_plan_completeness(self, plan: dict) -> list:
         """Plan tüm FR/AC'leri kapsıyor mu? Kapsanmayan madde id listesini döndür.
-        Ucuz (haiku) tek çağrılık denetçi."""
+
+        1. yol — DETERMINISTIK: plan degisiklikleri `covers_requirements` tasiyorsa
+           (tasks.yaml semasinda ZATEN var ve gercek planlarda dolu geliyor)
+           kontrol bir KUME FARKI islemine iner: LLM yok, ~$0.
+        2. yol — haiku denetci: plan id vermediyse duzyazidan TAHMIN eden ucuz
+           denetciye duser. Bu yol job #179'da $0.22 harcadi ve $1.27'lik bir
+           amend tetikledi.
+
+        DURUST SINIR: deterministik yol, modelin KENDI beyanina guvenir —
+        bagimsiz bir denetim degil. Karsiligi: (a) beyan yapisal ve denetlenebilir
+        (uydurma id'ler loglanir), (b) gercek bosluk review'da yakalanir, cunku
+        itirazlar da requirement_ids tasiyor ve bir AC'ye baglanan itiraz BLOKLAR.
+        Bagimsiz denetim daha guclu olurdu ama #179'da o da yanildi: her sey
+        kapsandigi beyan edilmisken AC5/AC6/FR3 dedi, $1.27 amend tetikledi ve
+        sonunda hala TR3 eksik raporladi."""
         from agile_sdlc_crew.tools.claude_cli_llm import claude_cli_completion
+
+        # ── 1. Deterministik yol ──
+        _all_ids = _requirement_ids(self.state.requirements_text or "")
+        _covered: set = set()
+        _any_declared = False
+        for c in (plan.get("changes") or []):
+            rids = c.get("covers_requirements") or c.get("requirement_ids") or []
+            if isinstance(rids, str):
+                rids = [rids]
+            if rids:
+                _any_declared = True
+                _covered |= {str(r).strip().upper() for r in rids if str(r).strip()}
+        if _all_ids and _any_declared:
+            _uncovered = sorted(_all_ids - _covered)
+            # Planin uydurdugu, gereksinimlerde olmayan id'ler de sinyaldir.
+            _bogus = sorted(_covered - _all_ids)
+            if _bogus:
+                _log(f"  Plan completeness: planda var olmayan gereksinim id'leri: {_bogus}")
+            _log(f"  Plan completeness (deterministik, LLM yok): "
+                 f"{len(_covered & _all_ids)}/{len(_all_ids)} kapsandı"
+                 + (f", eksik: {_uncovered}" if _uncovered else ""))
+            return _uncovered
+
+        # ── 2. Haiku denetci (geriye uyum) ──
         reqs = (self.state.requirements_text or "")[:4000]
         if not reqs:
             return []
