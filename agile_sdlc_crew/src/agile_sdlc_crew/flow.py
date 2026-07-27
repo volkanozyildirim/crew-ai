@@ -555,6 +555,18 @@ class _KickoffOnlyStop(Exception):
     pass
 
 
+class NeedsHumanReview(Exception):
+    """Pipeline kullanilabilir is uretti ama kendi kalite kapisini gecemedi.
+
+    'failed' DEGILDIR: PR acik kalir, teshis PR ve WI yorumuna yazilir, job
+    durumu 'needs_human' olur. Worker bunu generic Exception'dan ONCE yakalar ve
+    fail_job/complete_job cagirmaz — durum zaten yazilmistir.
+
+    Akisi kesmek icin exception kullanilir: `return` etmek CrewAI Flow'un sonraki
+    adimlarina (test planlama, UAT, rapor) devam etmesine ve en sonunda
+    complete_job'in 'needs_human'i EZMESINE yol acardi."""
+
+
 class PipelineState(BaseModel):
     """Flow boyunca tasınan state. Her adim state'i gunceller."""
     work_item_id: str = ""
@@ -2149,15 +2161,52 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"  🔄 Hala acik blocking madde var — tekrar (deneme {self._review_attempt}/{max_review_retries})")
                 self._review_retry_loop()
                 return
-            _log(f"  🚨 {max_review_retries} deneme sonrasi hala acik madde var — pipeline durduruluyor")
-            _add_wi_comment(self._client, self.state.work_item_id,
-                f"## ❌ Kod İnceleme — {max_review_retries} Düzeltme Sonrası Hâlâ Başarısız\n\n"
-                f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
-                f"**Kapanmayan Maddeler:**\n{remaining_summary}\n\n"
-                f"---\n*Agile SDLC Crew - Review Retry Exhausted*"
+            # ── ESKALASYON: 'failed' DEGIL, 'needs_human' ──────────────────
+            # Pipeline kullanilabilir is uretti ama kendi kapisini gecemedi.
+            # PR ACIK KALIR; ne denendigi ve neden kapanmadigi PR + WI'ya yazilir.
+            # Job #178+#179'da $16.21 harcandi ve geriye TESHISSIZ iki yetim PR
+            # kaldi — tek sebep "reviewer razi olmadi = job oldu" denklemiydi.
+            _log(f"  🙋 {max_review_retries} deneme sonrasi hala acik madde — "
+                 f"insan mudahalesine devredildi (PR acik kaliyor)")
+            _tried = _format_issues_md([
+                i for i in self.state.review_issues if i.get("status") == "closed"
+            ])
+            _diag = (
+                f"## 🙋 İnsan İncelemesi Gerekli — {max_review_retries} Otomatik Düzeltme Yetmedi\n\n"
+                f"PR: [#{self.state.pr_id}]({self.state.pr_url}) — **açık bırakıldı**, "
+                f"kod incelemeye hazır.\n\n"
+                f"### Kapanmayan maddeler\n{remaining_summary}\n\n"
+                f"### Bu turda kapatılan/düşürülen maddeler\n{_tried}\n\n"
+                f"### Neden otomatik kapatılamadı\n"
+                f"Pipeline {max_review_retries} düzeltme turu denedi; kalan maddeler "
+                f"ya aynı hâlde tekrarladı (ilerleme yok) ya da düzeltme kapsamı "
+                f"dışında. Kararı size bırakıyor.\n\n"
+                f"---\n*Agile SDLC Crew — insan müdahalesi (job `needs_human`)*"
             )
-            self._step_fail("review_pr_task", f"Reviewer: {max_review_retries} deneme sonrasi hala acik madde")
-            raise RuntimeError(f"Reviewer {max_review_retries} deneme sonrasi reddediyor")
+            _add_wi_comment(self._client, self.state.work_item_id, _diag)
+            try:
+                self._client.add_pr_comment(
+                    self.state.repo_name, int(self.state.pr_id), _diag)
+            except Exception as _e_pc:
+                _log(f"  PR teshis yorumu hatasi (kritik degil): {_e_pc}")
+            self._step_done(
+                "review_pr_task",
+                f"İnsan müdahalesi gerekli — {max_review_retries} deneme sonrası "
+                f"kapanmayan madde:\n{remaining_summary}"[:3000],
+            )
+            if self._db and self.state.job_id:
+                try:
+                    self._db.needs_human_job(
+                        self.state.job_id,
+                        f"Review: {max_review_retries} deneme sonrasi kapanmayan madde "
+                        f"— PR acik, insan incelemesi bekliyor",
+                    )
+                except Exception as _e_nh:
+                    _log(f"  needs_human durumu yazilamadi: {_e_nh}")
+            raise NeedsHumanReview(
+                f"{max_review_retries} deneme sonrasi kapanmayan review maddesi "
+                f"— PR #{self.state.pr_id} acik, insan incelemesi bekliyor"
+            )
 
         # Onay
         self._step_done("review_pr_task", (self.state.review_text or remaining_summary)[:3000])

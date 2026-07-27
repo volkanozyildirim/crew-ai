@@ -359,9 +359,9 @@ async def retry_job(job_id: int):
     job = db.get_job(job_id)
     if not job:
         return JSONResponse({"error": "Job bulunamadi"}, status_code=404)
-    if job["status"] not in ("failed", "completed"):
+    if job["status"] not in ("failed", "completed", "needs_human"):
         return JSONResponse(
-            {"error": f"Sadece failed/completed isler retry edilebilir (durum: {job['status']})"},
+            {"error": f"Sadece failed/completed/needs_human isler retry edilebilir (durum: {job['status']})"},
             status_code=409,
         )
     new_job_id = db.create_job(
@@ -523,7 +523,7 @@ async def kickoff_run_ws(websocket: WebSocket, job_id: int):
 
     Mesaj formatlari (sunucudan istemciye):
       {"type":"log","lines":[...],"initial":true|false}
-      {"type":"status","status":"running|completed|failed|queued"}
+      {"type":"status","status":"running|completed|failed|needs_human|queued"}
       {"type":"done","detail":{job,debug}}   # tamamlandiginda 1 kez
       {"type":"error","message":"..."}
     """
@@ -554,7 +554,7 @@ async def kickoff_run_ws(websocket: WebSocket, job_id: int):
         await websocket.send_json({"type": "status", "status": last_status})
 
         # Job zaten bitmis ise hemen detail gonder ve kapat
-        if last_status in ("completed", "failed"):
+        if last_status in ("completed", "failed", "needs_human"):
             detail = _build_kickoff_detail(job_id)
             detail.pop("_status", None)
             await websocket.send_json({"type": "done", "detail": detail})
@@ -595,7 +595,7 @@ async def kickoff_run_ws(websocket: WebSocket, job_id: int):
             if job["status"] != last_status:
                 last_status = job["status"]
                 await websocket.send_json({"type": "status", "status": last_status})
-                if last_status in ("completed", "failed"):
+                if last_status in ("completed", "failed", "needs_human"):
                     # Son log gecisi (race: status set olduktan sonra son satirlar gelmis olabilir)
                     try:
                         if log_path.exists():
@@ -1741,8 +1741,19 @@ def _queue_worker():
             db.complete_job(job_id)
 
         except Exception as e:
-            db.fail_job(job_id, str(e))
-            pipeline_log.error(f"Job #{job_id} (WI #{work_item_id}) basarisiz: {e}")
+            # NeedsHumanReview 'basarisiz' DEGIL: pipeline kullanilabilir is
+            # uretti, kendi kalite kapisini gecemedi. Durum flow icinde
+            # 'needs_human' olarak yazildi ve PR acik birakildi — fail_job ile
+            # EZMEYELIM, aksi halde is sayimlarda basarisiz gorunur ve acik PR'in
+            # neden orada oldugu kaybolur.
+            from agile_sdlc_crew.flow import NeedsHumanReview
+            if isinstance(e, NeedsHumanReview):
+                pipeline_log.info(
+                    f"Job #{job_id} (WI #{work_item_id}) insan mudahalesine devredildi: {e}"
+                )
+            else:
+                db.fail_job(job_id, str(e))
+                pipeline_log.error(f"Job #{job_id} (WI #{work_item_id}) basarisiz: {e}")
 
 
 # ── Startup ──
