@@ -251,6 +251,67 @@ def _parse_review_issues(review_text: str) -> list[dict]:
     return out
 
 
+def _php_signatures(source: str) -> dict:
+    """PHP kaynagindaki metot adi → (zorunlu, toplam) parametre sayisi.
+
+    Tam parser degil; `function ad(...)` imzasini yakalayip virgul sayar.
+    Varsayilan degerli parametreler (`$x = 1`) ve variadic (`...$rest`) ayirt
+    edilir — variadic imza sinirsiz argüman kabul eder, kontrolden muaf tutulur."""
+    import re as _re_ps
+    out: dict = {}
+    for m in _re_ps.finditer(
+        r"function\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", source or ""
+    ):
+        name, params = m.group(1), m.group(2).strip()
+        if "..." in params:
+            out[name] = (0, -1)  # variadic → sinirsiz
+            continue
+        if not params:
+            out[name] = (0, 0)
+            continue
+        parts = [p.strip() for p in params.split(",") if p.strip()]
+        required = sum(1 for p in parts if "=" not in p)
+        out[name] = (required, len(parts))
+    return out
+
+
+def _php_call_arity(source: str) -> list:
+    """PHP kaynagindaki `->metot(...)` / `::metot(...)` cagrilarini bulur.
+
+    Doner: [(metot_adi, argüman_sayisi, satir_no)]. Ic ice parantez ve string
+    icindeki virguller sayilmaz — argüman ayirici virgüller yalnizca en ust
+    seviyede sayilir."""
+    import re as _re_ca
+    out = []
+    for m in _re_ca.finditer(r"(?:->|::)\s*([A-Za-z_]\w*)\s*\(", source or ""):
+        name = m.group(1)
+        i = m.end()  # acilis parantezinden sonra
+        depth, args, seen, quote = 1, 1, False, ""
+        while i < len(source) and depth > 0:
+            ch = source[i]
+            if quote:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = ""
+            elif ch in "\"'":
+                quote = ch
+            elif ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch == "," and depth == 1:
+                args += 1
+            elif not ch.isspace():
+                seen = True
+            i += 1
+        out.append((name, 0 if not seen else args, source.count("\n", 0, m.start()) + 1))
+    return out
+
+
 def _requirement_ids(requirements_text: str) -> set[str]:
     """Gereksinim metnindeki gecerli FR/TR/AC id kumesini cikarir.
 
@@ -1622,6 +1683,74 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         return _norm(quote) in _norm(content)
 
+    def _check_cross_file_contract(self, file_path: str, new_content: str) -> list:
+        """Push edilecek icerigin repo ile SOZLESME uyumunu dogrular (LLM yok).
+
+        `_validate_code` `php -l`'i GECICI dosyada IZOLE calistirir — bu yuzden
+        dosyalar-arasi ihlali yapisal olarak goremez. Job #179'da developer
+        `Allocator.php`'de `luggageSuffix($sku,$i,$ctx,$stockSourceId)` yazdi ama
+        `luggageSuffix` 3 parametreli kaldi; PHP fazla argümani sessizce yutuyor,
+        `php -l` PASS verdi, reviewer da kacirdi → duzenleme tamamen NO-OP oldu.
+
+        Iki hedefli kontrol:
+          1. ARITY — eklenen cagrinin argüman sayisi, repoda tanimli imzayla
+             uyusuyor mu (fazla/eksik)
+          2. ERISILEBILIRLIK — yeni eklenen public metot en az bir yerden
+             cagriliyor mu
+
+        Doner: problem aciklamalari (bos = temiz). Yalnizca PHP; diger dillerde
+        sessizce atlanir."""
+        if not file_path.lower().endswith(".php") or not new_content:
+            return []
+        repo = self.state.repo_name
+        if not repo:
+            return []
+        try:
+            root = self._repo_mgr.repo_path(repo)
+        except Exception:
+            return []
+        if not root.exists():
+            return []
+
+        problems: list = []
+        # Repo genelindeki imzalari topla (klon uzerinde, tek gecis)
+        sigs: dict = {}
+        try:
+            for p in root.rglob("*.php"):
+                if "/vendor/" in p.as_posix() or "/node_modules/" in p.as_posix():
+                    continue
+                try:
+                    sigs.update(_php_signatures(p.read_text(errors="ignore")))
+                except Exception:
+                    continue
+        except Exception:
+            return []
+        # Push edilecek icerigin kendi imzalari da gecerli
+        sigs.update(_php_signatures(new_content))
+        if not sigs:
+            return []
+
+        # ── 1. Arity ──
+        for name, argc, line in _php_call_arity(new_content):
+            if name not in sigs:
+                continue  # repoda tanimli degil (framework/dinamik) → atla
+            req, total = sigs[name]
+            if total == -1:
+                continue  # variadic
+            if argc > total:
+                problems.append(
+                    f"ARITY: satır {line}, '{name}(...)' {argc} argümanla "
+                    f"çağrılıyor ama imza en fazla {total} parametre alıyor "
+                    f"— PHP fazlasını sessizce yutar, çağrı beklendiği gibi "
+                    f"çalışmaz (job #179'daki ölü argüman bu sınıf)."
+                )
+            elif argc < req:
+                problems.append(
+                    f"ARITY: satır {line}, '{name}(...)' {argc} argümanla "
+                    f"çağrılıyor ama {req} zorunlu parametre var."
+                )
+        return problems
+
     def _plan_fix_feedback(self, problems: list) -> str:
         """_validate_plan_paths problemlerini architect'e verilecek geri bildirime
         cevirir (step4 gate + review retry re-plan ayni metni kullanir)."""
@@ -1864,6 +1993,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"({orig_lines} → {new_lines} satir). Push IPTAL."
                 )
                 continue
+            # Dosyalar-arasi sozlesme (arity) — retry'da da bloklar
+            if _pc_rr.get("CREW_CONTRACT_GATE"):
+                _cp_rr = self._check_cross_file_contract(file_path, new_content)
+                for _c in _cp_rr:
+                    _log(f"    🚨 SÖZLEŞME (retry): {_c}")
+                if _cp_rr:
+                    _log("    Sözleşme ihlali — push iptal")
+                    continue
 
             push_result = push_file(
                 repo_name, branch, file_path, new_content,
@@ -3835,6 +3972,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
         repo_name = self.state.repo_name
         branch_name = self.state.branch_name
         all_pushes = []
+        from agile_sdlc_crew import pipeline_config as _pc_cg
+        # Sozlesme kapisinda takilan dosyalar — adim sonunda WI'ya raporlanir.
+        _contract_failures: list = []
 
         # Ayni dosyayi hedefleyen degisiklikleri birlestir — yoksa ikinci push
         # birincinin duzeltmesini ezer (WI #66687 Kargoist.php v2+legacy dali).
@@ -4119,6 +4259,17 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    GUVENLIK: cok kisa icerik ({new_lines} satir, {new_len} char), push iptal")
                 continue
 
+            # 4. Dosyalar-arasi sozlesme (LLM yok) — php -l izole calistigi icin
+            # goremedigi sinif: arity uyusmazligi. Env: CREW_CONTRACT_GATE.
+            if _pc_cg.get("CREW_CONTRACT_GATE"):
+                _cprobs = self._check_cross_file_contract(file_path, final_content)
+                for _cp in _cprobs:
+                    _log(f"    🚨 SÖZLEŞME: {_cp}")
+                if _cprobs:
+                    _log("    Sözleşme ihlali — push iptal, developer'a geri veriliyor")
+                    _contract_failures.append((file_path, _cprobs))
+                    continue
+
             commit_msg = f"#{self.state.work_item_id}: {description[:80]}"
             push_result = push_file(
                 repo_name, branch_name, file_path, final_content, commit_msg,
@@ -4138,8 +4289,29 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    Push hatasi: {push_result['error']}")
 
         _cli_impl.clear_repo_ctx()  # implement repo-tool baglamini kapat
+        # Sozlesme kapisi bir seyi engellediyse SESSIZ GECMEYELIM: PR eksik
+        # kalacak, sebebi WI'da yazili olsun. (Job #179'da ihlal sessizce push
+        # edildi ve reviewer da kacirdi — bir daha olmasin.)
+        if _contract_failures:
+            from agile_sdlc_crew.main import _add_wi_comment as _awc_cg
+            _det = "\n\n".join(
+                f"**`{f}`**\n" + "\n".join(f"- {p}" for p in probs)
+                for f, probs in _contract_failures
+            )
+            _log(f"  🚨 Sözleşme kapısı {len(_contract_failures)} dosyayı engelledi")
+            try:
+                _awc_cg(self._client, self.state.work_item_id,
+                    f"## 🚨 Sözleşme Kapısı — {len(_contract_failures)} Dosya Push Edilmedi\n\n"
+                    f"Aşağıdaki dosyalar repo ile sözleşme uyumsuzluğu nedeniyle "
+                    f"push edilmedi (bu sınıfı `php -l` göremez, izole çalışır):\n\n"
+                    f"{_det}\n\n*Agile SDLC Crew — Katman 0 sözleşme kapısı*")
+            except Exception as _e_cg:
+                _log(f"  Sözleşme yorumu hatasi (kritik degil): {_e_cg}")
+
         self.state.all_pushes = all_pushes
-        self._step_done("implement_change_task", f"{len(all_pushes)} dosya push edildi")
+        self._step_done("implement_change_task", f"{len(all_pushes)} dosya push edildi"
+                        + (f", {len(_contract_failures)} sözleşme ihlali engellendi"
+                           if _contract_failures else ""))
 
     @listen(step6_implement_code)
     def step7_create_pr(self):

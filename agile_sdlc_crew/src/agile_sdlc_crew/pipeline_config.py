@@ -287,6 +287,13 @@ SCHEMA: list[dict] = [
         "desc": "Teknik tasarım sonrası, her FR/AC'nin plandaki bir değişikliğe karşılık geldiğini ucuz (haiku) denetçiyle doğrula; boşluk varsa architect'i geri bildirimle bir kez yeniden çalıştırıp planı genişlet. Eksik-kapsam planların implement'e ulaşmasını engeller.",
     },
     {
+        "key": "CREW_CONTRACT_GATE",
+        "label": "Dosyalar-Arası Sözleşme Kapısı",
+        "type": "bool",
+        "default": False,
+        "desc": "Push öncesi arity kontrolü (LLM yok): eklenen metot çağrısının argüman sayısı repodaki imzayla uyuşuyor mu. php -l bu sınıfı GÖREMEZ çünkü geçici dosyada izole çalışır — job #179'da Allocator.php luggageSuffix'e 4. argüman geçti, imza 3 parametreliydi, PHP fazlasını sessizce yuttu, linter PASS verdi, reviewer da kaçırdı ve düzenleme tamamen no-op oldu. İhlalde push iptal edilir ve WI'ya yazılır. Sadece PHP; diğer dillerde atlanır.",
+    },
+    {
         "key": "CREW_ISSUE_GATE",
         "label": "İtiraz Kapısı (Katman 0)",
         "type": "bool",
