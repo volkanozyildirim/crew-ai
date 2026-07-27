@@ -1696,24 +1696,29 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 for c in (self.state.plan.get("changes") or []) if c.get("file_path")
             }
 
-            # Maddenin 'file' alani plan icinde olsa BILE, required_fix baska bir
-            # dosyaya dokunmayi gerektiriyorsa madde kod-seviyesi DEGIL plan-
-            # seviyesidir: developer'a target_file=issue['file'] verirsek o baska
-            # dosyaya dokunamaz → madde ASLA kapanmaz (job #178 R1: cagri noktasi
-            # mevcut bir dosyaya eklenmeliydi, madde ise yeni resolver'a
-            # anchor'lanmisti → 1 retry sonrasi hala acik → pipeline durdu).
-            def _needs_other_file(issue: dict) -> bool:
-                txt = f"{issue.get('problem', '')} {issue.get('required_fix', '')}"
-                return bool(
-                    _paths_in_text(txt) - plan_files - {_norm_path(issue.get("file"))}
-                )
-
-            # Ayrica: plan YAPISAL olarak bozuksa (uydurma yol / hic entegrasyon
-            # yok) hicbir madde tek-dosya duzenlemesiyle kapanamaz — planin
-            # kendisi duzelmeli. Bu durumda TUM bloklayan maddeler architect'e gider.
-            # Flag kapaliysa TUM yeni yonlendirme devre disi → eski davranis
-            # (madde yalnizca 'file' alanina gore siniflanir).
             _routing = bool(_pc_rr.get("CREW_REVIEW_RETRY_REPLAN"))
+
+            # Maddeyi kapatmak icin hangi dosyalar degismeli?
+            # 1. tercih: 'fix_targets' SEMA alani (reviewer acikca bildirir).
+            # Yoksa geriye-uyum: madde dosyasi + required_fix metninden cikarim.
+            # Cikarim bir YAMA'ydi — madde 'file' alani cogu zaman problemi
+            # GOZLEMLEDIGI yeri gosteriyor, DUZELTILECEK yeri degil (job #178 R1:
+            # cagri noktasi mevcut bir dosyaya eklenmeliydi, madde yeni resolver'a
+            # anchor'lanmisti → developer o dosyaya dokunamadi → madde asla
+            # kapanmadi). Sema alani cikarimi gereksiz kilar.
+            def _issue_targets(issue: dict) -> set:
+                ft = {f for f in (issue.get("fix_targets") or []) if f}
+                if ft:
+                    return ft
+                out = {_norm_path(issue.get("file"))}
+                if _routing:
+                    txt = f"{issue.get('problem', '')} {issue.get('required_fix', '')}"
+                    out |= _paths_in_text(txt)
+                return {f for f in out if f}
+
+            # Plan YAPISAL olarak bozuksa (uydurma yol / hic entegrasyon yok)
+            # hicbir madde tek-dosya duzenlemesiyle kapanamaz — planin kendisi
+            # duzelmeli. Bu durumda TUM bloklayan maddeler architect'e gider.
             struct_probs = []
             if _routing:
                 try:
@@ -1724,11 +1729,17 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     for _p in struct_probs:
                         _log(f"  ⚠️ Plan yapısal sorun: {_p}")
 
+            # Hedeflerinin tamami planda olan madde kod-seviyesidir; biri bile
+            # eksikse plan genisletilmeli (plan-seviyesi).
+            _targets = {i["id"]: _issue_targets(i) for i in open_issues}
             plan_level = [
                 i for i in open_issues
-                if _norm_path(i["file"]) not in plan_files
-                or (_routing and (_needs_other_file(i) or struct_probs))
+                if not (_targets[i["id"]] <= plan_files)
+                or (_routing and struct_probs)
             ]
+            if _targets:
+                _log("  Düzeltme hedefleri: " + "; ".join(
+                    f"{k}→{','.join(sorted(v)) or '?'}" for k, v in _targets.items()))
             prev_plan_files = set(plan_files)
             if plan_level:
                 # Sadece plan-gap maddelerini architect'e ver (HAM review_text degil)
@@ -1736,6 +1747,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"- [{i['severity']}] {i['file']}"
                     + (f" (satir {i['line']})" if i.get("line") else "")
                     + f": {i['problem']} -> GEREKLI: {i['required_fix']}"
+                    + (f" -> DEGISMESI GEREKEN DOSYALAR: {', '.join(sorted(_targets[i['id']]))}"
+                       if _targets.get(i["id"]) else "")
                     for i in plan_level
                 )
                 if struct_probs:
@@ -1748,16 +1761,16 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         for c in amended.get("changes", []) if c.get("file_path")
                     }
             # Amend'in EKLEDIGI dosyalar (cagri noktasi/eksik servis) henuz hic
-            # yazilmadi ve hicbir maddenin 'file' alani onlara esit degil — bu
-            # yuzden ayrica implement listesine alinmalari sart. Yoksa plan
-            # genisler ama kod yazilmaz, madde acik kalir ve dongu yakinsamaz.
+            # yazilmadi — implement listesine alinmalari sart, yoksa plan genisler
+            # ama kod yazilmaz, madde acik kalir ve dongu yakinsamaz.
             new_plan_files = (plan_files - prev_plan_files) if _routing else set()
             if new_plan_files:
                 _log(f"  Re-plan {len(new_plan_files)} yeni dosya ekledi (entegrasyon): "
                      + ", ".join(sorted(new_plan_files)[:4]))
+            # Duzeltilecek dosyalar = tum maddelerin hedefleri (planda olanlar)
+            # + amend'in ekledikleri.
             code_level_files = {
-                _norm_path(i["file"]) for i in open_issues
-                if _norm_path(i["file"]) in plan_files
+                t for tgts in _targets.values() for t in tgts if t in plan_files
             } | new_plan_files
             changes_to_fix = [
                 c for c in self.state.plan.get("changes", [])
@@ -1779,9 +1792,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
             # Reviewer maddelerini DOGRUDAN developer'a aktar (yapisal yolda)
             change_description = change.get("description", "")
             if structured:
+                # Bu dosyayi HEDEFLEYEN maddeler (fix_targets), maddenin
+                # gozlemlendigi dosya degil.
                 issues_for_file = [
                     i for i in open_issues
-                    if _norm_path(i["file"]) == _norm_path(file_path)
+                    if _norm_path(file_path) in _targets.get(i["id"], set())
                 ]
                 if issues_for_file:
                     digest = "\n".join(
@@ -3574,73 +3589,68 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception as _se:
             _log(f"  Öneri yorumu hatasi (kritik degil): {_se}")
 
-        # ── B: Plan completeness gate ──────────────────────────────────────
-        # Architect planı eksik FR/AC ile gelebilir (WI #66328: logo yarım +
-        # TPL/newOrderDetail hiç yok → review'da kalıcı RED). Implement'ten ÖNCE
-        # her FR/AC'nin bir değişikliğe karşılık geldiğini denetle; boşluk varsa
-        # architect'i geri bildirimle bir kez yeniden çalıştır. Env: CREW_PLAN_GATE.
+        # ── B: PLAN KAPILARI — bedava olan once, TEK birlesik amend ─────────
+        # Ilke: hicbir pahali kapi, kendisinden ucuz bir kapidan once kosmaz.
+        #   1. Yol/entegrasyon (LLM YOK, dosya sistemi)   — uydurma dizin, cagri
+        #      noktasi olmayan plan (job #178: $6.61 yandi, review'da durdu)
+        #   2. Completeness (haiku denetci, ~$0.22)       — kapsanmayan FR/AC
+        # Ikisi de amend tetikleyebiliyor. Onceden AYRI ve SIRALI amend
+        # yapiyorlardi: job #179'da completeness amend'i $1.27/280s + ek cagri
+        # yakti, ardindan yol gate'i ayrica kosacakti. Artik bulgular TEK turda
+        # toplanip TEK amend ile giderilir.
+        # Env: CREW_PLAN_PATH_GATE (yol), CREW_PLAN_GATE (completeness).
         try:
             from agile_sdlc_crew import pipeline_config as _pc_pg
-            if _pc_pg.get("CREW_PLAN_GATE"):
-                uncovered = self._check_plan_completeness(plan)
-                if uncovered:
-                    _log(f"  ⚠️ Plan gate: kapsanmayan FR/AC: {uncovered} — plan genişletiliyor")
-                    fb = (
-                        "Plan şu gereksinim maddelerini kapsamıyor: "
-                        + ", ".join(uncovered)
-                        + ". Bunları karşılayacak değişiklikleri (eksik dosya/servisler) plana EKLE."
-                    )
-                    amended = self._amend_plan(fb, "plan_gate_amend")
-                    if amended and amended.get("changes"):
-                        plan = amended
-                        self.state.plan = plan
-                        still = self._check_plan_completeness(plan)
-                        _log(f"  Plan gate sonrası: {len(plan.get('changes', []))} dosya"
-                             + (f", hâlâ eksik: {still}" if still else ", tüm FR/AC kapsandı"))
-        except Exception as _e_pg:
-            _log(f"  Plan gate hatası (atlanıyor): {_e_pg}")
 
-        # ── B2: Plan yol/entegrasyon gate ──────────────────────────────────
-        # Architect tool'suz EMIT fazinda var olmayan dizinler uydurabiliyor ve
-        # sadece yeni dosyadan olusan (cagri noktasi olmayan) plan uretebiliyor.
-        # Ikisi de implement'e ulasirsa reviewer KALICI RED verir ve is bosa gider
-        # (job #178: /app/Library/Order yok + 3 yeni dosya, sifir entegrasyon →
-        # $6.61 yakip review'da durdu). Burada LLM'siz (dosya sistemi) dogrula;
-        # sorun varsa architect'i somut geri bildirimle BIR kez yeniden calistir.
-        # Env: CREW_PLAN_PATH_GATE.
-        try:
-            from agile_sdlc_crew import pipeline_config as _pc_pv
-            if _pc_pv.get("CREW_PLAN_PATH_GATE"):
-                _probs = self._validate_plan_paths(plan, repo_name)
-                if _probs:
-                    for _p in _probs:
-                        _log(f"  ⚠️ Plan yol gate: {_p}")
-                    _amended_pv = self._amend_plan(
-                        self._plan_fix_feedback(_probs), "plan_path_gate_amend",
-                    )
-                    if _amended_pv and _amended_pv.get("changes"):
-                        _still = self._validate_plan_paths(
-                            _amended_pv, _amended_pv.get("repo_name") or repo_name,
-                        )
-                        if len(_still) < len(_probs):
-                            plan = _amended_pv
-                            self.state.plan = plan
-                            _log(
-                                f"  Plan yol gate sonrası: {len(plan.get('changes', []))} dosya"
-                                + (f", hâlâ {len(_still)} sorun" if _still
-                                   else ", yollar + entegrasyon doğrulandı")
-                            )
-                        else:
-                            # Amend iyilestirme saglamadi → eskisini koru (daha kotu
-                            # bir planla implement'e girmektense mevcut plan kalsin).
-                            _log(
-                                f"  Plan yol gate: re-plan iyileştirme sağlamadı "
-                                f"({len(_still)} sorun) — mevcut plan korunuyor"
-                            )
-                else:
+            _path_probs: list = []
+            if _pc_pg.get("CREW_PLAN_PATH_GATE"):
+                _path_probs = self._validate_plan_paths(plan, repo_name)
+                for _p in _path_probs:
+                    _log(f"  ⚠️ Plan yol gate: {_p}")
+                if not _path_probs:
                     _log("  Plan yol gate: yollar + entegrasyon noktası doğrulandı")
-        except Exception as _e_pv:
-            _log(f"  Plan yol gate hatası (atlanıyor): {_e_pv}")
+
+            # Completeness YALNIZCA yol/entegrasyon temizse kosar: yapisal olarak
+            # gecersiz bir plan icin denetci parasi odemek anlamsiz, ve yol
+            # amend'i zaten kapsam bosluklarinin bir kismini kapatir.
+            _uncovered: list = []
+            if _pc_pg.get("CREW_PLAN_GATE") and not _path_probs:
+                _uncovered = self._check_plan_completeness(plan)
+                if _uncovered:
+                    _log(f"  ⚠️ Plan gate: kapsanmayan FR/AC: {_uncovered}")
+
+            if _path_probs or _uncovered:
+                _fb_parts = []
+                if _path_probs:
+                    _fb_parts.append(self._plan_fix_feedback(_path_probs))
+                if _uncovered:
+                    _fb_parts.append(
+                        "Plan şu gereksinim maddelerini kapsamıyor: "
+                        + ", ".join(_uncovered)
+                        + ". Bunları karşılayacak değişiklikleri (eksik dosya/"
+                        "servisler) plana EKLE."
+                    )
+                _amended = self._amend_plan("\n\n".join(_fb_parts), "plan_gate_amend")
+                if _amended and _amended.get("changes"):
+                    # Amend'i yalnizca DAHA IYIYSE kabul et: yol sorunu artmadiysa.
+                    _still_path = self._validate_plan_paths(
+                        _amended, _amended.get("repo_name") or repo_name,
+                    ) if _pc_pg.get("CREW_PLAN_PATH_GATE") else []
+                    if len(_still_path) <= len(_path_probs):
+                        plan = _amended
+                        self.state.plan = plan
+                        _msg = f"  Plan kapıları sonrası: {len(plan.get('changes', []))} dosya"
+                        if _still_path:
+                            _msg += f", hâlâ {len(_still_path)} yol sorunu"
+                        elif _path_probs:
+                            _msg += ", yollar + entegrasyon doğrulandı"
+                        _log(_msg)
+                    else:
+                        # Daha kotu bir planla implement'e girmektense mevcudu koru.
+                        _log(f"  Plan kapıları: re-plan iyileştirme sağlamadı "
+                             f"({len(_still_path)} yol sorunu) — mevcut plan korunuyor")
+        except Exception as _e_pg:
+            _log(f"  Plan kapıları hatası (atlanıyor): {_e_pg}")
 
         # technical_design_task ciktisi JSON — cache'den parse edilebilmesi icin
         # tam veya en azindan buyuk pencereli sakla (onceden [:3000] ile kesilip
