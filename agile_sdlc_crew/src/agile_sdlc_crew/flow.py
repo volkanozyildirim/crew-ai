@@ -212,21 +212,130 @@ def _parse_review_issues(review_text: str) -> list[dict]:
     except Exception as e:
         _log(f"  REVIEW_ISSUES_JSON parse hatasi: {e}")
         return []
+    def _loc(v) -> dict:
+        """evidence/precedent alt-nesnesi: {file, line, quote}. Yollar SINIRDA
+        normalize edilir (her karsilastirma noktasinda degil)."""
+        if not isinstance(v, dict) or not v.get("file"):
+            return {}
+        return {
+            "file": _norm_path(str(v.get("file", ""))),
+            "line": v.get("line"),
+            "quote": str(v.get("quote", "") or "").strip(),
+        }
+
     out = []
     for i, it in enumerate(raw_issues):
         if not isinstance(it, dict) or not it.get("file"):
             continue
+        req_ids = it.get("requirement_ids") or []
+        if not isinstance(req_ids, list):
+            req_ids = [req_ids]
+        fix_targets = it.get("fix_targets") or []
+        if not isinstance(fix_targets, list):
+            fix_targets = [fix_targets]
         out.append({
             "id": f"R{i + 1}",  # LLM'in kendi id'si GOZ ARDI edilir
-            "file": str(it.get("file", "")).strip(),
+            "file": _norm_path(str(it.get("file", ""))),
             "line": it.get("line"),
             "severity": (str(it.get("severity") or "major")).strip().lower(),
             "problem": str(it.get("problem", "")).strip(),
             "required_fix": str(it.get("required_fix", "")).strip(),
+            # ── Kapi taksonomisi alanlari (bkz. specs/2026-07-27-...) ──
+            "requirement_ids": [str(r).strip().upper() for r in req_ids if str(r).strip()],
+            "evidence": _loc(it.get("evidence")),
+            "precedent": _loc(it.get("precedent")),
+            "fix_targets": [_norm_path(str(f)) for f in fix_targets if str(f).strip()],
             "status": "open",
             "note": "",
         })
     return out
+
+
+def _requirement_ids(requirements_text: str) -> set[str]:
+    """Gereksinim metnindeki gecerli FR/TR/AC id kumesini cikarir.
+
+    Once JSON parse denenir (BA ciktisi yapisal); tutmazsa duz regex'e duser.
+    Bu kume, review itirazlarinin 'requirement_ids' atiflarini dogrulamak icin
+    kullanilir — var olmayan bir id'ye atif yapan itiraz bloklamaz."""
+    import re as _re_rq
+    txt = requirements_text or ""
+    ids: set[str] = set()
+    try:
+        s = txt.find("{")
+        e = txt.rfind("}")
+        if s >= 0 and e > s:
+            d = _json.loads(txt[s:e + 1])
+            for key in ("functional_requirements", "technical_requirements",
+                        "acceptance_criteria"):
+                for item in (d.get(key) or []):
+                    if isinstance(item, dict) and item.get("id"):
+                        ids.add(str(item["id"]).strip().upper())
+    except Exception:
+        pass
+    if not ids:
+        # Fallback: metinde gecen FR1/TR2/AC7 kaliplari
+        ids = {m.group(0).upper() for m in _re_rq.finditer(r"\b(?:FR|TR|AC)\d+\b", txt)}
+    return ids
+
+
+def _classify_review_issues(
+    issues: list, valid_req_ids: set, verify_loc, log=None,
+) -> tuple[list, list]:
+    """Review itirazlarini BLOKLAYICI ve DUSURULEN olarak ayirir.
+
+    Saf fonksiyon: repo erisimi `verify_loc(loc) -> bool` ile enjekte edilir
+    (loc = {file, line, quote}). Boylece replay korpusuna karsi test edilebilir.
+
+    Bloklama kurali — bir itiraz ancak severity ∈ {blocker, major} VE
+    asagidakilerden en az biri saglaniyorsa BLOKLAR:
+      1. requirement_ids bos degil VE tum id'ler gereksinimlerde MEVCUT, veya
+      2. precedent verilmis VE dogrulanmis (repo'da o convention gerçekten var)
+    Ayrica evidence her itiraz icin dogrulanabilir olmak zorunda.
+
+    Neden: reviewer bir LLM; verdigi VERI olarak ele alinir, HUKUM olarak degil.
+    Job #179'un iki yanlis blokoru bu filtreden gecemezdi:
+      R2 'cms_setting_group_id eksik' → hicbir AC'ye baglanmiyor ve gosterecegi
+         emsal yok (#67539'un kendi insert'i de o kolonu kullanmiyor) → dusurulur
+      R1 'merchant elemesi satir-bazli olmali' → urun karari, AC bagi yok
+         (WI FR4 'merchant SIPARISLERI' diyor) → dusurulur
+    Dusurulen itiraz kaybolmaz: PR yorumuna gider, sadece job'i OLDURMEZ."""
+    blocking, demoted = [], []
+
+    def _drop(it, reason):
+        it = dict(it)
+        it["demote_reason"] = reason
+        demoted.append(it)
+        if log:
+            log(f"    ↓ {it['id']} düşürüldü ({reason}): {it.get('problem', '')[:70]}")
+
+    for it in issues:
+        if it.get("severity") not in ("blocker", "major"):
+            _drop(it, "minor/öneri")
+            continue
+
+        ev = it.get("evidence") or {}
+        if not ev:
+            _drop(it, "kanıt (evidence) verilmemiş")
+            continue
+        if not verify_loc(ev):
+            _drop(it, f"kanıt doğrulanamadı ({ev.get('file')}:{ev.get('line')})")
+            continue
+
+        req_ids = it.get("requirement_ids") or []
+        unknown = [r for r in req_ids if r not in valid_req_ids] if valid_req_ids else []
+        req_ok = bool(req_ids) and not unknown
+        if req_ids and unknown:
+            _drop(it, f"var olmayan gereksinim id'sine atıf: {', '.join(unknown)}")
+            continue
+
+        prec = it.get("precedent") or {}
+        prec_ok = bool(prec) and verify_loc(prec)
+
+        if req_ok or prec_ok:
+            blocking.append(it)
+        else:
+            _drop(it, "gereksinim bağı yok ve repo emsali gösterilmedi")
+    return blocking, demoted
 
 
 def _parse_review_verify(text: str) -> tuple[dict, list]:
@@ -1466,6 +1575,52 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 "Yeni kod hiçbir yerden çağrılmayacağı için üretimde davranış değişmez."
             )
         return problems
+
+    def _verify_issue_loc(self, loc: dict) -> bool:
+        """Review itirazinin gosterdigi {file, line, quote} gercekten var mi?
+
+        Kanit dogrulama Katman 0'dir: LLM cagrisi yok, sadece dosya okuma.
+        Reviewer'in kanit FORMATINA uymasi yetmiyor (job #179/R2 uydu ama icerigi
+        yanlisti) — kanitin KENDISI sinanmali.
+
+        Once feature branch'te, sonra base'te aranir: evidence degisen kodu
+        gosterir (branch), precedent mevcut convention'i gosterir (ikisinde de
+        olabilir). quote bos ise yalnizca dosyanin varligi kontrol edilir.
+        Bosluklar normalize edilerek karsilastirilir — LLM alintilari girintiyi
+        ve satir sonlarini sadik biçimde tasimiyor."""
+        import re as _re_vl
+        f = (loc or {}).get("file")
+        if not f:
+            return False
+        repo = self.state.repo_name
+        if not repo:
+            return False
+        content = ""
+        for ref in (self.state.branch_name, "main", "master"):
+            if not ref:
+                continue
+            try:
+                content = self._client.get_file_content(repo, f, ref)
+                if content:
+                    break
+            except Exception:
+                continue
+        if not content:
+            try:
+                content = self._repo_mgr.get_file_content(repo, f)
+            except Exception:
+                content = ""
+        if not content:
+            return False
+
+        quote = (loc.get("quote") or "").strip()
+        if not quote:
+            return True  # dosya var, alinti iddiasi yok
+
+        def _norm(s: str) -> str:
+            return _re_vl.sub(r"\s+", " ", s).strip().lower()
+
+        return _norm(quote) in _norm(content)
 
     def _plan_fix_feedback(self, problems: list) -> str:
         """_validate_plan_paths problemlerini architect'e verilecek geri bildirime
@@ -4282,11 +4437,63 @@ class AgileSDLCFlow(Flow[PipelineState]):
         else:
             self.state.review_issues = []
 
+        # ── KATMAN 0: itiraz sinifllandirma (LLM yok) ────────────────────
+        # Reviewer bir LLM; verdigi VERI, hukum degil. Bloklayici kume
+        # deterministik kurala gore olusur (bkz. _classify_review_issues).
+        # Env: CREW_ISSUE_GATE. Kapali → eski davranis (verdict dogrudan bloklar).
+        _demoted: list = []
+        _gate_on = bool(_pc_sr.get("CREW_ISSUE_GATE")) and bool(self.state.review_issues)
+        if _gate_on and not any(i.get("evidence") for i in self.state.review_issues):
+            # GUVENLIK: reviewer yeni semaya hic uymadi (tek bir itirazda bile
+            # evidence yok). Bu durumda hepsi "kanit verilmemis" diye duserdi ve
+            # job KOSULSUZ approve olurdu — gercek bir blokoru sessizce gecirir.
+            # Sema uyumsuzlugu, "itiraz yok" sinyali DEGILDIR → legacy yola dus.
+            _log("  ⚠️ İtiraz kapısı ATLANDI: reviewer yeni şemayı üretmedi "
+                 "(hiçbir maddede evidence yok) — verdict'e güveniliyor")
+            _gate_on = False
+        if _gate_on:
+            _valid_ids = _requirement_ids(self.state.requirements_text)
+            _blocking, _demoted = _classify_review_issues(
+                self.state.review_issues, _valid_ids, self._verify_issue_loc, log=_log,
+            )
+            _log(f"  🔎 İtiraz kapısı: {len(_blocking)} bloklayıcı, "
+                 f"{len(_demoted)} düşürüldü (gereksinim id kümesi: {len(_valid_ids)})")
+            # Dusurulenler kaybolmaz: bloklamaz ama PR'a yorum olarak gider.
+            for _d in _demoted:
+                _d["status"] = "closed"
+                _d["note"] = f"bloklamıyor — {_d.get('demote_reason', '')}"
+            self.state.review_issues = _blocking + _demoted
+            if _demoted:
+                try:
+                    self._client.add_pr_comment(
+                        self.state.repo_name, int(self.state.pr_id),
+                        "## 💡 Bloklamayan İnceleme Notları\n\n"
+                        "Aşağıdaki maddeler bir kabul kriterine bağlanamadığı veya "
+                        "kanıtı/emsali doğrulanamadığı için PR'ı bloklamıyor; "
+                        "değerlendirmenize bırakılıyor:\n\n"
+                        + _format_issues_md(_demoted)
+                        + "\n\n*Agile SDLC Crew — Katman 0 itiraz kapısı*",
+                    )
+                except Exception as _e_dc:
+                    _log(f"  Düşürülen madde yorumu hatası (kritik değil): {_e_dc}")
+
         # 🚨 RESPECT REVIEWER VERDICT — if CHANGES_REQUIRED / REJECTED,
         # loop back into dev (max CREW_REVIEW_MAX_RETRIES, default 2).
         # Accept both English (new) and Turkish (legacy) tokens.
         import os as _os_rev
         rejected = _review_rejected(review_text)
+        # Yapisal kapi aciksa ve reviewer madde listesi urettiyse, RED karari
+        # sentinel'den DEGIL bloklayici kumeden gelir: tum itirazlar dusurulduyse
+        # bloklayacak bir sey yok → APPROVE. Job #179 burada gecerdi.
+        if _gate_on:
+            _open_blocking = [
+                i for i in self.state.review_issues
+                if i.get("status") == "open" and i.get("severity") in ("blocker", "major")
+            ]
+            if rejected and not _open_blocking:
+                _log("  ✅ İtiraz kapısı: bloklayıcı madde kalmadı — "
+                     "reviewer RED'i geçersiz, APPROVE sayılıyor")
+            rejected = bool(_open_blocking)
         from agile_sdlc_crew import pipeline_config as _pc_rev
         max_review_retries = _pc_rev.get("CREW_REVIEW_MAX_RETRIES")
         review_attempt = getattr(self, "_review_attempt", 0)
