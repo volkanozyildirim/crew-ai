@@ -677,54 +677,82 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
     def _build_step_context(self, step_key: str) -> str:
         """Step'e ozel, tipli bilgilerden derlenen yapisal context.
-        Her agent, kendi adimi icin gereken bilgiyi burada alir."""
+        Her agent, kendi adimi icin gereken bilgiyi burada alir.
+
+        ── PREFIX KARARLILIGI (prompt cache) ──────────────────────────────
+        Prompt cache PREFIX ESLESMESIYLE calisir: prefix'teki tek byte degisimi
+        sonrasindaki HER SEYI gecersiz kilar. Cache YAZMA, OKUMA'dan 12.5-20 kat
+        pahali (olculen: ayni prompt soguk $0.278, sicak $0.014).
+        Job #182: 1.18M token cache YAZMA, 4.85M OKUMA, output sadece 72K —
+        yani maliyetin ezici kismi dusunmeye degil baglami yeniden yuklemeye
+        gidiyor.
+
+        Bu yuzden bolumler KARARLILIGA gore siralanir, konuya gore DEGIL:
+          1. Is-degismezi (WI, gereksinimler, kabul kriterleri, plan, impl)
+             → her adimda AYNI byte'lar, AYNI sirada
+          2. Adima gore degisen (kickoff alintisi, dogrulama ciktilari,
+             benzer isler) → EN SONDA
+
+        Onceden kickoff alintisi 2. sirada, WI basligindan hemen sonraydi ve
+        adima gore FARKLI kirpiliyordu (KICKOFF / KICKOFF_QA / KICKOFF_REVIEW).
+        Olcum: kickoff kapaliyken adimlar arasi ortak prefix 2.936 karakter,
+        ACIKKEN 25 karaktere COKUYOR. Yani kickoff'u acmak cache yeniden
+        kullanimini tamamen yok ediyordu.
+
+        Talimatin sonda olmasi ayrica prompt-muhendisligi acisindan da tercih
+        edilir — modeller son talimata daha fazla agirlik verir."""
         s = self.state
-        parts = []
+        parts = []      # is-degismezi: her adimda ayni
+        tail = []       # adima gore degisen: en sona eklenir
 
         # Her step icin: is kalemi ozeti
         if s.work_item_id:
             parts.append(f"# Is Kalemi\nWI #{s.work_item_id}")
 
-        # Kickoff Design Review tutanagi — Kritik Risk Tablosu + Backlog Adaylari
-        # her adima tasiniyor. Teknik tasarim en genis pencereyi alir (risk + edge case
-        # bilgisi tasarima yansimali). Test/UAT daha kisaltilmis.
-        # NOT: requirements artik kickoff'tan ONCE calisiyor, dolayisiyla
+        # Requirements (step 1 sonrasi — kickoff dahil, artik requirements once calisiyor)
+        if s.requirements_text and step_key != "requirements_analysis_task":
+            parts.append(f"\n# Is Analizi (Gereksinimler)\n{self._forward_text('requirements', s.requirements_text, _cb.cap('REQUIREMENTS'))}")
+
+        # Kickoff Design Review tutanagi — adima gore FARKLI kirpilir, o yuzden
+        # TAIL'e gider (prefix'i bozmasin). Teknik tasarim en genis pencereyi
+        # alir (risk + edge case bilgisi tasarima yansimali); test/UAT kisaltilmis.
+        # NOT: requirements kickoff'tan ONCE calisiyor, dolayisiyla
         # requirements_analysis_task icin kickoff text enjekte edilmez (henuz yok).
         if s.kickoff_text:
             if step_key in ("technical_design_task",):
                 # Architect: Risk Tablosu + Edge Case'ler + Kabul Kriterleri mutlaka gorusun
-                parts.append(
+                tail.append(
                     f"\n# Kickoff Design Review Tutanagi (Tum Disiplinler)\n"
                     f"{s.kickoff_text[:_cb.cap('KICKOFF')]}\n"
                     f"⚠️ Teknik plan 'Kritik Risk Tablosu'ndaki TUM riskler ve "
                     f"'Edge Case'ler' icin somut kod degisiklikleri icermeli."
                 )
             elif step_key in ("test_planning_task",):
-                parts.append(
+                tail.append(
                     f"\n# Kickoff Design Review — Test Perspektifi\n"
                     f"{s.kickoff_text[:_cb.cap('KICKOFF_QA')]}"
                 )
             elif step_key in ("uat_task",):
-                parts.append(
+                tail.append(
                     f"\n# Kickoff Design Review — Backlog Adaylari ve Kabul Kriterleri\n"
                     f"{s.kickoff_text[:_cb.cap('KICKOFF_QA')]}"
                 )
             elif step_key in ("review_pr_task",):
                 # Reviewer: risk tablosunu bilerek PR'i incelesin
-                parts.append(
+                tail.append(
                     f"\n# Kickoff Design Review — Kritik Riskler\n"
                     f"{s.kickoff_text[:_cb.cap('KICKOFF_REVIEW')]}"
                 )
 
-        # Requirements (step 1 sonrasi — kickoff dahil, artik requirements once calisiyor)
-        if s.requirements_text and step_key != "requirements_analysis_task":
-            parts.append(f"\n# Is Analizi (Gereksinimler)\n{self._forward_text('requirements', s.requirements_text, _cb.cap('REQUIREMENTS'))}")
-
         # Kabul kriterleri — BA analizinden sonra belirlenir, pipeline boyunca
         # baglayici tek kaynak: tasarim, gelistirme, inceleme ve UAT buna gore yapilir.
+        # test_planning_task DA dahil: QA test planini baglayici kriterleri
+        # GORMEDEN yaziyordu (kalite bosluğu) ve tek eksik girdi adimlar arasi
+        # ortak prefix'i tam burada kesiyordu (olculen: 2.936 karakterde).
         if s.acceptance_criteria and step_key in (
             "kickoff_meeting_task", "technical_design_task", "implement_change_task",
-            "review_pr_task", "uat_task", "completion_report_task",
+            "review_pr_task", "test_planning_task", "uat_task",
+            "completion_report_task",
         ):
             criteria_text = "\n".join(
                 f"{i+1}. {c}" for i, c in enumerate(s.acceptance_criteria)
@@ -770,16 +798,18 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 impl.append(f"PR #{s.pr_id}: {s.pr_url}")
             parts.append("\n".join(impl))
 
-        # Validation ciktilari (step 11 icin)
+        # Validation ciktilari (step 11 icin) — adima ozel → TAIL
         if step_key == "completion_report_task":
             if s.review_text:
-                parts.append(f"\n# Kod Inceleme\n{s.review_text[:_cb.cap('REVIEW')]}")
+                tail.append(f"\n# Kod Inceleme\n{s.review_text[:_cb.cap('REVIEW')]}")
             if s.test_text:
-                parts.append(f"\n# Test Planlama\n{s.test_text[:_cb.cap('TEST')]}")
+                tail.append(f"\n# Test Planlama\n{s.test_text[:_cb.cap('TEST')]}")
             if s.uat_text:
-                parts.append(f"\n# UAT Dogrulama\n{s.uat_text[:_cb.cap('UAT')]}")
+                tail.append(f"\n# UAT Dogrulama\n{s.uat_text[:_cb.cap('UAT')]}")
 
-        # Vector DB'den benzer onceki isler (step 4 icin)
+        # Vector DB'den benzer onceki isler (step 4 icin) — adima ozel → TAIL.
+        # Ayrica ICERIGI DE DEGISKEN (vector arama sonucu her cagride ayni
+        # olmayabilir), yani prefix'te durmasi cache'i her seferinde bozar.
         if step_key == "technical_design_task" and self._vector_store:
             try:
                 similar = self._vector_store.find_similar_jobs(
@@ -792,11 +822,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         f"- WI#{x['work_item_id']} ({x['step']}): {x['content'][:_cb.cap('SIMILAR')]}"
                         for x in rel
                     )
-                    parts.append(f"\n# Benzer Onceki Isler\n{sim_text}")
+                    tail.append(f"\n# Benzer Onceki Isler\n{sim_text}")
             except Exception:
                 pass
 
-        return _cb.measure(step_key, "\n".join(parts))
+        # Kararli bolumler once, adima gore degisenler sonra.
+        return _cb.measure(step_key, "\n".join(parts + tail))
 
     def _step_start(self, step_key: str):
         # Cagri muhasebesi: bu adimdaki claude cagrilari bu (job, step, agent)'a

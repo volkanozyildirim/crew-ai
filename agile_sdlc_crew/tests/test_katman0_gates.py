@@ -476,13 +476,83 @@ def test_reachability():
         check("PHP olmayan dosya atlanır", fn(stub, "app/x.py", "def f(): pass", "") == [])
 
 
+# ── 11. Prefix kararlılığı (prompt cache) ────────────────────────────────
+
+def test_context_prefix_stability():
+    print("\n[11] _build_step_context — prefix kararlılığı (cache yeniden kullanımı)")
+    from agile_sdlc_crew.flow import PipelineState
+
+    STEPS = ["technical_design_task", "implement_change_task", "review_pr_task",
+             "test_planning_task", "uat_task", "completion_report_task"]
+    reqs = json.dumps({"acceptance_criteria": [{"id": f"AC{i}", "desc": f"kriter {i}"}
+                                               for i in range(1, 6)]})
+    KICK = "## Kritik Risk Tablosu\n" + ("- uzun risk satırı örneği\n" * 40)
+
+    def contexts(kickoff):
+        s = PipelineState(
+            work_item_id="1", requirements_text=reqs,
+            plan={"changes": [{"file_path": "a.php", "description": "d"}]},
+            repo_name="r", branch_name="feature/1", pr_id="9", pr_url="http://x",
+            review_text="R", test_text="T", uat_text="U",
+            acceptance_criteria=[f"kriter {i}" for i in range(1, 6)],
+            kickoff_text=kickoff)
+        f = SimpleNamespace(state=s, _vector_store=None,
+                            _forward_text=lambda k, t, c: t[:c])
+        return {k: AgileSDLCFlow._build_step_context(f, k) for k in STEPS}
+
+    def lcp(vals):
+        a, b = min(vals), max(vals)
+        n = 0
+        for x, y in zip(a, b):
+            if x != y:
+                break
+            n += 1
+        return n
+
+    off, on = contexts(""), contexts(KICK)
+    lcp_off, lcp_on = lcp(list(off.values())), lcp(list(on.values()))
+
+    # Kickoff AÇIK olması prefix'i çökertmemeli — eski davranışta 25 karaktere
+    # düşüyordu çünkü adıma göre kırpılan kickoff bloğu WI başlığından hemen
+    # sonra, prefix'in başında duruyordu.
+    check("kickoff açık/kapalı ortak prefix'i çökertmez",
+          lcp_on > 500 and abs(lcp_on - lcp_off) < 200, f"kapalı={lcp_off}, açık={lcp_on}")
+    # Boyut eşiği fixture'a bağlı olur (gerçek job #182'de 3.828, burada küçük
+    # sentetik gereksinim metniyle ~600). Ölçülmesi gereken YAPISAL özellik:
+    # ortak prefix TÜM kararlı bölümleri kapsıyor mu?
+    prefix = list(off.values())[0][:lcp_off]
+    for section in ("# Is Kalemi", "# Is Analizi (Gereksinimler)",
+                    "# Acceptance Criteria (Binding"):
+        check(f"ortak prefix '{section}' bölümünü kapsar", section in prefix,
+              f"prefix {lcp_off} karakter")
+
+    # Kararlı bölümler prefix'te, değişkenler sonda
+    for k, v in off.items():
+        heads = re.findall(r"^# (.+)$", v, re.M)
+        if not heads:
+            continue
+        check(f"{k}: ilk bölüm '# Is Kalemi'", heads[0].startswith("Is Kalemi"), f"{heads[:2]}")
+    for k, v in on.items():
+        heads = [h for h in re.findall(r"^# (.+)$", v, re.M)]
+        kick_idx = next((i for i, h in enumerate(heads) if h.startswith("Kickoff")), None)
+        if kick_idx is None:
+            continue
+        stable = [i for i, h in enumerate(heads)
+                  if h.startswith(("Is Kalemi", "Is Analizi", "Acceptance Criteria"))]
+        check(f"{k}: kickoff bloğu kararlı bölümlerden SONRA",
+              all(kick_idx > i for i in stable), f"kickoff@{kick_idx}, kararlı@{stable}")
+
+    check("QA (test_planning) kabul kriterlerini görür",
+          "Acceptance Criteria (Binding" in off["test_planning_task"])
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
     for t in (test_norm_path, test_plan_paths, test_issue_gate,
               test_requirement_ids, test_completeness, test_contract_gate,
               test_fix_targets, test_envelope, test_prune_fix_targets,
-              test_reachability):
+              test_reachability, test_context_prefix_stability):
         try:
             t()
         except Exception as e:
