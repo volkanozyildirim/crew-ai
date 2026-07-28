@@ -77,10 +77,16 @@ bu pipeline'ın tekrar ürettiği iki hata sınıfına hedefli iki kontrol:
    metot repoda tanımlıysa bildirilen parametre sayısıyla karşılaştırılır.
    Fazla/eksik argüman → bloklar. (`luggageSuffix($a,$b,$c,$d)` vs 3 parametreli
    imza.)
-2. **Erişilebilirlik** — planın eklediği her yeni public metot/sınıf için repoda
-   en az bir çağrı noktası aranır. Yok → "çağrılmayan yeni kod" olarak bloklar.
-   Bu, mevcut entegrasyon kontrolünün dosya seviyesinden sembol seviyesine
-   indirilmiş hâli.
+2. **Erişilebilirlik** — planın eklediği her yeni public metot için repoda en az
+   bir çağrı noktası aranır. Yok → **uyarı** (blok değil). Bu, mevcut entegrasyon
+   kontrolünün dosya seviyesinden sembol seviyesine indirilmiş hâli.
+
+   **Neden bloklamaz:** arity deterministiktir (imza ya uyar ya uymaz), ama
+   erişilebilirlik sezgiseldir — metot dinamik/framework tarafından çağrılabilir,
+   bir interface implementasyonu olabilir, ya da aynı PR'ın henüz yazılmamış bir
+   dosyasından çağrılacak olabilir. Sezgisel bir kontrolü bloklayıcı yapmanın
+   maliyeti ölçüldü: job #180'de asıl implementasyon dosyası engellendi ve iş
+   boşa gitti.
 
 İkisi de klon üzerinde grep/regex seviyesinde uygulanabilir; dil-başına tam
 parser gerekmiyor. PHP ile başlanır (tek aktif repo dili), diğer diller
@@ -266,8 +272,12 @@ bildirdiği model beklenenle karşılaştırılır. Uyuşmazlık deploy'u durdur
 Deploy başına ~$0.45, job başına değil. Gözlemlenemeyen config kayan config'tir
 — litellm prefix hatası aylarca sessiz kaldı.
 
-**Adım bütçesi.** Her adımın zarftaki payı loglanır; payını aşan adım uyarı
-üretir. #179'da $1.27'lik tek çağrı sessizce geçti.
+**Adım bütçesi.** Her adımın zarftaki payı loglanır; zarfın %40'ını aşan adım
+uyarı üretir. #179'da $1.27'lik tek çağrı sessizce geçti.
+
+**Tek bütçe kaynağı.** Zarf hem adım-sınırı guard'ında hem ara-adım kısa-devresinde
+okunmalı. İkisi ayrışırsa iş her zaman DÜŞÜK tavanda ölür — job #181 tam böyle
+öldü: zarf $18 dedi, sink sabit $10 okudu, $10.62'de bütün çağrılar boş döndü.
 
 **Kanıt eleme logu.** Katman 0'ın eledigi her itiraz gerekçesiyle loglanır.
 Reviewer kalitesinin zaman içindeki ölçümü bu logdan çıkar; sessiz eleme
@@ -281,6 +291,9 @@ fonksiyonlar — LLM çağrısı olmadan test edilebilirler.
 **Replay korpusu:** `jobs` / `job_steps` / `llm_calls` tabloları 125 job'lık
 gerçek üretim çıktısı barındırıyor. Her Katman 0 doğrulayıcısı bu korpusa karşı
 doğrulanır: mock değil, kaydedilmiş gerçek LLM çıktısı.
+
+Uygulama: `tests/test_katman0_gates.py` — 59 test, bağımsız çalışır
+(`.venv/bin/python tests/test_katman0_gates.py`), pytest gerekmez.
 
 Bilinen fixture'lar:
 - job #178 planı → yol gate 4 sorun bulmalı (3 uydurma yol + entegrasyon yok)
@@ -318,3 +331,19 @@ doğrulandı:
 
 Tasarım bunları sözleşme seviyesine taşıyor: (2) ve (3) sezgisel yamalar,
 şema alanları onların yerini alır.
+
+## Uygulama sonrası: gerçek koşuda doğrulananlar
+
+Job #181 (2026-07-27) her mekanizmayı gerçek koşuda çalıştırdı:
+zarf `L/$18/3` · keşif ~2 dk'da bitti (`Hard timeout` yok; önce 13.5 dk + SIGKILL)
+· `yollar + entegrasyon doğrulandı` → `completeness 8/8, LLM yok` · sözleşme
+kapısı gerçek arity ihlali yakaladı (`OrderTest.php`'de `luggageSuffix` 2
+argüman, imza 3 zorunlu) ve #180'in yanlış alarmlarını üretmedi · itiraz kapısı
+`4 bloklayıcı, 3 düşürüldü` (reviewer yeni şemayı üretti) · `fix_targets`
+yönlendirmesi 5 dosyayı implement listesine aldı (#178'de hiç çalışmadı,
+#179'da 1 dosya).
+
+**Uçtan uca başarılı bir koşu hâlâ yok.** #181 bütçe tavanı hatasıyla düştü
+(düzeltildi). WI 69378 artık doğrulama için uygun değil — PR #40663 ile main'e
+merge edildi, dolayısıyla mimar yalnızca çevresel işler planlıyor. Tam
+doğrulama için başka bir WI gerekiyor.
