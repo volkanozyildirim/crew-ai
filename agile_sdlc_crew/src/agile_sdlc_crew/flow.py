@@ -844,6 +844,28 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._step_done(step_key, cached_output[:50_000])
 
     def _step_done(self, step_key: str, output: str = ""):
+        # ── Adim butcesi: bu adim zarfin ne kadarini yedi? ──────────────
+        # Job #179'da tek bir $1.27'lik cagri sessizce gecti. Adimin payi
+        # loglanmazsa hangi adimin butceyi yedigi ancak is oldukten sonra
+        # anlasiliyor. Esik: adim basina zarfin %40'i (13 adimda toplam
+        # zarfi asmak icin ~3 adim yeter — bu bir uyari, blok degil).
+        try:
+            _spent = float(getattr(self, "_job_real_cost_usd", 0.0) or 0.0)
+            _prev = float(getattr(self, "_step_cost_mark", 0.0) or 0.0)
+            _share = _spent - _prev
+            self._step_cost_mark = _spent
+            _cap = self._envelope_budget(0.0)
+            if _cap > 0 and _share > 0:
+                _pct = 100.0 * _share / _cap
+                _msg = (f"  🧾 Adım payı [{step_key}]: ${_share:.2f} "
+                        f"(zarfın %{_pct:.0f}'ı, toplam ${_spent:.2f}/${_cap:.0f})")
+                if _pct >= 40:
+                    _log(_msg + "  ⚠️ pay yüksek")
+                else:
+                    _log(_msg)
+        except Exception:
+            pass
+
         self._tracker.task_completed(step_key)
         if self.state.job_id:
             try:
@@ -1888,6 +1910,134 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"çağrılıyor ama {req} zorunlu parametre var."
                 )
         return problems
+
+    def _check_reachability(self, file_path: str, new_content: str,
+                            old_content: str = "") -> list:
+        """Yeni eklenen public metotlarin bir cagri noktasi var mi? (LLM yok)
+
+        Entegrasyon kontrolunun SEMBOL seviyesi: `_validate_plan_paths` dosya
+        seviyesinde "hicbir mevcut kaynak dosyasi degismiyor" diyor; bu ise
+        "bu yeni metot hicbir yerden cagrilmiyor" diyor.
+
+        UYARI URETIR, BLOKLAMAZ. Arity deterministik (imza ya uyar ya uymaz),
+        erisilebilirlik SEZGISEL: bir metot framework tarafindan dinamik
+        cagrilabilir, interface implementasyonu olabilir, ya da ayni PR'in
+        henuz yazilmamis bir dosyasindan cagrilacak olabilir. Job #180'de
+        sezgisel bir kontrolu bloklayici yapmak asil implementasyon dosyasini
+        engelledi — o hatayi tekrarlamıyorum."""
+        if not file_path.lower().endswith(".php") or not new_content:
+            return []
+        repo = self.state.repo_name
+        if not repo:
+            return []
+        try:
+            root = self._repo_mgr.repo_path(repo)
+        except Exception:
+            return []
+        if not root.exists():
+            return []
+
+        import re as _re_rb
+        old_names = set(_php_signatures(old_content or "").keys())
+        new_defs = [
+            m.group(1) for m in _re_rb.finditer(
+                r"public\s+function\s+([A-Za-z_]\w*)\s*\(", new_content)
+        ]
+        added = [n for n in new_defs if n not in old_names]
+        if not added:
+            return []
+
+        warnings = []
+        self_posix = _norm_path(file_path)
+        for name in added:
+            if name.startswith("__") or name.startswith("test"):
+                continue  # magic metotlar ve testler dogrudan cagrilmaz
+            found = False
+            pat = _re_rb.compile(r"(?:->|::)\s*" + _re_rb.escape(name) + r"\s*\(")
+            if pat.search(new_content):
+                continue  # ayni dosyada cagriliyor
+            try:
+                for p in root.rglob("*.php"):
+                    if "/vendor/" in p.as_posix() or "/node_modules/" in p.as_posix():
+                        continue
+                    if _norm_path(str(p.relative_to(root))) == self_posix:
+                        continue
+                    try:
+                        if pat.search(p.read_text(errors="ignore")):
+                            found = True
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                return []
+            if not found:
+                warnings.append(
+                    f"ERİŞİLEBİLİRLİK: yeni public metot '{name}()' repoda "
+                    f"hiçbir yerden çağrılmıyor — üretimde çalışmaz "
+                    f"(dinamik/framework çağrısıysa yok sayın)"
+                )
+        return warnings
+
+    def _prune_fix_targets(self, issues: list) -> int:
+        """Itirazlarin `fix_targets` yollarini repoya karsi dogrular, uydurmalari atar.
+
+        `evidence` ve `precedent` dogrulaniyordu ama `fix_targets` dogrulanmiyordu.
+        Job #181'de reviewer N2 icin uc varyant verdi — `Upgrade.php`,
+        `app/Migration/Upgrade.php`, `app/Upgrade.php` — ayni dosyanin ikisi
+        uydurma. Zarar vermiyordu (plan filtresinde dusuyorlardi) ama re-plan'i
+        gereksiz dosya eklemeye itiyordu.
+
+        Bir hedef, repoda (branch veya base) GERCEKTEN varsa ya da plan onu
+        olusturmayi planliyorsa gecerlidir. Bir maddenin TUM hedefleri gecersizse
+        madde `file` alanina duser — hedefsiz kalmasin.
+
+        Doner: atilan hedef sayisi."""
+        repo = self.state.repo_name
+        if not repo or not issues:
+            return 0
+        planned = {
+            _norm_path(c.get("file_path"))
+            for c in (self.state.plan or {}).get("changes") or []
+            if c.get("file_path")
+        }
+        cache: dict = {}
+
+        def _exists(p: str) -> bool:
+            if p in cache:
+                return cache[p]
+            ok = p in planned
+            if not ok:
+                for ref in (self.state.branch_name, "main", "master"):
+                    if not ref:
+                        continue
+                    try:
+                        if self._client.get_file_content(repo, p, ref):
+                            ok = True
+                            break
+                    except Exception:
+                        continue
+            cache[p] = ok
+            return ok
+
+        dropped = 0
+        for it in issues:
+            tg = [t for t in (it.get("fix_targets") or []) if t]
+            if not tg:
+                continue
+            keep = [t for t in tg if _exists(t)]
+            bad = [t for t in tg if t not in keep]
+            if bad:
+                dropped += len(bad)
+                _log(f"    ↯ {it['id']} fix_targets: {len(bad)} uydurma yol atıldı "
+                     f"({', '.join(bad[:3])})")
+            if not keep:
+                # Hepsi uydurma → maddenin kendi dosyasina dus
+                fallback = _norm_path(it.get("file"))
+                keep = [fallback] if fallback and _exists(fallback) else []
+                if keep:
+                    _log(f"    ↯ {it['id']} hedefsiz kaldı → '{keep[0]}' (madde dosyası)")
+            it["fix_targets"] = keep
+        return dropped
 
     def _plan_fix_feedback(self, problems: list) -> str:
         """_validate_plan_paths problemlerini architect'e verilecek geri bildirime
@@ -4455,6 +4605,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     file_path, final_content, full_content or "")
                 for _cp in _cprobs:
                     _log(f"    🚨 SÖZLEŞME: {_cp}")
+                # Erisilebilirlik UYARI uretir, push'u bloklamaz (sezgisel).
+                for _rw in self._check_reachability(
+                        file_path, final_content, full_content or ""):
+                    _log(f"    ⚠️  {_rw}")
                 if _cprobs:
                     _log("    Sözleşme ihlali — push iptal, developer'a geri veriliyor")
                     _contract_failures.append((file_path, _cprobs))
@@ -4834,6 +4988,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
             for _d in _demoted:
                 _d["status"] = "closed"
                 _d["note"] = f"bloklamıyor — {_d.get('demote_reason', '')}"
+            # fix_targets'i da dogrula (evidence/precedent gibi) — uydurma yollar
+            # re-plan'i gereksiz dosya eklemeye itiyordu (job #181/N2).
+            try:
+                self._prune_fix_targets(_blocking)
+            except Exception as _e_ft:
+                _log(f"  fix_targets dogrulama hatasi (atlaniyor): {_e_ft}")
             self.state.review_issues = _blocking + _demoted
             if _demoted:
                 try:
