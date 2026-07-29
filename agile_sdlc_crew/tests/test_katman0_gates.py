@@ -546,13 +546,78 @@ def test_context_prefix_stability():
           "Acceptance Criteria (Binding" in off["test_planning_task"])
 
 
+# ── 12. Grep kanıtı (repo keşif kapsamı) ─────────────────────────────────
+
+def test_grep_evidence():
+    print("\n[12] _grep_repo_evidence — sembol çıkarımı + repo adayı genişletme")
+    from agile_sdlc_crew.flow import _GREP_STOPWORDS
+
+    # Sembol çıkarımı: en kritik kusur snake_case'in HİÇ yakalanmamasıydı
+    # (job #182: camelCase regex'i sıfır terim buldu, WI'daki stock_location
+    # görülmedi → grep hiçbir işe yaramadı).
+    import re as _re
+    def extract(txt):
+        t = set()
+        for m in _re.finditer(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b", txt):
+            if len(m.group(0)) >= 8 and m.group(0) not in _GREP_STOPWORDS:
+                t.add(m.group(0))
+        for m in _re.finditer(r"\b([a-zA-Z]*[a-z][A-Z][a-zA-Z]{2,})\b", txt):
+            t.add(m.group(1))
+        return {x for x in t if len(x) >= 5}
+
+    got = extract("reject_reasons tablosuna stock_location eklendi, getStockLocation çağrılır")
+    check("snake_case tablo/kolon adı yakalanır",
+          {"reject_reasons", "stock_location"} <= got, f"{sorted(got)}")
+    check("camelCase sınıf/metot adı yakalanır", "getStockLocation" in got, f"{sorted(got)}")
+    check("TÜMÜ BÜYÜK kelime sınıf adı sayılmaz (ASSUMPTION gürültüsü)",
+          "ASSUMPTION" not in extract("ASSUMPTION: bu bir varsayımdır"),
+          f"{sorted(extract('ASSUMPTION: bu bir varsayımdır'))}")
+    check("kendi JSON şemamızın meta adları elenir",
+          not (extract("acceptance_criteria functional_requirements out_of_scope")
+               & {"acceptance_criteria", "functional_requirements", "out_of_scope"}))
+
+    # Repo tarama: iki fixture repo, biri terimleri AYNI dosyada içeriyor
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for name, files in (
+            ("hit", {"app/Integration/Horoz.php":
+                     "<?php // reject_reasons join + stock_location fallback"}),
+            ("miss", {"app/Other.php": "<?php // alakasiz"}),
+        ):
+            r = base / name
+            for fp, content in files.items():
+                (r / fp).parent.mkdir(parents=True, exist_ok=True)
+                (r / fp).write_text(content)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=r, check=True,
+                           capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=r, check=True, capture_output=True)
+            subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "-qm", "i"], cwd=r, check=True, capture_output=True)
+
+        from agile_sdlc_crew.tools.local_repo import LocalRepoManager
+        stub = SimpleNamespace(state=SimpleNamespace(known_repos=["hit", "miss"]),
+                              _repo_mgr=LocalRepoManager(base_dir=str(base)))
+        ev = AgileSDLCFlow._grep_repo_evidence(
+            stub, "reject_reasons tablosuna stock_location eklendi")
+        repos = [e["repo"] for e in ev]
+        check("eşleşen repo kanıta girer", "hit" in repos, f"{repos}")
+        check("eşleşmeyen repo kanıta girmez", "miss" not in repos, f"{repos}")
+        if ev:
+            hit = [e for e in ev if e["repo"] == "hit"][0]
+            check("aynı dosyada birlikte geçme sayılır (cooccur≥1)",
+                  hit["cooccur"] >= 1, f"cooccur={hit['cooccur']}")
+            check("eşleşen dosya yüzeye çıkar",
+                  any("Horoz" in f for f in hit["files"]), f"{hit['files']}")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
     for t in (test_norm_path, test_plan_paths, test_issue_gate,
               test_requirement_ids, test_completeness, test_contract_gate,
               test_fix_targets, test_envelope, test_prune_fix_targets,
-              test_reachability, test_context_prefix_stability):
+              test_reachability, test_context_prefix_stability,
+              test_grep_evidence):
         try:
             t()
         except Exception as e:
