@@ -3475,13 +3475,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         kickoff_repo = max(repo_hits_ko, key=repo_hits_ko.get)
                         _log(f"  Kickoff hedef repo (grep): {kickoff_repo} ({repo_hits_ko[kickoff_repo]} terim)")
 
-            # Katman 3: Vector semantic search (son care)
-            if not kickoff_repo and self._vector_store:
-                query = f"{self.state.requirements_text[:500]}"
-                relevant = self._vector_store.find_relevant_repos(query, limit=3)
-                if relevant and relevant[0]["score"] >= 0.1:
-                    kickoff_repo = relevant[0]["repo"]
-                    _log(f"  Kickoff hedef repo (vector): {kickoff_repo} (score={relevant[0]['score']:.3f})")
+            # Katman 3 (vektor) KALDIRILDI — step4'teki ayni gerekce (olu esik
+            # 0.1 > ulasilabilir max 0.031; esik dusurulse yanlis repo doner).
+            if not kickoff_repo:
+                _log("  Kickoff hedef repo belirlenemedi (grep kaniti yok) — vektor tahmini kullanilmiyor.")
 
             # Bulunan reponun summary + ust dizin dosya listesini context'e ekle
             if kickoff_repo:
@@ -3625,9 +3622,29 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._step_done("dependency_analysis_task", "Atlandı — repo bilgisi local'den alınıyor")
 
         # Repo summary'lerini context'e ekle.
-        # Vector search ile en ilgili repolari basa al — 66 repo varken
-        # sadece ilk 15 context'e giriyor, hedef repo mutlaka icinde olmali.
+        # 66 repo var, yalnizca ilk ~15'i context'e giriyor (summaries_repos[:20]
+        # → candidate_repos) — hedef repo bu pencerenin ICINDE olmak ZORUNDA,
+        # yoksa mimarin onu secme sansi yok.
+        #
+        # Siralama iki katmanli: ONCE deterministik grep, SONRA vektor.
+        # Neden bu sirada — OLCULDU (2026-07-29, WI 69381'in ham metniyle):
+        #   vektor/hibrit top-15 : #1 TwistedFate (alakasiz), core #11, orkestra #12
+        #   grep kaniti          : #1 core (app/Integration/Warehouse/Horoz.php —
+        #                          mekanizmanin GERCEKTEN bulundugu dosya), #3 orkestra
+        # Vektor skorlari 66 repo boyunca 0.026-0.031 arasinda duz; ayirt edici
+        # gucu yok (ayni embedder'da bos string 0.77, anlamsiz harf dizisi 0.81
+        # skor aliyor). Siralamayi tek basina ona birakmak, dogru repoyu
+        # pencerenin sonuna surukluyor. Grep 66 klonda 3.8 saniye suruyor ve
+        # ~0 maliyetli; 53 dakikalik pipeline'da olculemez.
         ordered_repos = list(self.state.known_repos)  # default: olduğu gibi
+        grep_first: list = []
+        try:
+            _q_grep = f"{self.state.requirements_text[:1500]} {self.state.kickoff_text[:500]}"
+            grep_first = [e["repo"] for e in self._grep_repo_evidence(_q_grep)]
+            if grep_first:
+                _log(f"  Repo sirasi — grep kaniti one aliniyor: {grep_first}")
+        except Exception as e:
+            _log(f"  Repo sirasi grep hatasi (yoksayildi): {e}")
         if self._vector_store:
             try:
                 query = f"{self.state.requirements_text[:500]} {self.state.kickoff_text[:300]}"
@@ -3638,6 +3655,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     ordered_repos = top_names + rest
             except Exception:
                 pass
+        # Grep adaylari en one — vektor sirasi ne derse desin pencereye girsinler.
+        if grep_first:
+            ordered_repos = grep_first + [r for r in ordered_repos if r not in grep_first]
         summaries = []
         summaries_repos = []
         for rname in ordered_repos:
@@ -3955,16 +3975,22 @@ class AgileSDLCFlow(Flow[PipelineState]):
             except Exception as e:
                 _log(f"  Kod grep hatasi: {e}")
 
-        # Katman 3: Vector semantic search (son care)
-        if not prefetch_repo and self._vector_store:
-            try:
-                wi_query = f"{wi_title} {wi_desc_clean[:500]}" if wi_title else self.state.requirements_text[:500]
-                relevant = self._vector_store.find_relevant_repos(wi_query, limit=5)
-                if relevant and relevant[0]["score"] >= 0.1:
-                    prefetch_repo = relevant[0]["repo"]
-                    _log(f"  Vector repo tahmini: {prefetch_repo} (score={relevant[0]['score']:.3f})")
-            except Exception:
-                pass
+        # Katman 3: Vector semantic search — KASITLI OLARAK KALDIRILDI.
+        # OLCULDU (2026-07-29): `score >= 0.1` esigi hicbir zaman saglanamiyor;
+        # find_relevant_repos'un ulasabildigi en yuksek skor 0.031 (hibrit RRF)
+        # / 0.004 (saf vektor). Yani bu blok ZATEN olu koddu, hic ateslenmedi.
+        # Esigi dusurup calistirmak DAHA KOTU olurdu: WI 69381'in ham metninde
+        # vektor #1 `TwistedFate` (tamamen alakasiz) donuyor, dogru repo `core`
+        # #11'de. Yanlis bir repoyu "tahmin" olarak kabul etmek, hic tahmin
+        # etmemekten pahali — job #182'de yanlis repo sessizce kabul edildi.
+        # Fallback yok: grep de bossa prefetch_repo bos kalir ve asagidaki
+        # uyari loglanir, mimar 15 repo ozeti + kendi araclariyla karar verir.
+        if not prefetch_repo:
+            _log(
+                "  ⚠️ Hedef repo deterministik olarak belirlenemedi (grep kaniti yok). "
+                "Mimar repo ozetleri uzerinden karar verecek — vektor tahmini "
+                "KULLANILMIYOR (ayirt edici degil, bkz. flow.py Katman 3 notu)."
+            )
 
         # ── TAZELIK: hedef repo belirlendi, DOSYA OKUMALARINDAN ONCE fetch ──
         # Bundan sonraki her sey (pre-fetch dosya icerikleri, Faz A kesfi,
