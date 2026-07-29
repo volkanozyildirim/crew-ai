@@ -610,6 +610,154 @@ def test_grep_evidence():
                   any("Horoz" in f for f in hit["files"]), f"{hit['files']}")
 
 
+# ── 13. Retrieval: tanımlayıcı çıkarımı + tokenizer bileşiği ─────────────
+
+def test_bm25_identifier_terms():
+    from agile_sdlc_crew.tools.bm25_search import identifier_terms, tokenize
+
+    # Türkçe düzyazıda tanımlayıcı YOKSA boş dönmeli → çağıran BM25'i atlar.
+    # Ölçüm gerekçesi: 135 token'lık düzyazı BM25'e verilince sıralama gürültü
+    # oluyordu (#1 tsubasa, doğru repo ilk 15'te yok).
+    prose = "İade kabulde reasonlara göre alt depo ataması yapılacak"
+    check("düzyazıda tanımlayıcı bulunmaz", identifier_terms(prose) == [],
+          f"{identifier_terms(prose)}")
+
+    wi = "reject_reasons tablosuna stock_location alanı eklendi, getStockLocation çağrılır"
+    got = identifier_terms(wi)
+    check("snake_case yakalanır", "reject_reasons" in got and "stock_location" in got, f"{got}")
+    check("gerçek camelCase yakalanır", "getstocklocation" in got, f"{got}")
+
+    # ALL-CAPS tanımlayıcı sayılmamalı (JSON, ARALIK gibi kelimeler)
+    check("ALL-CAPS tanımlayıcı sayılmaz",
+          identifier_terms("JSON ARALIK WI ID") == [],
+          f"{identifier_terms('JSON ARALIK WI ID')}")
+
+    # Dosya yolları — tam yol dönmesi beklenen davranış (tokenizer parçalar)
+    fp = identifier_terms("app/Integration/Warehouse/Horoz.php")
+    check("dosya yolu yakalanır", any(f.endswith("horoz.php") for f in fp), f"{fp}")
+
+    # Tokenizer snake_case BİLEŞİĞİNİ korumalı — parçalanınca 'stock'/'location'
+    # genel kelimeye dönüşüp adında 'stock' geçen repoyu kazandırıyordu.
+    toks = tokenize("stock_location")
+    check("tokenizer snake_case bileşiğini korur", "stock_location" in toks, f"{toks}")
+    check("tokenizer parçaları da emit eder",
+          "stock" in toks and "location" in toks, f"{toks}")
+    # camelCase davranışı bozulmamalı
+    ct = tokenize("flo-dashboard/src/getOrderDetails.php")
+    check("camelCase bileşiği korunur", "getorderdetails" in ct, f"{ct[:8]}")
+
+
+# ── 14. Repo özeti: kolon adları çıkarımı ────────────────────────────────
+
+def test_summary_column_extraction():
+    import tempfile
+    from pathlib import Path as _P
+    from agile_sdlc_crew.tools.local_repo import LocalRepoManager
+
+    with tempfile.TemporaryDirectory() as td:
+        root = _P(td) / "fakerepo"
+        mig = root / "app" / "Migration"
+        mig.mkdir(parents=True)
+        # Butterfly checkColumn — job #182'nin gerçek kalıbı
+        (mig / "Upgrade.php").write_text(
+            "<?php\n"
+            "if (!db()->schema('reject_reasons')->checkColumn('stock_location')) {\n"
+            "  $object->string('stock_location')->columnType('varchar(10)');\n"
+            "}\n"
+            "$object->integer('warehouse_id');\n"
+            "Schema::table('orders', function($t){ $t->string('cargo_barcode'); });\n"
+            "ALTER TABLE returns ADD COLUMN reject_reason_id int;\n",
+            encoding="utf-8",
+        )
+        mgr = LocalRepoManager.__new__(LocalRepoManager)
+        sig = LocalRepoManager._extract_db_signals(mgr, root)
+        cols = sig.get("columns", [])
+        check("checkColumn kolonu çıkar", "stock_location" in cols, f"{cols}")
+        check("tip metodu kolonu çıkar", "warehouse_id" in cols, f"{cols}")
+        check("Laravel closure kolonu çıkar", "cargo_barcode" in cols, f"{cols}")
+        check("raw SQL ADD COLUMN çıkar", "reject_reason_id" in cols, f"{cols}")
+        check("tablo adları da korunur",
+              "reject_reasons" in sig["tables"] and "orders" in sig["tables"],
+              f"{sig['tables']}")
+        # Gürültü kolonları elenir (tek parçalı çok genel adlar)
+        (mig / "Noise.php").write_text(
+            "<?php $object->string('name'); $object->integer('id');\n"
+            "$object->string('order_note');\n", encoding="utf-8")
+        sig2 = LocalRepoManager._extract_db_signals(mgr, root)
+        c2 = sig2.get("columns", [])
+        check("tek parçalı genel ad elenir", "name" not in c2 and "id" not in c2, f"{c2}")
+        check("snake_case her zaman kalır", "order_note" in c2, f"{c2}")
+
+
+# ── 15. Vector indeks tazeleme (write-once hatası) ───────────────────────
+
+def test_summary_index_refresh():
+    """index_repo_summary içerik değişince kaydı TAZELEMELİ.
+
+    Önceden kayıt varsa koşulsuz `return` ediyordu → indeks write-once'tı ve
+    özet iyileştirmeleri (kolon adları) retrieval'a hiç yansımıyordu.
+    """
+    import tempfile
+    from pathlib import Path as _P
+    from types import SimpleNamespace
+    from agile_sdlc_crew.tools.vector_store import VectorStore
+
+    calls = {"deleted": [], "saved": [], "delete_kwargs": []}
+
+    class _Storage:
+        def __init__(self, content):
+            self._content = content
+        def get_scope_info(self, scope):
+            return SimpleNamespace(record_count=1, newest_record=None)
+        def list_records(self, scope, limit=500):
+            return [SimpleNamespace(id="rec-1", content=self._content,
+                                    metadata={"repo": "core", "type": "summary"})]
+        def delete(self, scope_prefix=None, categories=None, record_ids=None,
+                   older_than=None, metadata_filter=None):
+            calls["deleted"].extend(record_ids or [])
+            calls["delete_kwargs"].append(
+                {"scope_prefix": scope_prefix, "record_ids": record_ids})
+            return len(record_ids or [])
+
+    with tempfile.TemporaryDirectory() as td:
+        root = _P(td)
+        (root / "REPO_SUMMARY.md").write_text(
+            "# core\n\n## Ozet\n- PHP\n\n## DB Tablolari & Migrationlar\n"
+            "- **Tablolar**: reject_reasons\n- **Kolonlar**: stock_location\n",
+            encoding="utf-8")
+
+        vs = VectorStore.__new__(VectorStore)
+        # `hybrid` property'sinin setter'i yok — alt katman alanlarını kur.
+        vs._hybrid_enabled = False
+        vs._hybrid = None
+        vs._indexed_repos = set()
+        vs._save_record = lambda **kw: calls["saved"].append(kw)
+
+        # A) Depodaki içerik GÜNCEL → hiç yazma olmamalı
+        from agile_sdlc_crew.tools.vector_store import _extract_focused_sections
+        cur = _extract_focused_sections(
+            (root / "REPO_SUMMARY.md").read_text(encoding="utf-8"), "core")
+        vs._storage = _Storage(cur)
+        VectorStore.index_repo_summary(vs, "core", root)
+        check("içerik aynıysa yeniden embed edilmez",
+              not calls["saved"] and not calls["deleted"],
+              f"saved={len(calls['saved'])} deleted={calls['deleted']}")
+
+        # B) Depodaki içerik BAYAT → sil + yeniden yaz
+        vs._storage = _Storage("# core\n\n## Ozet\n- eski, kolon yok\n")
+        VectorStore.index_repo_summary(vs, "core", root)
+        check("içerik değişince bayat kayıt silinir",
+              calls["deleted"] == ["rec-1"], f"{calls['deleted']}")
+        check("delete record_ids KWARG ile çağrılır (ilk konumsal scope_prefix)",
+              calls["delete_kwargs"] and calls["delete_kwargs"][-1]["scope_prefix"] is None,
+              f"{calls['delete_kwargs']}")
+        check("yeni içerik kaydedilir", len(calls["saved"]) == 1,
+              f"saved={len(calls['saved'])}")
+        check("kaydedilen içerikte kolon var",
+              "stock_location" in calls["saved"][0]["content"],
+              f"{calls['saved'][0]['content'][:120]}")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -617,7 +765,8 @@ def main():
               test_requirement_ids, test_completeness, test_contract_gate,
               test_fix_targets, test_envelope, test_prune_fix_targets,
               test_reachability, test_context_prefix_stability,
-              test_grep_evidence):
+              test_grep_evidence, test_bm25_identifier_terms,
+              test_summary_column_extraction, test_summary_index_refresh):
         try:
             t()
         except Exception as e:

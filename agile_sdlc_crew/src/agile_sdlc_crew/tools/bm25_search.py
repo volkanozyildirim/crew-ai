@@ -43,6 +43,49 @@ _SPLIT_RE = re.compile(r"[\s/._\-:()\[\]{},;\"']+")
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 # Tek-karakter ve sadece-rakam token'lari ele
 _NOISE_RE = re.compile(r"^[0-9]+$|^.{0,1}$")
+# snake_case bilesigi — bolunmeden once butun olarak da emit edilir
+_SNAKE_COMPOUND_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b", re.IGNORECASE)
+
+# ── Sorgu tarafi: tanimlayici-sinifi terim cikarimi ────────
+# snake_case (tablo/kolon adlari) — en ayirt edici sinif
+_IDENT_SNAKE_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+# GERCEK camelCase/PascalCase — icinde kucuk-buyuk gecisi OLMALI ki
+# "ARALIK", "JSON", "WI" gibi ALL-CAPS kelimeler tanimlayici sayilmasin
+_IDENT_CAMEL_RE = re.compile(r"\b[a-zA-Z]*[a-z][A-Z][a-zA-Z]{2,}\b")
+# Dosya adlari
+_IDENT_FILE_RE = re.compile(r"\b[A-Za-z][\w./-]*\.(?:php|py|go|ts|tsx|js|jsx|java|cs|sql|yaml|yml)\b")
+
+
+def identifier_terms(text: str) -> list[str]:
+    """Metinden YALNIZCA tanimlayici-sinifi terimleri cikar (BM25 sorgusu icin).
+
+    Neden gerekli — OLCULDU (2026-07-29, WI 69381 + 65 repo ozeti):
+      BM25'e Turkce duzyazinin TAMAMI verilince (135 token: "iade", "kabulde",
+      "gore", "alt", "depo", "atamasi", "kapsaminda"...) siralama tamamen
+      gurultu oluyor: #1 tsubasa (28.1), #2 FloMuse, #3 TwistedFate — dogru
+      repo `core` ilk 15'e bile girmiyor. Durak-kelime filtresi yok, dolayisiyla
+      BM25 en sik gecen genel kelimeleri puanliyor.
+
+      AYNI korpusta tek bir gercek tanimlayici verilince kusursuz calisiyor:
+        "reject_reasons"              -> core #1 (1.24, ikincinin 2 kati)
+        "return_accept_package_items" -> core #1 (2.17)
+
+      Yani BM25 bozuk degil, YANLIS SORGU besleniyordu. Guclu oldugu yer nadir
+      ve birebir gecen tanimlayicilar; duzyazida ise aktif olarak zararli.
+
+    Bos liste donerse cagiran BM25 fuzyonunu TAMAMEN atlamali — saf vektor
+    siralamasi duzyazida dogru sonucu veriyor (ayni WI'de `core` 2/65).
+    """
+    if not text:
+        return []
+    out: set[str] = set()
+    for m in _IDENT_SNAKE_RE.finditer(text):
+        out.add(m.group(0).lower())
+    for m in _IDENT_CAMEL_RE.finditer(text):
+        out.add(m.group(0).lower())
+    for m in _IDENT_FILE_RE.finditer(text):
+        out.add(m.group(0).lower())
+    return sorted(out)
 
 
 def tokenize(text: str) -> list[str]:
@@ -75,6 +118,17 @@ def tokenize(text: str) -> list[str]:
             return
         seen.add(tok)
         out.append(tok)
+
+    # snake_case BILESIGINI KORU — bolmeden once.
+    # Neden — OLCULDU (2026-07-29, WI 69381): `_SPLIT_RE` alt cizgide bolduğu
+    # icin `stock_location` -> 'stock' + 'location' oluyordu. Ikisi de genel
+    # kelime; sonuc olarak sorgu, adinda 'stock' gecen `stock-api` reposunu
+    # #1 dondurup dogru repoyu (`core`) ilk 15'in disina atiyordu. Bileşik
+    # `stock_location` ise korpusta NADIR — BM25'in guclu oldugu tam bu.
+    # camelCase icin bu zaten yapiliyordu (satir altinda `_emit(part)`),
+    # snake_case atlanmisti.
+    for m in _SNAKE_COMPOUND_RE.finditer(text):
+        _emit(m.group(0))
 
     for part in _SPLIT_RE.split(text):
         if not part:
@@ -188,6 +242,9 @@ class HybridSearcher:
         # Public knobs
         self._lex_k = int(os.environ.get("CREW_BM25_LEXICAL_CANDIDATES", "50"))
         self._rrf_k = int(os.environ.get("CREW_RRF_K", "60"))
+        # BM25'e yalnizca tanimlayici-sinifi terimler gonderilsin mi (default: evet).
+        # 0 yapmak eski davranisa (tum sorgu metni) doner — olculdu, duzyazida kotu.
+        self._ident_only = os.environ.get("CREW_BM25_IDENT_ONLY", "1") not in ("0", "false", "False")
         self._fusion_mode = os.environ.get("CREW_FUSION", "rrf").lower()
         self._bm25_weight = float(os.environ.get("CREW_BM25_WEIGHT", "0.5"))
 
@@ -369,9 +426,23 @@ class HybridSearcher:
         if idx is None or not idx.record_ids:
             return vector_results[:limit]
 
-        # BM25 sorgusu
+        # BM25 sorgusu — YALNIZCA tanimlayici-sinifi terimlerle.
+        # Duzyazi sorgularinda BM25 gurultu puanliyor ve dogru sonucu asagi
+        # cekiyor; bkz. identifier_terms() docstring'indeki olcum.
         try:
-            q_tokens = tokenize(query)
+            if self._ident_only:
+                idents = identifier_terms(query)
+                if not idents:
+                    # Duzyazi sorgusu: BM25'in katkisi yok, saf vektor daha iyi.
+                    log.info(
+                        f"  BM25 atlandi ({scope_prefix}): sorguda tanimlayici-sinifi "
+                        "terim yok, saf vektor siralamasi kullaniliyor"
+                    )
+                    return vector_results[:limit]
+                q_tokens = tokenize(" ".join(idents))
+                log.info(f"  BM25 sorgusu ({scope_prefix}): {idents}")
+            else:
+                q_tokens = tokenize(query)
             if not q_tokens:
                 return vector_results[:limit]
             # bm25s retrieve API: tek query → list, ya da liste of liste

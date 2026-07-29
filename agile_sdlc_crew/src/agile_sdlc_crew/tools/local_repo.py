@@ -769,13 +769,18 @@ class LocalRepoManager:
         # "2024_01_01_add_scheduled_delivery_date_range_to_order_address.php"),
         # bu da repo seciminde en ayirt edici sinyaldir.
         db = self._extract_db_signals(repo_dir)
-        if db.get("tables") or db.get("migrations"):
+        if db.get("tables") or db.get("migrations") or db.get("columns"):
             lines.append("## DB Tablolari & Migrationlar")
             if db.get("tables"):
                 # Repo seciminde en ayirt edici sinyal — buyuk monolithlerde
                 # 200+ tablo olabilir, alfabetik kesilirse 'o' / 'p' / 'r' harfli
                 # tablolar duser (ornegin order_addresses), o yuzden cap genis.
                 lines.append(f"- **Tablolar**: {', '.join(db['tables'][:300])}")
+            if db.get("columns"):
+                # Kolon adlari — is kalemleri cogu zaman TABLO degil KOLON
+                # seviyesinde konusur ("reject_reasons tablosuna stock_location
+                # eklendi"). Tablo listesi tek basina bu WI'lari bulamiyor.
+                lines.append(f"- **Kolonlar**: {', '.join(db['columns'][:400])}")
             if db.get("migrations"):
                 lines.append("- **Son Migration'lar**:")
                 for m in db["migrations"][-40:]:
@@ -878,7 +883,9 @@ class LocalRepoManager:
         migrations: list[str] = []
 
         table_call_re = _re.compile(
-            r"Schema::(?:table|create|hasTable|drop|dropIfExists)\(\s*['\"]([a-z_][a-z0-9_]*)['\"]",
+            # Laravel: Schema::table('x') / Butterfly: db()->schema('x')
+            r"(?:Schema::(?:table|create|hasTable|drop|dropIfExists)|"
+            r"(?:db\(\)\s*)?->\s*schema)\(\s*['\"]([a-z_][a-z0-9_]*)['\"]",
             _re.IGNORECASE,
         )
         # Laravel: protected $table = 'xxx'  /  Butterfly: protected $_name = 'xxx'
@@ -891,6 +898,43 @@ class LocalRepoManager:
             r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`'\"]?([a-z_][a-z0-9_]*)[`'\"]?",
             _re.IGNORECASE,
         )
+
+        # ── KOLON adlari ──────────────────────────────────────────────────
+        # Neden gerekli — OLCULDU (2026-07-29, WI 69381): ozetler yalnizca TABLO
+        # adi tasiyordu, kolon adi tasimiyordu. WI'nin tum ayirt edici sinyali
+        # `stock_location` KOLONUNDAYDI; `core`'un ozetinde `reject_reasons`
+        # tablosu vardi ama `stock_location` YOKTU. Sonuc: ne vektor ne BM25
+        # dogru repoyu bulabildi (BM25 'stock' icin core'u hic dondurmedi —
+        # cunku ozette gercekten yoktu; hata retrieval'da degil, INDEKSLENEN
+        # DOKUMANDA'ydi). Veri zaten okudugumuz dosyadaydi:
+        #   core/app/Migration/Upgrade.php:1194
+        #   if (!db()->schema('reject_reasons')->checkColumn('stock_location'))
+        # Butterfly: ->checkColumn('x') / ->dropColumn('x') / $object->string('x')
+        column_bf_re = _re.compile(
+            r"->(?:checkColumn|dropColumn|renameColumn)\(\s*['\"]([a-z_][a-z0-9_]*)['\"]",
+            _re.IGNORECASE,
+        )
+        # Butterfly + Laravel schema builder tip metodlari: ->string('x'), ->integer('x')
+        column_type_re = _re.compile(
+            r"->(?:string|integer|bigInteger|tinyInteger|smallInteger|boolean|text|"
+            r"longText|mediumText|date|dateTime|datetime|timestamp|decimal|float|"
+            r"double|json|enum|char|unsignedBigInteger|unsignedInteger)\(\s*"
+            r"['\"]([a-z_][a-z0-9_]*)['\"]",
+        )
+        # Raw SQL: ALTER TABLE ... ADD [COLUMN] `x`
+        column_sql_re = _re.compile(
+            r"ADD\s+(?:COLUMN\s+)?[`'\"]?([a-z_][a-z0-9_]*)[`'\"]?\s+"
+            r"(?:varchar|int|bigint|tinyint|smallint|text|longtext|mediumtext|"
+            r"date|datetime|timestamp|decimal|float|double|json|enum|char|boolean|bool)",
+            _re.IGNORECASE,
+        )
+        columns: set[str] = set()
+        # Kolon adi olmayacak kadar genel olanlari ele — ozetin sinyalini seyreltir
+        _COL_NOISE = {
+            "id", "created_at", "updated_at", "deleted_at", "created", "updated",
+            "name", "title", "type", "status", "value", "data", "date", "time",
+            "code", "key", "text", "note", "notes", "description", "active",
+        }
 
         # Migration dizinleri (Butterfly, Laravel, generic)
         migration_dirs = [
@@ -917,6 +961,13 @@ class LocalRepoManager:
                         tables.add(m.group(1).lower())
                     for m in create_table_sql_re.finditer(txt):
                         tables.add(m.group(1).lower())
+                    for rx in (column_bf_re, column_type_re, column_sql_re):
+                        for m in rx.finditer(txt):
+                            col = m.group(1).lower()
+                            # Tek parcali cok genel adlari atla; snake_case olanlar
+                            # (iki+ parca) ayirt edici oldugu icin her zaman kalir.
+                            if "_" in col or col not in _COL_NOISE:
+                                columns.add(col)
                 except Exception:
                     pass
 
@@ -942,6 +993,7 @@ class LocalRepoManager:
         return {
             "tables": sorted(tables),
             "migrations": migrations,
+            "columns": sorted(columns),
         }
 
     def _extract_meaningful_deps(self, repo_dir: Path) -> list[str]:
