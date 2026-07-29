@@ -321,20 +321,46 @@ class VectorStore:
             return
 
         scope = "/repo-summaries"
-        # Zaten var mi kontrol et (basit liste)
+        content = summary_file.read_text(encoding="utf-8", errors="replace")
+        focused = _extract_focused_sections(content, repo_name)
+
+        # Kayit varsa ICERIGI KARSILASTIR — ayniysa atla, DEGISTIYSE tazele.
+        # Onceden burada kosulsuz `return` vardi: kayit bir kez yazildiktan
+        # sonra ASLA guncellenmiyordu (write-once indeks). Sonuc: 2026-07-08'de
+        # embed edilen ozetler donmustu ve generate_repo_summary'deki hicbir
+        # iyilestirme indekse ULASMIYORDU. Kolon adlarini ozete eklemek de
+        # (2026-07-29) bu yuzden retrieval'a hic yansimadi — olculdu:
+        # scope newest_record 2026-07-08'de kaldi, yeniden indeksleme 0 yazdi.
+        stale_ids: list = []
         try:
             info = self.storage.get_scope_info(scope)
             if info and info.record_count > 0:
-                existing = self.storage.list_records(scope, limit=200)
-                for r in existing:
-                    if r.metadata.get("repo") == repo_name:
-                        return  # zaten var
+                for r in self.storage.list_records(scope, limit=500):
+                    if r.metadata.get("repo") != repo_name:
+                        continue
+                    if (r.content or "").strip() == focused.strip():
+                        return  # icerik ayni — yeniden embed etmeye gerek yok
+                    rid = getattr(r, "id", None)
+                    if rid:
+                        stale_ids.append(rid)
         except Exception:
             pass
 
+        if stale_ids:
+            # DIKKAT: storage.delete()'in ilk konumsal parametresi `scope_prefix`,
+            # record id DEGIL — `delete(rid)` sessizce hicbir sey silmez.
+            try:
+                self.storage.delete(record_ids=stale_ids)
+            except Exception as e:
+                log.warning(f"  Bayat summary kaydi silinemedi ({repo_name}): {e}")
+            log.info(f"  Summary tazelendi: {repo_name} ({len(stale_ids)} bayat kayit silindi)")
+            if self.hybrid:
+                try:
+                    self.hybrid.invalidate(scope)
+                except Exception:
+                    pass
+
         try:
-            content = summary_file.read_text(encoding="utf-8", errors="replace")
-            focused = _extract_focused_sections(content, repo_name)
             self._save_record(
                 content=focused,
                 scope=scope,
