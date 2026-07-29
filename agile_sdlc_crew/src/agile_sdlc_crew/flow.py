@@ -2774,7 +2774,64 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 except Exception as e:
                     _log(f"  Repo clone hatasi ({name}): {e}")
         if new_clones > 0:
-            _log(f"  {new_clones} yeni repo clone edildi (diger repolar fetch edilmedi, hiz icin)")
+            _log(f"  {new_clones} yeni repo clone edildi")
+
+        # ── TUM KLONLARI TAZELE (paralel) ───────────────────────────────────
+        # Onceden hicbir repo fetch edilmiyordu ("hiz icin"). Olculen sonuc:
+        # 66 klonun ~20'si (%30) remote'un GERISINDEYDI; ozellikle `core` 42 gun
+        # geride. Yani klonlari okuyan her sey — grep kaniti, repo ozetleri,
+        # vector store, mimarin --add-dir kesfi — eksik kod goruyordu.
+        #
+        # NOT: klonlarin ortanca commit yasi 202 gun ama bu BAYATLIK DEGIL,
+        # repolarin cogunun gercekten olu olmasi (fetch sonrasi da degismiyor).
+        # Onemli olan "remote'un kac commit gerisinde" — fetch onceki olcumde
+        # 17 repo ilerledi.
+        #
+        # Bu tam olarak kovaladigimiz hata sinifi: son eklenen bir mekanizma
+        # klonlarda hic gorunmez, mimar "yok, yazmam lazim" der ve paralel bir
+        # uygulama uretir (WI 69381: mekanizma core'da hazirdi).
+        #
+        # Seri fetch 66 repo icin 1-8 dakika (olculen: core 976ms, channel
+        # 608ms, webservice 7.7s) — kabul edilemez. Paralel havuzla ~10-40s.
+        # Env: CREW_FRESHEN_ALL_REPOS.
+        from agile_sdlc_crew import pipeline_config as _pc_fr
+        if _pc_fr.get("CREW_FRESHEN_ALL_REPOS") and self.state.known_repos:
+            import concurrent.futures as _cf
+            import time as _t_fr
+
+            def _fetch_one(rname: str):
+                d = self._repo_mgr.base_dir / rname
+                if not (d / ".git").exists():
+                    return (rname, None, None)
+                try:
+                    before = self._repo_mgr._git(
+                        ["rev-parse", "origin/main"], cwd=d).stdout.strip()
+                    for br in ("main", "master"):
+                        r = self._repo_mgr._git(["fetch", "origin", br], cwd=d, timeout=60)
+                        if r.returncode == 0:
+                            break
+                    after = self._repo_mgr._git(
+                        ["rev-parse", "origin/main"], cwd=d).stdout.strip()
+                    return (rname, before, after)
+                except Exception:
+                    return (rname, None, None)
+
+            _t0 = _t_fr.monotonic()
+            moved, failed = [], 0
+            with _cf.ThreadPoolExecutor(max_workers=12) as ex:
+                for rname, before, after in ex.map(_fetch_one, self.state.known_repos):
+                    if before is None and after is None:
+                        failed += 1
+                    elif before != after:
+                        moved.append(rname)
+            _dur = _t_fr.monotonic() - _t0
+            _log(f"  🔄 Klon tazeleme: {len(self.state.known_repos)} repo, "
+                 f"{len(moved)} ilerledi, {failed} atlandı ({_dur:.0f}s)")
+            if moved:
+                _log(f"     ilerleyenler: {', '.join(sorted(moved)[:8])}"
+                     + (f" (+{len(moved)-8})" if len(moved) > 8 else ""))
+        else:
+            _log("  ⚠️ Klon tazeleme KAPALI — grep/özet/vector bayat kod görebilir")
 
         # Workspace cleanup (KESIF FAZI): sadece BU WI'nin onceki run'larindan
         # kalan artik feature branch'i olan repolari temizle. Tum repolari

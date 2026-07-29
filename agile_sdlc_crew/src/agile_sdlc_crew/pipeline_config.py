@@ -301,6 +301,13 @@ SCHEMA: list[dict] = [
         "desc": "Push öncesi arity kontrolü (LLM yok): eklenen metot çağrısının argüman sayısı repodaki imzayla uyuşuyor mu. php -l bu sınıfı GÖREMEZ çünkü geçici dosyada izole çalışır — job #179'da Allocator.php luggageSuffix'e 4. argüman geçti, imza 3 parametreliydi, PHP fazlasını sessizce yuttu, linter PASS verdi, reviewer da kaçırdı ve düzenleme tamamen no-op oldu. İhlalde push iptal edilir ve WI'ya yazılır. Sadece PHP; diğer dillerde atlanır.",
     },
     {
+        "key": "CREW_FRESHEN_ALL_REPOS",
+        "label": "Tüm Klonları Tazele (paralel fetch)",
+        "type": "bool",
+        "default": False,
+        "desc": "initialize'da TÜM klonların origin/main'ini paralel fetch et. Ölçülen sorun: 66 klonun ~20'si (%30) remote'un gerisindeydi; özellikle `core` 42 gün geride — yani grep kanıtı, repo özetleri, vector store ve mimarın --add-dir keşfi eksik kod görüyordu. Son eklenen bir mekanizma klonlarda hiç görünmediği için mimar 'yok, yazmam lazım' deyip paralel uygulama üretiyor (WI 69381). Maliyeti süre: seri 1-8 dakika, 12 işçili paralel havuzla ~10-40s.",
+    },
+    {
         "key": "CREW_ISSUE_GATE",
         "label": "İtiraz Kapısı (Katman 0)",
         "type": "bool",
