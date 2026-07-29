@@ -77,7 +77,7 @@ SCHEMA: list[dict] = [
         "label": "Knowledge RAG",
         "type": "bool",
         "default": False,
-        "desc": "Domain knowledge'i backstory'ye tikistirmak yerine CrewAI Knowledge ile RAG olarak ver (token tasarrufu, kucuk modelde odak).",
+        "desc": "Domain knowledge'i backstory yerine CrewAI Knowledge/RAG ile ver. OLCULDU (job #182, 2026-07-29): FAYDASIZ, ACMA. knowledge/*.md dosyalari 2.8-4.5 KB, chunk_size=4000 -> her biri 1-2 chunk; results_limit=5 + score_threshold=0.6 ile retrieval her sorguda DOKUMANIN TAMAMINI donuyor (kapsam %100-104). Cop sorgu ve gercek sorgu birebir ayni sonucu veriyor. Karsiliginda CrewAI her gorev icin _get_knowledge_search_query ile TUM task prompt'unu (~20k token) modele yollayip arama cumlesi uretiyor: job #182'de 23 ekstra cagri = 5.62 USD = toplam maliyetin %37'si. Kapaliyken ayni dokumanlar backstory'ye giriyor (~0.31 USD, sistem prompt prefix'inde daha iyi cache'lenir). Chunk ayarini duzeltmek de kurtarmaz: embedder (multilingual-e5-large) ayirt edici degil - bos string 0.77, anlamsiz metin 0.81, ilgili sorgu 0.85 skor aliyor.",
     },
     {
         "key": "CREW_REPO_HISTORY_SUGGEST",
