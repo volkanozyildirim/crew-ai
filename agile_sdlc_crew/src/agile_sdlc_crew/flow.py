@@ -561,6 +561,18 @@ class _KickoffOnlyStop(Exception):
     pass
 
 
+# WI/gereksinim metnindeki, bizim KENDI JSON semamizdan gelen meta adlar —
+# her WI'da aynilar, grep sinyali degil gurultu. Modul seviyesinde: pydantic
+# Flow sinifinda alt-cizgili sinif niteligi PrivateAttr'a donusuyor.
+_GREP_STOPWORDS = frozenset({
+    "acceptance_criteria", "functional_requirements", "technical_requirements",
+    "open_questions", "out_of_scope", "work_item_id", "requirement_ids",
+    "fix_targets", "covers_requirements", "file_path", "change_type",
+    "current_code", "new_code", "repo_name", "breaking_changes",
+    "migration_notes", "security_perf_notes", "alternatives_considered",
+})
+
+
 class NeedsHumanReview(Exception):
     """Pipeline kullanilabilir is uretti ama kendi kalite kapisini gecemedi.
 
@@ -1802,6 +1814,167 @@ class AgileSDLCFlow(Flow[PipelineState]):
     def _envelope_retries(self, default: int) -> int:
         env = getattr(self, "_envelope", None)
         return int(env["retries"]) if env else int(default)
+
+    def _grep_repo_evidence(self, wi_text: str, limit: int = 4) -> list:
+        """WI metnindeki SOMUT sembolleri tum klonlarda ara (LLM yok, ~0 maliyet).
+
+        Amaci repo KARARI VERMEK degil — dogru repoyu mimarin MASASINA koymak.
+        Job #182'de mekanizma `core:app/Integration/Warehouse/Horoz.php`'de
+        hazirdi (reject_reasons JOIN + stock_location bos ise varsayilan) ama
+        mimar `--add-dir` ile yalnizca 3 repo goruyordu ve `core` aralarinda
+        degildi; bulma sansi YOKTU, sifirdan paralel bir mekanizma yazdi.
+
+        Mevcut kod grep'inin uc kusuru vardi:
+          1. Yalnizca `prefetch_repo` BOSSA kosuyordu → discover_repos bir cevap
+             verdiyse hic calismiyordu
+          2. snake_case tablo/kolon adlarini HIC yakalamiyordu (`reject_reasons`,
+             `stock_location`) — WI 69381'de camelCase regex'i sifir terim buldu
+          3. Calisma agacini grep'liyordu (feature branch'te checkout'lu olabilir)
+
+        Siralama sinyali: bir dosyada BIRDEN FAZLA terimin birlikte gecmesi, tek
+        terimin varliginda cok daha guclu kanittir. WI 69381'de birlikte-gecme
+        `core`'u ustte ve dogru dosyayi ilk sirada gosteriyor.
+
+        DURUST SINIR: bu, dogru repoyu garanti ETMEZ. O vakada `reject_reasons`
+        4 repoda, `stock_location` 3 repoda geciyordu ve WI metni 'Horoz'
+        kelimesini hic icermiyordu — hicbir deterministik sinyal `core`'u tek
+        basina secemezdi. Yaptigi sey adaylari dogru kumeye genisletmek.
+
+        Doner: [{repo, terms, files, cooccur}] — cooccur'a gore sirali."""
+        import re as _re_gr
+        import subprocess as _sp_gr
+
+        txt = wi_text or ""
+        terms: set = set()
+        # snake_case (tablo/kolon adlari) — en ayirt edici sinif
+        for m in _re_gr.finditer(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b", txt):
+            t = m.group(0)
+            if len(t) >= 8 and t not in _GREP_STOPWORDS:
+                terms.add(t)
+        # camelCase / PascalCase sinif adlari. TUMU BUYUK HARF olanlar sinif
+        # adi degil (ASSUMPTION, TODO, JSON gibi) — kucuk harf ARDINDAN buyuk
+        # harf gelmesini sart kos, aksi halde WI duzyazisi gurultu uretiyor.
+        for m in _re_gr.finditer(r"\b([a-zA-Z]*[a-z][A-Z][a-zA-Z]{2,})\b", txt):
+            terms.add(m.group(1))
+        # dosya adlari (uzantisiz govde)
+        for m in _re_gr.finditer(r"\b(\w{4,})\.(?:php|py|ts|tsx|js|go|cs|java)\b", txt):
+            terms.add(m.group(1))
+        # /api/<segment>
+        for m in _re_gr.finditer(r"/api/(\w{3,})", txt, _re_gr.IGNORECASE):
+            terms.add(m.group(1))
+        terms = {t for t in terms if len(t) >= 5}
+        if not terms:
+            return []
+        terms_l = sorted(terms)[:8]
+        _log(f"  🔍 Grep kanıtı — semboller: {terms_l}")
+
+        out = []
+        for rname in self.state.known_repos:
+            repo_dir = self._repo_mgr.base_dir / rname
+            if not (repo_dir / ".git").exists():
+                continue
+            # origin/main uzerinde ara — calisma agaci feature branch'te olabilir
+            ref = "origin/main"
+            try:
+                if self._repo_mgr._git(
+                    ["rev-parse", "--verify", "--quiet", ref], cwd=repo_dir
+                ).returncode != 0:
+                    ref = "HEAD"
+            except Exception:
+                continue
+            file_terms: dict = {}
+            for term in terms_l:
+                try:
+                    r = _sp_gr.run(
+                        ["git", "-C", str(repo_dir), "grep", "-l", "--", term, ref],
+                        capture_output=True, text=True, timeout=12,
+                    )
+                except Exception:
+                    continue
+                if r.returncode != 0:
+                    continue
+                for line in (r.stdout or "").strip().split("\n"):
+                    if ":" not in line:
+                        continue
+                    f = line.split(":", 1)[1]
+                    if "/vendor/" in f or "/node_modules/" in f:
+                        continue
+                    file_terms.setdefault(f, set()).add(term)
+            if not file_terms:
+                continue
+            # Birlikte-gecme: ayni dosyada >=2 terim
+            cooccur = {f: ts for f, ts in file_terms.items() if len(ts) >= 2}
+            matched_terms = set().union(*file_terms.values())
+            ranked_files = sorted(
+                file_terms, key=lambda f: (-len(file_terms[f]), f)
+            )[:5]
+            out.append({
+                "repo": rname,
+                "terms": sorted(matched_terms),
+                "files": ranked_files,
+                "cooccur": len(cooccur),
+            })
+        out.sort(key=lambda x: (-x["cooccur"], -len(x["terms"]), x["repo"]))
+        for e in out[:limit]:
+            _log(f"    · {e['repo']}: {e['cooccur']} dosyada birlikte, "
+                 f"{len(e['terms'])} terim → {e['files'][:2]}")
+        # SIRALAMANIN GUCUNU SAKLAMA. Hicbir repoda birlikte-gecme yoksa siralama
+        # tek terime ve alfabetik tie-break'e dusuyor — yani ustteki repo SINYAL
+        # DEGIL, tesadüf olabilir. WI 69381'de tam boyle oldu (tek ayirt edici
+        # terim: stock_location). Bu durumda kanit "hangi repo dogru" demiyor,
+        # yalnizca "bu dosyalara bak" diyor.
+        if out and all(e["cooccur"] == 0 for e in out[:limit]):
+            _log("    ⚠️ Hiçbir repoda birlikte-geçme yok → sıralama ZAYIF "
+                 "(tek terim + alfabetik). Kanıt aday genişletmek için, "
+                 "karar vermek için değil.")
+        return out[:limit]
+
+    def _freshen_target_repo(self, repo_name: str) -> bool:
+        """Hedef repo'nun origin/main'ini GUNCELLE — mimar bayat gerceklik gormesin.
+
+        `initialize` tum repolari `fetch=False` ile hazirliyor (hiz icin, bilincli).
+        Hedef repo'nun fetch'i ise step5'te, yani TEKNIK TASARIMDAN SONRA yapiliyor.
+        Sonuc: mimar her zaman BAYAT bir main uzerinde plan yapiyor.
+
+        Job #182 bunun bedelini gosterdi: WI 69381'in mekanizmasi
+        (`Refund::getStockLocationByReason` + `REASON_STOCK_LOCATIONS`) main'e
+        10:45'te girdi; job 13:37'de basladi ama klon fetch edilmedigi icin mimar
+        13:39-13:44 arasindaki kesifte o kodu GOREMEDI ve "yok, yazmam lazim"
+        diyip paralel bir uygulama uretti. Mimarin yetenegi degil, ona yanlis
+        gerceklik gosterilmesi sorunu.
+
+        Ayrica `_validate_plan_paths` base ref olarak origin/main kullaniyor —
+        bayat klonla o kapi da bayat gercekliğe karsi dogruluyor.
+
+        Doner: main HAREKET ETTIYSE True (yani klon bayatti)."""
+        if not repo_name:
+            return False
+        try:
+            repo_dir = self._repo_mgr.base_dir / repo_name
+            if not (repo_dir / ".git").exists():
+                return False
+            before = self._repo_mgr._git(
+                ["rev-parse", "origin/main"], cwd=repo_dir).stdout.strip()
+            self._repo_mgr.set_remote_auth(repo_name)
+            r = self._repo_mgr._git(["fetch", "origin", "main"], cwd=repo_dir)
+            if r.returncode != 0:
+                _log(f"  ⚠️ Tazelik: {repo_name} fetch BASARISIZ — mimar bayat "
+                     f"main görebilir (git auth?)")
+                return False
+            after = self._repo_mgr._git(
+                ["rev-parse", "origin/main"], cwd=repo_dir).stdout.strip()
+            if before and after and before != after:
+                n = self._repo_mgr._git(
+                    ["rev-list", "--count", f"{before}..{after}"], cwd=repo_dir
+                ).stdout.strip() or "?"
+                _log(f"  🔄 Tazelik: {repo_name} main {n} commit ilerlemiş "
+                     f"({before[:8]} → {after[:8]}) — mimar GÜNCEL kodu görecek")
+                return True
+            _log(f"  ✓ Tazelik: {repo_name} main güncel ({(after or '?')[:8]})")
+            return False
+        except Exception as e:
+            _log(f"  Tazelik kontrolü hatası (atlanıyor): {e}")
+            return False
 
     def _verify_issue_loc(self, loc: dict) -> bool:
         """Review itirazinin gosterdigi {file, line, quote} gercekten var mi?
@@ -3649,6 +3822,33 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 prefetch_repo = repo_history_suggestions[0]["repo"]
                 _log(f"  Adim 4 hedef repo (geçmiş-iş): {prefetch_repo} (skor {repo_history_suggestions[0]['score']})")
 
+        # ── KATMAN 0: DETERMINISTIK GREP KANITI (LLM yok, HER ZAMAN kosar) ──
+        # Onceden bu grep yalnizca `prefetch_repo` BOSSA kosuyordu; discover_repos
+        # bir cevap verdiyse hic calismiyordu ve yanlis repo sessizce kabul
+        # ediliyordu (job #182: mekanizma `core`'da, pipeline `orkestra` sectі).
+        # Artik her zaman kosar, karar VERMEZ ama kaniti mimarin masasina koyar.
+        self._grep_evidence = []
+        try:
+            _gsrc = f"{wi_title} {wi_desc_clean} {wi_criteria_clean}"
+            self._grep_evidence = self._grep_repo_evidence(_gsrc)
+            if self._grep_evidence:
+                _ev_md = "\n".join(
+                    f"- **{e['repo']}** — {e['cooccur']} dosyada birden fazla terim "
+                    f"birlikte geçiyor; en güçlü eşleşmeler: "
+                    + ", ".join(f"`{f}`" for f in e["files"][:3])
+                    for e in self._grep_evidence
+                )
+                ctx += (
+                    "\n\n# 🔍 KOD ARAMA KANITI (deterministik, tüm repolarda)\n"
+                    "WI metnindeki somut semboller (tablo/kolon/sınıf adları) tüm "
+                    "klonlarda arandı. Aşağıdaki repolarda BİRLİKTE geçiyorlar — "
+                    "yani aradığın mekanizma ORADA HAZIR OLABİLİR.\n"
+                    "⚠️ Sıfırdan yazmadan ÖNCE bu dosyalara bak; mevcut bir yapıyı "
+                    "tekrar yazmak WI'nın istediği şey değildir.\n\n" + _ev_md + "\n"
+                )
+        except Exception as _e_ge:
+            _log(f"  Grep kanıtı hatası (atlanıyor): {_e_ge}")
+
         # Katman 2: Kod grep — teknik terimler repo kodlarinda geciyorsa
         if not prefetch_repo:
             try:
@@ -3708,6 +3908,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     _log(f"  Vector repo tahmini: {prefetch_repo} (score={relevant[0]['score']:.3f})")
             except Exception:
                 pass
+
+        # ── TAZELIK: hedef repo belirlendi, DOSYA OKUMALARINDAN ONCE fetch ──
+        # Bundan sonraki her sey (pre-fetch dosya icerikleri, Faz A kesfi,
+        # _validate_plan_paths'in origin/main base ref'i) bu klondan okuyor.
+        # Bayat klon = mimara yanlis gerceklik (job #182: WI'nin mekanizmasi
+        # main'de 10:45'te vardi, job 13:37'de basladi, mimar goremedi ve
+        # paralel bir uygulama uretti).
+        if prefetch_repo:
+            self._freshen_target_repo(prefetch_repo)
 
         if prefetch_repo:
             rel_text = "\n".join(f"- {r['repo']} (score: {r['score']:.3f})" for r in relevant)
@@ -3998,8 +4207,18 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _cand = [prefetch_repo] + [
                 a for a in getattr(self, "_discovered_alternatives", []) if a != prefetch_repo
             ]
+            # Grep kanitli repolar ADAY LISTESINE ZORLA girer. Job #182'de
+            # mekanizma `core`'da hazirdi ama `core` --add-dir listesinde
+            # olmadigi icin mimarin onu bulma sansi YOKTU; ne kadar iyi kesif
+            # yaparsa yapsin goremedigi repoda arama yapamaz.
+            _ge = getattr(self, "_grep_evidence", []) or []
+            for e in _ge:
+                if e["repo"] not in _cand:
+                    _cand.append(e["repo"])
+                    _log(f"  📌 Grep kanıtıyla aday eklendi: {e['repo']} "
+                         f"({e['cooccur']} dosyada birlikte geçme)")
             _repo_dirs = [
-                str(self._repo_mgr.base_dir / r) for r in _cand[:3]
+                str(self._repo_mgr.base_dir / r) for r in _cand[:4]
                 if (self._repo_mgr.base_dir / r).exists()
             ]
 
