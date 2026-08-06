@@ -104,6 +104,8 @@ header {
 }
 .kanban-column-title { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
 .kanban-column-count { font-size:11px; font-weight:600; background:var(--bg-elevated); padding:3px 9px; border-radius:10px; color:var(--text-dim); }
+.kanban-column-meta { display:flex; align-items:center; gap:6px; flex-shrink:0; }
+.kanban-column-sp { font-size:11px; font-weight:700; padding:3px 8px; border-radius:10px; background:rgba(108,92,231,0.18); color:var(--accent-light); }
 .kanban-column-body { padding:8px; display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 280px); overflow-y:auto; }
 
 /* ── WI Card ── */
@@ -127,6 +129,12 @@ header {
 .wi-link { text-decoration:none; transition:color 0.15s; }
 .wi-link:hover { color:var(--accent-light); text-decoration:underline; }
 .wi-priority { font-size:10px; margin-left:auto; font-weight:600; }
+/* SP rozeti — kart basliginin sag ucu, priority'den sonra */
+.wi-sp {
+  font-size:10px; font-weight:700; padding:2px 7px; border-radius:9px;
+  background:rgba(108,92,231,0.18); color:var(--accent-light); flex-shrink:0;
+}
+.wi-sp.none { background:none; padding:2px 3px; color:var(--text-dim); font-weight:600; }
 .wi-priority[data-p="1"] { color:#e17055; }
 .wi-priority[data-p="2"] { color:#fdcb6e; }
 .wi-priority[data-p="3"] { color:#74b9ff; }
@@ -890,16 +898,14 @@ async function loadBoard(){
   // SP toplami. Kapsami da gosteriyoruz (kac isin SP'si var): tahmini
   // girilmemis is toplama 0 katkida bulunur, dolayisiyla ciplak bir toplam
   // "18 isin tamami tahminlenmis" gibi okunur — 12/18 ise oyle degil.
-  const spTot=items.reduce((a,i)=>a+(Number(i.storyPoints)||0),0);
-  const spN=items.filter(i=>(Number(i.storyPoints)||0)>0).length;
   sum.innerHTML=`<div class="sprint-stat"><div class="sprint-stat-val">${items.length}</div><div class="sprint-stat-lbl">Toplam</div></div>`
-    +`<div class="sprint-stat"><div class="sprint-stat-val" style="color:var(--accent-light)">${fmtSP(spTot)}</div><div class="sprint-stat-lbl">SP · ${spN}/${items.length} iş</div></div>`
+    +`<div class="sprint-stat"><div class="sprint-stat-val" style="color:var(--accent-light)">${fmtSP(spSum(items))}</div><div class="sprint-stat-lbl">SP · ${spCount(items)}/${items.length} iş</div></div>`
     +sts.map(s=>`<div class="sprint-stat"><div class="sprint-stat-val" style="color:${sc(s)}">${bs[s]}</div><div class="sprint-stat-lbl">${esc(s)}</div></div>`).join('');
   sum.style.display='flex';
   // Kanban
   const gr={};for(const i of items){if(!gr[i.state])gr[i.state]=[];gr[i.state].push(i)}
   const cols=Object.keys(gr).sort((a,b)=>so(a)-so(b));
-  c.innerHTML=`<div class="kanban-board" style="grid-template-columns:repeat(${cols.length},minmax(210px,1fr))">`+cols.map(s=>`<div class="kanban-column"><div class="kanban-column-header" style="border-top:3px solid ${sc(s)}"><span class="kanban-column-title">${esc(s)}</span><span class="kanban-column-count">${gr[s].length}</span></div><div class="kanban-column-body">${gr[s].map(wiCard).join('')}</div></div>`).join('')+'</div>';
+  c.innerHTML=`<div class="kanban-board" style="grid-template-columns:repeat(${cols.length},minmax(210px,1fr))">`+cols.map(s=>`<div class="kanban-column"><div class="kanban-column-header" style="border-top:3px solid ${sc(s)}"><span class="kanban-column-title">${esc(s)}</span><span class="kanban-column-meta"><span class="kanban-column-sp">${fmtSP(spSum(gr[s]))} SP</span><span class="kanban-column-count">${gr[s].length}</span></span></div><div class="kanban-column-body">${gr[s].map(wiCard).join('')}</div></div>`).join('')+'</div>';
   }catch(e){c.innerHTML=`<div class="board-empty">Hata: ${esc(e.message)}</div>`;sum.style.display='none'}
 }
 
@@ -908,6 +914,10 @@ const SC={'New':'#6c5ce7','Backlog':'#6c5ce7','To Do':'#a29bfe','Active':'#74b9f
 function sc(s){return SC[s]||'#8b8fa3'}function so(s){const i=SO.indexOf(s);return i>=0?i:999}
 // SP float gelir (Custom.StoryPoints): 2.0 -> "2", 2.5 -> "2.5"
 function fmtSP(v){return Number.isInteger(v)?String(v):v.toFixed(1)}
+// API string de donebilir ("3") — Number() ile coz, tahmin girilmemisse 0.
+function spOf(it){return Number(it.storyPoints)||0}
+function spSum(arr){return arr.reduce((a,i)=>a+spOf(i),0)}
+function spCount(arr){return arr.filter(i=>spOf(i)>0).length}
 
 const QS=['New','Backlog','To Do'];
 function wiCard(it){
@@ -923,6 +933,7 @@ function wiCard(it){
       <div class="wi-type-icon ${t.c}">${t.i}</div>
       ${it.url?`<a class="wi-id wi-link" href="${esc(it.url)}" target="_blank" onclick="event.stopPropagation()">#${it.id}</a>`:`<span class="wi-id">#${it.id}</span>`}
       <span class="wi-priority" data-p="${it.priority}">${pl[it.priority]||''}</span>
+      ${spOf(it)>0?`<span class="wi-sp">${fmtSP(spOf(it))}</span>`:`<span class="wi-sp none" title="Story point girilmemiş">—</span>`}
     </div>
     <div class="wi-title">${esc(it.title)}</div>
     <div class="wi-footer">
