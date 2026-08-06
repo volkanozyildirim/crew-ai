@@ -887,7 +887,14 @@ async function loadBoard(){
   // Summary
   const bs={};for(const i of items)bs[i.state]=(bs[i.state]||0)+1;
   const sts=Object.keys(bs).sort((a,b)=>so(a)-so(b));
-  sum.innerHTML=`<div class="sprint-stat"><div class="sprint-stat-val">${items.length}</div><div class="sprint-stat-lbl">Toplam</div></div>`+sts.map(s=>`<div class="sprint-stat"><div class="sprint-stat-val" style="color:${sc(s)}">${bs[s]}</div><div class="sprint-stat-lbl">${esc(s)}</div></div>`).join('');
+  // SP toplami. Kapsami da gosteriyoruz (kac isin SP'si var): tahmini
+  // girilmemis is toplama 0 katkida bulunur, dolayisiyla ciplak bir toplam
+  // "18 isin tamami tahminlenmis" gibi okunur — 12/18 ise oyle degil.
+  const spTot=items.reduce((a,i)=>a+(Number(i.storyPoints)||0),0);
+  const spN=items.filter(i=>(Number(i.storyPoints)||0)>0).length;
+  sum.innerHTML=`<div class="sprint-stat"><div class="sprint-stat-val">${items.length}</div><div class="sprint-stat-lbl">Toplam</div></div>`
+    +`<div class="sprint-stat"><div class="sprint-stat-val" style="color:var(--accent-light)">${fmtSP(spTot)}</div><div class="sprint-stat-lbl">SP · ${spN}/${items.length} iş</div></div>`
+    +sts.map(s=>`<div class="sprint-stat"><div class="sprint-stat-val" style="color:${sc(s)}">${bs[s]}</div><div class="sprint-stat-lbl">${esc(s)}</div></div>`).join('');
   sum.style.display='flex';
   // Kanban
   const gr={};for(const i of items){if(!gr[i.state])gr[i.state]=[];gr[i.state].push(i)}
@@ -899,6 +906,8 @@ async function loadBoard(){
 const SO=['New','Backlog','To Do','Active','Committed','In Progress','Blocked','Code Review','QA To Do','QA','Testing','UAT','Resolved','Ready for Production','Done','Closed','Canceled','Removed'];
 const SC={'New':'#6c5ce7','Backlog':'#6c5ce7','To Do':'#a29bfe','Active':'#74b9ff','Committed':'#74b9ff','In Progress':'#0984e3','Blocked':'#d63031','Code Review':'#fdcb6e','QA To Do':'#ffeaa7','QA':'#e17055','Testing':'#e17055','UAT':'#fd79a8','Resolved':'#00cec9','Ready for Production':'#55efc4','Done':'#00b894','Closed':'#00b894','Canceled':'#636e72','Removed':'#636e72'};
 function sc(s){return SC[s]||'#8b8fa3'}function so(s){const i=SO.indexOf(s);return i>=0?i:999}
+// SP float gelir (Custom.StoryPoints): 2.0 -> "2", 2.5 -> "2.5"
+function fmtSP(v){return Number.isInteger(v)?String(v):v.toFixed(1)}
 
 const QS=['New','Backlog','To Do'];
 function wiCard(it){
