@@ -758,6 +758,88 @@ def test_summary_index_refresh():
               f"{calls['saved'][0]['content'][:120]}")
 
 
+# ── 16. Build-fix dosya seçimi (#183 kapsam patlaması) ───────────────────
+
+def test_build_fix_selection():
+    """job #183: PR 2 dosya değiştirdi, build-fix 11 dosyayı düzeltmeye kalktı.
+
+    Gerçek vaka: FloLogistic.php değişti; hata özetinde SizeGuideTest,
+    IntegrationAbstractTest gibi ZATEN KIRMIZI testler de vardı. SizeGuideTest
+    ve IntegrationAbstractTest repoda İKİ dosyada tanımlı (job #180'in "ad
+    tekil değil" hatası), o yüzden 5 sınıf adı 9 dosyaya şişti.
+    """
+    from agile_sdlc_crew.flow import _changed_symbols, _select_build_fix_files
+
+    check("değişen dosyadan sembol çıkar",
+          _changed_symbols(["/app/Integration/Warehouse/FloLogistic.php"]) == {"FloLogistic"},
+          f"{_changed_symbols(['/app/Integration/Warehouse/FloLogistic.php'])}")
+    # Test dosyası verilirse test edilen sınıf adı da çıkar
+    s = _changed_symbols(["/app/Test/Integration/Warehouse/FloLogisticTest.php"])
+    check("FooTest -> Foo sembolü de çıkar", {"FloLogisticTest", "FloLogistic"} <= s, f"{s}")
+
+    # #183'ün GERÇEK hata özeti şekli
+    SUMMARY = ("PHPUnit: 6 failures. FloLogisticTest::testDropPointRecipient failed. "
+               "SizeGuideTest::testRender failed. StockApiListTest::testList failed. "
+               "IntegrationAbstractTest::testAbstract failed. StockSourcesTest::testSrc failed.")
+    CHANGED = ["/app/Integration/Warehouse/FloLogistic.php"]
+    REPO = {
+        # ad -> dosyalar (gerçek orkestra ölçümü: 2 dosya olanlar belirsiz)
+        "FloLogisticTest": ["/app/Test/Integration/Warehouse/FloLogisticTest.php"],
+        "SizeGuideTest": ["/app/Test/Model/SizeGuideTest.php", "/app/Test/Hook/SizeGuideTest.php"],
+        "IntegrationAbstractTest": ["/app/Test/Integration/IntegrationAbstractTest.php",
+                                    "/app/Test/Library/Exporter/IntegrationAbstractTest.php"],
+        "StockApiListTest": ["/app/Test/Hook/StockApiListTest.php"],
+        "StockSourcesTest": ["/app/Test/Hook/StockSourcesTest.php"],
+    }
+    BODIES = {
+        # yalnızca FloLogisticTest değişen sınıfa değiniyor
+        "app/Test/Integration/Warehouse/FloLogisticTest.php": "use App\\Integration\\Warehouse\\FloLogistic; class FloLogisticTest {}",
+        "app/Test/Hook/StockApiListTest.php": "class StockApiListTest { function testList(){} }",
+        "app/Test/Hook/StockSourcesTest.php": "class StockSourcesTest { function testSrc(){} }",
+    }
+    got = _select_build_fix_files(
+        SUMMARY, CHANGED,
+        lambda c: REPO.get(c, []),
+        lambda p: BODIES.get(p.lstrip("/"), ""),
+        limit=6,
+    )
+    check("değişen dosya her zaman listede",
+          "app/Integration/Warehouse/FloLogistic.php" in got, f"{got}")
+    check("ilgili test seçilir (değişen sınıfa değiniyor)",
+          "app/Test/Integration/Warehouse/FloLogisticTest.php" in got, f"{got}")
+    check("belirsiz ad elenir — SizeGuideTest (2 dosya)",
+          not any("SizeGuide" in g for g in got), f"{got}")
+    check("belirsiz ad elenir — IntegrationAbstractTest (2 dosya)",
+          not any("IntegrationAbstract" in g for g in got), f"{got}")
+    check("ilgisiz test elenir — StockApiListTest",
+          not any("StockApiList" in g for g in got), f"{got}")
+    check("#183'ün 11 dosyası 2'ye indi", len(got) == 2, f"{len(got)}: {got}")
+
+    # Belirsiz ad + hata özetinde YOL ipucu varsa çözülebilmeli
+    S2 = SUMMARY + " at app/Test/Hook/SizeGuideTest.php:42"
+    B2 = dict(BODIES); B2["app/Test/Hook/SizeGuideTest.php"] = "class SizeGuideTest { FloLogistic::x(); }"
+    got2 = _select_build_fix_files(S2, CHANGED, lambda c: REPO.get(c, []),
+                                  lambda p: B2.get(p.lstrip("/"), ""), limit=6)
+    check("yol ipucu belirsizliği çözer",
+          "app/Test/Hook/SizeGuideTest.php" in got2, f"{got2}")
+
+    # Determinizm: set sırasına bağlı olmamalı — aynı girdi aynı çıktı
+    runs = {tuple(_select_build_fix_files(SUMMARY, CHANGED, lambda c: REPO.get(c, []),
+                                         lambda p: BODIES.get(p.lstrip("/"), ""), limit=6))
+            for _ in range(5)}
+    check("seçim deterministik (set sırası etkilemiyor)", len(runs) == 1, f"{runs}")
+
+    # Kırpma sessiz olmamalı
+    msgs = []
+    many = {f"T{i}Test": [f"/app/Test/T{i}Test.php"] for i in range(12)}
+    S3 = " ".join(f"T{i}Test::t failed." for i in range(12))
+    got3 = _select_build_fix_files(S3, CHANGED, lambda c: many.get(c, []),
+                                   lambda p: "FloLogistic", limit=4, log=msgs.append)
+    check("limit uygulanır", len(got3) == 4, f"{len(got3)}")
+    check("kırpma loglanır (sessiz kesme yok)",
+          any("kirpildi" in m or "kırpıldı" in m for m in msgs), f"{msgs}")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -766,7 +848,8 @@ def main():
               test_fix_targets, test_envelope, test_prune_fix_targets,
               test_reachability, test_context_prefix_stability,
               test_grep_evidence, test_bm25_identifier_terms,
-              test_summary_column_extraction, test_summary_index_refresh):
+              test_summary_column_extraction, test_summary_index_refresh,
+              test_build_fix_selection):
         try:
             t()
         except Exception as e:
