@@ -881,6 +881,22 @@ def test_resume_wiring():
     check("cache yok -> resume edilmez",
           AgileSDLCFlow._resume_or_run(stub, "x", lambda c: True) is False)
 
+    # KISA ÇIKTI RESUME'U ENGELLEMEMELİ (#184 hatası).
+    # implement_change_task çıktısı "2 dosya push edildi" = 19 karakter;
+    # eski `>20` eşiği bunu eledi, implement resume edilmedi ve gözden
+    # geçirilmiş kodu yeniden yazmaya başladı.
+    class _DB:
+        def __init__(self, out): self.out = out
+        def get_cached_step_output(self, key, wi=None): return self.out
+    for out, beklenen in (("2 dosya push edildi", True),   # 19 karakter
+                          ("Branch: feature/70979", True),  # 21 karakter
+                          ("ok", True),                     # 2 karakter
+                          ("", False), ("   ", False), (None, False)):
+        s = SimpleNamespace(_db=_DB(out), state=SimpleNamespace(work_item_id="70979"))
+        got = AgileSDLCFlow._try_resume_step(s, "implement_change_task")
+        check(f"kısa çıktı resume: {out!r} -> {'var' if beklenen else 'yok'}",
+              (got is not None) == beklenen, f"got={got!r}")
+
     # get_prior_job_artifacts — gerçek kayıt (WI 70979 → job #183)
     try:
         from agile_sdlc_crew import db
