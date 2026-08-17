@@ -989,7 +989,16 @@ class AgileSDLCFlow(Flow[PipelineState]):
             return None
         try:
             cached = self._db.get_cached_step_output(step_key, self.state.work_item_id)
-            if cached and len(cached.strip()) > 20:
+            # UZUNLUK ESIGI YOK. Onceden `len(cached.strip()) > 20` sarti vardi ve
+            # kisa-ama-gecerli tamamlanma isaretlerini eliyordu — job #184'te
+            # olculdu: implement_change_task'in ciktisi "2 dosya push edildi"
+            # (19 karakter) esigi gecmedi, implement resume EDILMEDI ve gozden
+            # gecirilmis kodu yeniden yazmaya basladi (tam onlemek istedigimiz sey).
+            # Otoriter sinyal ADIMIN `completed` DURUMU — onu zaten
+            # get_cached_step_output filtreliyor. Cikti uzunlugu bir sey ifade
+            # etmiyor: "Branch: feature/70979" 21 karakterle kil payi geciyordu,
+            # 19 karakterlik implement ciktisi geciyordu. Kirilgan heuristik.
+            if cached and cached.strip():
                 return cached
         except Exception:
             pass
