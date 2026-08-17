@@ -931,6 +931,67 @@ def test_resume_wiring():
     check("exclude_job_id kendini eler", not art2 or art2.get("id") != 183, f"{art2}")
 
 
+# ── 18. Build gate timeout: "bilmiyorum" != "geçti" (#185) ───────────────
+
+def test_build_gate_timeout_strict():
+    """job #185: poll timeout 11:13'te düştü, build 11:14'te FAILED bitti.
+
+    Gate "geçildi sayıldı" → pipeline KIRMIZI bir PR için tamamlanma raporu
+    yazdı ve iş `completed` bitti. Terminal sözleşmesi "testler yeşil VE
+    reviewer onaylar"dı; ilk yarısı sessizce düştü.
+    """
+    import inspect
+    from agile_sdlc_crew.flow import AgileSDLCFlow
+    from agile_sdlc_crew import pipeline_config as pc
+
+    src = inspect.getsource(AgileSDLCFlow.pr_build_gate)
+    # Timeout dalı artık _step_done ile BAŞARILI kapatmamalı
+    ti = src.find('outcome == "timeout"')
+    check("timeout dalı bulunur", ti > 0)
+    # Dal uzun (PR yorum metni dahil) — sonraki dala kadarını al
+    nxt = src.find('outcome == "completed"', ti)
+    branch = src[ti:nxt if nxt > ti else ti + 4000]
+    check("timeout artık son şans bekliyor",
+          "_poll_pr_build(grace" in branch or "TIMEOUT_GRACE" in branch, "grace yok")
+    check("timeout artık gate'i GEÇMİYOR (_step_done yok)",
+          "_step_done" not in branch, "hala _step_done var")
+    check("timeout needs_human'a düşüyor",
+          "NeedsHumanReview" in branch and "needs_human_job" in branch, "needs_human yok")
+    check("timeout adımı fail olarak işaretleniyor",
+          "_step_fail" in branch, "_step_fail yok")
+
+    # Tavan suite süresinden uzun olmalı: orkestra-test ölçülen ~22 dk = 1320s
+    to = int(pc.get("CREW_PR_BUILD_POLL_TIMEOUT") or 0)
+    check(f"poll timeout ölçülen suite süresinin üstünde ({to}s > 1320s)", to > 1320, f"{to}")
+    gr = int(pc.get("CREW_PR_BUILD_TIMEOUT_GRACE") or 0)
+    check(f"son şans penceresi #185'in 2 dk gecikmesini kapsıyor ({gr}s >= 120s)",
+          gr >= 120, f"{gr}")
+
+
+# ── 19. Build-fix TEK commit (#183 5 build iptali) ───────────────────────
+
+def test_build_fix_single_commit():
+    """Her dosyayı ayrı push etmek CI'ı yeniden tetikliyor, Azure uçuştaki
+    build'i iptal ediyor. PR 41840 için 5 build iptal edildi
+    (#129155/57/58/68) — her iptal ~20 dakika çöpe gitti.
+    """
+    import inspect
+    from agile_sdlc_crew.flow import AgileSDLCFlow
+
+    src = inspect.getsource(AgileSDLCFlow._fix_failing_build)
+    check("düzeltmeler biriktiriliyor", "pending.append" in src)
+    check("tek commit API'si kullanılıyor", "push_changes" in src)
+    # Dosya döngüsü içinde artık push YOK — döngü pending'e yazıp bitiyor
+    loop = src.split("pending.append")[0]
+    loop_body = loop[loop.rfind("for i, file_path in enumerate"):]
+    check("dosya döngüsünde tek tek push kalmadı",
+          "push_file(" not in loop_body, "döngüde push_file var")
+    # Tek commit patlarsa dosya bazlı push'a düşmeli (sessiz kayıp olmasın)
+    check("tek commit hatasında fallback var",
+          "dosya bazli push'a dusuluyor" in src or "fallback" in src.lower())
+    check("dry-run yolu korunuyor", "dry_run" in src and "push_file" in src)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -940,7 +1001,9 @@ def main():
               test_reachability, test_context_prefix_stability,
               test_grep_evidence, test_bm25_identifier_terms,
               test_summary_column_extraction, test_summary_index_refresh,
-              test_build_fix_selection, test_resume_wiring):
+              test_build_fix_selection, test_resume_wiring,
+              test_build_gate_timeout_strict,
+              test_build_fix_single_commit):
         try:
             t()
         except Exception as e:
