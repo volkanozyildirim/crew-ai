@@ -992,6 +992,55 @@ def test_build_fix_single_commit():
     check("dry-run yolu korunuyor", "dry_run" in src and "push_file" in src)
 
 
+# ── 20. Build-fix çıktı kapısı: skip silme / yeni test (#185) ────────────
+
+def test_build_fix_regressions():
+    """Gerçek vaka: build-fix, StockSourcesTest.test_set_passive'den
+    markTestSkipped() sildi → test koştu → Mockery uyarısı →
+    failOnWarning=true → BUILD KIRMIZI. Build'i kıran şey WI'ın değişikliği
+    değil, bizim düzeltme döngümüzdü.
+    """
+    from agile_sdlc_crew.flow import _build_fix_regressions
+
+    OLD = ("<?php class StockSourcesTest extends TestCase {\n"
+           "  public function test_set_passive() {\n"
+           "    $this->markTestSkipped();\n"
+           "    Helper::delete(['stock_sources']);\n  }\n"
+           "  public function test_other() { $this->assertTrue(true); }\n}")
+    # 1) skip silinmiş → REDDET
+    new_unskip = OLD.replace("    $this->markTestSkipped();\n", "")
+    r = _build_fix_regressions(OLD, new_unskip)
+    check("markTestSkipped silinmesi reddedilir", any("markTestSkipped" in x for x in r), f"{r}")
+
+    # 2) yeni test eklenmiş → REDDET
+    new_added = OLD.replace("}", "  public function test_brand_new() {}\n}", 1) if OLD.endswith("}") else OLD
+    new_added = OLD[:-1] + "  public function test_brand_new() {}\n}"
+    r2 = _build_fix_regressions(OLD, new_added)
+    check("ilgisiz yeni test eklenmesi reddedilir",
+          any("yeni test" in x for x in r2) and any("test_brand_new" in x for x in r2), f"{r2}")
+
+    # 3) meşru düzeltme (assertion değişimi) → KABUL
+    new_ok = OLD.replace("$this->assertTrue(true);", "$this->assertSame(1, 1);")
+    check("meşru düzeltme kabul edilir", _build_fix_regressions(OLD, new_ok) == [],
+          f"{_build_fix_regressions(OLD, new_ok)}")
+
+    # 4) markTestIncomplete de korunur
+    OLD2 = OLD.replace("markTestSkipped", "markTestIncomplete")
+    r4 = _build_fix_regressions(OLD2, OLD2.replace("    $this->markTestIncomplete();\n", ""))
+    check("markTestIncomplete silinmesi de reddedilir",
+          any("markTestIncomplete" in x for x in r4), f"{r4}")
+
+    # 5) eski içerik boşsa (yeni dosya) kapı sessiz — yanlış alarm üretmesin
+    check("yeni dosyada kapı sessiz", _build_fix_regressions("", OLD) == [])
+
+    # 6) #185'in gerçek diff'i: skip silme + 2 yeni test → İKİ ihlal
+    real_new = new_unskip[:-1] + (
+        "  public function test_success_checkDailyOrderLimitFloDigitalForActiveStockSource() {}\n"
+        "  public function test_failed_checkDailyOrderLimitFloDigitalForActiveStockSource() {}\n}")
+    r6 = _build_fix_regressions(OLD, real_new)
+    check("#185'in gerçek diff'i iki ihlalle reddedilir", len(r6) >= 2, f"{r6}")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -1003,7 +1052,8 @@ def main():
               test_summary_column_extraction, test_summary_index_refresh,
               test_build_fix_selection, test_resume_wiring,
               test_build_gate_timeout_strict,
-              test_build_fix_single_commit):
+              test_build_fix_single_commit,
+              test_build_fix_regressions):
         try:
             t()
         except Exception as e:
