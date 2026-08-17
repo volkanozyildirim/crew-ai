@@ -225,7 +225,7 @@ SCHEMA: list[dict] = [
         "label": "Cache'ten Resume",
         "type": "bool",
         "default": True,
-        "desc": "Onceki job'dan tamamlanan adimlar cache'ten okunarak atlanir. Vendor/yeni context ile taze calistirmak icin kapat.",
+        "desc": "Onceki job'dan tamamlanan adimlar cache'ten okunarak atlanir — build/review'de olen bir isi PAHALI ADIMLARI TEKRAR KOSMADAN devam ettirmek icin. Kapsam: requirements, kickoff, technical_design, create_branch, implement, create_pr, review, test_planning, uat. Resume edilen adim YAN ETKI URETMEZ: push etmez, branch/PR yaratmaz. Review yalnizca ONAY ile bittiyse resume edilir (red edilmis review resume edilmez). State cikarilamazsa (plan JSON bozuk, PR id yok) adim normal kosar. Vendor/yeni context ile tamamen taze calistirmak icin kapat.",
     },
 
     # ── Repo deps (vendor/) ──
