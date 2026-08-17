@@ -532,6 +532,63 @@ def _changed_symbols(changed_files) -> set:
     return {s for s in out if len(s) >= 3}
 
 
+def _build_fix_regressions(old_content: str, new_content: str) -> list:
+    """Build-fix ciktisi kabul edilebilir mi? Kabul EDILMEMESI gereken sinif.
+
+    Neden gerekli — job #183/#185'te olculdu (2026-08-17). Tasan build-fix
+    dongusu `app/Test/Hook/StockSourcesTest.php`'yi "duzeltirken":
+
+      -        $this->markTestSkipped();      <-- SILDI
+
+    O test main'de KASTEN atlaniyordu. Skip kalkinca test kostu, Mockery bozuk
+    state'e girdi ("Attempt to read property _mockery_parentClass on null") ve
+    phpunit.xml'deki failOnWarning="true" yuzunden BUILD KIRMIZI oldu. Yani
+    build'i kiran sey WI'in degisikligi degil, bizim duzeltme dongumuzdu.
+    Ayrica WI ile ilgisiz iki yeni test metodu eklemisti (kapsam orani da
+    bundan etkilenir).
+
+    Kapsam filtresi (bkz. _select_build_fix_files) bu dosyalari artik zaten
+    secmiyor, ama secilse bile bu iki sey ASLA yapilmamali — o yuzden ciktinin
+    kendisinde ayri bir kapi.
+
+    Doner: ihlal aciklamalari (bos liste = kabul edilebilir).
+    """
+    import re as _re_bf
+
+    old, new = old_content or "", new_content or ""
+    if not old.strip():
+        return []
+    out = []
+
+    # 1) Kasten atlanmis testin skip'i silinmis mi?
+    SKIPS = ("markTestSkipped", "markTestIncomplete")
+    for s in SKIPS:
+        n_old, n_new = old.count(s), new.count(s)
+        if n_old > n_new:
+            out.append(
+                f"{s}() cagrisi silinmis ({n_old} -> {n_new}). O test KASTEN "
+                f"atlanmis; skip'i kaldirmak suite'i kirar."
+            )
+    # PHPUnit attribute formu da sayilsin
+    for attr in ("#[Ignore", "@group skip"):
+        if old.count(attr) > new.count(attr):
+            out.append(f"{attr} isareti silinmis ({old.count(attr)} -> {new.count(attr)}).")
+
+    # 2) Yeni test metodu eklenmis mi? (build-fix'in isi MEVCUT testi duzeltmek)
+    def _tests(src):
+        names = set(_re_bf.findall(r"function\s+(test[A-Za-z0-9_]*)\s*\(", src))
+        names |= set(_re_bf.findall(r"function\s+(test_[A-Za-z0-9_]+)\s*\(", src))
+        return names
+
+    added = _tests(new) - _tests(old)
+    if added:
+        out.append(
+            "yeni test metodu eklenmis: " + ", ".join(sorted(added)[:5])
+            + ". Build-fix'in isi MEVCUT testi yesile cevirmek, yeni test yazmak degil."
+        )
+    return out
+
+
 def _select_build_fix_files(
     failure_summary: str,
     changed_files,
@@ -6002,6 +6059,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 # Güvenlik: büyük kod kaybı (mevcut implement ile aynı eşik)
                 if existing and len(existing.strip()) > 500 and len(new_content.strip()) < len(existing.strip()) * 0.5:
                     _log("    🚨 GÜVENLİK: dosya >%50 küçüldü, build-fix push İPTAL")
+                    continue
+                # Skip silme / ilgisiz yeni test ekleme — bkz. _build_fix_regressions
+                _regr = _build_fix_regressions(existing, new_content)
+                if _regr:
+                    for _r in _regr:
+                        _log(f"    🚨 GÜVENLİK: {_r}")
+                    _log(f"    build-fix push İPTAL: {file_path}")
                     continue
                 # TEK TEK PUSH ETME — hepsi toplanip TEK COMMIT'te gonderilir.
                 # Neden: her push CI'i yeniden tetikliyor ve Azure ucustaki
