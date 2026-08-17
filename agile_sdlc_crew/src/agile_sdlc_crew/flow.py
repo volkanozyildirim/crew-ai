@@ -5715,9 +5715,47 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 self._step_done(step_key, "Repoda PR-test pipeline'i yok — gate atlandi")
                 return
             if outcome == "timeout":
-                _log(f"  ⏱️ Build poll timeout ({poll_timeout}s) — sonuc belirsiz, gate gecildi sayildi")
-                self._step_done(step_key, f"Build poll timeout — son durum: {build.get('status') if build else '?'}")
-                return
+                # ── SON SANS: build birazdan bitiyor olabilir ────────────────
+                # Job #185'te olculdu: timeout 11:13:07'de dustu, build 129169
+                # ~11:14'te `failed` olarak bitti — YALNIZCA 2 DAKIKA farkla
+                # kacirdik. Kapi "gecildi" sayip devam etti ve pipeline KIRMIZI
+                # bir PR icin tamamlanma raporu yazdi, is `completed` bitti.
+                grace = int(_pc.get("CREW_PR_BUILD_TIMEOUT_GRACE") or 300)
+                if grace > 0:
+                    _log(f"  ⏱️ Poll timeout ({poll_timeout}s) — son sans: {grace}s daha bekleniyor")
+                    outcome, build = self._poll_pr_build(grace, poll_interval)
+                if outcome != "completed":
+                    # ── "BILMIYORUM" != "GECTI" ──────────────────────────────
+                    # Terminal sozlesmemiz "testler yesil VE reviewer onaylar".
+                    # Sonucu bilinmeyen bir kapiyi completed yazmak sozlesmenin
+                    # ilk yarisini sessizce dusuruyor: is kaydina bakan herkes
+                    # "testler gecti" diye okur. Job #185 boyle oldu.
+                    last = (build or {}).get("status") or "?"
+                    msg = (
+                        f"Build sonucu DOGRULANMADI — poll timeout "
+                        f"({poll_timeout}s + {grace}s ek), son durum: {last}. "
+                        f"PR #{self.state.pr_id} acik; testlerin yesil oldugu "
+                        f"TEYIT EDILMEDI."
+                    )
+                    _log(f"  🖐 {msg}")
+                    self._step_fail(step_key, msg)
+                    try:
+                        _add_wi_comment(self._client, self.state.work_item_id,
+                            f"## 🖐 Build Sonucu Doğrulanamadı\n\n"
+                            f"PR [#{self.state.pr_id}]({self.state.pr_url}) için test build'i "
+                            f"{poll_timeout}+{grace} saniyede tamamlanmadı (son durum: `{last}`).\n\n"
+                            f"Reviewer kodu onayladı ancak **testlerin yeşil olduğu teyit "
+                            f"edilmedi** — PR'ı birleştirmeden önce build sonucunu kontrol edin.\n\n"
+                            f"---\n*Agile SDLC Crew - PR Build Gate*")
+                    except Exception:
+                        pass
+                    if self._db and self.state.job_id:
+                        try:
+                            self._db.needs_human_job(self.state.job_id, msg)
+                        except Exception as _e_nh:
+                            _log(f"  needs_human durumu yazilamadi: {_e_nh}")
+                    raise NeedsHumanReview(msg)
+                _log(f"  ↳ Son sansta build bitti: {(build or {}).get('result')}")
             # outcome == "completed"
             result = (build or {}).get("result")
             if result == "succeeded":
@@ -5926,6 +5964,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             pass
         if _repo_tools and repo_dir.exists():
             _cli.set_repo_ctx([str(repo_dir)], "Read,Grep,Glob,LS")
+        pending: list = []   # (file_path, new_content) — sonunda TEK commit
         try:
             for i, file_path in enumerate(fix_files):
                 _log(f"  Build-fix implement [{i+1}/{len(fix_files)}]: {file_path}")
@@ -5964,16 +6003,54 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 if existing and len(existing.strip()) > 500 and len(new_content.strip()) < len(existing.strip()) * 0.5:
                     _log("    🚨 GÜVENLİK: dosya >%50 küçüldü, build-fix push İPTAL")
                     continue
-                push_result = push_file(
-                    repo_name, branch, file_path, new_content,
-                    f"fix: PR build test hatasi - {file_path.rsplit('/',1)[-1]} (WI #{self.state.work_item_id})",
-                    repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
-                )
-                _log(f"    {'Push OK' if push_result.get('success') else 'Push HATA: ' + str(push_result.get('error','?'))}: {file_path}")
-                if push_result.get("success"):
-                    self._restore_worktree_file(repo_name, file_path)
+                # TEK TEK PUSH ETME — hepsi toplanip TEK COMMIT'te gonderilir.
+                # Neden: her push CI'i yeniden tetikliyor ve Azure ucustaki
+                # build'i IPTAL ediyor. Job #183'te olculdu — PR 41840 icin
+                # 5 build iptal edildi (#129155/57/58/68), her iptal ~20 dakika
+                # cope gitti. Kullanicinin gordugu "pipeline surekli iptal
+                # edilip yeniden basliyor" tam olarak buydu.
+                pending.append((file_path, new_content))
+                _log(f"    ✔ Duzeltme hazir (biriktirildi): {file_path}")
         finally:
             _cli.clear_repo_ctx()
+
+        if not pending:
+            _log("  Build-fix: push edilecek degisiklik yok")
+            return
+        # Tek commit → tek build tetigi → tek bekleme
+        _log(f"  📦 {len(pending)} dosya TEK commit'te push ediliyor (1 build tetigi)")
+        if self.state.dry_run:
+            for fp, content in pending:
+                push_file(repo_name, branch, fp, content, "fix: PR build (dry-run)",
+                          repo_mgr=self._repo_mgr, dry_run=True)
+        else:
+            changes = []
+            for fp, content in pending:
+                p = "/" + _norm_path(fp)
+                try:
+                    self._client.get_file_content(repo_name, p, branch)
+                    ct = "edit"
+                except Exception:
+                    ct = "add"
+                changes.append({"changeType": ct, "path": p, "content": content})
+            names = ", ".join(fp.rsplit("/", 1)[-1] for fp, _ in pending)
+            try:
+                self._client.push_changes(
+                    repo_name, branch, changes,
+                    f"fix: PR build test hatasi - {names} (WI #{self.state.work_item_id})",
+                )
+                _log(f"    Push OK (tek commit, {len(changes)} dosya)")
+            except Exception as e:
+                _log(f"    Push HATA (tek commit): {e} — dosya bazli push'a dusuluyor")
+                for fp, content in pending:
+                    r = push_file(
+                        repo_name, branch, fp, content,
+                        f"fix: PR build test hatasi - {fp.rsplit('/',1)[-1]} (WI #{self.state.work_item_id})",
+                        repo_mgr=self._repo_mgr, dry_run=False,
+                    )
+                    _log(f"      {'OK' if r.get('success') else 'HATA'}: {fp}")
+        for fp, _ in pending:
+            self._restore_worktree_file(repo_name, fp)
         _log("  Build-fix tamam — build yeniden tetiklenecek")
 
     @listen(pr_build_gate)
