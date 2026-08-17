@@ -351,6 +351,14 @@ SCHEMA: list[dict] = [
         "desc": "PR build (test) basarisiz olunca kac kez otomatik duzeltme+yeniden-build dongusu calisir.",
     },
     {
+        "key": "CREW_BUILD_FIX_MAX_FILES",
+        "label": "Build Fix Max Dosya",
+        "type": "int",
+        "default": 6,
+        "min": 1,
+        "desc": "Build-fix dongusunde tek turda en fazla kac dosya duzeltilir. Job #183'te sinir yoktu ve 11 dosyaya cikti (cogu degisiklikle ilgisiz, zaten kirmizi testler) — 21 cagri / $11.66 harcandi, 4 cagri >%50-kucultme kapisinda copa gitti. Kirpilan dosyalar loglanir (sessiz kesme yok).",
+    },
+    {
         "key": "CREW_PR_BUILD_POLL_TIMEOUT",
         "label": "PR Build Poll Timeout (sn)",
         "type": "int",

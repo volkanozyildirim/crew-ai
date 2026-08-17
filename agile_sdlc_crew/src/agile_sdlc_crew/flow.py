@@ -510,6 +510,121 @@ def _is_test_path(rel_path: str) -> bool:
     )
 
 
+def _changed_symbols(changed_files) -> set:
+    """Degistirilen dosyalardan sembol adlari cikar (sinif/dosya adi).
+
+    Build-fix'te "bu testi BENIM degisikligim mi kirdi?" sorusunu cevaplamak
+    icin kullanilir: aday test dosyasi bu sembollerden birine deginiyorsa
+    ilgili sayilir.
+    """
+    out: set = set()
+    for f in changed_files or []:
+        base = _norm_path(f).rsplit("/", 1)[-1]
+        stem = base.rsplit(".", 1)[0] if "." in base else base
+        if not stem:
+            continue
+        out.add(stem)
+        # Test dosyasiysa test edilen sinifin adini da ekle (FooTest -> Foo)
+        if stem.endswith("Test") and len(stem) > 4:
+            out.add(stem[:-4])
+        elif stem.startswith("test_") and len(stem) > 5:
+            out.add(stem[5:])
+    return {s for s in out if len(s) >= 3}
+
+
+def _select_build_fix_files(
+    failure_summary: str,
+    changed_files,
+    resolve_class,
+    read_file,
+    limit: int = 6,
+    log=None,
+) -> list:
+    """Build'i kiran testlerden YALNIZCA degisiklikle ILGILI olanlari sec.
+
+    Neden gerekli — job #183'te olculdu (2026-08-17): PR 2 dosya degistirdi
+    (`app/Integration/Warehouse/FloLogistic.php` + testi) ama build-fix dongusu
+    11 DOSYAYI duzeltmeye kalkti: SizeGuideTest (x2), StockApiListTest,
+    IntegrationAbstractTest (x2), StockSourcesTest... `FloLogistic.php` icinde
+    `SizeGuide` HIC gecmiyor. Yani repoda zaten kirmizi olan testleri Opus'a
+    "duzelttiriyorduk"; geliystirici baglamini bilmedigi test dosyasini kirpik
+    donduruyor, >%50 kucultme kapisi push'u engelliyor ve cagri copa gidiyor
+    (4 cagri, ~$1.5 bosa).
+
+    Uc kusur duzeltiliyor:
+      1. AYNI SINIF ADI COK DOSYADA: eski kod `grep -rl "class X"` sonucunun
+         TAMAMINI ekliyordu. Olculdu: `SizeGuideTest` -> 2 dosya,
+         `IntegrationAbstractTest` -> 2 dosya; 5 sinif adi 9 dosyaya sisiyordu.
+         Bu, job #180'i olduren "ad repo genelinde tekil degil" hatasinin
+         aynisi (sozlesme kapisinda _php_signatures ile duzeltilmisti).
+         Artik belirsiz ad (>1 dosya) icin hata ozetindeki yol ipucuna
+         bakilir; ipucu yoksa ad ATLANIR.
+      2. `list(set(...))[:5]` — set iterasyon sirasi kosumlar arasi sabit
+         degil, yani "ilk 5 kirik test" kuraydi. Artik siralama deterministik.
+      3. ILGI KONTROLU YOK — artik aday test dosyasi, degistirilen dosyalarin
+         sembollerinden birine deginmiyorsa elenir.
+
+    resolve_class(cls) -> [rel_path, ...]   (sinif adini dosyalara cozer)
+    read_file(rel_path) -> str              (dosya icerigi; bulunamazsa "")
+    Doner: [rel_path, ...] — plan dosyalari once, sonra ilgili test dosyalari.
+    """
+    import re as _re_sel  # modul seviyesinde `re` yok (bkz. job #177 NameError)
+
+    def _say(msg):
+        if log:
+            log(msg)
+
+    summary = failure_summary or ""
+    # Plan/degisiklik dosyalari her zaman listede — onlar bizim degisikligimiz.
+    selected: list = []
+    for f in changed_files or []:
+        n = _norm_path(f)
+        if n and n not in selected:
+            selected.append(n)
+
+    symbols = _changed_symbols(changed_files)
+    # Deterministik siralama: hata ozetinde ilk gecen once.
+    classes = []
+    for m in _re_sel.finditer(r"\b([A-Z][A-Za-z0-9_]*Test)\b", summary):
+        c = m.group(1)
+        if c not in classes:
+            classes.append(c)
+
+    dropped_ambiguous, dropped_unrelated = [], []
+    for cls in classes:
+        paths = [_norm_path(p) for p in (resolve_class(cls) or []) if p]
+        paths = [p for p in paths if p]
+        if not paths:
+            continue
+        if len(paths) > 1:
+            # Belirsiz ad: hata ozetinde yol ipucu var mi? (orn "app/Test/Hook/")
+            hinted = [p for p in paths if p in summary or p.rsplit("/", 1)[0] in summary]
+            if len(hinted) == 1:
+                paths = hinted
+            else:
+                dropped_ambiguous.append(f"{cls} ({len(paths)} dosya)")
+                continue
+        rel = paths[0]
+        if rel in selected:
+            continue
+        # ILGI: test dosyasi degisen sembollerden birine deginiyor mu?
+        body = read_file(rel) or ""
+        if symbols and not any(s in body for s in symbols):
+            dropped_unrelated.append(rel)
+            continue
+        selected.append(rel)
+
+    if dropped_ambiguous:
+        _say(f"    ↷ Belirsiz test adi atlandi (ad repo genelinde tekil degil): {', '.join(dropped_ambiguous)}")
+    if dropped_unrelated:
+        _say(f"    ↷ Degisiklikle ilgisiz test atlandi ({len(dropped_unrelated)}): {', '.join(dropped_unrelated[:5])}")
+
+    if len(selected) > limit:
+        _say(f"    ⚠️ {len(selected)} aday {limit}'e kirpildi — atlananlar: {', '.join(selected[limit:])}")
+        selected = selected[:limit]
+    return selected
+
+
 def _coalesce_plan_changes(changes: list) -> list:
     """Ayni dosyayi hedefleyen birden fazla plan degisikligini TEK girise birlestir.
 
@@ -5582,7 +5697,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         """Build'i kiran testleri/kodu duzelt: plan'daki kaynak dosyalar + hata
         ozetinden cozulen test dosyalari developer'a verilir, push edilir.
         Branch + PR zaten var; push build'i yeniden tetikler."""
-        import re as _re_fb
         from agile_sdlc_crew.pipeline import push_file
         from agile_sdlc_crew.tools import claude_cli_llm as _cli
         from agile_sdlc_crew import pipeline_config as _pc_fb
@@ -5593,13 +5707,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
         branch = self.state.branch_name
         repo_dir = self._repo_mgr.base_dir / repo_name
 
-        # 1) Plan'daki kaynak dosyalar
-        fix_files: list[str] = [
+        # 1) Plan'daki kaynak dosyalar — bunlar BIZIM degisikligimiz
+        changed_files: list[str] = [
             c.get("file_path") for c in plan.get("changes", []) if c.get("file_path")
         ]
-        # 2) Hata ozetinden test sinif adlarini cozumle (ornek: ReturnOrderTest)
-        test_classes = set(_re_fb.findall(r'\b([A-Z][A-Za-z0-9_]*Test)\b', failure_summary or ""))
-        for cls in list(test_classes)[:5]:
+
+        # 2) Hata ozetindeki test siniflarindan YALNIZCA ilgili olanlari sec.
+        #    Belirsiz adlar ve degisiklikle ilgisiz testler elenir — gerekce
+        #    _select_build_fix_files docstring'inde (job #183 olcumu).
+        def _resolve_class(cls: str) -> list:
             try:
                 import subprocess as _sp
                 res = _sp.run(
@@ -5607,17 +5723,35 @@ class AgileSDLCFlow(Flow[PipelineState]):
                      "--include=*.js", "--include=*.go", f"class {cls}", str(repo_dir)],
                     capture_output=True, text=True, timeout=8,
                 )
-                for f in (res.stdout or "").strip().split("\n"):
-                    if f and ("vendor/" not in f and "node_modules/" not in f):
-                        rel = "/" + f[len(str(repo_dir)):].lstrip("/")
-                        if rel not in fix_files:
-                            fix_files.append(rel)
             except Exception:
-                pass
+                return []
+            out = []
+            for f in (res.stdout or "").strip().split("\n"):
+                if f and "vendor/" not in f and "node_modules/" not in f:
+                    out.append("/" + f[len(str(repo_dir)):].lstrip("/"))
+            return out
+
+        def _read_local(rel: str) -> str:
+            try:
+                p = repo_dir / _norm_path(rel)
+                return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+            except Exception:
+                return ""
+
+        _limit = 6
+        try:
+            _limit = int(_pc_fb.get("CREW_BUILD_FIX_MAX_FILES") or 6)
+        except Exception:
+            pass
+        fix_files = _select_build_fix_files(
+            failure_summary, changed_files, _resolve_class, _read_local,
+            limit=_limit, log=_log,
+        )
 
         if not fix_files:
             _log("  Düzeltilecek dosya çözümlenemedi — atlaniyor")
             return
+        _log(f"  Düzeltilecek dosya: {len(fix_files)} — {', '.join(fix_files)}")
 
         # Part B: developer repoyu --add-dir ile görsün (test dosyasini okuyabilsin)
         _repo_tools = False
