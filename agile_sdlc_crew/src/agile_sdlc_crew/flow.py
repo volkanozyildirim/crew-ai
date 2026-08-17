@@ -1001,6 +1001,53 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._step_start(step_key)
         self._step_done(step_key, cached_output[:50_000])
 
+    def _prior_artifacts(self) -> dict:
+        """Ayni WI'nin onceki isinden repo/branch/PR bilgisi (bos dict olabilir)."""
+        cached = getattr(self, "_prior_art_cache", None)
+        if cached is not None:
+            return cached
+        art = {}
+        try:
+            art = self._db.get_prior_job_artifacts(
+                self.state.work_item_id, self.state.job_id or 0
+            ) or {}
+        except Exception as e:
+            _log(f"  Onceki is artefakti okunamadi: {e}")
+        self._prior_art_cache = art
+        return art
+
+    def _resume_or_run(self, step_key: str, restore) -> bool:
+        """Adim onceki isten resume edilebiliyorsa state'i geri yukle ve True don.
+
+        `restore(cached_output) -> bool`: state'i geri yukler. False donerse
+        (ornegin plan JSON'i parse edilemedi, PR id yok) resume EDILMEZ ve adim
+        normal calisir — yarim state ile devam etmek sessiz bozulma uretir.
+
+        Neden gerekli — job #183 (2026-08-17): is pr_build_gate'te oldu; PR
+        #41840 review'dan gecmis, uc reviewer itirazi duzeltilmis koda sahipti.
+        `/api/jobs/{id}/retry` SIFIRDAN yeni is yaratiyor: teknik tasarim ve
+        implement yeniden kosar, yani branch'teki gozden gecirilmis kod EZILIR.
+        get_cached_step_output docstring'i "tasarim/implement adimlari tekrar
+        kosulmadan reuse edilir" diyordu ama resume yalnizca requirements /
+        kickoff / test_planning / uat adimlarina baglanmisti — asil pahali
+        adimlar (tasarim, implement, branch, PR, review) baglanmamisti.
+
+        Yan etki YOK kurali: resume edilen adim push etmez, branch/PR
+        yaratmaz — yalnizca state'i geri yukler.
+        """
+        cached = self._try_resume_step(step_key)
+        if not cached:
+            return False
+        try:
+            if restore(cached) is False:
+                _log(f"  ⏩ {step_key} resume ATLANDI — cache'ten state cikarilamadi, adim normal kosacak")
+                return False
+        except Exception as e:
+            _log(f"  ⏩ {step_key} resume ATLANDI ({type(e).__name__}: {e}) — adim normal kosacak")
+            return False
+        self._resume_step(step_key, cached)
+        return True
+
     def _step_done(self, step_key: str, output: str = ""):
         # ── Adim butcesi: bu adim zarfin ne kadarini yedi? ──────────────
         # Job #179'da tek bir $1.27'lik cagri sessizce gecti. Adimin payi
@@ -2766,12 +2813,26 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"— PR #{self.state.pr_id} acik, insan incelemesi bekliyor"
             )
 
-        # Onay
-        self._step_done("review_pr_task", (self.state.review_text or remaining_summary)[:3000])
         _log(f"  ✅ Review retry basarili — kod onaylandi")
         closed_summary = _format_issues_md(
             [i for i in self.state.review_issues if i.get("status") == "closed"]
         ) if structured else ""
+        # Onay — ADIM CIKTISI ONAYI YANSITMALI.
+        # Onceden burada `self.state.review_text` kaydediliyordu; o alan retry
+        # dongusu boyunca GUNCELLENMIYOR, yani hala RED eden ILK review metnini
+        # tutuyor. Sonuc (job #183'te olculdu): adim `completed` + onaylanmis
+        # halde bitti ama kayitli cikti "Verdict: CHANGES_REQUIRED" diyordu.
+        # Iki zarari vardi: (a) is kaydini okuyan insan yanlis bilgi aliyor,
+        # (b) _review_rejected(kayitli_cikti) True donuyor, dolayisiyla
+        # adim-seviyesi resume onaylanmis bir review'i resume EDEMIYOR.
+        _approval = (
+            "REVIEW_DECISION: APPROVE\n"
+            f"Verdict: APPROVE — {getattr(self, '_review_attempt', 0) + 1} düzeltme turundan sonra onaylandı.\n\n"
+            + (f"**Kapatılan Maddeler:**\n{closed_summary}\n\n" if closed_summary else "")
+            + f"Son review metni (düzeltme öncesi):\n{(self.state.review_text or remaining_summary or '')[:1800]}"
+        )
+        self.state.review_text = _approval
+        self._step_done("review_pr_task", _approval[:3000])
         _add_wi_comment(self._client, self.state.work_item_id,
             f"## ✅ Kod İnceleme (Düzeltme Sonrası Onay)\n\n"
             f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
@@ -3736,6 +3797,23 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Step 3 (dependency_analysis) hala atlanyor — repo summary context icin yeterli.
         self._step_done("dependency_analysis_task", "Atlandı — repo bilgisi local'den alınıyor")
 
+        # ── RESUME: onceki isin plani varsa tasarimi tekrar kosma ──────────
+        def _restore_plan(cached: str):
+            p = _parse_architect_output(cached)
+            if not isinstance(p, dict) or not p.get("changes"):
+                return False
+            self.state.plan = p
+            art = self._prior_artifacts()
+            repo = p.get("repo_name") or art.get("repo_name")
+            if repo:
+                self.state.repo_name = repo
+                self._discovered_repo = repo
+            _log(f"  ⏩ Plan resume: repo={self.state.repo_name}, {len(p.get('changes', []))} degisiklik")
+            return True
+
+        if self._resume_or_run("technical_design_task", _restore_plan):
+            return
+
         # Repo summary'lerini context'e ekle.
         # 66 repo var, yalnizca ilk ~15'i context'e giriyor (summaries_repos[:20]
         # → candidate_repos) — hedef repo bu pencerenin ICINDE olmak ZORUNDA,
@@ -4589,6 +4667,19 @@ class AgileSDLCFlow(Flow[PipelineState]):
         """Adim 5: Branch Olustur + Repo'yu locale clone et."""
         from agile_sdlc_crew.pipeline import create_branch
 
+        # ── RESUME: branch zaten varsa yeniden yaratma ─────────────────────
+        # Branch adi step ciktisinda serbest metin; otoriter kaynak `jobs` satiri.
+        def _restore_branch(_cached: str):
+            b = (self._prior_artifacts() or {}).get("branch_name") or ""
+            if not b:
+                return False
+            self.state.branch_name = b
+            _log(f"  ⏩ Branch resume: {b} (yeniden yaratilmadi)")
+            return True
+
+        if self._resume_or_run("create_branch_task", _restore_branch):
+            return
+
         plan = self.state.plan
         repo_name = self.state.repo_name
 
@@ -4753,6 +4844,19 @@ class AgileSDLCFlow(Flow[PipelineState]):
         import os.path as _osp
 
         _log("\n-- ADIM 6: Kod gelistirme --")
+
+        # ── RESUME: kod branch'te zaten push'lu — TEKRAR YAZMA ─────────────
+        # En kritik resume noktasi: bu adim yeniden kosarsa gozden gecirilmis
+        # kod (job #183'te uc reviewer itirazi duzeltilmisti) EZILIR.
+        def _restore_impl(_cached: str):
+            if not self.state.branch_name:
+                return False
+            _log("  ⏩ Implement resume: kod branch'te mevcut, push YAPILMADI")
+            return True
+
+        if self._resume_or_run("implement_change_task", _restore_impl):
+            return
+
         self._step_start("implement_change_task")
 
         plan = self.state.plan
@@ -5113,6 +5217,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew.pipeline import create_pull_request
 
         _log("\n-- ADIM 7: PR olusturuluyor --")
+
+        # ── RESUME: PR zaten acik — yeniden acma ───────────────────────────
+        def _restore_pr(_cached: str):
+            art = self._prior_artifacts() or {}
+            pid = str(art.get("pr_id") or "").strip()
+            if not pid:
+                return False
+            self.state.pr_id = pid
+            self.state.pr_url = art.get("pr_url") or self.state.pr_url
+            _log(f"  ⏩ PR resume: #{pid} (yeniden acilmadi) {self.state.pr_url}")
+            return True
+
+        if not self.state.dry_run and self._resume_or_run("create_pr_task", _restore_pr):
+            return
+
         self._step_start("create_pr_task")
 
         if self.state.dry_run:
@@ -5269,6 +5388,22 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._step_start("review_pr_task")
             self.state.review_text = "DRY-RUN: code review skipped (no remote PR)"
             self._step_done("review_pr_task", self.state.review_text)
+            return
+
+        # ── RESUME: onceki review ONAY ile bittiyse tekrar review etme ─────
+        # Kritik: yalnizca ONAY resume edilir. Red edilmis bir review'i resume
+        # etmek, duzeltilmemis kodu onaylanmis gibi ilerletirdi.
+        def _restore_review(cached: str):
+            if _review_rejected(cached):
+                _log("  ⏩ Review resume ATLANDI — onceki review RED ile bitmis")
+                return False
+            if not self.state.pr_id:
+                return False
+            self.state.review_text = cached
+            _log("  ⏩ Review resume: onceki review ONAY ile bitmis, tekrar review edilmiyor")
+            return True
+
+        if self._resume_or_run("review_pr_task", _restore_review):
             return
 
         # Onceki PR yorumlarina yanit ver (implement sonrasi)

@@ -349,6 +349,29 @@ def skip_steps(job_id: int, step_keys: list[str], reason: str = "Atlandı"):
             )
 
 
+def get_prior_job_artifacts(work_item_id: str, exclude_job_id: int = 0) -> dict | None:
+    """Ayni WI'nin ONCEKI islerinden branch/PR/repo bilgisini getir.
+
+    Adim-seviyesi resume icin: branch adi ve PR id'si step CIKTISINDA serbest
+    metin olarak duruyor, ordan regex'le cikarmak kirilgan. Bu bilgiler zaten
+    `jobs` satirinda kolon olarak var — otoriter kaynak burasi.
+
+    PR'i olan en yeni is tercih edilir (branch acilip PR acilmadan olen bir
+    isin satiri, PR'i olan eski bir isi golgelemesin).
+    """
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, repo_name, branch_name, pr_id, pr_url FROM jobs "
+            "WHERE work_item_id=%s AND id<>%s AND dry_run=0 "
+            "  AND branch_name IS NOT NULL AND branch_name<>'' "
+            "ORDER BY (pr_id IS NOT NULL AND pr_id<>'') DESC, id DESC LIMIT 1",
+            (str(work_item_id), int(exclude_job_id or 0)),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
 def get_cached_step_output(step_key: str, work_item_id: str = None) -> str | None:
     """Onceki job'lardan bu step'in BASARILI (completed) ciktisini getir.
 

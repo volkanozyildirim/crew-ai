@@ -840,6 +840,65 @@ def test_build_fix_selection():
           any("kirpildi" in m or "kırpıldı" in m for m in msgs), f"{msgs}")
 
 
+# ── 17. Adım-seviyesi resume (#183 devam ettirme) ────────────────────────
+
+def test_resume_wiring():
+    """job #183 pr_build_gate'te öldü; PR #41840 + gözden geçirilmiş kod duruyor.
+
+    retry SIFIRDAN yeni iş yaratıyor → tasarım+implement yeniden koşar ve
+    branch'teki gözden geçirilmiş kod EZİLİR. Resume bunu engeller.
+    """
+    from agile_sdlc_crew.flow import AgileSDLCFlow, _review_rejected
+
+    # Onay metni RED okunmamalı — içinde CHANGES_REQUIRED geçse bile
+    # (sentinel/Verdict satırı parse edilir, tüm metin taranmaz).
+    ap = ("REVIEW_DECISION: APPROVE\nVerdict: APPROVE — 2 tur sonra onaylandı.\n\n"
+          "Son review metni (düzeltme öncesi):\n**Verdict:** CHANGES_REQUIRED ...")
+    check("onay metni RED okunmaz", _review_rejected(ap) is False, f"{_review_rejected(ap)}")
+    rej = "## PR Review Result\n**Verdict:** CHANGES_REQUIRED\n- R1 ..."
+    check("red metni RED okunur", _review_rejected(rej) is True)
+
+    # _resume_or_run: restore False dönerse resume EDİLMEZ (yarım state ile
+    # devam sessiz bozulma üretir)
+    calls = {"resumed": 0}
+    stub = SimpleNamespace()
+    stub._try_resume_step = lambda k: "cached output uzun yeterince ...."
+    stub._resume_step = lambda k, c: calls.__setitem__("resumed", calls["resumed"] + 1)
+    ok = AgileSDLCFlow._resume_or_run(stub, "x", lambda c: False)
+    check("restore False -> resume edilmez", ok is False and calls["resumed"] == 0,
+          f"ok={ok} resumed={calls['resumed']}")
+    ok2 = AgileSDLCFlow._resume_or_run(stub, "x", lambda c: True)
+    check("restore True -> resume edilir", ok2 is True and calls["resumed"] == 1,
+          f"ok={ok2} resumed={calls['resumed']}")
+    # restore patlarsa resume edilmez (adım normal koşar)
+    def _boom(c):
+        raise ValueError("plan parse edilemedi")
+    ok3 = AgileSDLCFlow._resume_or_run(stub, "x", _boom)
+    check("restore hata -> resume edilmez", ok3 is False, f"{ok3}")
+
+    # cache yoksa resume yok
+    stub._try_resume_step = lambda k: None
+    check("cache yok -> resume edilmez",
+          AgileSDLCFlow._resume_or_run(stub, "x", lambda c: True) is False)
+
+    # get_prior_job_artifacts — gerçek kayıt (WI 70979 → job #183)
+    try:
+        from agile_sdlc_crew import db
+        art = db.get_prior_job_artifacts("70979", 0)
+    except Exception as e:
+        skip("get_prior_job_artifacts #183 kaydını bulur", f"DB yok: {e}")
+        return
+    if not art:
+        skip("get_prior_job_artifacts #183 kaydını bulur", "kayıt yok")
+        return
+    check("önceki iş artefaktı bulunur", art.get("branch_name") == "feature/70979", f"{art}")
+    check("PR id gelir", str(art.get("pr_id")) == "41840", f"{art}")
+    check("repo gelir", art.get("repo_name") == "orkestra", f"{art}")
+    # exclude_job_id çalışır
+    art2 = db.get_prior_job_artifacts("70979", 183)
+    check("exclude_job_id kendini eler", not art2 or art2.get("id") != 183, f"{art2}")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -849,7 +908,7 @@ def main():
               test_reachability, test_context_prefix_stability,
               test_grep_evidence, test_bm25_identifier_terms,
               test_summary_column_extraction, test_summary_index_refresh,
-              test_build_fix_selection):
+              test_build_fix_selection, test_resume_wiring):
         try:
             t()
         except Exception as e:
