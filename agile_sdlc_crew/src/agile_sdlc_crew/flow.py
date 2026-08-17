@@ -1025,6 +1025,25 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._prior_art_cache = art
         return art
 
+    def _persist_artifacts(self, **fields):
+        """Resume ile geri yuklenen repo/branch/PR bilgisini `jobs` satirina yaz.
+
+        Resume yolu adimin normal govdesini atladigi icin oradaki update_job
+        cagrilarina da ulasmiyordu; sonuc: is DB'de PR'siz/branch'siz gorunuyor
+        (dashboard bos, get_prior_job_artifacts bu isi bulamiyor, tamamlanma
+        raporunda PR linki eksik kaliyor). Olculdu: job #185 review'a girerken
+        jobs.pr_id BOSTU, oysa bellekteki state PR #41840'i tasiyordu.
+        """
+        if not (self._db and self.state.job_id):
+            return
+        clean = {k: v for k, v in fields.items() if v}
+        if not clean:
+            return
+        try:
+            self._db.update_job(self.state.job_id, **clean)
+        except Exception as e:
+            _log(f"  Artefakt DB'ye yazilamadi ({', '.join(clean)}): {e}")
+
     def _resume_or_run(self, step_key: str, restore) -> bool:
         """Adim onceki isten resume edilebiliyorsa state'i geri yukle ve True don.
 
@@ -4683,6 +4702,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             if not b:
                 return False
             self.state.branch_name = b
+            self._persist_artifacts(repo_name=self.state.repo_name, branch_name=b)
             _log(f"  ⏩ Branch resume: {b} (yeniden yaratilmadi)")
             return True
 
@@ -5235,6 +5255,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 return False
             self.state.pr_id = pid
             self.state.pr_url = art.get("pr_url") or self.state.pr_url
+            self._persist_artifacts(pr_id=pid, pr_url=self.state.pr_url)
             _log(f"  ⏩ PR resume: #{pid} (yeniden acilmadi) {self.state.pr_url}")
             return True
 

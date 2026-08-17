@@ -897,6 +897,22 @@ def test_resume_wiring():
         check(f"kısa çıktı resume: {out!r} -> {'var' if beklenen else 'yok'}",
               (got is not None) == beklenen, f"got={got!r}")
 
+    # _persist_artifacts: resume state'i DB'ye de yazmalı (#185'te jobs.pr_id boştu)
+    wrote = {}
+    class _DB2:
+        def update_job(self, jid, **f): wrote.update({"job_id": jid, **f})
+    s2 = SimpleNamespace(_db=_DB2(), state=SimpleNamespace(job_id=185))
+    AgileSDLCFlow._persist_artifacts(s2, pr_id="41840", pr_url="http://x/41840")
+    check("resume artefaktı DB'ye yazılır",
+          wrote.get("pr_id") == "41840" and wrote.get("job_id") == 185, f"{wrote}")
+    wrote.clear()
+    AgileSDLCFlow._persist_artifacts(s2, pr_id="", pr_url=None)
+    check("boş artefakt yazılmaz", wrote == {}, f"{wrote}")
+    # job_id yoksa patlamamalı
+    s3 = SimpleNamespace(_db=_DB2(), state=SimpleNamespace(job_id=None))
+    AgileSDLCFlow._persist_artifacts(s3, pr_id="1")
+    check("job_id yoksa sessiz geçer", True)
+
     # get_prior_job_artifacts — gerçek kayıt (WI 70979 → job #183)
     try:
         from agile_sdlc_crew import db
