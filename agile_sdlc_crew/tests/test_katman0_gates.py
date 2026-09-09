@@ -48,6 +48,11 @@ from agile_sdlc_crew.flow import (  # noqa: E402
     _php_signatures,
     _requirement_ids,
     _review_approved,
+    _parse_readiness,
+    _readiness_score,
+    _readiness_comment,
+    NeedsHumanReview,
+    NeedsMoreInfo,
 )
 
 PASS, FAIL, SKIP = [], [], []
@@ -1320,6 +1325,127 @@ def test_build_gate_stale_build():
           "NeedsHumanReview" in branch and "needs_human_job" in branch, "RuntimeError yolu duruyor")
 
 
+# ── 24. Hazırlık kapısı — WI yeterince detaylı mı? (#190) ────────────────
+
+def test_readiness_gate():
+    """Job #190 (WI 73061): mimar Faz A'da 4 repoya yayılan, veri kaynağı
+    tanımsız bir iş olduğunu teşhis etti (INSUFFICIENT), completeness 4/25
+    çıktı — akış yine de kör plan + implement'e devam edecekti ($10+). Doğrusu:
+    skor eşiğin altındaysa iş `needs_info`'ya alınır (silinmez), eksik
+    detaylar WI'a Türkçe yorum olarak yazılır, iş ↻ ile tekrar kuyruğa alınır."""
+    print("\n[24] hazırlık kapısı (readiness)")
+    import inspect, re as _re
+    from agile_sdlc_crew import flow as _flow, db as _db, server as _srv, pipeline_config as _pc
+
+    ba = json.dumps({
+        "summary": "x",
+        "functional_requirements": [{"id": "FR1", "desc": "a"}],
+        "acceptance_criteria": [],
+        "open_questions": ["Nokta COD verisi nerede saklanacak?", "CDEK için nokta deposu var mı?", "DPD НПП alanı hangi API'den?"],
+        "readiness": {"score": 72, "missing_details": [
+            {"topic": "Nokta COD verisinin kaynağı", "why_needed": "cashAllowed/cardAllowed persist edilmiyor", "question": "Hangi API alanı, hangi tablo?"},
+            {"topic": "CDEK/DPD nokta deposu", "why_needed": "senkronizasyon yok", "question": "Nokta verisi nereden okunacak?"},
+        ]},
+    }, ensure_ascii=False)
+    r = _parse_readiness("```json\n" + ba + "\n```")
+    check("readiness bloğu fenced JSON'dan parse edilir", r is not None and r["score"] == 72 and len(r["missing_details"]) == 2, f"{r}")
+    check("readiness yoksa None (kapı atlanır, iş bloklanmaz)", _parse_readiness('{"summary":"x"}') is None)
+    check("bozuk JSON → None", _parse_readiness("düzyazı") is None)
+
+    score, reasons = _readiness_score(r, ac_empty=True, open_questions=3)
+    check("ceza: AC boş −15, 3 açık soru −9 → 72−24 = 48", score == 48, f"{score} {reasons}")
+    check("ceza gerekçeleri listelenir", any("AC" in x for x in reasons) and any("soru" in x for x in reasons), f"{reasons}")
+    check("açık soru cezası −15'te durur", _readiness_score({"score": 90, "missing_details": []}, False, 9)[0] == 75)
+    check("skor 0..100'e kırpılır", _readiness_score({"score": 130, "missing_details": []}, False, 0)[0] == 100
+          and _readiness_score({"score": 10, "missing_details": []}, True, 5)[0] == 0)
+    check("readiness None → skor None (kapı karar vermez)", _readiness_score(None, True, 3)[0] is None)
+
+    c = _readiness_comment(48, 60, r["missing_details"], stage="requirements", penalties=reasons)
+    check("yorum: skor/eşik başlıkta", "48" in c and "60" in c and "Hazırlık" in c, c[:120])
+    check("yorum: eksik detaylar tablo satırı olarak", "Nokta COD verisinin kaynağı" in c and "Hangi API alanı" in c)
+    check("yorum: tekrar kuyruğa alma talimatı", "tekrar kuyruğa" in c or "↻" in c)
+    c2 = _readiness_comment(16, 50, [], stage="plan", uncovered=["AC1", "FR2"],
+                            architect_note="INSUFFICIENT: 4 repoya yayılan yeni mekanizma; nokta COD verisi persist edilmiyor.")
+    check("aşama 2 yorumu: mimar teşhisi + kapsanmayan id'ler", "AC1" in c2 and "persist edilmiyor" in c2 and "%" in c2, c2[:200])
+
+    check("NeedsMoreInfo, NeedsHumanReview'un alt sınıfı (server/main ayrımı değişmez)",
+          issubclass(NeedsMoreInfo, NeedsHumanReview))
+
+    # bağlama: durum, DB, server, dashboard, config
+    check("jobs.status ENUM'unda needs_info var", "needs_info" in _db.SCHEMA)
+    check("db.needs_info_job var", hasattr(_db, "needs_info_job"))
+    check("health sayacında needs_info", "needs_info" in inspect.getsource(_db.get_stats) if hasattr(_db, "get_stats") else "needs_info" in inspect.getsource(_db))
+    srv_src = inspect.getsource(_srv)
+    check("retry endpoint needs_info'yu kabul eder", _re.search(r'retry.*?needs_info|needs_info.*?retry', srv_src, _re.S) is not None)
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("dashboard needs_info rengi + retry butonu", html.count("needs_info") >= 2, f"{html.count('needs_info')}")
+    check("config: CREW_READINESS_GATE / MIN_SCORE=60 / MIN_COVERAGE=50",
+          _pc.get("CREW_READINESS_GATE") is not None and int(_pc.get("CREW_READINESS_MIN_SCORE")) == 60
+          and int(_pc.get("CREW_READINESS_MIN_COVERAGE")) == 50)
+    s1 = inspect.getsource(_flow.AgileSDLCFlow.crew_step1_requirements)
+    check("aşama 1 requirements adımına bağlı (NeedsMoreInfo + _step_fail)", "NeedsMoreInfo" in s1 and "_readiness_score" in s1)
+    s4 = inspect.getsource(_flow.AgileSDLCFlow.crew_step4_technical_design)
+    check("aşama 2 plan adımına bağlı (kapsam eşiği + mimar reddi)", "NeedsMoreInfo" in s4 and "CREW_READINESS_MIN_COVERAGE" in s4)
+
+
+# ── 25. Çağrı muhasebesi thread sınırını aşmalı (crewai 1.15 regresyonu) ──
+
+def test_call_context_cross_thread():
+    """crewai 1.15.20 ile crew kickoff'larının LLM çağrıları flow adımından
+    FARKLI bir thread'de koşuyor. Muhasebe bağlamı thread-local idi → job_id
+    None → llm_calls satırları sahipsiz (bugün 7 satır, $3.03 NULL job_id),
+    jobs.total_cost_usd ve adım maliyetleri 0 kaldı (#190, #191). Worker
+    kuyruğu seri: süreç-genel bir 'geçerli iş' bağlamı güvenli; thread-local
+    yalnızca paralel adımlarda (step9/step10) ince ayar."""
+    print("\n[25] çağrı muhasebesi — thread sınırı")
+    import threading
+    from agile_sdlc_crew.tools import claude_cli_llm as cli
+    cli.set_call_context(4242, "requirements_analysis_task", "business_analyst")
+    got = {}
+    def _worker():
+        got["ctx"] = cli._get_call_context()
+    t = threading.Thread(target=_worker); t.start(); t.join()
+    check("başka thread'den okunan bağlam job_id'yi taşır",
+          got.get("ctx", (None,))[0] == 4242, f"{got}")
+    check("adım/agent de taşınır", got["ctx"][1] == "requirements_analysis_task" and got["ctx"][2] == "business_analyst")
+    # thread-local override: paralel adım kendi bağlamını set ederse o kazanır
+    got2 = {}
+    def _w2():
+        cli.set_call_context(4243, "uat_task", "uat_specialist")
+        got2["ctx"] = cli._get_call_context()
+    t2 = threading.Thread(target=_w2); t2.start(); t2.join()
+    check("thread kendi bağlamını set ettiyse o geçerli", got2["ctx"][0] == 4243, f"{got2}")
+    cli.clear_call_context()
+    got3 = {}
+    def _w3():
+        got3["ctx"] = cli._get_call_context()
+    t3 = threading.Thread(target=_w3); t3.start(); t3.join()
+    check("clear sonrası başka thread de boş görür", got3["ctx"][0] is None, f"{got3}")
+
+    # WI yorumu: _md_to_html '###' ve '|' tablo bilmez — yorum bunları kullanmamalı
+    c = _readiness_comment(48, 60, [{"topic": "T", "why_needed": "W", "question": "Q?"}],
+                           stage="requirements", penalties=["AC alanı boş (−15)"])
+    check("yorumda '###' yok (h3 render edilmiyor)", "###" not in c)
+    check("yorumda pipe tablo yok (render edilmiyor)", "|---|" not in c and "| T |" not in c)
+    check("eksik detay madde olarak (- ile) listelenir", "- **T**" in c or "- T" in c, c[:300])
+
+
+# ── 26. _md_to_html: ### başlık ve | tablo (WI yorumu düz metin kalıyordu) ─
+
+def test_md_to_html_headings_tables():
+    """#191'in WI yorumunda '### Eksik detaylar' ve '| a | b |' satırları
+    Azure DevOps'ta düz metin göründü (ekran görüntüsü, 09.09 15:01)."""
+    print("\n[26] _md_to_html — ### ve tablo")
+    from agile_sdlc_crew.main import _md_to_html
+    h = _md_to_html("### Alt başlık\n\nmetin")
+    check("### → <h4>", "<h4>Alt başlık</h4>" in h, h)
+    t = _md_to_html("| A | B |\n|---|---|\n| 1 | **iki** |\n\nson")
+    check("pipe tablo → <table> + <th>", "<table>" in t and "<th>A</th>" in t, t)
+    check("hücreler <td>, inline biçim korunur", "<td>1</td>" in t and "<strong>iki</strong>" in t, t)
+    check("ayırıcı satır (|---|) hücre olmaz", "---" not in t, t)
+    check("tablo sonrası paragraf devam eder", "<p>son</p>" in t, t)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -1335,7 +1461,10 @@ def main():
               test_build_fix_regressions,
               test_partial_implement_resume,
               test_needs_human_and_resume_envelope,
-              test_build_gate_stale_build):
+              test_build_gate_stale_build,
+              test_readiness_gate,
+              test_call_context_cross_thread,
+              test_md_to_html_headings_tables):
         try:
             t()
         except Exception as e:

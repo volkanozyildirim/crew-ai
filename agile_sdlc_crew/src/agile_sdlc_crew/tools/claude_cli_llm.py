@@ -87,6 +87,13 @@ def set_toolless(on: bool = True) -> None:
 # sayisi kayitli sink'e gonderilir (db.record_llm_call). Thread-local —
 # paralel step'lerde izole.
 _acct_ctx = threading.local()
+# Surec-genel yedek: crewai>=1.15 crew kickoff'larinin LLM cagrilarini flow
+# adimindan FARKLI bir thread'de kosturuyor → thread-local bos → job_id None →
+# llm_calls satirlari sahipsiz, jobs/job_steps maliyeti 0 (09.09: 7 satir,
+# $3.03 NULL job_id; #190/#191 $0 gorundu). Worker kuyrugu seri calistigi icin
+# 'gecerli is' surec-genel tutulabilir; thread-local yalnizca paralel adimlarda
+# (step9/step10) kendi bagini set eden thread icin ince ayar olarak kalir.
+_acct_global = {"job_id": None, "step_key": "", "agent": ""}
 _call_sink = None
 
 
@@ -94,24 +101,30 @@ def set_call_context(job_id=None, step_key: str = "", agent: str = "") -> None:
     _acct_ctx.job_id = job_id
     _acct_ctx.step_key = step_key or ""
     _acct_ctx.agent = agent or ""
+    _acct_global.update(job_id=job_id, step_key=step_key or "", agent=agent or "")
 
 
 def clear_call_context() -> None:
     _acct_ctx.job_id = None
     _acct_ctx.step_key = ""
     _acct_ctx.agent = ""
+    _acct_global.update(job_id=None, step_key="", agent="")
 
 
 def set_call_agent(agent: str) -> None:
     """Sadece agent alanini guncelle (job_id/step_key korunur). Kickoff gibi
     cok-personali adimlarda her persona icin ayri atif yapmaya yarar."""
     _acct_ctx.agent = agent or ""
+    _acct_global["agent"] = agent or ""
 
 
 def _get_call_context() -> tuple:
-    return (getattr(_acct_ctx, "job_id", None),
-            getattr(_acct_ctx, "step_key", ""),
-            getattr(_acct_ctx, "agent", ""))
+    """Bu thread bag set ettiyse o; yoksa surec-genel yedek."""
+    if getattr(_acct_ctx, "job_id", None) is not None:
+        return (_acct_ctx.job_id,
+                getattr(_acct_ctx, "step_key", ""),
+                getattr(_acct_ctx, "agent", ""))
+    return (_acct_global["job_id"], _acct_global["step_key"], _acct_global["agent"])
 
 
 def register_call_sink(fn) -> None:

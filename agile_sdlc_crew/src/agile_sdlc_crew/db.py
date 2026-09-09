@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id INT AUTO_INCREMENT PRIMARY KEY,
     work_item_id VARCHAR(20) NOT NULL,
     wi_title VARCHAR(255) DEFAULT '',
-    status ENUM('queued','running','completed','failed','needs_human') DEFAULT 'queued',
+    status ENUM('queued','running','completed','failed','needs_human','needs_info') DEFAULT 'queued',
     use_hal TINYINT(1) DEFAULT 1,
     repo_name VARCHAR(100) DEFAULT '',
     branch_name VARCHAR(100) DEFAULT '',
@@ -125,13 +125,14 @@ def init_db():
         try:
             cur.execute("SHOW COLUMNS FROM jobs LIKE 'status'")
             _row = cur.fetchone()
-            if _row and "needs_human" not in (_row.get("Type") or ""):
+            _typ = (_row.get("Type") or "") if _row else ""
+            if _row and ("needs_human" not in _typ or "needs_info" not in _typ):
                 cur.execute(
                     "ALTER TABLE jobs MODIFY status "
-                    "ENUM('queued','running','completed','failed','needs_human') "
+                    "ENUM('queued','running','completed','failed','needs_human','needs_info') "
                     "DEFAULT 'queued'"
                 )
-                log.info("jobs.status ENUM'una 'needs_human' eklendi")
+                log.info("jobs.status ENUM'una 'needs_human'/'needs_info' eklendi")
         except Exception as e:
             log.warning(f"jobs.status ENUM guncellenemedi (atlaniyor): {e}")
 
@@ -285,6 +286,19 @@ def needs_human_job(job_id: int, reason: str):
     kuyruga alinabilir."""
     update_job(job_id, status="needs_human", finished_at=datetime.now(),
                error_message=reason[:2000])
+
+
+def needs_info_job(job_id: int, reason: str):
+    """Is 'WI detay bekliyor' durumuna alinir — 'failed' DEGIL, silinmez.
+
+    Hazirlik kapisi: WI bir gelistiricinin kimseye sormadan uygulayabilecegi
+    kadar detayli degilse (BA skoru < esik, ya da mimar kodu gorunce 'tek
+    repoda karsilanamaz' dedi / plan kapsami < esik) is burada durur, eksik
+    detaylar WI yorumuna yazilir. WI sahibi detaylari ekleyip /api/jobs/{id}/
+    retry ile ayni isi tekrar kuyruga alir. Job #190 (WI 73061)."""
+    update_job(job_id, status="needs_info", finished_at=datetime.now(),
+               error_message=reason[:2000])
+
 
 
 def fail_orphan_running_jobs(reason: str = "Sunucu yeniden baslatildi, is yarida kaldi") -> int:
@@ -548,5 +562,7 @@ def get_queue_stats() -> dict:
             # 'needs_human' TERMINAL ama basarisiz DEGIL — ayri sayilir, yoksa
             # bu isler sayimlarda tamamen kaybolur.
             "needs_human": stats.get("needs_human", 0),
+            # 'needs_info': WI sahibinden detay bekleniyor — basarisiz degil.
+            "needs_info": stats.get("needs_info", 0),
             "total": sum(stats.values()),
         }

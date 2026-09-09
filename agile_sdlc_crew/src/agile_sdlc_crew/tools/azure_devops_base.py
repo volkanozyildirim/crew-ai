@@ -104,6 +104,17 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
+    def update_comment(self, work_item_id: int, comment_id: int, text: str) -> dict:
+        """Mevcut WI yorumunun metnini degistirir (yanlis render edilen yorumu
+        duzeltmek icin; yeni yorum eklemek yerine — duplikasyon olmasin)."""
+        url = f"{self._base_api_url}/wit/workitems/{work_item_id}/comments/{comment_id}"
+        params = {"api-version": "7.1-preview.4"}
+        resp = requests.patch(
+            url, headers=self._headers, json={"text": text}, params=params, timeout=30
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ── Git / Repo API'leri ──
 
     def _project_api_url(self, project: str) -> str:

@@ -770,9 +770,14 @@ def _md_to_html(md: str) -> str:
     result = []
     in_list = False
     in_code = False
+    in_table = False      # pipe tablo (| a | b |) — ilk satir baslik, |---| atlanir
+    table_header_done = False
     for line in lines:
         # Code block
         if line.strip().startswith("```"):
+            if in_table:
+                result.append("</table>")
+                in_table = False
             if in_code:
                 result.append("</pre>")
                 in_code = False
@@ -783,15 +788,40 @@ def _md_to_html(md: str) -> str:
         if in_code:
             result.append(_html.escape(line))
             continue
+        stripped = line.strip()
+        # Pipe tablo satiri: '| a | b |' (job #191 WI yorumunda duz metin kalmisti)
+        if stripped.startswith("|") and stripped.endswith("|") and len(stripped) > 1:
+            cells = [c.strip() for c in stripped[1:-1].split("|")]
+            if all(re.fullmatch(r":?-{3,}:?", c) for c in cells if c) and any(cells):
+                continue  # ayirici satir
+            if in_list:
+                result.append("</ul>")
+                in_list = False
+            if not in_table:
+                result.append("<table>")
+                in_table = True
+                table_header_done = False
+            tag = "th" if not table_header_done else "td"
+            result.append("<tr>" + "".join(f"<{tag}>{_format_inline(c)}</{tag}>" for c in cells) + "</tr>")
+            table_header_done = True
+            continue
+        if in_table:
+            result.append("</table>")
+            in_table = False
         # Liste kapat
-        if in_list and not line.strip().startswith("- ") and not line.strip().startswith("* "):
+        if in_list and not stripped.startswith("- ") and not stripped.startswith("* "):
             result.append("</ul>")
             in_list = False
-        stripped = line.strip()
         if not stripped:
             result.append("<br>")
             continue
-        # Headings
+        # Headings (#### → h5, ### → h4, ## → h3, # → h2)
+        if stripped.startswith("#### "):
+            result.append(f"<h5>{_html.escape(stripped[5:])}</h5>")
+            continue
+        if stripped.startswith("### "):
+            result.append(f"<h4>{_html.escape(stripped[4:])}</h4>")
+            continue
         if stripped.startswith("## "):
             result.append(f"<h3>{_html.escape(stripped[3:])}</h3>")
             continue
@@ -819,6 +849,8 @@ def _md_to_html(md: str) -> str:
         result.append(f"<p>{_format_inline(stripped)}</p>")
     if in_list:
         result.append("</ul>")
+    if in_table:
+        result.append("</table>")
     if in_code:
         result.append("</pre>")
     return "\n".join(result)
