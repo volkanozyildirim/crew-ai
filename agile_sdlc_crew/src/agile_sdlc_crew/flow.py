@@ -195,6 +195,36 @@ def _review_rejected(review_text: str) -> bool:
     return False
 
 
+def _review_approved(review_text: str) -> bool:
+    """POZITIF onay sinyali var mi? (_review_rejected'in tersi DEGIL.)
+
+    _review_rejected belirsizlikte False doner — dongoye girmemek icin dogru,
+    ama 'red degil' ≠ 'onay'. Job #188'de escalation ciktisi ("Insan
+    mudahalesi gerekli — ...") karar satiri tasimiyordu → _review_rejected
+    False → _restore_review ONAY sanip review'u resume edecekti; verify'in
+    buldugu N1 regresyonu incelenmeden build gate'e giderdi. Resume yalnizca
+    ACIK onayla yapilir: REVIEW_DECISION: APPROVE ya da Verdict satirinda
+    APPROVE/ONAY (red tokeni olmadan)."""
+    import re as _re_a
+    text = review_text or ""
+    decisions = _re_a.findall(
+        r"(?im)^[\s>*_#-]*REVIEW_DECISION\s*[:=]\s*([A-Za-z_]+)", text
+    )
+    if decisions:
+        return decisions[-1].strip().upper().startswith("APPROVE")
+    vm = _re_a.search(
+        r"(?im)^[\s>*_#-]*(?:final[\s_]*)?(?:verdict|karar)\s*[:=]\s*(.+)$", text
+    )
+    if vm:
+        val = vm.group(1).upper()
+        has_reject = any(tok in val for tok in (
+            "CHANGES_REQUIRED", "CHANGES REQUIRED", "REJECT", "RED",
+            "REDDED", "DEĞİŞİKLİK GEREKLİ", "DEGISIKLIK GEREKLI", "NEEDS_HUMAN",
+        ))
+        return ("APPROVE" in val or "ONAY" in val) and not has_reject
+    return False
+
+
 def _parse_review_issues(review_text: str) -> list[dict]:
     """REVIEW_ISSUES_JSON blogunu parse eder. ID'ler HER ZAMAN burada atanir
     (R1, R2, ...) — LLM'in urettigi id varsa bile YOK SAYILIR (turlar arasi
@@ -301,21 +331,66 @@ def _php_call_arity(source: str) -> list:
                     continue
                 if ch == quote:
                     quote = ""
-            elif ch in "\"'":
-                quote = ch
-            elif ch in "([{":
-                depth += 1
-            elif ch in ")]}":
+                i += 1
+                continue
+            if ch in ")]}":
                 depth -= 1
                 if depth == 0:
                     break
+            # Parantez ICINDEKI her bosluk-disi karakter bir argümanin
+            # varligini gosterir — string acan tirnak ve dizi acan koseli
+            # parantez DAHIL. Job #186'da tirnak `seen` isaretlemiyordu:
+            # `->expose('change')` 0 argüman sayildi → yanlis ARITY alarmi →
+            # test dosyasi bloklandi → 1/2 push → is oldu.
+            if not ch.isspace():
+                seen = True
+            if ch in "\"'":
+                quote = ch
+            elif ch in "([{":
+                depth += 1
             elif ch == "," and depth == 1:
                 args += 1
-            elif not ch.isspace():
-                seen = True
             i += 1
         out.append((name, 0 if not seen else args, source.count("\n", 0, m.start()) + 1))
     return out
+
+
+def _partition_plan_by_branch(plan_changes: list, changed_files) -> tuple[list, list]:
+    """Plan dosyalarini 'branch'te zaten degismis' / 'eksik' diye ayirir.
+
+    Doner: (on_branch, missing) — ikisi de PLANIN KENDI file_path metinleriyle
+    (step7'nin kapsam kumesi ham file_path kullanir; normalize edilmis yol
+    oraya girerse '/app/X.php' vs 'app/X.php' kesisimi bos kalir — #179'daki
+    yonlendirme hatasinin aynisi). Karsilastirma _norm_path uzerinden.
+
+    changed_files None (fetch hatasi) → guvenli taraf: hepsi eksik."""
+    if not changed_files:
+        return [], [c.get("file_path") for c in (plan_changes or []) if c.get("file_path")]
+    chg = {_norm_path(f) for f in changed_files if f}
+    on_branch, missing = [], []
+    for c in plan_changes or []:
+        fp = c.get("file_path")
+        if not fp:
+            continue
+        (on_branch if _norm_path(fp) in chg else missing).append(fp)
+    return on_branch, missing
+
+
+def _contract_fix_description(file_path: str, problems: list) -> str:
+    """Sozlesme kapisinin bulgusunu developer'a duzeltme talimati olarak paketler.
+
+    Kapi makine-okunur bulgu veriyor (satir, metot, parametre sayisi). Job
+    #186'da bu bulgu yalnizca WI yorumuna yazildi, dosya atlandi ve is 1/2
+    push ile oldu ($4.89) — oysa tek duzeltme cagrisi (~$0.3) kurtarirdi."""
+    return (
+        "Dosyalar-arası SÖZLEŞME kapısı bu dosyayı reddetti — push edilmedi.\n"
+        f"Dosya: {file_path}\n"
+        "Bulgular (deterministik; php -l bunu göremez, izole çalışır):\n"
+        + "\n".join(f"- {p}" for p in problems)
+        + "\n\nHer bulguyu gider: çağrıyı repodaki GERÇEK imzaya uydur (argüman "
+        "ekle/çıkar) ya da imzayı planla uyumlu düzelt. Başka hiçbir şeyi "
+        "değiştirme. Dosyanın TAMAMINI ilk satırından son satırına döndür — parça değil."
+    )
 
 
 def _requirement_ids(requirements_text: str) -> set[str]:
@@ -2881,8 +2956,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"  PR teshis yorumu hatasi (kritik degil): {_e_pc}")
             self._step_done(
                 "review_pr_task",
-                f"İnsan müdahalesi gerekli — {max_review_retries} deneme sonrası "
-                f"kapanmayan madde:\n{remaining_summary}"[:3000],
+                (f"REVIEW_DECISION: NEEDS_HUMAN\n"
+                 f"İnsan müdahalesi gerekli — {max_review_retries} deneme sonrası "
+                 f"kapanmayan madde:\n{remaining_summary}")[:3000],
             )
             if self._db and self.state.job_id:
                 try:
@@ -3329,6 +3405,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         self.state.acceptance_criteria.append(ac)
             except Exception:
                 pass
+            # Zarf resume yolunda da hesaplanmali — job #188'de requirements ve
+            # plan cache'ten geldi, _apply_envelope hic cagrilmadi: zarf L
+            # (3 retry/$18) yerine config (1 retry/$10) gecerli oldu ve verify'in
+            # buldugu tek regresyon icin 2. tur hakki kalmadi.
+            self._apply_envelope("requirements")
             self._resume_step("requirements_analysis_task", cached_ba)
             return
 
@@ -3893,6 +3974,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             if repo:
                 self.state.repo_name = repo
                 self._discovered_repo = repo
+            self._apply_envelope("plan")  # resume yolunda da (job #188)
             _log(f"  ⏩ Plan resume: repo={self.state.repo_name}, {len(p.get('changes', []))} degisiklik")
             return True
 
@@ -4931,13 +5013,39 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         _log("\n-- ADIM 6: Kod gelistirme --")
 
-        # ── RESUME: kod branch'te zaten push'lu — TEKRAR YAZMA ─────────────
-        # En kritik resume noktasi: bu adim yeniden kosarsa gozden gecirilmis
-        # kod (job #183'te uc reviewer itirazi duzeltilmisti) EZILIR.
+        # ── RESUME: branch'te ZATEN degismis plan dosyalari YENIDEN YAZILMAZ ──
+        # Job #183: implement yeniden kosarsa gozden gecirilmis kod EZILIR.
+        # Job #187: 'branch var → resume' kestirmesi all_pushes'i BOS birakti
+        # ve plan kapsamini hic sorgulamadi → step7 'hicbir dosya push
+        # edilmedi', is $0'da oldu. Otoriter sinyal branch'in base'e gore
+        # DEGISEN DOSYALARI: plandakilerin hepsi degismisse tam resume; bir
+        # kismiysa KISMI — mevcutlar dongude atlanir, eksikler implement edilir.
+        from agile_sdlc_crew import pipeline_config as _pc_rs
+        _on_branch: list = []
+        _missing: list = []
+        _on_branch_norm: set = set()
+        if (self.state.branch_name and not self.state.dry_run
+                and _pc_rs.get("CREW_ENABLE_RESUME")):
+            try:
+                _chg = self._repo_mgr.changed_files(self.state.repo_name, self.state.branch_name)
+            except Exception as _e_cf:
+                _log(f"  Branch degisiklik listesi alinamadi ({_e_cf}) — resume yok, hepsi implement")
+                _chg = None
+            _on_branch, _missing = _partition_plan_by_branch(
+                (self.state.plan or {}).get("changes", []), _chg)
+            _on_branch_norm = {_norm_path(f) for f in _on_branch}
+            if _on_branch and _missing:
+                _log(f"  ⏩ Implement KISMİ resume: {len(_on_branch)} plan dosyası branch'te "
+                     f"(yeniden yazılmayacak), eksik {len(_missing)}: {_missing[:5]}")
+
         def _restore_impl(_cached: str):
-            if not self.state.branch_name:
-                return False
-            _log("  ⏩ Implement resume: kod branch'te mevcut, push YAPILMADI")
+            if not _on_branch or _missing:
+                return False  # kismi/yok → adim normal kosar, mevcutlar dongude atlanir
+            self.state.all_pushes = [
+                {"file": f, "success": True, "change_type": "resume", "note": "branch'te mevcut"}
+                for f in _on_branch
+            ]
+            _log(f"  ⏩ Implement resume: planın {len(_on_branch)} dosyasının hepsi branch'te, push YAPILMADI")
             return True
 
         if self._resume_or_run("implement_change_task", _restore_impl):
@@ -5003,6 +5111,19 @@ class AgileSDLCFlow(Flow[PipelineState]):
             current_code = change.get("current_code", "")
 
             _log(f"\n  [{i+1}/{len(plan['changes'])}] {file_path} ({change_type})")
+
+            # Kismi resume: onceki iste branch'e push edilmis (base'e gore
+            # degisik) dosya yeniden yazilmaz — gozden gecirilmis kod ezilmez.
+            if _norm_path(file_path) in _on_branch_norm:
+                _log("    ⏩ Önceki işte branch'e push edilmiş (base'e göre değişik) — yeniden yazılmıyor")
+                all_pushes.append({"file": file_path, "success": True,
+                                   "change_type": change_type, "note": "resume-branch"})
+                try:
+                    implemented_codes[file_path] = (
+                        self._client.get_file_content(repo_name, file_path, branch_name) or "")[:3000]
+                except Exception:
+                    pass
+                continue
 
             # Skip: branch'te bu dosya bu job'da zaten push edilmis ise atla.
             # Kritik: branch yeni olusturulduysa (hic commit yok), API
@@ -5247,8 +5368,44 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 for _rw in self._check_reachability(
                         file_path, final_content, full_content or ""):
                     _log(f"    ⚠️  {_rw}")
+                if _cprobs and _pc_cg.get("CREW_CONTRACT_FIX_RETRY"):
+                    # Kapinin bulgusu makine-okunur (satir + metot + parametre
+                    # sayisi). Job #186'da bulgu yalnizca WI yorumuna yazildi,
+                    # dosya atlandi, 1/2 push → %70 esigi → is $4.89'da oldu.
+                    # TEK duzeltme cagrisi (~$0.3) isi kurtarir; ikinci deneme yok.
+                    _log("    Sözleşme ihlali — developer'a TEK düzeltme turu veriliyor")
+                    code_crew = self._agile_crew.create_code_crew()
+                    code_result = code_crew.kickoff(inputs={
+                        "work_item_id": self.state.work_item_id,
+                        "target_repo": repo_name,
+                        "target_file": file_path,
+                        "change_description": _contract_fix_description(file_path, _cprobs),
+                        "current_code": final_content[:6000],
+                        "new_code": "[Sözleşme ihlalini düzelt — dosyanın TAMAMINI döndür]",
+                        "previous_context": _dev_context(),
+                    })
+                    self._track_and_check_budget(code_result, f"contract-fix:{file_path}")
+                    _fixed = _extract_dev_output(code_result)
+                    _fixed = self._prefer_worktree_edit(repo_name, file_path, _fixed, full_content)
+                    _ok2 = False
+                    if _fixed.strip():
+                        _ok2, _fixed = _validate_code(
+                            _fixed, file_path, full_content, description, repo_name=repo_name)
+                    if _ok2:
+                        _cprobs2 = self._check_cross_file_contract(
+                            file_path, _fixed, full_content or "")
+                        if not _cprobs2:
+                            final_content = _fixed
+                            _cprobs = []
+                            _log("    Sözleşme düzeltmesi başarılı — push ediliyor")
+                        else:
+                            for _cp in _cprobs2:
+                                _log(f"    🚨 SÖZLEŞME (düzeltme sonrası): {_cp}")
+                            _cprobs = _cprobs2
+                    else:
+                        _log("    Sözleşme düzeltmesi geçersiz/boş çıktı")
                 if _cprobs:
-                    _log("    Sözleşme ihlali — push iptal, developer'a geri veriliyor")
+                    _log("    Sözleşme ihlali — push iptal, WI'ya yazılacak")
                     _contract_failures.append((file_path, _cprobs))
                     continue
 
@@ -5481,8 +5638,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Kritik: yalnizca ONAY resume edilir. Red edilmis bir review'i resume
         # etmek, duzeltilmemis kodu onaylanmis gibi ilerletirdi.
         def _restore_review(cached: str):
-            if _review_rejected(cached):
-                _log("  ⏩ Review resume ATLANDI — onceki review RED ile bitmis")
+            # 'Red degil' ≠ 'onay': job #188'de escalation ciktisi karar satiri
+            # tasimiyordu ve onay sanilacakti. Yalnizca ACIK onay resume edilir.
+            if not _review_approved(cached):
+                _log("  ⏩ Review resume ATLANDI — onceki review ACIK ONAY ile bitmemis"
+                     + (" (RED)" if _review_rejected(cached) else " (karar yok / escalation)"))
                 return False
             if not self.state.pr_id:
                 return False
@@ -5765,8 +5925,16 @@ class AgileSDLCFlow(Flow[PipelineState]):
         poll_interval = int(_pc.get("CREW_PR_BUILD_POLL_INTERVAL"))
 
         attempt = 0
+        prev_build_id = None  # duzeltme sonrasi bayat build'i degerlendirmemek icin (#189)
         while True:
-            outcome, build = self._poll_pr_build(poll_timeout, poll_interval)
+            outcome, build = self._poll_pr_build(poll_timeout, poll_interval,
+                                                 ignore_build_id=prev_build_id)
+            if outcome == "stale":
+                # Duzeltme push'u yeni build tetiklemedi (ya da cok gecikti).
+                # Eski sonucu yeniden degerlendirmek retry hakkini bosa yakar;
+                # son sans + needs_human yoluna dusur.
+                _log(f"  ⚠️ Düzeltme sonrası yeni build görülmedi (hâlâ {(build or {}).get('build_id')})")
+                outcome = "timeout"
             if outcome == "no_pipeline":
                 _log("  PR build bulunamadi — bu repoda PR-test pipeline'i yok, gate atlaniyor")
                 self._step_done(step_key, "Repoda PR-test pipeline'i yok — gate atlandi")
@@ -5780,7 +5948,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 grace = int(_pc.get("CREW_PR_BUILD_TIMEOUT_GRACE") or 300)
                 if grace > 0:
                     _log(f"  ⏱️ Poll timeout ({poll_timeout}s) — son sans: {grace}s daha bekleniyor")
-                    outcome, build = self._poll_pr_build(grace, poll_interval)
+                    outcome, build = self._poll_pr_build(grace, poll_interval,
+                                                         ignore_build_id=prev_build_id)
+                    if outcome == "stale":
+                        outcome = "timeout"
                 if outcome != "completed":
                     # ── "BILMIYORUM" != "GECTI" ──────────────────────────────
                     # Terminal sozlesmemiz "testler yesil VE reviewer onaylar".
@@ -5841,7 +6012,16 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"Testleri manuel inceleyin.\n\n---\n*Agile SDLC Crew - PR Build Gate*"
                 )
                 self._step_fail(step_key, f"PR build {max_retries} deneme sonrasi {result}")
-                raise RuntimeError(f"PR build {result} ({max_retries} deneme sonrasi)")
+                # 'failed' DEGIL: kod var, PR acik, reviewer onaylamis; yalnizca
+                # testler kirmizi. Terminal sozlesme geregi insan karari.
+                _msg_bf = (f"PR build {max_retries} duzeltme sonrasi hala '{result}' "
+                           f"— PR #{self.state.pr_id} acik, testler kirmizi, insan incelemesi bekliyor")
+                if self._db and self.state.job_id:
+                    try:
+                        self._db.needs_human_job(self.state.job_id, _msg_bf)
+                    except Exception as _e_nh:
+                        _log(f"  needs_human durumu yazilamadi: {_e_nh}")
+                raise NeedsHumanReview(_msg_bf)
 
             attempt += 1
             _log(f"  🔄 PR build '{result}' — testleri düzeltme döngüsüne giriliyor (deneme {attempt}/{max_retries})")
@@ -5852,7 +6032,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"Otomatik düzeltme başlatılıyor...\n\n---\n*Agile SDLC Crew - PR Build Gate*"
             )
             self._fix_failing_build(summary)
-            # döngü başına dön — build yeniden tetiklenecek, tekrar poll
+            prev_build_id = build.get("build_id")
+            # döngü başına dön — YENİ build (farklı id) tetiklenecek, tekrar poll
 
     def _read_worktree_file(self, repo_name: str, file_path: str) -> str:
         """Klonun calisma kopyasindaki dosyayi DOGRUDAN diskten oku (dev'in
@@ -5928,13 +6109,23 @@ class AgileSDLCFlow(Flow[PipelineState]):
             "- Test eklenm/güncellenmediyse bu eksiklik incelemede CHANGES_REQUIRED sebebidir."
         )
 
-    def _poll_pr_build(self, timeout_s: int, interval_s: int) -> tuple[str, dict | None]:
+    def _poll_pr_build(self, timeout_s: int, interval_s: int,
+                       ignore_build_id=None) -> tuple[str, dict | None]:
         """PR build'ini tamamlanana kadar poll et.
-        Donus: ("completed", build) | ("no_pipeline", None) | ("timeout", build|None)."""
+        Donus: ("completed", build) | ("no_pipeline", None) | ("timeout", build|None)
+               | ("stale", build) — yalnizca ignore_build_id verildiyse.
+
+        ignore_build_id: BIR ONCEKI turda degerlendirilmis build. Duzeltme
+        push'undan sonra Azure yeni build'i kuyruga almasi birkac saniye
+        surer; o arada queueTime'a gore 'en son' build hala eskisidir. Job
+        #189'da gate push'tan 2 sn sonra poll etti, eski 'failed'i duzeltmenin
+        sonucu sanip ikinci retry hakkini bayat sonuca yakti. Ayni id'li build
+        tamamlanmis SAYILMAZ; grace suresi icinde yeni build gelmezse "stale"."""
         import time as _t
         waited = 0
         last = None
         grace = 120  # build tetiklenmesi icin taninan sure (policy gecikmesi)
+        stale_logged = False
         while waited < timeout_s:
             try:
                 build = self._client.get_pr_build(self.state.repo_name, int(self.state.pr_id))
@@ -5944,6 +6135,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
             if build is None:
                 if waited >= grace:
                     return ("no_pipeline", None)
+            elif ignore_build_id is not None and build.get("build_id") == ignore_build_id:
+                last = build
+                if not stale_logged:
+                    _log(f"  Build {build.get('build_id')} onceki turun sonucu — yeni build'in "
+                         f"tetiklenmesi bekleniyor (en fazla {grace}s)")
+                    stale_logged = True
+                if waited >= grace:
+                    return ("stale", build)
             else:
                 last = build
                 if build.get("status") == "completed":

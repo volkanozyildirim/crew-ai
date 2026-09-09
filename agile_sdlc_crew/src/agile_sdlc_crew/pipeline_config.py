@@ -301,6 +301,13 @@ SCHEMA: list[dict] = [
         "desc": "Push öncesi arity kontrolü (LLM yok): eklenen metot çağrısının argüman sayısı repodaki imzayla uyuşuyor mu. php -l bu sınıfı GÖREMEZ çünkü geçici dosyada izole çalışır — job #179'da Allocator.php luggageSuffix'e 4. argüman geçti, imza 3 parametreliydi, PHP fazlasını sessizce yuttu, linter PASS verdi, reviewer da kaçırdı ve düzenleme tamamen no-op oldu. İhlalde push iptal edilir ve WI'ya yazılır. Sadece PHP; diğer dillerde atlanır.",
     },
     {
+        "key": "CREW_CONTRACT_FIX_RETRY",
+        "label": "Sözleşme İhlalinde Developer Düzeltme Turu",
+        "type": "bool",
+        "default": True,
+        "desc": "Sözleşme kapısı bir dosyayı reddettiğinde dosyayı sessizce atlamak yerine developer'a TEK düzeltme çağrısı yap (kapının somut bulgusuyla: satır, metot, parametre sayısı). Job #186'da bulgu yalnızca WI yorumuna yazıldı, dosya atlandı, 1/2 push → %70 eşiği → iş $4.89'da öldü; ~$0.3'lük tek çağrı kurtarırdı. Yalnızca kapı reddettiğinde ve tek kez koşar, bütçe zarfına dahildir. Kapalıysa eski davranış (atla, WI'ya yaz).",
+    },
+    {
         "key": "CREW_FRESHEN_ALL_REPOS",
         "label": "Tüm Klonları Tazele (paralel fetch)",
         "type": "bool",

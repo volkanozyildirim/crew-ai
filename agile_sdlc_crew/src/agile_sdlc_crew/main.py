@@ -917,7 +917,12 @@ def run_pipeline(
 
     except Exception as e:
         tracker.finish()
-        if job_id:
+        # NeedsHumanReview 'basarisiz' DEGIL: flow durumu zaten 'needs_human'
+        # yazdi ve PR'i acik birakti. Job #188'de bu genel except onu fail_job
+        # ile EZDI → DB 'failed' gosterdi (server.py'deki ayrim buraya kadar
+        # gelemiyordu; #185'in needs_human olmasi elle duzeltmeydi).
+        from agile_sdlc_crew.flow import NeedsHumanReview as _NHR
+        if job_id and not isinstance(e, _NHR):
             try:
                 _db.fail_job(job_id, str(e))
             except Exception:
