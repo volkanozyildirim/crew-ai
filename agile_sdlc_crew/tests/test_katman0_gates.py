@@ -42,9 +42,12 @@ from agile_sdlc_crew.flow import (  # noqa: E402
     _norm_path,
     _parse_review_issues,
     _paths_in_text,
+    _contract_fix_description,
+    _partition_plan_by_branch,
     _php_call_arity,
     _php_signatures,
     _requirement_ids,
+    _review_approved,
 )
 
 PASS, FAIL, SKIP = [], [], []
@@ -300,6 +303,25 @@ def test_contract_gate():
     check("iç parantez virgülü sayılmaz", calls.get("g") == 2)
     check("argümansız çağrı 0 sayılır", calls.get("z") == 0)
 
+    # #186 (2026-09-09): tek argümanı string literal olan çağrı 0 argüman
+    # sayılıyordu — parser quote'a girerken `seen` işaretlemiyordu. Sonuç:
+    # `exposeReasonOptionDefaultKey('change')` için yanlış ARITY alarmı, test
+    # dosyası bloklandı, 1/2 push → %70 eşiği → iş $4.89'da öldü.
+    src186 = ("<?php\n$this->assertSame(\n    'x',\n"
+              "    $controller->exposeReasonOptionDefaultKey('change')\n);\n"
+              '$o->e(""); $o->arr([]); $o->sp( ); $o->num(0); $o->neg(-1);')
+    c186 = {n: a for n, a, _ in _php_call_arity(src186)}
+    check("#186 tek string-literal argüman 1 sayılır",
+          c186.get("exposeReasonOptionDefaultKey") == 1, f"{c186}")
+    check("boş string argüman 1 sayılır", c186.get("e") == 1, f"{c186}")
+    check("boş dizi argüman 1 sayılır", c186.get("arr") == 1, f"{c186}")
+    check("yalnız boşluk → 0 sayılır", c186.get("sp") == 0, f"{c186}")
+    check("sıfır / negatif sayı 1 sayılır",
+          c186.get("num") == 1 and c186.get("neg") == 1, f"{c186}")
+    check("satır numarası çağrının kendi satırı",
+          any(n == "exposeReasonOptionDefaultKey" and l == 4
+              for n, _, l in _php_call_arity(src186)))
+
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
         repo = base / "fake"
@@ -331,6 +353,32 @@ def test_contract_gate():
         check("old_content yok → geriye uyumlu (tüm dosya taranır)",
               any("luggageSuffix" in x for x in fn(stub, "app/A.php", NEW, "")))
         check("PHP olmayan dosya atlanır", fn(stub, "app/x.py", NEW, OLD) == [])
+
+        # #186'nın gerçek test dosyası (plan new_code): anonim alt sınıfta
+        # tanımlanan 1 parametreli helper, iki testten 1 argümanla çağrılıyor.
+        # Gate bunu "satır 27, 0 argüman" diye bloklamıştı. Sözleşme TEMİZ olmalı.
+        NEW186 = (
+            "<?php\nnamespace App\\Test\\Controller\\Api\\V1;\n"
+            "use App\\Controller\\Api\\V1\\Customer;\n"
+            "class CustomerReturnReasonDefaultTest extends TestCase\n{\n"
+            "    public function testReturn(): void\n    {\n"
+            "        $controller = $this->makeController();\n"
+            "        $this->assertSame(\n            'Lütfen İade Nedeninizi Belirtiniz',\n"
+            "            $controller->exposeReasonOptionDefaultKey(Florchestra::REQUEST_TYPE_RETURN)\n"
+            "        );\n    }\n"
+            "    public function testChange(): void\n    {\n"
+            "        $controller = $this->makeController();\n"
+            "        $this->assertSame(\n            'Lütfen Değişim Nedeninizi Belirtiniz',\n"
+            "            $controller->exposeReasonOptionDefaultKey('change')\n"
+            "        );\n    }\n"
+            "    private function makeController(): Customer\n    {\n"
+            "        return new class extends Customer {\n"
+            "            public function exposeReasonOptionDefaultKey(string $requestType): string\n"
+            "            {\n                return $this->getReasonOptionDefaultTranslationKey($requestType);\n"
+            "            }\n        };\n    }\n}\n")
+        p186 = fn(stub, "Test/Controller/Api/V1/CustomerReturnReasonDefaultTest.php", NEW186, "")
+        check("#186 gerçek test dosyası → sözleşme kapısı temiz (yanlış alarm yok)",
+              p186 == [], f"{p186}")
 
 
 # ── 7. fix_targets çıkarımı (#178 yönlendirme) ───────────────────────────
@@ -1041,6 +1089,196 @@ def test_build_fix_regressions():
     check("#185'in gerçek diff'i iki ihlalle reddedilir", len(r6) >= 2, f"{r6}")
 
 
+# ── 21. Kısmi implement resume + sözleşme düzeltme turu (#186/#187) ─────
+
+def test_partial_implement_resume():
+    """#186: sözleşme kapısı test dosyasını blokladı, Customer.php branch'e
+    push'landı, iş 1/2 ile öldü. #187 (yeniden kuyruk): implement 'resume'
+    edildi — ama all_pushes BOŞ kaldı ve plan kapsamı hiç sorgulanmadı →
+    'Hiçbir dosya push edilemedi', $0'da öldü. Doğru davranış: branch'te
+    zaten değişmiş plan dosyaları push sayılır ve YENİDEN YAZILMAZ; eksikler
+    implement edilir."""
+    print("\n[21] kısmi implement resume + sözleşme düzeltme turu")
+    plan = [
+        {"file_path": "/app/Controller/Api/V1/Customer.php", "change_type": "edit"},
+        {"file_path": "Test/Controller/Api/V1/CustomerReturnReasonDefaultTest.php",
+         "change_type": "create"},
+    ]
+    # #186 sonrası branch: yalnızca Customer.php değişmiş
+    on, todo = _partition_plan_by_branch(plan, ["app/Controller/Api/V1/Customer.php"])
+    check("#186 branch'i: Customer.php branch'te sayılır (slash farkı normalize)",
+          on == ["/app/Controller/Api/V1/Customer.php"], f"{on}")
+    check("#186 branch'i: test dosyası eksik → implement edilecek",
+          todo == ["Test/Controller/Api/V1/CustomerReturnReasonDefaultTest.php"], f"{todo}")
+    check("planın kendi yol biçimi korunur (step7 kapsam kümesi ham file_path kullanır)",
+          on[0] == plan[0]["file_path"])
+    on2, todo2 = _partition_plan_by_branch(
+        plan, ["app/Controller/Api/V1/Customer.php",
+               "Test/Controller/Api/V1/CustomerReturnReasonDefaultTest.php", "README.md"])
+    check("tüm plan dosyaları branch'te → tam resume, eksik yok", len(on2) == 2 and todo2 == [])
+    on3, todo3 = _partition_plan_by_branch(plan, [])
+    check("branch'te değişiklik yok → hiçbir şey resume edilmez", on3 == [] and len(todo3) == 2)
+    on4, todo4 = _partition_plan_by_branch(plan, None)
+    check("changed_files None (fetch hatası) → güvenli taraf: hepsi implement", on4 == [] and len(todo4) == 2)
+
+    # LocalRepoManager.changed_files — gerçek git fixture
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        remote = base / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True, capture_output=True)
+        work = base / "seed"
+        subprocess.run(["git", "clone", "-q", str(remote), str(work)], check=True, capture_output=True)
+        env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        import os as _os
+        env = {**_os.environ, **env}
+        (work / "app").mkdir(); (work / "app" / "A.php").write_text("<?php // a\n")
+        (work / "README.md").write_text("x\n")
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=work, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "feature/1"], cwd=work, check=True, capture_output=True)
+        (work / "app" / "A.php").write_text("<?php // a2\n")
+        (work / "app" / "B.php").write_text("<?php // b\n")
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "feat"], cwd=work, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "push", "-q", "origin", "feature/1"], cwd=work, check=True, capture_output=True)
+        # pipeline'ın klonu: yalnızca main'i bilen ayrı bir klon
+        clone = base / "fake"
+        subprocess.run(["git", "clone", "-q", str(remote), str(clone)], check=True, capture_output=True)
+        from agile_sdlc_crew.tools.local_repo import LocalRepoManager
+        mgr = LocalRepoManager(base_dir=str(base))
+        got = mgr.changed_files("fake", "feature/1")
+        check("changed_files: remote branch fetch edilip main'e göre fark listelenir",
+              sorted(got) == ["app/A.php", "app/B.php"], f"{got}")
+        check("changed_files: olmayan branch → boş liste (exception değil)",
+              mgr.changed_files("fake", "feature/yok") == [])
+
+    # Sözleşme düzeltme talimatı — developer'a kapının verdiği somut bulgu gitmeli
+    d = _contract_fix_description(
+        "Test/X.php",
+        ["ARITY: satır 27, 'exposeReasonOptionDefaultKey(...)' 0 argümanla çağrılıyor ama 1 zorunlu parametre var."])
+    check("düzeltme talimatı dosya yolunu içerir", "Test/X.php" in d)
+    check("düzeltme talimatı kapının bulgusunu birebir içerir", "satır 27" in d and "exposeReasonOptionDefaultKey" in d)
+    check("düzeltme talimatı tam dosya ister (parça değil)", "TAM" in d.upper())
+
+
+# ── 22. needs_human kalıcılığı + escalation resume + zarf-on-resume (#188) ─
+
+def test_needs_human_and_resume_envelope():
+    """Job #188 (2026-09-09) üç kusuru birden gösterdi:
+      1. flow needs_human yazdı, main.run_pipeline'ın genel except'i fail_job ile
+         EZDİ → DB'de 'failed'. #185'in needs_human olması elle düzeltmeydi.
+      2. Escalation çıktısı ("İnsan müdahalesi gerekli — ...") karar satırı
+         taşımıyor → _review_rejected False → _restore_review ONAY sanıp
+         review'u atlar → N1 regresyonu incelenmeden build gate'e gider.
+      3. requirements/plan resume edildiğinde _apply_envelope hiç çağrılmadı →
+         zarf L (3 retry, $18) yerine config (1 retry, $10); verify N1 bulduğunda
+         2. tur hakkı yoktu → gereksiz escalation."""
+    print("\n[22] needs_human kalıcılığı · escalation resume · zarf-on-resume")
+    import inspect
+    from agile_sdlc_crew import main as _main, flow as _flow, db as _db
+
+    # 1) _review_approved: yalnızca POZİTİF onay sinyali
+    esc = "İnsan müdahalesi gerekli — 1 deneme sonrası kapanmayan madde:\n- N1 ..."
+    check("escalation metni ONAY değildir", _review_approved(esc) is False)
+    check("REVIEW_DECISION: APPROVE onaydır", _review_approved("x\nREVIEW_DECISION: APPROVE\n") is True)
+    check("Verdict: APPROVE onaydır", _review_approved("## PR Review\n**Verdict:** APPROVE — ok") is True)
+    check("CHANGES_REQUIRED onay değildir", _review_approved("**Verdict:** CHANGES_REQUIRED") is False)
+    check("karar satırı yok → onay değil (belirsizlik resume ETMEZ)", _review_approved("sadece düzyazı") is False)
+    check("REVIEW_DECISION: NEEDS_HUMAN onay değildir", _review_approved("REVIEW_DECISION: NEEDS_HUMAN") is False)
+    src8 = inspect.getsource(_flow.AgileSDLCFlow.step8_code_review)
+    check("_restore_review pozitif onay ister (_review_approved)", "_review_approved(" in src8)
+
+    # 2) run_pipeline: NeedsHumanReview fail_job'u TETİKLEMEZ
+    calls = []
+    orig_kick, orig_fail = _flow.AgileSDLCFlow.kickoff, _db.fail_job
+    def _raise(exc):
+        def _k(self, inputs=None, **kw):
+            raise exc
+        return _k
+    _db.fail_job = lambda jid, msg: calls.append(("fail", jid))
+    tracker = SimpleNamespace(finish=lambda: None)
+    try:
+        _flow.AgileSDLCFlow.kickoff = _raise(_flow.NeedsHumanReview("kapanmayan madde"))
+        try:
+            _main.run_pipeline("1", tracker=tracker, job_id=999)
+        except _flow.NeedsHumanReview:
+            pass
+        check("NeedsHumanReview → fail_job ÇAĞRILMAZ (needs_human ezilmez)", calls == [], f"{calls}")
+        calls.clear()
+        _flow.AgileSDLCFlow.kickoff = _raise(RuntimeError("boom"))
+        try:
+            _main.run_pipeline("1", tracker=tracker, job_id=999)
+        except RuntimeError:
+            pass
+        check("diğer hatalar → fail_job çağrılır", calls == [("fail", 999)], f"{calls}")
+    finally:
+        _flow.AgileSDLCFlow.kickoff, _db.fail_job = orig_kick, orig_fail
+
+    # 3) zarf resume yollarında da uygulanır (kaynak-seviyesi bağlama kontrolü)
+    src4 = inspect.getsource(_flow.AgileSDLCFlow.crew_step4_technical_design)
+    i_env, i_res = src4.find('_apply_envelope("plan")'), src4.find('_resume_or_run("technical_design_task"')
+    check("plan resume → _apply_envelope('plan') restore içinde (resume'dan ÖNCE tanımlı)",
+          0 <= i_env < i_res, f"env={i_env} resume={i_res}")
+    src1 = inspect.getsource(_flow.AgileSDLCFlow.crew_step1_requirements)
+    check("requirements resume → _apply_envelope('requirements') hem resume hem normal yolda",
+          src1.count('_apply_envelope("requirements")') >= 2, f"{src1.count(chr(95)+'apply_envelope')}")
+
+
+# ── 23. Build gate: düzeltme push'undan sonra ESKİ build'i değerlendirme (#189) ─
+
+def test_build_gate_stale_build():
+    """Job #189: build-fix push'u 11:37:44'te gitti, gate 11:37:46'da poll etti,
+    Azure yeni build'i henüz kuyruğa almamıştı → queueTime'a göre 'en son'
+    build hâlâ eski 132550 (failed) → gate bunu düzeltmenin sonucu sanıp
+    2 saniyede 'deneme 2/2'ye girdi. İkinci retry hakkı bayat sonuca yandı.
+    Düzeltmeden sonra gate, id'si ÖNCEKİNDEN FARKLI bir build görmeden karar
+    vermemeli."""
+    print("\n[23] build gate — düzeltme sonrası bayat build")
+    import inspect, time as _time
+    from agile_sdlc_crew.flow import AgileSDLCFlow
+
+    def _mk(seq):
+        it = iter(seq)
+        last = {"b": None}
+        def _get(repo, pr):
+            try:
+                last["b"] = next(it)
+            except StopIteration:
+                pass
+            return last["b"]
+        return SimpleNamespace(state=SimpleNamespace(repo_name="r", pr_id="1"),
+                               _client=SimpleNamespace(get_pr_build=_get))
+
+    stale = {"build_id": 100, "status": "completed", "result": "failed"}
+    fresh_run = {"build_id": 101, "status": "inProgress", "result": None}
+    fresh_ok = {"build_id": 101, "status": "completed", "result": "succeeded"}
+    orig_sleep = _time.sleep
+    _time.sleep = lambda s: None
+    try:
+        out = AgileSDLCFlow._poll_pr_build(_mk([stale, stale, fresh_run, fresh_ok]), 600, 30,
+                                           ignore_build_id=100)
+        check("bayat build (aynı id) tamamlanmış sayılmaz, yeni build beklenir",
+              out[0] == "completed" and out[1]["build_id"] == 101, f"{out}")
+        out2 = AgileSDLCFlow._poll_pr_build(_mk([stale]), 600, 30)
+        check("ignore verilmezse eski davranış (ilk poll'da completed)",
+              out2[0] == "completed" and out2[1]["build_id"] == 100, f"{out2}")
+        out3 = AgileSDLCFlow._poll_pr_build(_mk([stale]), 600, 30, ignore_build_id=100)
+        check("yeni build hiç gelmezse 'stale' döner (timeout/completed değil)",
+              out3[0] == "stale" and out3[1]["build_id"] == 100, f"{out3}")
+    finally:
+        _time.sleep = orig_sleep
+
+    src = inspect.getsource(AgileSDLCFlow.pr_build_gate)
+    check("gate düzeltme sonrası önceki build id'sini poll'a geçiriyor",
+          "ignore_build_id=" in src)
+    check("gate 'stale' sonucunu ele alıyor", '"stale"' in src)
+    ti = src.find("attempt >= max_retries")
+    branch = src[ti:ti + 1800] if ti > 0 else ""
+    check("retry tavanı: PR açık → needs_human (failed değil)",
+          "NeedsHumanReview" in branch and "needs_human_job" in branch, "RuntimeError yolu duruyor")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -1053,7 +1291,10 @@ def main():
               test_build_fix_selection, test_resume_wiring,
               test_build_gate_timeout_strict,
               test_build_fix_single_commit,
-              test_build_fix_regressions):
+              test_build_fix_regressions,
+              test_partial_implement_resume,
+              test_needs_human_and_resume_envelope,
+              test_build_gate_stale_build):
         try:
             t()
         except Exception as e:

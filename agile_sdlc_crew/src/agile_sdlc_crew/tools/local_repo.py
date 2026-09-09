@@ -1116,6 +1116,42 @@ class LocalRepoManager:
         diff = self._git(["diff", f"{base_ref}...{branch}"], cwd=repo_dir, timeout=60)
         return diff.stdout or ""
 
+    def changed_files(self, repo_name: str, branch: str, base: str = "main") -> list[str]:
+        """`base...branch` arasinda degisen dosya yollari (repo kokune gore).
+
+        Kismi implement resume icin: branch'te ZATEN degismis plan dosyalari
+        yeniden yazilmaz. Job #187'de 'branch var → resume' kestirmesi
+        all_pushes'i bos birakti ve plan kapsamini hic sorgulamadi → step7
+        'hicbir dosya push edilmedi' dedi, is $0'da oldu. Otoriter sinyal
+        branch'in base'e gore degisen dosyalari.
+
+        Branch once remote'tan fetch edilir. Hata ya da branch yoksa BOS liste
+        — cagiran guvenli tarafta kalir (hepsini implement eder)."""
+        try:
+            repo_dir = self._get_repo_dir(repo_name)
+        except Exception:
+            return []
+        try:
+            self._git(["fetch", "-q", "origin", branch], cwd=repo_dir, timeout=60)
+        except Exception:
+            pass
+        head_ref = None
+        for ref in (f"origin/{branch}", branch):
+            if self._git(["rev-parse", "--verify", "--quiet", ref], cwd=repo_dir).returncode == 0:
+                head_ref = ref
+                break
+        if not head_ref:
+            return []
+        base_ref = base
+        for ref in (f"origin/{base}", base):
+            if self._git(["rev-parse", "--verify", "--quiet", ref], cwd=repo_dir).returncode == 0:
+                base_ref = ref
+                break
+        r = self._git(["diff", "--name-only", f"{base_ref}...{head_ref}"], cwd=repo_dir, timeout=60)
+        if r.returncode != 0:
+            return []
+        return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+
     # ── Internal ────────────────────────────────────
 
     def _get_repo_dir(self, repo_name: str) -> Path:
