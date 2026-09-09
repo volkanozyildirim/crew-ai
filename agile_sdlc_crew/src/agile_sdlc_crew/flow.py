@@ -3272,12 +3272,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
     def route_planning_mode(self):
         """HAL modu veya CrewAI modu secimi."""
         if self.state.use_hal:
-            return "hal_planning"
+            return "hal_route"  # rota adi != handler adi (crewai>=1.15 dogrulamasi)
         return "crew_planning"
 
     # ── HAL Planning Path ────────────────────────────
 
-    @listen("hal_planning")
+    @listen("hal_route")
     def hal_planning(self):
         """HAL modunda planlama: tek adimda analiz + tasarim."""
         from agile_sdlc_crew.hal_client import HALClient
