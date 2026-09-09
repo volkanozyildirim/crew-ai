@@ -359,9 +359,9 @@ async def retry_job(job_id: int):
     job = db.get_job(job_id)
     if not job:
         return JSONResponse({"error": "Job bulunamadi"}, status_code=404)
-    if job["status"] not in ("failed", "completed", "needs_human"):
+    if job["status"] not in ("failed", "completed", "needs_human", "needs_info"):
         return JSONResponse(
-            {"error": f"Sadece failed/completed/needs_human isler retry edilebilir (durum: {job['status']})"},
+            {"error": f"Sadece failed/completed/needs_human/needs_info isler retry edilebilir (durum: {job['status']})"},
             status_code=409,
         )
     new_job_id = db.create_job(
@@ -523,7 +523,7 @@ async def kickoff_run_ws(websocket: WebSocket, job_id: int):
 
     Mesaj formatlari (sunucudan istemciye):
       {"type":"log","lines":[...],"initial":true|false}
-      {"type":"status","status":"running|completed|failed|needs_human|queued"}
+      {"type":"status","status":"running|completed|failed|needs_human|needs_info|queued"}
       {"type":"done","detail":{job,debug}}   # tamamlandiginda 1 kez
       {"type":"error","message":"..."}
     """
@@ -554,7 +554,7 @@ async def kickoff_run_ws(websocket: WebSocket, job_id: int):
         await websocket.send_json({"type": "status", "status": last_status})
 
         # Job zaten bitmis ise hemen detail gonder ve kapat
-        if last_status in ("completed", "failed", "needs_human"):
+        if last_status in ("completed", "failed", "needs_human", "needs_info"):
             detail = _build_kickoff_detail(job_id)
             detail.pop("_status", None)
             await websocket.send_json({"type": "done", "detail": detail})
@@ -595,7 +595,7 @@ async def kickoff_run_ws(websocket: WebSocket, job_id: int):
             if job["status"] != last_status:
                 last_status = job["status"]
                 await websocket.send_json({"type": "status", "status": last_status})
-                if last_status in ("completed", "failed", "needs_human"):
+                if last_status in ("completed", "failed", "needs_human", "needs_info"):
                     # Son log gecisi (race: status set olduktan sonra son satirlar gelmis olabilir)
                     try:
                         if log_path.exists():

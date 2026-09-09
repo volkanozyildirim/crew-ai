@@ -308,6 +308,27 @@ SCHEMA: list[dict] = [
         "desc": "Sözleşme kapısı bir dosyayı reddettiğinde dosyayı sessizce atlamak yerine developer'a TEK düzeltme çağrısı yap (kapının somut bulgusuyla: satır, metot, parametre sayısı). Job #186'da bulgu yalnızca WI yorumuna yazıldı, dosya atlandı, 1/2 push → %70 eşiği → iş $4.89'da öldü; ~$0.3'lük tek çağrı kurtarırdı. Yalnızca kapı reddettiğinde ve tek kez koşar, bütçe zarfına dahildir. Kapalıysa eski davranış (atla, WI'ya yaz).",
     },
     {
+        "key": "CREW_READINESS_GATE",
+        "label": "Hazırlık Kapısı (WI detay yeterliliği)",
+        "type": "bool",
+        "default": True,
+        "desc": "İki aşamalı: (1) BA çıktısındaki readiness skoru (0-100, 'geliştirici kimseye sormadan uygulayabilir mi?') deterministik cezalarla düzeltilir (AC alanı boş −15, açık soru başına −3, en çok −15); eşiğin altındaysa iş `needs_info`'ya alınır, eksik detaylar WI'a Türkçe yorum olarak yazılır. (2) BA geçirdi ama mimar keşifte 'INSUFFICIENT' dedi ya da amend sonrası plan kapsamı eşiğin altındaysa yine `needs_info`; mimarın teşhisi yoruma girer. İş silinmez, ↻ ile tekrar kuyruğa alınır. Job #190 (WI 73061): 4 repoya yayılan, veri kaynağı tanımsız iş için kör plan + implement'e ($10+) girilecekti; teşhis ($1.5) WI'a hiç yazılmadı.",
+    },
+    {
+        "key": "CREW_READINESS_MIN_SCORE",
+        "label": "Hazırlık Skoru Eşiği (0-100)",
+        "type": "int",
+        "default": 60,
+        "desc": "Aşama 1 eşiği. BA skoru (cezalar sonrası) bunun altındaysa iş başlamadan `needs_info`. 60: 'çoğu şey belli, birkaç boşluk var' sınırı; 73061 gibi veri kaynağı/repo belirsiz işler 40'ın altında kalır.",
+    },
+    {
+        "key": "CREW_READINESS_MIN_COVERAGE",
+        "label": "Plan Kapsam Eşiği (%)",
+        "type": "int",
+        "default": 50,
+        "desc": "Aşama 2 eşiği. Plan kapıları (amend dahil) sonrasında planın kapsadığı gereksinim yüzdesi bunun altındaysa `needs_info`. 73061'de 4/25 = %16 idi.",
+    },
+    {
         "key": "CREW_FRESHEN_ALL_REPOS",
         "label": "Tüm Klonları Tazele (paralel fetch)",
         "type": "bool",

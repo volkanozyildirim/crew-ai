@@ -347,7 +347,13 @@ requirements_analysis_task:
       ],
       "out_of_scope": ["..."],
       "assumptions": ["ASSUMPTION: ..."],
-      "open_questions": ["..."]
+      "open_questions": ["..."],
+      "readiness": {
+        "score": 0-100,
+        "missing_details": [
+          {"topic": "...", "why_needed": "...", "question": "..."}
+        ]
+      }
     }
     ```
 
@@ -356,6 +362,17 @@ requirements_analysis_task:
     - DO NOT INVENT anything not in the description
     - Add missing info to open_questions
     - NO text outside the JSON
+
+    READINESS (mandatory): "Could a developer implement this WITHOUT asking
+    anyone?" score 0-100. Score LOW when: data source/storage for a new
+    field is undefined; affected repo/module/service is not identifiable;
+    business rules are ambiguous or contradictory; external team/API
+    dependency is unspecified; acceptance criteria are missing or
+    untestable. Score HIGH only when every FR/AC maps to a concrete,
+    checkable behavior. Each missing_details item names ONE concrete gap:
+    `topic` (short), `why_needed` (what breaks without it), `question`
+    (the exact question to ask the WI owner). Write topic/why_needed/
+    question in TURKISH — they are posted to the work item as a comment.
   agent: business_analyst
 
 technical_design_task:

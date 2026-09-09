@@ -394,6 +394,103 @@ def _contract_fix_description(file_path: str, problems: list) -> str:
     )
 
 
+def _parse_readiness(requirements_text: str):
+    """BA JSON'undaki `readiness` blogunu cikarir; yoksa/bozuksa None.
+
+    None = 'kapi karar vermez' (eski cache, modelin blogu atlamasi) — is
+    bloklanmaz, yalnizca loglanir. Ek olarak open_questions sayisini tasir
+    (deterministik ceza icin)."""
+    txt = requirements_text or ""
+    try:
+        s0 = txt.find("{")
+        e0 = txt.rfind("}")
+        if s0 < 0 or e0 <= s0:
+            return None
+        d = _json.loads(txt[s0:e0 + 1])
+    except Exception:
+        return None
+    rd = d.get("readiness") if isinstance(d, dict) else None
+    if not isinstance(rd, dict) or "score" not in rd:
+        return None
+    try:
+        score = int(round(float(rd.get("score"))))
+    except Exception:
+        return None
+    details = []
+    for it in rd.get("missing_details") or []:
+        if isinstance(it, dict):
+            details.append({
+                "topic": str(it.get("topic") or "").strip(),
+                "why_needed": str(it.get("why_needed") or "").strip(),
+                "question": str(it.get("question") or "").strip(),
+            })
+        elif isinstance(it, str) and it.strip():
+            details.append({"topic": it.strip(), "why_needed": "", "question": ""})
+    oq = d.get("open_questions") or []
+    return {"score": score, "missing_details": details,
+            "open_questions": len(oq) if isinstance(oq, list) else 0}
+
+
+def _readiness_score(readiness, ac_empty: bool, open_questions: int) -> tuple:
+    """BA skoru + deterministik cezalar (yalnizca ASAGI): AC alani bos -15,
+    her acik soru -3 (en cok -15). 0..100'e kirpilir.
+    Doner: (skor | None, gerekce listesi)."""
+    if not readiness or readiness.get("score") is None:
+        return None, []
+    score = int(readiness["score"])
+    reasons = []
+    if ac_empty:
+        score -= 15
+        reasons.append("AC alanı boş (−15)")
+    oq = int(open_questions or 0)
+    if oq > 0:
+        pen = min(15, 3 * oq)
+        score -= pen
+        reasons.append(f"{oq} açık soru (−{pen})")
+    return max(0, min(100, score)), reasons
+
+
+def _readiness_comment(score, threshold, missing_details, stage: str = "requirements",
+                       penalties=None, uncovered=None, architect_note: str = "") -> str:
+    """WI'a yazilacak Turkce yorum: skor, esik, eksik detaylar, ne yapilmali."""
+    unit = "%" if stage == "plan" else "/100"
+    lines = [f"## ℹ️ Geliştirme Başlatılmadı — Hazırlık Skoru {score}{unit} (eşik {threshold}{unit})", ""]
+    if stage == "plan":
+        lines.append("Analiz geçti, ancak mimar mevcut kodu inceledikten sonra bu iş kalemi "
+                     "tek bir repoda / mevcut bilgiyle planlanamadı.")
+    else:
+        lines.append("İş kalemi, bir geliştiricinin kimseye sormadan uygulayabileceği kadar "
+                     "detaylı değil. Pipeline maliyet harcamadan burada durdu.")
+    if penalties:
+        lines.append(f"Skor düzeltmeleri: {', '.join(penalties)}.")
+    # NOT: _md_to_html yalnizca '#'/'##' baslik, '- ' madde, **kalin**, `kod`,
+    # '---' ve kod bloklarini bilir — '###' ve '|' tablo duz metin kalir
+    # (ilk yorumda oyle oldu). Bu yuzden madde + kalin etiket kullanilir.
+    if missing_details:
+        lines += ["", "## Eksik detaylar", ""]
+        for it in missing_details:
+            t = it.get("topic", "") or "(konu)"
+            w = it.get("why_needed", "")
+            q = it.get("question", "")
+            row = f"- **{t}**"
+            if w:
+                row += f" — {w}"
+            if q:
+                row += f" **Soru:** {q}"
+            lines.append(row)
+    if uncovered:
+        lines += ["", f"## Planın kapsayamadığı gereksinimler ({len(uncovered)})", "",
+                  ", ".join(f"`{u}`" for u in uncovered)]
+    if architect_note:
+        lines += ["", "## Mimarın teşhisi", "", "```", architect_note.strip(), "```"]
+    lines += ["", "## Ne yapmalı", "",
+              "Yukarıdaki detayları iş kalemine (açıklama / kabul kriterleri) ekleyin, "
+              "ardından işi dashboard'dan ↻ ile **tekrar kuyruğa** alın. İş silinmedi; "
+              "durumu `needs_info`.", "",
+              "---", "*Agile SDLC Crew — Hazırlık Kapısı*"]
+    return "\n".join(lines)
+
+
 def _requirement_ids(requirements_text: str) -> set[str]:
     """Gereksinim metnindeki gecerli FR/TR/AC id kumesini cikarir.
 
@@ -832,6 +929,19 @@ class NeedsHumanReview(Exception):
     adimlarina (test planlama, UAT, rapor) devam etmesine ve en sonunda
     complete_job'in 'needs_human'i EZMESINE yol acardi."""
 
+
+
+class NeedsMoreInfo(NeedsHumanReview):
+    """WI yeterince detayli degil — is `needs_info` durumuna alinir (silinmez).
+
+    NeedsHumanReview'un alt sinifi: main.run_pipeline ve server.py'deki
+    'fail_job ile EZME' ayrimi degismeden calisir. Fark yalnizca durum adi
+    ve yorumun muhatabi: needs_human = 'kod var, kapi gecilemedi, insan
+    karar versin'; needs_info = 'WI sahibi eksik detaylari eklesin, sonra
+    tekrar kuyruga alinsin'. Job #190 (WI 73061): mimar 4 repoya yayilan,
+    veri kaynagi tanimsiz bir is oldugunu teshis etti (INSUFFICIENT),
+    completeness 4/25 cikti — akis yine de kor plan + implement'e devam
+    edecekti ($10+). Teshis WI'a hic yazilmadi."""
 
 class PipelineState(BaseModel):
     """Flow boyunca tasınan state. Her adim state'i gunceller."""
@@ -3648,6 +3758,38 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         self.state.requirements_text = requirements_text
 
+        # ── HAZIRLIK KAPISI (asama 1): WI yeterince detayli mi? (#190) ──
+        # Skor < esik → is `needs_info` (silinmez), eksik detaylar WI'a yorum.
+        # Adim _step_fail ile kapanir: WI duzenlendikten sonraki kosu bu
+        # analizi resume ETMEMELI.
+        from agile_sdlc_crew import pipeline_config as _pc_rd
+        if _pc_rd.get("CREW_READINESS_GATE"):
+            _rd = _parse_readiness(requirements_text)
+            _rd_min = int(_pc_rd.get("CREW_READINESS_MIN_SCORE") or 60)
+            _rd_score, _rd_pen = _readiness_score(
+                _rd, ac_empty=not (wi_ac_plain or "").strip(),
+                open_questions=(_rd or {}).get("open_questions", 0))
+            if _rd_score is None:
+                _log("  Hazırlık kapısı: BA readiness bloğu üretmedi — kapı atlandı")
+            else:
+                _log(f"  📋 Hazırlık skoru: {_rd_score}/100 (eşik {_rd_min})"
+                     + (f" — {', '.join(_rd_pen)}" if _rd_pen else ""))
+                if _rd_score < _rd_min:
+                    _details = (_rd or {}).get("missing_details") or []
+                    _add_wi_comment(self._client, self.state.work_item_id,
+                                    _readiness_comment(_rd_score, _rd_min, _details,
+                                                       stage="requirements", penalties=_rd_pen))
+                    _msg = (f"NEEDS_INFO: hazırlık skoru {_rd_score}/100 < eşik {_rd_min} — "
+                            f"WI'da {len(_details)} eksik detay; sorular WI yorumuna yazıldı")
+                    _log(f"  ℹ️ {_msg}")
+                    self._step_fail("requirements_analysis_task", _msg)
+                    if self._db and self.state.job_id:
+                        try:
+                            self._db.needs_info_job(self.state.job_id, _msg)
+                        except Exception as _e_ni:
+                            _log(f"  needs_info durumu yazilamadi: {_e_ni}")
+                    raise NeedsMoreInfo(_msg)
+
         # ── BA JSON Cikarimi ────────────────────────────────────
         # BA artik JSON cikti uretiyor — parse edip state'e kaydet.
         # Basarisiz olursa eski yonteme (serbest metin) dusulur.
@@ -4685,6 +4827,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"  Faz A keşif AÇIK: --add-dir {len(_repo_dirs)} repo (B ilk geçişte yetersiz)")
                 self._needed_explore = True
                 findings = self._architect_explore(ctx, prefetch_repo, ctx_hint)
+                # Mimar kesif sonunda yetersizlik teshisi verdiyse (INSUFFICIENT
+                # ile BASLAYAN duzyazi) sakla — hazirlik kapisi (asama 2) bunu
+                # WI yorumuna tasir. Job #190'da bu $1.5'lik teshis cope gitti.
+                import re as _re_rd
+                if isinstance(findings, str) and _re_rd.match(
+                        r"\s*(INSUFFICIENT|YETERSIZ)\b", findings, _re_rd.IGNORECASE):
+                    self._architect_refusal = findings[:3000]
+                    _log("  Faz A: mimar yetersizlik teşhisi verdi — hazırlık kapısı (aşama 2) değerlendirecek")
                 _cli.clear_repo_ctx()
                 plan, raw_output, _ = self._architect_emit_json(
                     ctx, prefetch_repo, findings=findings, label="technical_design_task",
@@ -4820,6 +4970,37 @@ class AgileSDLCFlow(Flow[PipelineState]):
                              f"({len(_still_path)} yol sorunu) — mevcut plan korunuyor")
         except Exception as _e_pg:
             _log(f"  Plan kapıları hatası (atlanıyor): {_e_pg}")
+
+        # ── HAZIRLIK KAPISI (asama 2): mimar reddi / kapsam esigi (#190) ──
+        # BA gecirdi ama mimar kodu gorunce 'tek repoda karsilanamaz' dedi ya da
+        # amend sonrasi plan gereksinimlerin yarisini bile kapsamiyor → kor plan
+        # + implement + review dongusune ($10+) girmek yerine needs_info.
+        from agile_sdlc_crew import pipeline_config as _pc_rd2
+        if _pc_rd2.get("CREW_READINESS_GATE"):
+            from agile_sdlc_crew.main import _add_wi_comment as _awc_rd
+            _all_ids = _requirement_ids(self.state.requirements_text or "")
+            _unc2 = self._check_plan_completeness(plan) if (_all_ids and _pc_rd2.get("CREW_PLAN_GATE")) else []
+            _cov = int(round(100 * (len(_all_ids) - len(_unc2)) / len(_all_ids))) if _all_ids else 100
+            _min_cov = int(_pc_rd2.get("CREW_READINESS_MIN_COVERAGE") or 50)
+            _refusal = getattr(self, "_architect_refusal", "") or ""
+            if _cov < _min_cov or _refusal:
+                _why = []
+                if _cov < _min_cov:
+                    _why.append(f"plan kapsamı %{_cov} < eşik %{_min_cov} ({len(_unc2)}/{len(_all_ids)} gereksinim açık)")
+                if _refusal:
+                    _why.append("mimar: iş mevcut kodda / tek repoda karşılanamıyor")
+                _msg = "NEEDS_INFO: " + " · ".join(_why)
+                _log(f"  ℹ️ {_msg}")
+                _awc_rd(self._client, self.state.work_item_id,
+                        _readiness_comment(_cov, _min_cov, [], stage="plan",
+                                           uncovered=sorted(_unc2), architect_note=_refusal))
+                self._step_fail("technical_design_task", _msg)
+                if self._db and self.state.job_id:
+                    try:
+                        self._db.needs_info_job(self.state.job_id, _msg)
+                    except Exception as _e_ni2:
+                        _log(f"  needs_info durumu yazilamadi: {_e_ni2}")
+                raise NeedsMoreInfo(_msg)
 
         # technical_design_task ciktisi JSON — cache'den parse edilebilmesi icin
         # tam veya en azindan buyuk pencereli sakla (onceden [:3000] ile kesilip
