@@ -1142,11 +1142,22 @@ class LocalRepoManager:
                 break
         if not head_ref:
             return []
-        base_ref = base
+        base_ref = None
         for ref in (f"origin/{base}", base):
             if self._git(["rev-parse", "--verify", "--quiet", ref], cwd=repo_dir).returncode == 0:
                 base_ref = ref
                 break
+        if base_ref is None:
+            # Default branch 'main' degil (master/develop): remote'un HEAD'i otoriter.
+            # Aksi halde diff patlar, [] doner ve resume hic tetiklenmez — yani
+            # gozden gecirilmis kod yeniden yazilir (#183/#187'nin onlemek istedigi).
+            sym = self._git(["symbolic-ref", "-q", "refs/remotes/origin/HEAD"], cwd=repo_dir)
+            cand = (sym.stdout or "").strip().replace("refs/remotes/", "", 1)
+            if sym.returncode == 0 and cand and self._git(
+                    ["rev-parse", "--verify", "--quiet", cand], cwd=repo_dir).returncode == 0:
+                base_ref = cand
+        if base_ref is None:
+            return []
         r = self._git(["diff", "--name-only", f"{base_ref}...{head_ref}"], cwd=repo_dir, timeout=60)
         if r.returncode != 0:
             return []
