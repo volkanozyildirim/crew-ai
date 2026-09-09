@@ -217,10 +217,11 @@ def _review_approved(review_text: str) -> bool:
     )
     if vm:
         val = vm.group(1).upper()
-        has_reject = any(tok in val for tok in (
-            "CHANGES_REQUIRED", "CHANGES REQUIRED", "REJECT", "RED",
-            "REDDED", "DEĞİŞİKLİK GEREKLİ", "DEGISIKLIK GEREKLI", "NEEDS_HUMAN",
-        ))
+        # Kelime siniri sart: 'consideRED', 'coveRED' gibi alt-dizgiler mesru bir
+        # APPROVE satirini red gibi okutup review'u bosuna yeniden kosturur.
+        has_reject = bool(_re_a.search(
+            r"\b(?:CHANGES[ _]REQUIRED|REJECT\w*|RED|REDDED\w*|NEEDS_HUMAN)\b"
+            r"|DEĞİŞİKLİK GEREKLİ|DEGISIKLIK GEREKLI", val))
         return ("APPROVE" in val or "ONAY" in val) and not has_reject
     return False
 
@@ -5949,7 +5950,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 if grace > 0:
                     _log(f"  ⏱️ Poll timeout ({poll_timeout}s) — son sans: {grace}s daha bekleniyor")
                     outcome, build = self._poll_pr_build(grace, poll_interval,
-                                                         ignore_build_id=prev_build_id)
+                                                         ignore_build_id=prev_build_id,
+                                                         stale_after=grace)
                     if outcome == "stale":
                         outcome = "timeout"
                 if outcome != "completed":
@@ -6110,7 +6112,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         )
 
     def _poll_pr_build(self, timeout_s: int, interval_s: int,
-                       ignore_build_id=None) -> tuple[str, dict | None]:
+                       ignore_build_id=None, stale_after: int = 120) -> tuple[str, dict | None]:
         """PR build'ini tamamlanana kadar poll et.
         Donus: ("completed", build) | ("no_pipeline", None) | ("timeout", build|None)
                | ("stale", build) — yalnizca ignore_build_id verildiyse.
@@ -6120,7 +6122,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
         surer; o arada queueTime'a gore 'en son' build hala eskisidir. Job
         #189'da gate push'tan 2 sn sonra poll etti, eski 'failed'i duzeltmenin
         sonucu sanip ikinci retry hakkini bayat sonuca yakti. Ayni id'li build
-        tamamlanmis SAYILMAZ; grace suresi icinde yeni build gelmezse "stale"."""
+        tamamlanmis SAYILMAZ; `stale_after` saniye icinde yeni build gelmezse
+        "stale". Son sans poll'unda stale_after=grace gecirilir ki yapilandirilan
+        pencere gercekten beklensin (120s'lik ic esik onu kisaltmasin)."""
         import time as _t
         waited = 0
         last = None
@@ -6139,9 +6143,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 last = build
                 if not stale_logged:
                     _log(f"  Build {build.get('build_id')} onceki turun sonucu — yeni build'in "
-                         f"tetiklenmesi bekleniyor (en fazla {grace}s)")
+                         f"tetiklenmesi bekleniyor (en fazla {stale_after}s)")
                     stale_logged = True
-                if waited >= grace:
+                if waited + interval_s >= stale_after:
                     return ("stale", build)
             else:
                 last = build

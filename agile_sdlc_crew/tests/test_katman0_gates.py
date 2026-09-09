@@ -1153,6 +1153,32 @@ def test_partial_implement_resume():
         check("changed_files: olmayan branch → boş liste (exception değil)",
               mgr.changed_files("fake", "feature/yok") == [])
 
+    # Default branch 'master' olan repo: base çözümlemesi origin/HEAD'e düşmeli
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        remote = base / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(remote)], check=True, capture_output=True)
+        work = base / "seed"
+        subprocess.run(["git", "clone", "-q", str(remote), str(work)], check=True, capture_output=True)
+        import os as _os2
+        env2 = {**_os2.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        (work / "a.php").write_text("<?php // a\n")
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=work, check=True, capture_output=True, env=env2)
+        subprocess.run(["git", "push", "-q", "origin", "master"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "feature/2"], cwd=work, check=True, capture_output=True)
+        (work / "b.php").write_text("<?php // b\n")
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "feat"], cwd=work, check=True, capture_output=True, env=env2)
+        subprocess.run(["git", "push", "-q", "origin", "feature/2"], cwd=work, check=True, capture_output=True)
+        clone = base / "fake2"
+        subprocess.run(["git", "clone", "-q", str(remote), str(clone)], check=True, capture_output=True)
+        from agile_sdlc_crew.tools.local_repo import LocalRepoManager as _LRM2
+        got2 = _LRM2(base_dir=str(base)).changed_files("fake2", "feature/2")
+        check("changed_files: default branch 'master' (main yok) → origin/HEAD ile çözülür",
+              got2 == ["b.php"], f"{got2}")
+
     # Sözleşme düzeltme talimatı — developer'a kapının verdiği somut bulgu gitmeli
     d = _contract_fix_description(
         "Test/X.php",
@@ -1186,6 +1212,10 @@ def test_needs_human_and_resume_envelope():
     check("CHANGES_REQUIRED onay değildir", _review_approved("**Verdict:** CHANGES_REQUIRED") is False)
     check("karar satırı yok → onay değil (belirsizlik resume ETMEZ)", _review_approved("sadece düzyazı") is False)
     check("REVIEW_DECISION: NEEDS_HUMAN onay değildir", _review_approved("REVIEW_DECISION: NEEDS_HUMAN") is False)
+    check("Verdict satırındaki 'consideRED/coveRED' onayı bozmaz (kelime sınırı)",
+          _review_approved("**Verdict:** APPROVED — all items were considered and covered") is True)
+    check("Verdict: RED kelimesi (tam token) onay değildir",
+          _review_approved("Verdict: RED — approve edilmedi") is False)
     src8 = inspect.getsource(_flow.AgileSDLCFlow.step8_code_review)
     check("_restore_review pozitif onay ister (_review_approved)", "_review_approved(" in src8)
 
@@ -1266,6 +1296,15 @@ def test_build_gate_stale_build():
         out3 = AgileSDLCFlow._poll_pr_build(_mk([stale]), 600, 30, ignore_build_id=100)
         check("yeni build hiç gelmezse 'stale' döner (timeout/completed değil)",
               out3[0] == "stale" and out3[1]["build_id"] == 100, f"{out3}")
+        calls = {"n": 0}
+        def _count_get(repo, pr):
+            calls["n"] += 1
+            return stale
+        stub_c = SimpleNamespace(state=SimpleNamespace(repo_name="r", pr_id="1"),
+                                 _client=SimpleNamespace(get_pr_build=_count_get))
+        out4 = AgileSDLCFlow._poll_pr_build(stub_c, 300, 30, ignore_build_id=100, stale_after=300)
+        check("stale_after verilirse son şans penceresi TAMAMEN beklenir (300s/30s = 10 poll)",
+              out4[0] == "stale" and calls["n"] >= 10, f"{out4[0]} polls={calls['n']}")
     finally:
         _time.sleep = orig_sleep
 
@@ -1273,6 +1312,8 @@ def test_build_gate_stale_build():
     check("gate düzeltme sonrası önceki build id'sini poll'a geçiriyor",
           "ignore_build_id=" in src)
     check("gate 'stale' sonucunu ele alıyor", '"stale"' in src)
+    check("son şans poll'u stale_after=grace ile çağrılıyor (120s'de erken düşmez)",
+          "stale_after=grace" in src)
     ti = src.find("attempt >= max_retries")
     branch = src[ti:ti + 1800] if ti > 0 else ""
     check("retry tavanı: PR açık → needs_human (failed değil)",
