@@ -363,14 +363,14 @@ SCHEMA: list[dict] = [
         "label": "Story Point Tahmini",
         "type": "bool",
         "default": True,
-        "desc": "BA çıktısındaki `estimate` bloğu (Fibonacci SP + güven + gerekçe) ile yapısal sinyaller (FR/TR/AC sayısı, plan dosya sayısı, keşif) birleştirilir: nihai = max(BA, yapısal), yalnızca yükselir (zarf gibi). İki aşama: requirements (kaba) → plan (kesin). Sonuç loglanır, `jobs.estimate_sp`'ye yazılır ve tamamlanma yorumunda 'Tahmin 5 SP · Gerçekleşen 17 dk · $3.96' satırı olur (retrospektif verisi). Azure'a YAZMAZ — yazma için CREW_WI_WRITE_ESTIMATE. LLM çağrısı yok.",
+        "desc": "BA çıktısındaki `estimate` bloğu (Fibonacci SP + güven + gerekçe) ile yapısal sinyaller (FR/TR/AC sayısı, plan dosya sayısı, keşif) birleştirilir: nihai = max(BA, yapısal), yalnızca yükselir (zarf gibi). İki aşama: requirements (kaba) → plan (kesin). Sonuç loglanır, `jobs.estimate_sp`'ye yazılır ve tamamlanma yorumunda 'Takım tahmini 2 SP · Pipeline tahmini 5 SP · Gerçekleşen 17 dk · $3.96' satırı olur (retrospektif verisi: takım ile pipeline tahmini yan yana). Azure'a YAZMAZ — yazma için CREW_WI_WRITE_ESTIMATE. LLM çağrısı yok.",
     },
     {
         "key": "CREW_WI_WRITE_ESTIMATE",
         "label": "Tahmini WI'a Yaz (StoryPoints)",
         "type": "bool",
         "default": False,
-        "desc": "Plan kesinleştiğinde nihai SP'yi WI'ın Microsoft.VSTS.Scheduling.StoryPoints alanına yazar (tipte yoksa Effort). YALNIZCA alan boşsa — insan tahmini asla ezilmez. Takım SP'yi Task seviyesinde tutuyor (son 45 gün: 153 Task'ın 89'unda dolu; 73121/73061 boştu). Sprint raporu bu alanı okuduğu için pipeline işleri rapora SP ile girer. Board'a yazdığı için varsayılan kapalı; dry-run/kickoff-only'de kapalı.",
+        "desc": "Plan kesinleştiğinde nihai SP'yi WI'a yazar — sırayla Custom.StoryPoints (org'un gerçek alanı: son 45 günde 153 Task'ın 150'sinde dolu; board, sprint raporu ve velocity bunu okur) → Microsoft.VSTS.Scheduling.StoryPoints → Effort. YALNIZCA alan boşsa — insan tahmini asla ezilmez (73121'de takım 2 SP, 73061'de 3 SP girmişti; bunlara dokunulmaz, tamamlanma yorumunda 'Takım tahmini 2 SP · Pipeline tahmini 5 SP' yan yana yazılır). Board'a yazdığı için varsayılan kapalı; dry-run/kickoff-only'de kapalı.",
     },
     {
         "key": "CREW_WI_CHILD_TASKS",

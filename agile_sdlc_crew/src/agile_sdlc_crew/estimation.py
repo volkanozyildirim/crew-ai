@@ -122,11 +122,18 @@ def size_class(sp: int) -> str:
     return "S" if sp <= 2 else ("M" if sp <= 5 else "L")
 
 
-def render_estimate_line(est: dict, *, elapsed_min: float | None = None, cost_usd: float | None = None) -> str:
-    """Tamamlanma yorumu için tek satır: tahmin + gerçekleşen."""
+def render_estimate_line(est: dict, *, elapsed_min: float | None = None, cost_usd: float | None = None,
+                         team_sp: float | None = None) -> str:
+    """Tamamlanma yorumu için tek satır: takım tahmini (WI'daki SP) · pipeline
+    tahmini · gerçekleşen. Takım SP'si varsa iki tahmin yan yana okunur —
+    retrospektifte 'kim ne kadar yanıldı' verisi."""
     if not est or not est.get("sp"):
         return ""
-    parts = [f"**Tahmin:** {est['sp']} SP ({size_class(int(est['sp']))}, {est.get('source', '?')})"]
+    parts = []
+    if team_sp is not None:
+        parts.append(f"**Takım tahmini:** {float(team_sp):g} SP")
+    label = "**Pipeline tahmini:**" if team_sp is not None else "**Tahmin:**"
+    parts.append(f"{label} {est['sp']} SP ({size_class(int(est['sp']))}, {est.get('source', '?')})")
     if elapsed_min is not None or cost_usd is not None:
         act = []
         if elapsed_min is not None:
@@ -137,13 +144,22 @@ def render_estimate_line(est: dict, *, elapsed_min: float | None = None, cost_us
     return " · ".join(parts)
 
 
+SP_FIELDS = (
+    "Custom.StoryPoints",                       # org'un gerçek alanı (board, sprint raporu, velocity)
+    "Microsoft.VSTS.Scheduling.StoryPoints",    # şablon alanı (eski/varsayılan)
+    "Microsoft.VSTS.Scheduling.Effort",         # Scrum şablonu
+)
+
+
 def write_story_points(client, work_item_id: str, sp: int, logger=None) -> str:
-    """StoryPoints alanına yaz; tipte yoksa Effort'a düş. Yazılan alan adı ya da ''."""
+    """SP alanına yaz — sırayla Custom.StoryPoints → StoryPoints → Effort; alan
+    tipte yoksa (400) bir sonrakine düş. Yazılan alan adı ya da ''."""
     _l = logger or log.info
-    for field in ("Microsoft.VSTS.Scheduling.StoryPoints", "Microsoft.VSTS.Scheduling.Effort"):
+    for field in SP_FIELDS:
         try:
+            value = int(sp) if field.startswith("Custom.") else float(sp)
             client.update_work_item(int(work_item_id), [
-                {"op": "add", "path": f"/fields/{field}", "value": float(sp)},
+                {"op": "add", "path": f"/fields/{field}", "value": value},
             ])
             _l(f"  📐 WI #{work_item_id} {field.split('.')[-1]} = {sp}")
             return field

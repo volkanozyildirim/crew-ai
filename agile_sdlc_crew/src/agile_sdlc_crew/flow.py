@@ -7030,7 +7030,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     _elapsed = max(0.0, (_dt_el.now() - _st).total_seconds() / 60.0)
             _cost = float(getattr(self, "_job_real_cost_usd", 0.0) or 0.0) or None
             _line = _est_r.render_estimate_line(self.state.estimate or {},
-                                                elapsed_min=_elapsed, cost_usd=_cost)
+                                                elapsed_min=_elapsed, cost_usd=_cost,
+                                                team_sp=self.state.wi_story_points)
             if _line:
                 _est_line = _line + "\n\n"
         except Exception as _e_el:

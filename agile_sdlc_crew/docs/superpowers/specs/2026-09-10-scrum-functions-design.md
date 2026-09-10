@@ -117,17 +117,17 @@ pozitif olabilir; zorlamadan önce birkaç koşuda tablo izlenmeli.
 
 ### Gözlem (Azure, son 45 gün, E-commerce Logistic Operations)
 
-| Tip | n | StoryPoints dolu | Effort/OriginalEstimate | Parent'lı |
-|---|---|---|---|---|
-| Task | 153 | 89 | 0 | 111 |
-| Bug | 20 | 9 | 0 | 1 |
-| User Story | 27 | 0 | 0 | 25 |
+| Tip | n | `Custom.StoryPoints` dolu | `Microsoft…StoryPoints` dolu | Effort/OriginalEstimate | Parent'lı |
+|---|---|---|---|---|---|
+| Task | 153 | **150** | 89 (94 değerin 93'ü 3.0 — varsayılan) | 0 | 111 |
+| Bug | 20 | **19** | 9 | 0 | 1 |
+| User Story | 27 | 0 | 0 | 0 | 25 |
 
-Takım SP'yi **Task** seviyesinde tutuyor; hiyerarşi User Story → Task. Pipeline'ın koştuğu WI'lar Task (73121, 73061; SP boş).
+Takım SP'yi **Task** seviyesinde ve **`Custom.StoryPoints`** alanında tutuyor (board, sprint raporu ve Analytics velocity bu alanı okur; `Microsoft.VSTS.Scheduling.StoryPoints` şablon artığı). Hiyerarşi User Story → Task. Pipeline'ın koştuğu WI'lar Task; 73121 takımca 2 SP, 73061 3 SP olarak tahminlenmişti — pipeline bunları **ezmez**, yanına kendi tahminini koyar.
 
 ### Tasarım
 
-**Tahmin (`estimation.py`):** BA JSON'una `estimate {story_points ∈ Fibonacci, confidence, rationale(TR)}` eklendi (kural İngilizce, metin Türkçe). Python: `parse_ba_estimate` · `structural_estimate(n_req, n_files, explored, stage)` (req: ≤3→2, ≤5→3, ≤8→5, >8→8; plan: ≥3 dosya +1, ≥6 dosya +2, keşif +1 basamak; tavan 13) · `reconcile` = max(BA, yapısal, önceki) → Fibonacci, **yalnızca yükselir**. İki aşama: step1 kaba, step4 kesin (normal/resume/HAL). `jobs.estimate_sp` kolonu; tamamlanma yorumunda "Tahmin 5 SP (M, BA) · Gerçekleşen 17 dk · $3.96" (Faz 3 retrospektif verisi). Yazma: `CREW_WI_WRITE_ESTIMATE` açık ve WI'da SP boşsa `StoryPoints` (tipte yoksa `Effort`).
+**Tahmin (`estimation.py`):** BA JSON'una `estimate {story_points ∈ Fibonacci, confidence, rationale(TR)}` eklendi (kural İngilizce, metin Türkçe). Python: `parse_ba_estimate` · `structural_estimate(n_req, n_files, explored, stage)` (req: ≤3→2, ≤5→3, ≤8→5, >8→8; plan: ≥3 dosya +1, ≥6 dosya +2, keşif +1 basamak; tavan 13) · `reconcile` = max(BA, yapısal, önceki) → Fibonacci, **yalnızca yükselir**. İki aşama: step1 kaba, step4 kesin (normal/resume/HAL). `jobs.estimate_sp` kolonu; tamamlanma yorumunda "Takım tahmini 2 SP · Pipeline tahmini 5 SP (M, BA) · Gerçekleşen 17 dk · $3.96" (Faz 3 retrospektif verisi). Yazma: `CREW_WI_WRITE_ESTIMATE` açık ve WI'da SP boşsa, sırayla `Custom.StoryPoints` → `Microsoft.VSTS.Scheduling.StoryPoints` → `Effort` (alan tipte yoksa 400 → bir sonraki).
 
 **Alt iş (`wi_children.py`):** yalnızca parent tipi WI (User Story, Bug, Feature, Epic, Improvement). Plan değişikliği başına child Task (`[repo] Düzenle Dosya.php — açıklama`, `crew-generated` etiketi, alan/iterasyon parent'tan, Hierarchy-Reverse ilişkisi); `CREW_WI_CHILD_TASKS_MAX` aşılırsa dizine göre grup. Parent'ta üretilmiş child varsa yeniden açılmaz (idempotent). step6'da dosya push edildikçe ilgili child `complete` tercihine göre kapanır (Done/Closed/…).
 
