@@ -95,6 +95,15 @@ class PRFixRequest(BaseModel):
     work_item_id: str = ""  # opsiyonel — PR'dan da cikarilabilir
 
 
+class PRReviewRequest(BaseModel):
+    """Insanin gelistirdigi PR'a danisma niteliginde inceleme (pr_review.py).
+    work_item_id verilirse PR WI relations'dan bulunur; ya da repo_name + pr_id."""
+    work_item_id: str = ""
+    pr_id: int | None = None
+    repo_name: str = ""
+    post: bool = True  # False: yalnizca sonucu dondur, PR/WI'a yazma
+
+
 class KickoffRunRequest(BaseModel):
     """Sadece kickoff'u calistirip durduran debug akisi."""
     work_item_id: str
@@ -1818,6 +1827,44 @@ async def _start_daily_scheduler():
         _daily.start_scheduler(lambda: bool(_pc.get("CREW_DAILY_ENABLED")))
     except Exception as e:
         pipeline_log.warning(f"Günlük özet zamanlayıcı başlatılamadı: {e}")
+
+
+# ── PR inceleme katkisi (pr_review.py) ──
+
+@app.post("/api/pr-review")
+async def pr_review(req: PRReviewRequest):
+    """Insanin gelistirdigi PR'a danisma niteliginde review: WI'a bagli aktif PR
+    bulunur, degisen dosyalar context'e alinir, code_reviewer bir kez kosar,
+    bulgular PR (ozet + satir yorumlari) ve WI yorumu olarak yazilir. Kod
+    degistirmez, oy vermez, WI durumuna dokunmaz."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    if not _pc.get("CREW_PR_REVIEW"):
+        return JSONResponse({"error": "PR inceleme katkisi kapali (CREW_PR_REVIEW)"}, status_code=409)
+    wi = (req.work_item_id or "").strip()
+    if not wi and not (req.pr_id and req.repo_name):
+        return JSONResponse({"error": "work_item_id ya da repo_name + pr_id gerekli"}, status_code=400)
+    if wi and not _re.match(r"^\d{1,10}$", wi):
+        return JSONResponse({"error": "Gecersiz Work Item ID"}, status_code=400)
+    job_id = db.create_job(wi or f"PR#{req.pr_id}", use_hal=False)
+    db.update_job(job_id, job_kind="pr_review", pr_id=str(req.pr_id or ""), repo_name=req.repo_name or "")
+
+    def _run():
+        try:
+            db.start_job(job_id)
+            from agile_sdlc_crew.pr_review import run_pr_review
+            res = run_pr_review(work_item_id=wi, pr_id=req.pr_id, repo_name=req.repo_name,
+                                job_id=job_id, post=req.post)
+            db.complete_job(job_id)
+            pipeline_log.info(f"PR-review #{job_id}: PR #{res.get('pr_id')} {res.get('verdict')} "
+                              f"{res.get('issues')} madde, yorum {res.get('posted')}")
+        except Exception as e:
+            db.fail_job(job_id, str(e))
+            pipeline_log.error(f"PR-review #{job_id} basarisiz: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return JSONResponse({"job_id": job_id, "status": "started",
+                         "message": f"İnceleme başladı (iş #{job_id}) — sonuç PR ve WI yorumuna yazılacak"},
+                        status_code=202)
 
 
 # ── Static files ──

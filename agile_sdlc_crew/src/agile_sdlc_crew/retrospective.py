@@ -91,7 +91,7 @@ def collect(*, since_days: int | None = None, wi_ids: list[str] | None = None,
     """Pencere içindeki işler + adımları. kickoff-only ve dry-run işler dışarıda.
     wi_ids verilirse (sprint) yalnızca o WI'ların işleri."""
     from agile_sdlc_crew import db
-    where = ["COALESCE(kickoff_only,0)=0", "COALESCE(dry_run,0)=0"]
+    where = ["COALESCE(kickoff_only,0)=0", "COALESCE(dry_run,0)=0", "COALESCE(job_kind,'pipeline')='pipeline'"]
     params: list = []
     if since_days:
         where.append("created_at >= %s")

@@ -2341,6 +2341,71 @@ def test_type_flow_hooks():
           po_ov.get("provider") == "claude_cli" and po_ov.get("model"), str(po_ov))
 
 
+# ── 38. PR inceleme katkısı — PR çözümleme, context, özet, sınırlar ────────
+
+def test_pr_review_contribution():
+    print("\n[38] PR inceleme katkısı — WI→PR çözümleme, değişen dosyalar, özet/satır yorumu, güvenlik sınırları")
+    from agile_sdlc_crew import pr_review as prv
+
+    rels = [{"attributes": {"name": "Pull Request"}, "url": "vstfs:///Git/PullRequestId/p1%2Frepo-guid-A%2F42951"},
+            {"attributes": {"name": "Pull Request"}, "url": "vstfs:///Git/PullRequestId/p1%2frepo-guid-A%2f42800"},
+            {"attributes": {"name": "Parent"}, "url": "vstfs:///WorkItemTracking/WorkItem/1"}]
+    links = prv.parse_pr_links(rels)
+    check("PR bağlantıları: %2F ve %2f, en yeni önce, parent atlanır",
+          links == [{"repo_id": "repo-guid-A", "pr_id": 42951}, {"repo_id": "repo-guid-A", "pr_id": 42800}], str(links))
+    check("değişen dosyalar: klasör/silinen hariç, tekrar yok",
+          prv.changed_paths([{"item": {"path": "/a.php"}}, {"item": {"path": "/dir", "isFolder": True}},
+                             {"item": {"path": "/b.php"}, "changeType": "delete"}, {"item": {"path": "/a.php"}}]) == ["/a.php"])
+    txt = prv.wi_requirements_text({"System.Title": "İade nedeni", "System.Description": "<p>Global site</p><br>rusça",
+                                    "Microsoft.VSTS.Common.AcceptanceCriteria": ""})
+    check("WI metni: HTML temizlenir, AC boşsa not düşer", "<p>" not in txt and "Global site" in txt and "rusça" in txt
+          and "WI alanı boş" in txt, txt)
+
+    class _C:
+        def __init__(self, statuses):
+            self.statuses = statuses
+        def get_work_item(self, wid):
+            return {"fields": {}, "relations": rels}
+        def get_repository(self, rid):
+            return {"name": "webservice"}
+        def get_pull_request(self, rname, pid):
+            return {"pullRequestId": pid, "status": self.statuses[pid], "sourceRefName": "refs/heads/feature/x",
+                    "title": f"#73121 x", "repository": {"project": {"name": "EcomBackend"}}}
+    r, p, pr = prv.resolve_pr(_C({42951: "abandoned", 42800: "active"}), work_item_id="73121")
+    check("çözümleme: en yeni abandoned → sonraki aktif seçilir", (r, p) == ("webservice", 42800))
+    r, p, pr = prv.resolve_pr(_C({42951: "completed", 42800: "abandoned"}), work_item_id="73121")
+    check("çözümleme: aktif yoksa tamamlanmış", p == 42951)
+    try:
+        prv.resolve_pr(_C({42951: "abandoned", 42800: "abandoned"}), work_item_id="73121"); ok = False
+    except LookupError:
+        ok = True
+    check("çözümleme: hepsi abandoned → LookupError (iş failed, sessiz değil)", ok)
+    r, p, pr = prv.resolve_pr(_C({7: "active"}), pr_id=7, repo_name="core")
+    check("çözümleme: repo+pr verildiyse WI'a gitmez", (r, p) == ("core", 7))
+
+    issues = [{"id": "R1", "severity": "blocker", "file": "app/X.php", "line": 12, "problem": "null kontrolü yok", "required_fix": "guard ekle"},
+              {"id": "R2", "severity": "minor", "file": "app/Y.php", "line": None, "problem": "isim", "required_fix": ""}]
+    md = prv.review_summary_markdown(verdict="CHANGES_REQUIRED", issues=issues, pr_id=42951, pr_url="https://x/pr",
+                                     work_item_id="73121", files=3)
+    check("özet: karar, tablo, danışma notu, PR linki",
+          "🔴 Değişiklik gerekli" in md and "| R1 | blocker | `app/X.php:12` |" in md and "danışma niteliğindedir" in md and "https://x/pr" in md)
+    check("özet: APPROVE + madde yok → 'bulunmadı'", "bulunmadı" in prv.review_summary_markdown(
+        verdict="APPROVE", issues=[], pr_id=1, pr_url="u", work_item_id="1", files=1))
+    check("satır yorumu: id, önem, düzeltme", "[R1] BLOCKER" in prv.inline_comment_text(issues[0]) and "guard ekle" in prv.inline_comment_text(issues[0]))
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
+    check("sınırlar: push/oy/durum yok — modülde push_file, set_work_item_state, reviewers/vote API'si geçmez",
+          "push_file" not in src and "set_work_item_state" not in src and "/reviewers" not in src and '"vote"' not in src)
+    check("yalnızca blocker/major satır yorumu, en çok 8", prv.INLINE_SEVERITIES == ("blocker", "major") and prv.MAX_INLINE_COMMENTS == 8)
+    for name, mod in (("retrospective", "retrospective"), ("sprint_planning", "sprint_planning"), ("daily", "daily")):
+        s = (Path(__file__).resolve().parent.parent / f"src/agile_sdlc_crew/{mod}.py").read_text()
+        check(f"{name}: pipeline dışı işler (pr_review) filtrelenir", "job_kind" in s)
+    src_srv = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/server.py").read_text()
+    check("server: /api/pr-review + CREW_PR_REVIEW + job_kind", '@app.post("/api/pr-review")' in src_srv and "CREW_PR_REVIEW" in src_srv and 'job_kind="pr_review"' in src_srv)
+    src_ui = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("dashboard: kartta 🔍 (başlanmış durumlar), iş listesinde rozet, onay diyaloğu",
+          "reviewWi(" in src_ui and "'Code Review'" in src_ui and "İNCELEME" in src_ui and "confirm(`#${id}" in src_ui)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2370,7 +2435,8 @@ def main():
               test_sprint_planning,
               test_daily_summary,
               test_type_flow,
-              test_type_flow_hooks):
+              test_type_flow_hooks,
+              test_pr_review_contribution):
         try:
             t()
         except Exception as e:

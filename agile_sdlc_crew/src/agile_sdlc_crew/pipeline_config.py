@@ -425,6 +425,14 @@ SCHEMA: list[dict] = [
         "default": False,
         "desc": "İş analizi bitip hazırlık kapısı geçildikten sonra PO ajanı TEK LLM çağrısıyla iş değeri (1-10), aciliyet (1-10), öncelik (P1-P4), GO/HOLD ve kapsam kararlarını (Türkçe) üretir. Çıktı WI yorumuna ve kickoff/teknik tasarım context'ine girer. Danışma niteliğinde — HOLD pipeline'ı durdurmaz (loglanır). Ek LLM maliyeti (~$0.1-0.3) olduğu için varsayılan kapalı; spike işlerde çalışmaz.",
     },
+    # ── PR inceleme katkisi (insan PR'lari) ──
+    {
+        "key": "CREW_PR_REVIEW",
+        "label": "PR İnceleme Katkısı (🔍 İncele)",
+        "type": "bool",
+        "default": True,
+        "desc": "Board'da başlanmış işlerin (In Progress / Code Review / QA…) kartındaki 🔍 İncele butonu ve POST /api/pr-review: WI'a bağlı aktif PR bulunur, değişen dosyalar context'e alınır, code_reviewer TEK çağrıyla inceler; karar + madde tablosu PR'a genel yorum, blocker/major maddeler dosya/satır yorumu, özet WI yorumu olarak yazılır. Kod değiştirmez, push etmez, oy vermez, WI durumuna dokunmaz — danışma. Pipeline sahiplik kuralı (başlanmış WI'a dokunma) korunur; katkı yalnızca review sürecine. İnsan butona basınca çalışır, otomatik tetiklenmez; iş listesinde 🔍 rozetiyle görünür, maliyeti llm_calls'a yazılır.",
+    },
     {
         "key": "CREW_FRESHEN_ALL_REPOS",
         "label": "Tüm Klonları Tazele (paralel fetch)",

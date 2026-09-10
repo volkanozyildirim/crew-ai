@@ -70,6 +70,10 @@ header {
 /* ── Main ── */
 .main { display:grid; grid-template-columns:1fr 380px; min-height:calc(100vh - 62px); }
 
+/* ── PR inceleme katkısı butonu (board kartı) ── */
+.wi-review-btn { margin-left:auto; background:rgba(108,92,231,0.15); border:1px solid var(--border); color:var(--accent-light); border-radius:6px; font-size:11px; padding:1px 6px; cursor:pointer; }
+.wi-review-btn:hover { background:var(--accent); color:#fff; }
+
 /* ── Markdown tablo (mdToHtml) ── */
 .md-table { border-collapse:collapse; margin:8px 0; font-size:12px; }
 .md-table th, .md-table td { border:1px solid var(--border); padding:4px 8px; text-align:left; vertical-align:top; }
@@ -662,6 +666,7 @@ function renderJobs(jobs){
       <div class="jdot ${j.status}"></div>
       <span class="jwi">#${j.work_item_id}</span>
       ${isDry?`<span class="jmeta" style="background:rgba(255,196,0,0.12);color:#ffc400" title="Dry-run: lokal, push yok">🔬 DRY</span>`:''}
+      ${j.job_kind==='pr_review'?`<span class="jmeta" style="background:rgba(108,92,231,0.15);color:var(--accent-light)" title="PR inceleme katkısı (danışma) — insan PR'ı">🔍 İNCELEME</span>`:''}
       <span class="jtitle">${esc(j.wi_title||j.repo_name||j.status)}</span>
       ${j.current_step?`<span class="jstep">${j.current_step.replace('_task','')}</span>`:''}
       ${dur?`<span class="jmeta">${dur}</span>`:''}
@@ -940,6 +945,17 @@ function spSum(arr){return arr.reduce((a,i)=>a+spOf(i),0)}
 function spCount(arr){return arr.filter(i=>spOf(i)>0).length}
 
 const QS=['New','Backlog','To Do'];
+// PR inceleme katkısı: başlanmış işlerde (PR olabilir) 🔍 butonu
+const RV=['In Progress','Code Review','QA To Do','QA','UAT','Preprod Check','Active','Resolved'];
+async function reviewWi(id){
+  if(!confirm(`#${id} için WI'a bağlı PR reviewer tarafından incelenecek; bulgular PR ve WI yorumu olarak yazılır (kod/durum değişmez). Devam?`))return;
+  try{
+    const r=await fetch('/api/pr-review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:String(id)})});
+    const d=await r.json();
+    alert(d.error?('Hata: '+d.error):d.message);
+    if(!d.error&&typeof loadJobs==='function')loadJobs();
+  }catch(e){alert('Hata: '+e);}
+}
 function wiCard(it){
   const tm={Bug:{i:'B',c:'bug'},'User Story':{i:'U',c:'userstory'},Task:{i:'T',c:'task'},Feature:{i:'F',c:'feature'},Epic:{i:'E',c:'epic'}};
   const t=tm[it.type]||{i:'?',c:'task'};
@@ -953,6 +969,7 @@ function wiCard(it){
       <div class="wi-type-icon ${t.c}">${t.i}</div>
       ${it.url?`<a class="wi-id wi-link" href="${esc(it.url)}" target="_blank" onclick="event.stopPropagation()">#${it.id}</a>`:`<span class="wi-id">#${it.id}</span>`}
       <span class="wi-priority" data-p="${it.priority}">${pl[it.priority]||''}</span>
+      ${RV.includes(it.state)?`<button class="wi-review-btn" onclick="event.stopPropagation();reviewWi(${it.id})" title="PR inceleme katkısı: WI'a bağlı PR'ı reviewer inceler, bulgular PR ve WI yorumu olur (danışma; kod/durum değişmez)">🔍</button>`:''}
       ${spOf(it)>0?`<span class="wi-sp">${fmtSP(spOf(it))}</span>`:`<span class="wi-sp none" title="Story point girilmemiş">—</span>`}
     </div>
     <div class="wi-title">${esc(it.title)}</div>

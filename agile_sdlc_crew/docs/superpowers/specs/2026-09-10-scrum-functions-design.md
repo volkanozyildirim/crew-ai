@@ -186,3 +186,7 @@ Kılavuz `_build_step_context`'te `parts` sonuna girer (iş-değişmezi → prom
 **Product Owner (`_po_assessment`, KN-44):** `CREW_PO_ASSESSMENT` (kapalı) açıksa step1 sonunda, hazırlık kapısı geçildikten sonra tek LLM çağrısı: `product_owner` ajanı (tool'suz, `reasoning_remote` profili) + `po_assessment_task` → JSON `{business_value, urgency, priority P1-P4, decision GO|HOLD, scope_decisions[], risks_if_delayed, rationale}` (metinler Türkçe). `parse_po` normalize eder; WI yorumu tablo; kickoff/tasarım context'ine blok. HOLD danışma — pipeline durmaz. Spike ve kickoff-only'de çalışmaz.
 
 **Yapılmayanlar:** PO HOLD → needs_human kapısı (faz 5.1, birkaç koşu izlendikten sonra); Bug için otomatik reproduce testi çalıştırma (build gate zaten koşuyor); spike raporunu takip User Story olarak açma.
+
+## Ek — PR inceleme katkısı (2026-09-11)
+
+Sahiplik kuralı başlanmış WI'lara dokunmayı yasaklar; kullanıcı bu işlerin **review sürecine** katkı istedi. `pr_review.py`: WI → aktif PR (relations), değişen dosyalar → context, `code_reviewer` tek çağrı → PR genel yorum + blocker/major satır yorumları (≤8) + WI yorumu. Kod/push/oy/durum yok. Board kartında 🔍 (başlanmış durumlar), `POST /api/pr-review {work_item_id | repo_name+pr_id, post}`; iş `job_kind='pr_review'` rozetiyle listede; retro/plan/daily sorguları pipeline dışı işleri filtreler. Knob `CREW_PR_REVIEW` (açık; insan tetikli). KN-45.
