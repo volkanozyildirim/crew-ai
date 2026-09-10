@@ -3642,8 +3642,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
             wi_fields = wi_full.get("fields", {}) if wi_full else {}
             wi_desc_raw = wi_fields.get("System.Description", "") or ""
             wi_title_raw = wi_fields.get("System.Title", "") or ""
-            # WI tipi/durumu → state; yasam dongusu acıksa 'In Progress' + atama
-            self._wi_begin(wi_fields)
+            # WI tipi/durumu → state; yasam dongusu acıksa 'In Progress' + atama.
+            # Kendi icinde hata yutar; yine de BA context'ini (asagidaki ctx +=)
+            # asla riske atmasin diye burada da sarilir.
+            try:
+                self._wi_begin(wi_fields)
+            except Exception as _e_wl:
+                _log(f"  🗂️ WI yasam dongusu baslatilamadi: {_e_wl}")
             wi_ac_raw = wi_fields.get("Microsoft.VSTS.Common.AcceptanceCriteria", "") or ""
             wi_ac_plain = _re.sub(r'<[^>]+>', ' ', wi_ac_raw).strip()
             wi_desc_clean = _re.sub(r'<[^>]+>', ' ', wi_desc_raw).strip()
