@@ -353,6 +353,11 @@ requirements_analysis_task:
         "missing_details": [
           {"topic": "...", "why_needed": "...", "question": "..."}
         ]
+      },
+      "estimate": {
+        "story_points": 1 | 2 | 3 | 5 | 8 | 13,
+        "confidence": 0-100,
+        "rationale": "..."
       }
     }
     ```
@@ -373,6 +378,16 @@ requirements_analysis_task:
     `topic` (short), `why_needed` (what breaks without it), `question`
     (the exact question to ask the WI owner). Write topic/why_needed/
     question in TURKISH — they are posted to the work item as a comment.
+
+    ESTIMATE (mandatory): Fibonacci story points for the WHOLE work item
+    from a developer's point of view. 1 = trivial one-line config/text
+    change; 2 = one file, clear logic; 3 = 2-3 files or one small new
+    mechanism; 5 = several files/modules, tests or an integration point;
+    8 = a new mechanism spanning modules or data/schema changes; 13 =
+    multi-repo or unclear-scope work (usually goes with a LOW readiness
+    score). `confidence` 0-100 = how sure you are. `rationale` = ONE
+    sentence in TURKISH naming the main size driver. The pipeline combines
+    this with structural signals and never lowers it.
   agent: business_analyst
 
 technical_design_task:

@@ -147,6 +147,7 @@ def init_db():
         _ensure_column(cur, "jobs", "total_llm_calls", "INT DEFAULT 0")
         _ensure_column(cur, "jobs", "total_tool_calls", "INT DEFAULT 0")
         _ensure_column(cur, "jobs", "total_turns", "INT DEFAULT 0")
+        _ensure_column(cur, "jobs", "estimate_sp", "TINYINT NULL")
         _ensure_column(cur, "job_steps", "cost_usd", "DECIMAL(12,6) DEFAULT 0")
         _ensure_column(cur, "job_steps", "tool_calls", "INT DEFAULT 0")
         _ensure_column(cur, "job_steps", "turns", "INT DEFAULT 0")
@@ -244,6 +245,7 @@ def delete_job(job_id: int):
 _ALLOWED_JOB_FIELDS = frozenset({
     "status", "use_hal", "repo_name", "branch_name", "pr_id", "pr_url",
     "current_step", "error_message", "wi_title", "started_at", "finished_at",
+    "estimate_sp",  # faz 2: nihai story point tahmini (retrospektif verisi)
 })
 
 

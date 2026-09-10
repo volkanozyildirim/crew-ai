@@ -45,6 +45,8 @@ STATE_PREFS: dict[str, list[str]] = {
     "wait":    ["Blocked", "On Hold", "Waiting", "Impeded"],
     # DoD geçti, QA'ya devir
     "handoff": ["QA To Do", "Ready for QA", "Ready for Test", "QA", "Testing", "Resolved"],
+    # pipeline'ın kendi açtığı alt iş (child Task) dosyası push edildi
+    "complete": ["Done", "Closed", "Completed", "Resolved"],
 }
 
 # Pipeline'ın sahiplendiği durum adları (Proposed kategorisi bunlara eklenir).
@@ -286,11 +288,18 @@ def load_wi_context(client, work_item_id: str, fields: dict | None = None) -> di
             states = client.get_work_item_type_states(wtype)
         except Exception as e:  # noqa: BLE001
             log.warning(f"  WI durum listesi alinamadi ({wtype}): {e}")
+    sp = fields.get("Microsoft.VSTS.Scheduling.StoryPoints")
+    if sp is None:
+        sp = fields.get("Microsoft.VSTS.Scheduling.Effort")
     return {
         "wi_type": wtype,
         "wi_state": fields.get("System.State", "") or "",
         "wi_assigned_to": assigned or "",
         "wi_states": [{"name": s.get("name", ""), "category": s.get("category", "")} for s in states],
+        # faz 2 (tahmin + alt iş): mevcut SP (insan tahmini ezilmez), alan/iterasyon (child'lara kopyalanır)
+        "wi_story_points": float(sp) if isinstance(sp, (int, float)) else None,
+        "wi_area_path": fields.get("System.AreaPath", "") or "",
+        "wi_iteration_path": fields.get("System.IterationPath", "") or "",
     }
 
 

@@ -1728,6 +1728,249 @@ def test_wi_lifecycle_flow_hooks():
           src_flow.count("self.state.build_status = ") >= 7)
 
 
+# ── 30. Tahminleme — Fibonacci, yapısal merdiven, BA bloğu, uzlaştırma ────
+
+_BA_WITH_ESTIMATE = """```json
+{
+  "summary": "Getirilen iade nedeni metni site diline uygun olsun",
+  "functional_requirements": [{"id": "FR1", "desc": "a"}, {"id": "FR2", "desc": "b"}],
+  "technical_requirements": [{"id": "TR1", "desc": "c"}],
+  "acceptance_criteria": [{"id": "AC1", "desc": "d"}],
+  "out_of_scope": [], "assumptions": [], "open_questions": [],
+  "readiness": {"score": 85, "missing_details": []},
+  "estimate": {"story_points": 5, "confidence": 70, "rationale": "Üç dosya ve çeviri kaynakları"}
+}
+```"""
+
+
+def test_estimation():
+    print("\n[30] Tahminleme — Fibonacci'ye oturtma, yapısal merdiven, BA bloğu, max-uzlaşma")
+    from agile_sdlc_crew import estimation as est
+
+    check("snap 4 → 5 (eşitlikte büyük)", est.snap_fib(4) == 5)
+    check("snap 6 → 5, 7 → 8, 2.6 → 3", (est.snap_fib(6), est.snap_fib(7), est.snap_fib(2.6)) == (5, 8, 3))
+    check("snap 0 / metin → None", est.snap_fib(0) is None and est.snap_fib("x") is None)
+    check("yapısal req: 2→2, 5→3, 7→5, 10→8",
+          [est.structural_estimate(n, 0, False, "requirements")[0] for n in (2, 5, 7, 10)] == [2, 3, 5, 8])
+    check("yapısal plan: 7 req + 6 dosya + keşif → 13 (tavan)",
+          est.structural_estimate(7, 6, True, "plan")[0] == 13)
+    check("yapısal plan: 2 req + 3 dosya → 3 (+1 basamak)", est.structural_estimate(2, 3, False, "plan")[0] == 3)
+    check("yapısal requirements: dosya sayısı YOK SAYILIR", est.structural_estimate(2, 9, True, "requirements")[0] == 2)
+    check("uzlaşma: BA yok → yapısal", est.reconcile(None, 3) == (3, "yapısal"))
+    check("uzlaşma: BA 5 > yapısal 3 → BA", est.reconcile(5, 3) == (5, "BA"))
+    check("uzlaşma: BA 2 < yapısal 3 → yapısal", est.reconcile(2, 3) == (3, "yapısal"))
+    check("uzlaşma: eşit → uyumlu", est.reconcile(3, 3)[1] == "BA + yapısal uyumlu")
+    check("uzlaşma: önceki aşama 5 → düşmez", est.reconcile(2, 3, previous_sp=5) == (5, "önceki aşama"))
+    ba = est.parse_ba_estimate(_BA_WITH_ESTIMATE)
+    check("BA bloğu parse: 5 SP, %70, gerekçe", ba == {"sp": 5, "confidence": 70, "rationale": "Üç dosya ve çeviri kaynakları"}, str(ba))
+    check("BA bloğu yok → None", est.parse_ba_estimate('{"summary": "x"}') is None)
+    check("bozuk JSON → None", est.parse_ba_estimate("{oops") is None)
+    check("story_points 4 → 5'e oturur", est.parse_ba_estimate('{"estimate": {"story_points": 4}}')["sp"] == 5)
+    check("sınıf: 2→S, 5→M, 8→L", (est.size_class(2), est.size_class(5), est.size_class(8)) == ("S", "M", "L"))
+    line = est.render_estimate_line({"sp": 5, "source": "BA"}, elapsed_min=17.2, cost_usd=3.96)
+    check("satır: tahmin + gerçekleşen", "5 SP (M, BA)" in line and "17 dk" in line and "$3.96" in line, line)
+    check("satır: tahmin yoksa boş", est.render_estimate_line({}) == "")
+
+    class _C:
+        def __init__(self, fail_fields=(), hard=False):
+            self.ops, self.fail_fields, self.hard = [], set(fail_fields), hard
+        def update_work_item(self, wid, ops):
+            fld = ops[0]["path"].rsplit("/", 1)[-1]
+            if self.hard:
+                raise RuntimeError("connection reset")
+            if fld in self.fail_fields:
+                raise RuntimeError("400 Client Error: TF51535 field does not exist")
+            self.ops.append((wid, fld, ops[0]["value"]))
+    c = _C()
+    check("SP yaz: StoryPoints", est.write_story_points(c, "73121", 5) == "Microsoft.VSTS.Scheduling.StoryPoints"
+          and c.ops == [(73121, "Microsoft.VSTS.Scheduling.StoryPoints", 5.0)])
+    c = _C(fail_fields={"Microsoft.VSTS.Scheduling.StoryPoints"})
+    check("SP yaz: tipte StoryPoints yok → Effort", est.write_story_points(c, "1", 3) == "Microsoft.VSTS.Scheduling.Effort")
+    check("SP yaz: ağ hatası → '' (pipeline devam)", est.write_story_points(_C(hard=True), "1", 3) == "")
+
+    job = None
+    try:
+        from agile_sdlc_crew import db
+        job = db.get_job(189)
+    except Exception:
+        job = None
+    if job:
+        reqs = next((s.get("output") or "" for s in job.get("steps") or [] if s["step_key"] == "requirements_analysis_task"), "")
+        n = len(_requirement_ids(reqs))
+        sp, why = est.structural_estimate(n, 2, False, "plan")
+        check(f"#189 GERÇEK BA (estimate bloğu yok → None) + yapısal {sp} SP Fibonacci'de",
+              est.parse_ba_estimate(reqs) is None and sp in est.FIB and n > 0, f"n_req={n} {why}")
+    else:
+        skip("#189 gerçek BA çıktısı", "DB erişilemedi")
+
+
+# ── 31. Alt iş kaydı planlama — parent tipi, gruplama, idempotency ────────
+
+def _plan(n, repo="webservice"):
+    dirs = ["/app/Controller", "/app/Model", "/resources/translation", "/Test/Controller"]
+    return {"repo_name": repo, "changes": [
+        {"file_path": f"{dirs[i % 4]}/File{i}.php", "change_type": "edit" if i % 3 else "add",
+         "description": f"Değişiklik {i}", "covers_requirements": ["FR1", f"AC{i % 2 + 1}"]}
+        for i in range(n)]}
+
+
+def test_child_tasks_planning():
+    print("\n[31] Alt iş kaydı — parent tipi, başlık/açıklama, gruplama, idempotent açma")
+    from agile_sdlc_crew import wi_children as wc
+
+    check("parent tipi: User Story/Bug/Feature evet; Task hayır",
+          wc.parent_allows_children("User Story") and wc.parent_allows_children("Bug")
+          and not wc.parent_allows_children("Task") and not wc.parent_allows_children(""))
+    items = wc.plan_child_tasks(_plan(3), "webservice")
+    check("3 değişiklik → 3 child", len(items) == 3)
+    check("başlık: [repo] eylem dosya — açıklama", items[1]["title"] == "[webservice] Düzenle File1.php — Değişiklik 1", items[1]["title"])
+    check("add → 'Yeni dosya'", items[0]["title"].startswith("[webservice] Yeni dosya File0.php"))
+    check("açıklama: gereksinimler + dosya", "Kapsadığı gereksinimler: FR1, AC2" in items[1]["description"]
+          and "/app/Model/File1.php" in items[1]["description"])
+    check("files eşlemesi", items[2]["files"] == ["/resources/translation/File2.php"])
+    big = wc.plan_child_tasks(_plan(12), "webservice", max_children=8)
+    check("12 değişiklik, max 8 → dizine göre ≤8 grup", 1 <= len(big) <= 8 and all("dosya" in b["title"] for b in big), str([b["title"] for b in big]))
+    check("gruplama: tüm dosyalar bir grupta", sorted(f for b in big for f in b["files"]) == sorted(c["file_path"] for c in _plan(12)["changes"]))
+    long_plan = {"repo_name": "r", "changes": [{"file_path": "/a/B.php", "change_type": "edit", "description": "x" * 200}]}
+    check("başlık 128'e kırpılır", len(wc.plan_child_tasks(long_plan, "r")[0]["title"]) <= 128)
+    check("boş plan → []", wc.plan_child_tasks({}, "r") == [] and wc.plan_child_tasks({"changes": [{"nope": 1}]}, "r") == [])
+    kids = [{"id": 1, "files": ["/app/Customer.php"]}, {"id": 2, "files": ["/Test/X.php"]}]
+    check("child_for_file: slash/büyük-küçük toleranslı",
+          wc.child_for_file(kids, "app/customer.php")["id"] == 1 and wc.child_for_file(kids, "/nope.php") is None)
+
+    class _C:
+        def __init__(self, children=()):
+            self.children, self.created, self.n = list(children), [], 900
+        def get_work_item_children(self, pid):
+            return self.children
+        def create_work_item(self, t, fields, parent_id=None):
+            self.n += 1
+            self.created.append((t, fields, parent_id))
+            return {"id": self.n, "fields": fields}
+    c = _C()
+    out = wc.create_children(c, 500, {"System.AreaPath": "BM\\Ops", "System.IterationPath": "BM\\Ops\\2026_19"}, items)
+    check("3 child açıldı, parent 500, Task tipi", len(c.created) == 3 and all(t == "Task" and p == 500 for t, _, p in c.created))
+    check("etiket + alan/iterasyon kopyalandı", all(f["System.Tags"] == "crew-generated" and f["System.AreaPath"] == "BM\\Ops"
+                                                    and f["System.IterationPath"] == "BM\\Ops\\2026_19" for _, f, _ in c.created))
+    check("dönen liste id + files taşır", [o["id"] for o in out] == [901, 902, 903] and out[0]["files"] == ["/app/Controller/File0.php"])
+    c2 = _C(children=[{"id": 77, "fields": {"System.Title": "[webservice] eski", "System.Tags": "crew-generated; x", "System.State": "Done"}}])
+    out2 = wc.create_children(c2, 500, {}, items)
+    check("üretilmiş child varsa YENİDEN AÇMAZ, mevcutları döndürür", c2.created == [] and [o["id"] for o in out2] == [77])
+    c3 = _C(children=[{"id": 78, "fields": {"System.Title": "insan task'ı", "System.Tags": "", "System.State": "To Do"}}])
+    wc.create_children(c3, 500, {}, items)
+    check("etiketsiz (insan) child engel değil", len(c3.created) == 3)
+
+
+# ── 32. Flow kancaları — tahmin + alt iş (stub client) ───────────────────
+
+class _StubAzClient2(_StubAzClient):
+    def __init__(self, states, fields, children=()):
+        super().__init__(states, fields)
+        self.children, self.n = list(children), 900
+    def update_work_item(self, wid, ops):
+        for o in ops:
+            self.ops.append(("field", int(wid), o["path"].rsplit("/", 1)[-1], o["value"]))
+        return {}
+    def create_work_item(self, t, fields, parent_id=None):
+        self.n += 1
+        self.ops.append(("create", parent_id, t, fields["System.Title"]))
+        return {"id": self.n}
+    def get_work_item_children(self, pid):
+        return self.children
+
+
+def test_estimate_flow_hooks():
+    print("\n[32] Flow kancaları — tahmin aşamaları, SP yazma koruması, alt iş açma/kapama")
+    from agile_sdlc_crew import pipeline_config as pc
+
+    knobs = {"CREW_ESTIMATE": True, "CREW_WI_WRITE_ESTIMATE": False,
+             "CREW_WI_CHILD_TASKS": False, "CREW_WI_CHILD_TASKS_MAX": 8}
+    _orig_get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _orig_get(k)
+    try:
+        def mk(wi_type="Task", sp=None, **st):
+            f = AgileSDLCFlow()
+            f._db = None
+            f.state.work_item_id = "73121"
+            f.state.repo_name = "webservice"
+            f.state.wi_type = wi_type
+            f.state.wi_story_points = sp
+            f.state.wi_area_path, f.state.wi_iteration_path = "BM\\Ops", "BM\\Ops\\2026_19"
+            f.state.requirements_text = _BA_WITH_ESTIMATE
+            for k, v in st.items():
+                setattr(f.state, k, v)
+            f._client = _StubAzClient2(_FLO_TASK, {"System.WorkItemType": wi_type, "System.State": "In Progress"})
+            return f
+
+        f = mk()
+        f._estimate("requirements")
+        e = f.state.estimate
+        check("requirements: BA 5 vs yapısal 3 (4 gereksinim) → 5 SP, kaynak BA",
+              e.get("sp") == 5 and e.get("source") == "BA" and e.get("structural_sp") == 3 and e.get("ba_sp") == 5, str(e))
+        f.state.plan = _plan(3)
+        f._estimate("plan")
+        e = f.state.estimate
+        check("plan: 3 dosya → yapısal 5, BA 5 → uyumlu, stage=plan",
+              e.get("sp") == 5 and e.get("stage") == "plan" and "uyumlu" in e.get("source", ""), str(e))
+        check("yazma knob'u kapalı → Azure'a SP yazılmadı", not any(o[0] == "field" for o in f._client.ops))
+
+        knobs["CREW_WI_WRITE_ESTIMATE"] = True
+        f = mk()
+        f.state.plan = _plan(3)
+        f._estimate("plan")
+        check("yazma açık + WI'da SP boş → StoryPoints=5 yazıldı",
+              ("field", 73121, "Microsoft.VSTS.Scheduling.StoryPoints", 5.0) in f._client.ops, str(f._client.ops))
+        f = mk(sp=3.0)
+        f.state.plan = _plan(3)
+        f._estimate("plan")
+        check("WI'da SP var (3) → insan tahmini EZİLMEZ", not any(o[0] == "field" for o in f._client.ops))
+        f = mk(dry_run=True)
+        f.state.plan = _plan(3)
+        f._estimate("plan")
+        check("dry-run: tahmin hesaplanır, yazılmaz", f.state.estimate.get("sp") == 5 and f._client.ops == [])
+        knobs["CREW_ESTIMATE"] = False
+        f = mk()
+        f._estimate("requirements")
+        check("CREW_ESTIMATE kapalı → hiç hesaplanmaz", f.state.estimate == {})
+        knobs["CREW_ESTIMATE"] = True
+
+        f = mk(plan=_plan(3))
+        f._create_child_tasks()
+        check("child knob kapalı → açılmaz", f.state.child_tasks == [] and f._client.ops == [])
+        knobs["CREW_WI_CHILD_TASKS"] = True
+        f = mk(plan=_plan(3))
+        f._create_child_tasks()
+        check("WI tipi Task → parent değil, açılmaz", f.state.child_tasks == [] and f._client.ops == [])
+        f = mk(wi_type="User Story", plan=_plan(3))
+        f._after_plan_finalized()
+        creates = [o for o in f._client.ops if o[0] == "create"]
+        check("User Story + knob → 3 child açıldı (parent 73121)", len(creates) == 3 and all(o[1] == 73121 for o in creates), str(creates))
+        check("state.child_tasks dolu, files eşli", len(f.state.child_tasks) == 3 and f.state.child_tasks[1]["files"] == ["/app/Model/File1.php"])
+        n = len(f._client.ops)
+        f._complete_child_task("app/Model/File1.php")
+        check("dosya push → ilgili child Done", f._client.ops[-1] == ("state", 902, "Done") and f.state.child_tasks[1].get("done"), str(f._client.ops[-1]))
+        f._complete_child_task("app/Model/File1.php")
+        check("aynı dosya ikinci kez → no-op", len(f._client.ops) == n + 1)
+        f._complete_child_task("/olmayan.php")
+        check("planda olmayan dosya → no-op", len(f._client.ops) == n + 1)
+        f._create_child_tasks()
+        check("ikinci çağrı → yeniden açmaz (state dolu)", len([o for o in f._client.ops if o[0] == "create"]) == 3)
+        f = mk(wi_type="User Story", plan=_plan(3), kickoff_only=True)
+        f._create_child_tasks()
+        check("kickoff-only → açılmaz", f._client.ops == [])
+    finally:
+        pc.get = _orig_get
+
+    src_flow = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("plan kesinleşen 3 yolda da _after_plan_finalized (normal/resume/HAL)", src_flow.count("self._after_plan_finalized()") == 3)
+    check("step6'da 3 push yolunda _complete_child_task", src_flow.count("self._complete_child_task(file_path)") == 3)
+    check("step1: requirements sonrası kaba tahmin", 'self._estimate("requirements")' in src_flow)
+    src_db = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/db.py").read_text()
+    check("db: estimate_sp kolonu + whitelist", '"estimate_sp"' in src_db and 'ensure_column(cur, "jobs", "estimate_sp"' in src_db)
+    src_yaml = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/config/tasks.yaml").read_text()
+    check("tasks.yaml: BA estimate bloğu + ESTIMATE kuralı", '"estimate": {' in src_yaml and "ESTIMATE (mandatory)" in src_yaml)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -1749,7 +1992,10 @@ def main():
               test_md_to_html_headings_tables,
               test_wi_lifecycle_transitions,
               test_dod_checklist,
-              test_wi_lifecycle_flow_hooks):
+              test_wi_lifecycle_flow_hooks,
+              test_estimation,
+              test_child_tasks_planning,
+              test_estimate_flow_hooks):
         try:
             t()
         except Exception as e:

@@ -44,6 +44,7 @@ ister; en son çare append. Her push öncesi **güvenlik kontrolleri** uygulanı
 - **KN-24** — Skip: aynı içerik zaten push edilmiş. Bkz. [decision-points.md#kn-24](../decision-points.md#kn-24)
 - **KN-25** — Uygulama stratejisi (direct-edit / LLM blok / append). Bkz. [decision-points.md#kn-25](../decision-points.md#kn-25)
 - **KN-26** — Push öncesi güvenlik kontrolleri (kod kaybı koruması). Bkz. [decision-points.md#kn-26](../decision-points.md#kn-26)
+- **KN-39** — Dosya push edildikçe (gerçek push / resume-branch / skip-exists) ilgili child Task kapatılır (`_complete_child_task`). Bkz. [decision-points.md#kn-39](../decision-points.md#kn-39)
 - **KN-22** — Budget guard. Bkz. [decision-points.md#kn-22](../decision-points.md#kn-22)
 
 ## Resume / dry-run

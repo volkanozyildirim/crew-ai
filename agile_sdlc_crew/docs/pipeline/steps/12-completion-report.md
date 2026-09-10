@@ -41,6 +41,7 @@ Dry-run'da WI yerine local rapor dosyası yazar.
 - **KN-35** — WI yaşam döngüsü `handoff` geçişi (Code Review → QA To Do / QA). Bkz. [decision-points.md#kn-35](../decision-points.md#kn-35)
 - **KN-36** — Definition of Done değerlendirmesi. Bkz. [decision-points.md#kn-36](../decision-points.md#kn-36)
 - **KN-37** — DoD geçilemezse `needs_human` (zorlama). Bkz. [decision-points.md#kn-37](../decision-points.md#kn-37)
+- **KN-38** — Yorumun başında "Tahmin N SP (sınıf, kaynak) · Gerçekleşen X dk · $Y" satırı (`estimation.render_estimate_line`; `jobs.started_at` + gerçek maliyet). Bkz. [decision-points.md#kn-38](../decision-points.md#kn-38)
 
 ## Resume / dry-run
 - Resume yok (rapor her seferinde son state'ten üretilir).
