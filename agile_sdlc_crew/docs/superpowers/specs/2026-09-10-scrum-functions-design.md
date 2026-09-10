@@ -1,6 +1,6 @@
-# Scrum İşlevleri — Tasarım (program + Faz 1–3 ayrıntısı)
+# Scrum İşlevleri — Tasarım (program + Faz 1–4 ayrıntısı)
 
-**Tarih:** 2026-09-10 · **Durum:** Faz 1 PR #8 · Faz 2 PR #9 · Faz 3 uygulanıyor · **Kaynak karar:** kullanıcı,
+**Tarih:** 2026-09-10 · **Durum:** Faz 1 PR #8 · Faz 2 PR #9 · Faz 3 PR #10 · Faz 4 uygulanıyor · **Kaynak karar:** kullanıcı,
 "agile metodolojinin tüm fonksiyonlarını sisteme eklemeliyiz" → boşluk analizi →
 "önerine göre ilerle".
 
@@ -19,7 +19,7 @@ böler ve Faz 1'i uygulanabilir ayrıntıda tasarlar.
 | **1** | **WI yaşam döngüsü + DoD** — durum geçişleri, isteğe bağlı atama, deterministik DoD listesi | Board pipeline'ı yansıtır; DoD tablosu tamamlanma yorumunda; UAT REJECTED artık görünür |
 | **2** | **Tahminleme + alt iş kaydı** — BA `estimate` + yapısal sinyaller → Fibonacci SP (yalnızca yükselir); parent tipi WI için plan → child Task | `jobs.estimate_sp`, tamamlanma yorumunda tahmin/gerçekleşen; WI'da SP (boşsa); child Task'lar board'da |
 | **3** | **Retrospektif** — sprint / son N gün için deterministik öğrenme raporu (neden sınıfları, kırılan adımlar, review/build/UAT kapıları, SP başına dk/$) → eşik tabanlı kılavuz-kuralı önerileri, insan onayıyla kickoff kılavuzuna | `GET /api/retro`, dashboard 🔁 Retro modalı, "＋ Ekle" ile kural |
-| 4 | Sprint Planning + Daily — velocity tabanlı seçim, bağımlılık sırası, günlük Telegram/WI özeti | Board'dan "sprint'i kuyrukla"; 09:00 günlük özet |
+| **4** | **Sprint Planning + Daily** — sprintten aday listesi (Proposed durum, tip, açık iş yok), öncelik+SP sırası, kapasite (kullanıcı / takım velocity), retro tabanlı $/dk tahmini, onaylı toplu kuyruk; günlük özet (biten/koşan/kuyruk/engeller) dashboard + zamanlayıcı + Telegram | 🗓️ Planla ve ☀️ Günlük modalleri; `/api/sprint-plan(/queue)`, `/api/daily(/send)` |
 | 5 | İş tipine göre akış + PO ajanı — Bug (reproduce → fix → regresyon testi), Spike (kodsuz araştırma), PO değer/öncelik kararı | Tip bazlı router; PO çıktısı kickoff'a girdi |
 
 Her faz kendi PR'ı; her davranış env/dashboard ile açılıp kapanır (proje kuralı:
@@ -159,3 +159,13 @@ Takım SP'yi **Task** seviyesinde ve **`Custom.StoryPoints`** alanında tutuyor 
 **Yüzey:** `GET /api/retro?days=N | iteration_path=…` → `{markdown, summary, suggested_rules, config_suggestions}`; board'da 🔁 Retro modalı (kapsam seçici, markdown render, kural ekleme). `mdToHtml` pipe tabloyu öğrendi (retro ve DoD tabloları için). Knob: `CREW_RETRO` (açık; salt okunur).
 
 **Yapılmayanlar:** LLM anlatı özeti (isteğe bağlı sonraki adım), raporu WI/Teams'e göndermek, otomatik kural ekleme.
+
+## Faz 4 — Sprint planlama + günlük özet (2026-09-10)
+
+**Sprint planlama (`sprint_planning.py`, KN-41):** seçili sprintin WI'ları → aday satırları (`eligible` + Türkçe `reason`): durum Proposed (tipin süreç listesinden; yoksa ad yedeği), tip pipeline türlerinden, WI'nın en son işi açık/tamamlanmış/bekleyen değil (failed → yeniden denenebilir). Sıra öncelik ↑, SP ↑, id ↑. Kapasite: kullanıcı ya da takım velocity'si (`sprint_report.velocity_data`, son 3 sprint Done SP ortalaması); kümülatif SP kapasiteyi aşmadan ön-işaret. Tahmin: retrospektif ortalamaları (SP başına $/dk; yoksa iş başına). `queue_selected` açık işi olanı atlar, `db.create_job` ile kuyruklar. UI: 🗓️ Planla modalı (kapasite girişi, tablo, toplamlar, "Kuyruğa al (n)" onaylı).
+
+**Günlük özet (`daily.py`, KN-42):** son N saat biten (durum, WI linki, PR, SP, dk, $, hata özeti), koşan (adım, süre), kuyruk, **insan bekleyenler** (WI'nın en son işi needs_info/needs_human; kaç gün), maliyet. `GET /api/daily`, `POST /api/daily/send` (dosya + Telegram). Zamanlayıcı thread sunucu startup'ında; `CREW_DAILY_ENABLED` her turda okunur; saat `CREW_DAILY_TIME` (env). Telegram düz metin (`to_plain`). UI: ☀️ Günlük modalı, saat aralığı seçici, Telegram butonu yalnızca yapılandırılmışsa.
+
+**Knob'lar:** `CREW_SPRINT_PLANNING` (açık; plan salt okunur, kuyruk yazımı butonla) · `CREW_DAILY_ENABLED` (kapalı; dışa gönderim). Env: `CREW_DAILY_TIME`, `CREW_DAILY_DIR`, `CREW_DAILY_TELEGRAM_TOKEN`, `CREW_DAILY_TELEGRAM_CHAT_ID`.
+
+**Yapılmayanlar:** WI'lar arası bağımlılık sırası (ilişki grafı — Faz 5+), sprint hedefi metni, Teams/Slack kanalı (Telegram Bot API yeterli başlangıç), günlük özeti WI yorumu olarak yazmak.

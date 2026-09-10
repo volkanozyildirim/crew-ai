@@ -395,6 +395,21 @@ SCHEMA: list[dict] = [
         "default": True,
         "desc": "Board'daki 🔁 Retro butonu ve /api/retro: seçili sprintin (ya da son N günün) pipeline işlerinden deterministik öğrenme raporu — sonuç dağılımı ve nedenleri, kırılan adımlar, review ilk-tur onayı / düzeltme turu, PR build, UAT kabul/red, teslim edilen SP ve SP başına dk/$, tekrar koşan WI'lar, en pahalı işler. Veriye bağlı eşiklerden kılavuz-kuralı önerileri üretir; kurallar yalnızca insan 'Kılavuza ekle' dediğinde kickoff kılavuzuna girer. LLM çağrısı yok, salt okunur.",
     },
+    # ── Scrum islevleri — Faz 4: sprint planlama + gunluk ozet ──
+    {
+        "key": "CREW_SPRINT_PLANNING",
+        "label": "Sprint Planlama (dashboard 🗓️)",
+        "type": "bool",
+        "default": True,
+        "desc": "Board'daki 🗓️ Planla butonu ve /api/sprint-plan: seçili sprintin WI'larından pipeline aday listesi — durumu Proposed (Backlog/To Do) olan, tipi pipeline'ın işlediği (Task/Bug/User Story/PBI), açık ya da tamamlanmış işi olmayan WI'lar; öncelik ↑ ve SP ↑ sırası; kapasite (kullanıcı ya da takımın son 3 sprint velocity'si) kadar ön-işaretli; retrospektif ortalamalarıyla tahmini $ ve dk. 'Kuyruğa al' insan onayıyla seçilenleri toplu kuyruğa ekler (açık işi olan atlanır). Plan salt okunur; kuyruk yazımı yalnızca butonla.",
+    },
+    {
+        "key": "CREW_DAILY_ENABLED",
+        "label": "Günlük Özet Zamanlayıcısı",
+        "type": "bool",
+        "default": False,
+        "desc": "Açıkken sunucu her gün CREW_DAILY_TIME (env, varsayılan 09:00) saatinde günlük özeti (son 24 saat: biten/koşan/kuyruk/insan bekleyen işler, maliyet) üretir, CREW_DAILY_DIR'e (varsayılan /tmp/crew_daily) yazar ve CREW_DAILY_TELEGRAM_TOKEN + CREW_DAILY_TELEGRAM_CHAT_ID (env) tanımlıysa Telegram'a gönderir. Kapalıyken de dashboard ☀️ butonu ve /api/daily anlık özet verir. Dışa gönderim yaptığı için varsayılan kapalı.",
+    },
     {
         "key": "CREW_FRESHEN_ALL_REPOS",
         "label": "Tüm Klonları Tazele (paralel fetch)",

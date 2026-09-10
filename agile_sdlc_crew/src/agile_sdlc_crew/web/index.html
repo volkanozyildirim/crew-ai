@@ -397,6 +397,8 @@ header {
       <button class="sm-btn" onclick="openBackfill()" title="Seçili takımın geçmiş done+PR'lı işlerini indeksle" style="padding:4px 10px;font-size:12px">📚 Geçmiş İşleri Tara</button>
       <button class="sm-btn" onclick="openSprintReport()" title="Seçili sprintin işlerini parent'a göre gruplayıp .pptx sprint raporu üret" style="padding:4px 10px;font-size:12px">📊 Sprint Raporu</button>
       <button class="sm-btn" onclick="openRetro()" title="Seçili sprintin (ya da son N günün) pipeline işlerinden retrospektif: nerede takıldı, kalite kapıları, SP başına süre/maliyet, önerilen kılavuz kuralları" style="padding:4px 10px;font-size:12px">🔁 Retro</button>
+      <button class="sm-btn" onclick="openPlan()" title="Seçili sprintin başlanmamış işlerinden pipeline aday listesi: öncelik + SP sırası, kapasite, tahmini maliyet/süre; seçilenleri toplu kuyruğa al" style="padding:4px 10px;font-size:12px">🗓️ Planla</button>
+      <button class="sm-btn" onclick="openDaily()" title="Günlük özet: son 24 saatte biten/koşan/kuyruktaki işler, insan bekleyen engeller, maliyet" style="padding:4px 10px;font-size:12px">☀️ Günlük</button>
     </div>
     <div class="sprint-summary" id="summary" style="display:none"></div>
     <div id="kanban"><div class="board-empty">Takım ve sprint seçerek board'u görüntüleyin.</div></div>
@@ -2572,6 +2574,130 @@ async function pollSprintReport(){
 // sayfa açılışında devam eden üretim varsa butonu 'üretiliyor' göster (kullanıcı popup'ı açmasa da)
 document.addEventListener('DOMContentLoaded',()=>{ if(srGetActive())setTimeout(()=>{const b=document.querySelector('[onclick="openSprintReport()"]'); if(b)b.textContent='📊 Rapor üretiliyor…';},300); });
 
+</script>
+
+<!-- Sprint Plan Modal (Scrum faz 4) -->
+<div id="planModal" style="display:none;position:fixed;inset:0;z-index:280;background:rgba(0,0,0,0.78);backdrop-filter:blur(4px);" onclick="if(event.target===this)closePlan()">
+  <div style="position:absolute;top:5%;left:50%;transform:translateX(-50%);width:min(1040px,96vw);max-height:90vh;background:var(--bg-card);border-radius:16px;border:1px solid var(--border);display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,0.5)">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border);gap:12px;flex-wrap:wrap">
+      <div style="display:flex;gap:10px;align-items:center;flex:1;flex-wrap:wrap">
+        <span style="font-size:18px">🗓️</span>
+        <h2 style="font-size:16px;font-weight:700">Sprint Planı — <span id="planTitle">-</span></h2>
+        <label style="font-size:12px;color:var(--text-dim);margin-left:10px">Kapasite (SP)
+          <input id="planCap" type="number" min="0" step="1" placeholder="velocity" style="width:80px;margin-left:6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px" onchange="loadPlan()">
+        </label>
+        <button class="sm-btn ghost" onclick="loadPlan()" style="padding:4px 8px;font-size:12px">&#8635; Yenile</button>
+      </div>
+      <button onclick="closePlan()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div id="planBody" style="padding:12px 20px;overflow:auto;font-size:12.5px;flex:1"></div>
+    <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div id="planTotals" style="font-size:12.5px;line-height:1.5"></div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span id="planStatus" style="font-size:12px"></span>
+        <button id="planQueueBtn" class="sm-btn" onclick="queuePlan()" disabled>Kuyruğa al (0)</button>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Daily Modal (Scrum faz 4) -->
+<div id="dailyModal" style="display:none;position:fixed;inset:0;z-index:280;background:rgba(0,0,0,0.78);backdrop-filter:blur(4px);" onclick="if(event.target===this)closeDaily()">
+  <div style="position:absolute;top:8%;left:50%;transform:translateX(-50%);width:min(760px,94vw);max-height:84vh;background:var(--bg-card);border-radius:16px;border:1px solid var(--border);display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,0.5)">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border);gap:12px">
+      <div style="display:flex;gap:10px;align-items:center;flex:1">
+        <span style="font-size:18px">☀️</span>
+        <h2 style="font-size:16px;font-weight:700">Günlük Özet</h2>
+        <select id="dailyHours" class="sprint-select" onchange="loadDaily()" style="margin-left:12px">
+          <option value="24" selected>Son 24 saat</option><option value="48">Son 48 saat</option><option value="72">Son 3 gün</option><option value="168">Son 7 gün</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="dailyStatus" style="font-size:12px"></span>
+        <button id="dailySendBtn" class="sm-btn" onclick="sendDaily()" style="display:none;padding:4px 10px;font-size:12px" title="CREW_DAILY_TELEGRAM_TOKEN/CHAT_ID tanımlı">✈️ Telegram'a gönder</button>
+        <button onclick="closeDaily()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
+      </div>
+    </div>
+    <div id="dailyBody" style="padding:14px 20px;overflow:auto;font-size:13px;line-height:1.55"></div>
+  </div>
+</div>
+<script>
+let _plan=null;
+function openPlan(){
+  const sel=document.getElementById('sprintSel'); const iter=(sel||{}).value||'';
+  if(!iter){alert('Önce bir sprint seçin');return;}
+  document.getElementById('planTitle').textContent=(sel.selectedOptions[0]||{}).text||iter;
+  document.getElementById('planStatus').textContent='';
+  document.getElementById('planModal').style.display='flex';
+  loadPlan();
+}
+function closePlan(){document.getElementById('planModal').style.display='none';}
+async function loadPlan(){
+  const iter=(document.getElementById('sprintSel')||{}).value||''; const team=(document.getElementById('teamSel')||{}).value||'';
+  const capEl=document.getElementById('planCap'); const cap=capEl.value; const body=document.getElementById('planBody');
+  body.innerHTML='<div style="color:var(--text-dim)">Hesaplanıyor… (sprint WI\'ları, iş durumları, velocity)</div>';
+  let q='iteration_path='+encodeURIComponent(iter)+'&team='+encodeURIComponent(team);
+  if(cap!=='')q+='&capacity_sp='+encodeURIComponent(cap);
+  try{
+    const r=await fetch('/api/sprint-plan?'+q+'&t='+Date.now()); const d=await r.json();
+    if(d.error){body.innerHTML='<div style="color:var(--danger)">'+esc(d.error)+'</div>';return;}
+    _plan=d; if(cap===''&&d.capacity_sp!=null)capEl.placeholder=fmtSP(d.capacity_sp);
+    renderPlan();
+  }catch(e){body.innerHTML='Hata: '+esc(String(e));}
+}
+function renderPlan(){
+  const d=_plan, body=document.getElementById('planBody');
+  if(!d.rows.length){body.innerHTML='<div class="board-empty">Sprintte iş kalemi yok.</div>';planTotals();return;}
+  const rows=d.rows.map((r,i)=>`<tr style="${r.eligible?'':'opacity:.55'}">
+    <td><input type="checkbox" data-i="${i}" ${r.selected?'checked':''} ${r.eligible?'':'disabled'} onchange="planToggle(this)"></td>
+    <td><a href="${esc(r.url)}" target="_blank" style="color:var(--accent-light)">#${r.id}</a></td>
+    <td>${esc(r.title)}</td><td>${esc(r.type)}</td><td>${esc(r.state)}</td><td style="text-align:center">${r.priority}</td>
+    <td style="text-align:right">${r.sp?fmtSP(r.sp):'—'}</td><td style="color:var(--text-dim)">${esc(r.reason||'')}</td></tr>`).join('');
+  body.innerHTML=`<table class="md-table" style="width:100%"><tr><th></th><th>WI</th><th>Başlık</th><th>Tip</th><th>Durum</th><th>Önc.</th><th>SP</th><th>Not</th></tr>${rows}</table>`;
+  planTotals();
+}
+function planToggle(cb){_plan.rows[+cb.dataset.i].selected=cb.checked;planTotals();}
+function planTotals(){
+  const sel=_plan.rows.filter(r=>r.selected); const sp=sel.reduce((a,r)=>a+(r.sp||0),0); const rt=_plan.rates||{}; const unk=sel.filter(r=>!r.sp).length;
+  let cost=null,min=null;
+  if(sel.length){
+    if(rt.cost_per_sp&&sp)cost=rt.cost_per_sp*sp+(rt.cost_per_job||0)*unk; else if(rt.cost_per_job)cost=rt.cost_per_job*sel.length;
+    if(rt.min_per_sp&&sp)min=rt.min_per_sp*sp+(rt.min_per_job||0)*unk; else if(rt.min_per_job)min=rt.min_per_job*sel.length;
+  }
+  document.getElementById('planTotals').innerHTML=`Seçili <b>${sel.length}</b> iş · <b>${fmtSP(sp)}</b> SP${unk?` <span style="color:var(--warning)">(${unk} işin SP'si yok)</span>`:''} · tahmini ${cost!=null?'<b>$'+cost.toFixed(2)+'</b>':'—'} · ${min!=null?'<b>'+Math.round(min)+' dk</b>':'—'}<br>`
+    +`<span style="color:var(--text-dim)">Kapasite: ${_plan.capacity_sp!=null?fmtSP(_plan.capacity_sp)+' SP ('+esc(_plan.capacity_source)+')':'belirtilmedi'}${_plan.team_velocity?' · takım velocity '+fmtSP(_plan.team_velocity)+' SP':''} · sprintte ${_plan.items_total} iş, ${_plan.eligible} uygun</span>`;
+  const b=document.getElementById('planQueueBtn'); b.textContent=`Kuyruğa al (${sel.length})`; b.disabled=!sel.length;
+}
+async function queuePlan(){
+  const sel=_plan.rows.filter(r=>r.selected); if(!sel.length)return;
+  if(!confirm(sel.length+' iş pipeline kuyruğuna alınacak (sırayla koşar). Onaylıyor musunuz?'))return;
+  const st=document.getElementById('planStatus'); st.textContent='Kuyruğa alınıyor…';
+  try{
+    const r=await fetch('/api/sprint-plan/queue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows:sel.map(x=>({id:x.id,title:x.title}))})});
+    const d=await r.json();
+    if(d.error){st.textContent='Hata: '+d.error;return;}
+    st.innerHTML=`✅ ${(d.queued||[]).length} iş kuyruğa alındı`+((d.skipped||[]).length?` · ${d.skipped.length} atlandı: `+esc(d.skipped.map(s=>'#'+s.wi+' ('+s.reason+')').join(', ')):'');
+    loadPlan();
+  }catch(e){st.textContent='Hata: '+e;}
+}
+function openDaily(){document.getElementById('dailyModal').style.display='flex';document.getElementById('dailyStatus').textContent='';loadDaily();}
+function closeDaily(){document.getElementById('dailyModal').style.display='none';}
+async function loadDaily(){
+  const h=document.getElementById('dailyHours').value; const body=document.getElementById('dailyBody');
+  body.innerHTML='<div style="color:var(--text-dim)">Hesaplanıyor…</div>';
+  try{
+    const r=await fetch('/api/daily?hours='+encodeURIComponent(h)+'&t='+Date.now()); const d=await r.json();
+    if(d.error){body.innerHTML='<div style="color:var(--danger)">'+esc(d.error)+'</div>';return;}
+    body.innerHTML=mdToHtml(d.markdown||'');
+    document.getElementById('dailySendBtn').style.display=d.telegram_configured?'':'none';
+  }catch(e){body.innerHTML='Hata: '+esc(String(e));}
+}
+async function sendDaily(){
+  const h=document.getElementById('dailyHours').value; const st=document.getElementById('dailyStatus'); st.textContent='Gönderiliyor…';
+  try{
+    const r=await fetch('/api/daily/send?hours='+encodeURIComponent(h),{method:'POST'}); const d=await r.json();
+    st.textContent=d.error?('Hata: '+d.error):(d.telegram_sent?'✅ Telegram\'a gönderildi':'Dosyaya yazıldı, Telegram yapılandırılmamış');
+  }catch(e){st.textContent='Hata: '+e;}
+}
 </script>
 
 <!-- Retro Modal (Scrum faz 3) -->
