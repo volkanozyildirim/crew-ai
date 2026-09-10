@@ -21,6 +21,10 @@ verdiğini** tek yerden okuyabilmek.
   tarayıp `/repo-decisions`'a yazar (async + concurrent, `azure_backfill.py`,
   `/api/backfill/{start,status,cancel}`).
   Spec: `docs/superpowers/specs/2026-06-15-azure-devops-backfill-design.md`.
+- **Scrum işlevleri programı** (5 faz): Faz 1 = **WI yaşam döngüsü + Definition of
+  Done** (`wi_lifecycle.py`; KN-35, KN-36, KN-37). Sonraki fazlar: tahminleme +
+  alt iş kaydı, retrospektif, sprint planning + daily, iş tipine göre akış + PO.
+  Spec: `docs/superpowers/specs/2026-09-10-scrum-functions-design.md`.
 
 ## Akış (CrewAI yolu)
 

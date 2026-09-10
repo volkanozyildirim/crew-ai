@@ -976,6 +976,20 @@ class PipelineState(BaseModel):
     # asla LLM'den gelen id'ye guvenilmez.
     # {id, file, line, severity, problem, required_fix, status(open|closed), note}
     review_issues: list[dict] = Field(default_factory=list)
+    # WI yasam dongusu + DoD (wi_lifecycle.py, CREW_WI_LIFECYCLE / CREW_DOD_*).
+    # Tip/durum/atama HER ZAMAN okunur (log + DoD icin); Azure'a yazma yalnizca
+    # CREW_WI_LIFECYCLE acikken. wi_states = tipin surec durumlari [{name, category}].
+    wi_type: str = ""
+    wi_state_initial: str = ""
+    wi_state_current: str = ""
+    wi_states: list[dict] = Field(default_factory=list)
+    wi_assigned_to: str = ""
+    wi_assigned_by_pipeline: bool = False
+    # pr_build_gate sonucu: succeeded | failed | partiallySucceeded | canceled |
+    # timeout | no_pipeline | disabled | skipped | "" (DoD 'build yesil' maddesi)
+    build_status: str = ""
+    # step11 DoD tablosu: [{key, label, ok(True|False|None), note, mandatory}]
+    dod: list[dict] = Field(default_factory=list)
 
 
 # ── Flow ─────────────────────────────────────────────
@@ -1368,6 +1382,94 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 self._db.fail_step(self.state.job_id, step_key, error)
             except Exception:
                 pass
+
+    # ── WI yasam dongusu (CREW_WI_LIFECYCLE; wi_lifecycle.py) ───────────
+    # Pipeline bugune kadar System.State'e hic yazmadi: 73121'i (job #189 PR
+    # acti, review + build yesil) insanlar 'Ready for Production'a elle tasidi.
+    # Gecisler surecten bagimsiz tercih listesiyle secilir ve YALNIZCA sahiplik
+    # araligindan (Proposed + In Progress/Code Review/Blocked) yapilir — QA/UAT/
+    # Done'daki bir WI'a dokunulmaz. Hatalar yutulur: WI durumu yazilamamasi
+    # pipeline'i asla durdurmaz.
+
+    def _wi_lifecycle_enabled(self) -> bool:
+        from agile_sdlc_crew import pipeline_config as _pc_wl
+        try:
+            return (
+                bool(_pc_wl.get("CREW_WI_LIFECYCLE"))
+                and not self.state.dry_run
+                and not self.state.kickoff_only
+            )
+        except Exception:
+            return False
+
+    def _wi_begin(self, wi_fields: dict | None = None) -> None:
+        """WI tipi/durumu/atamasini state'e al (her zaman — log ve DoD icin);
+        yasam dongusu acıksa 'start' gecisi + istege bagli bos-atama doldurma.
+        step1 (fields elde) ve hal_planning (fields yok → fetch) cagirir."""
+        from agile_sdlc_crew import wi_lifecycle as _wl
+        from agile_sdlc_crew import pipeline_config as _pc_wl
+        if self.state.wi_type and self.state.wi_states:
+            return  # zaten alinmis
+        try:
+            info = _wl.load_wi_context(self._client, self.state.work_item_id, wi_fields)
+        except Exception as e:
+            _log(f"  🗂️ WI baglami alinamadi: {e}")
+            return
+        self.state.wi_type = info["wi_type"]
+        self.state.wi_state_initial = info["wi_state"]
+        self.state.wi_state_current = info["wi_state"]
+        self.state.wi_states = info["wi_states"]
+        self.state.wi_assigned_to = info["wi_assigned_to"]
+        _log(f"  🗂️ WI #{self.state.work_item_id}: {info['wi_type'] or '?'} · durum '{info['wi_state']}'"
+             + (f" · atanan {info['wi_assigned_to']}" if info["wi_assigned_to"] else " · atanmamış"))
+        if not self._wi_lifecycle_enabled():
+            return
+        self._wi_transition("start")
+        try:
+            if _pc_wl.get("CREW_WI_ASSIGN_IF_EMPTY"):
+                who = _wl.assign_if_empty(self._client, self.state.work_item_id,
+                                          self.state.wi_assigned_to, logger=_log)
+                if who:
+                    self.state.wi_assigned_to = who
+                    self.state.wi_assigned_by_pipeline = True
+        except Exception as e:
+            _log(f"  🗂️ WI atama hatasi: {e}")
+
+    def _wi_transition(self, event: str) -> str | None:
+        """Olaya gore durum gecisi: start | review | wait | handoff. Hedef yoksa
+        (surecte ad yok, zaten hedefte, sahiplik disi) dokunmaz ve loglar."""
+        from agile_sdlc_crew import wi_lifecycle as _wl
+        if not self._wi_lifecycle_enabled() or not self.state.wi_states:
+            return None
+        try:
+            target = _wl.plan_transition(self.state.wi_state_current, self.state.wi_states, event)
+            if not target:
+                _log(f"  🗂️ WI durumu [{event}]: geçiş yok (mevcut '{self.state.wi_state_current}')")
+                return None
+            if _wl.apply_state(self._client, self.state.work_item_id, target, logger=_log):
+                self.state.wi_state_current = target
+                return target
+        except Exception as e:
+            _log(f"  🗂️ WI gecisi [{event}] hatasi: {e}")
+        return None
+
+    def wi_lifecycle_on_exception(self, exc: BaseException) -> None:
+        """main.run_pipeline except'inden cagrilir: NeedsMoreInfo/NeedsHumanReview
+        → 'wait' (Blocked); diger hata → PR YOKSA baslangic durumuna geri al
+        (PR varsa Code Review'da kalir, insan karar verir)."""
+        from agile_sdlc_crew import wi_lifecycle as _wl
+        if not self._wi_lifecycle_enabled() or not self.state.wi_states:
+            return
+        try:
+            if isinstance(exc, NeedsHumanReview):
+                self._wi_transition("wait")
+                return
+            target = _wl.plan_revert(self.state.wi_state_current, self.state.wi_state_initial,
+                                     self.state.wi_states, pr_exists=bool(self.state.pr_id))
+            if target and _wl.apply_state(self._client, self.state.work_item_id, target, logger=_log):
+                self.state.wi_state_current = target
+        except Exception as e:
+            _log(f"  🗂️ WI gecisi (hata yolu) basarisiz: {e}")
 
     def _run_discover_repos(self, candidate_repos: list[str], evidence: dict | None = None, repo_history: list[dict] | None = None) -> None:
         """LLM'e en alakali aday repo'larin summary'lerini ver, hedef repo'yu sec.
@@ -3398,6 +3500,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         )
 
         _log("\n-- PLANLAMA (HAL modu) --")
+        self._wi_begin()  # HAL yolunda requirements adimi yok → WI baglamini burada al
         hal = HALClient()
         hal.login()
         self._hal = hal
@@ -3539,6 +3642,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
             wi_fields = wi_full.get("fields", {}) if wi_full else {}
             wi_desc_raw = wi_fields.get("System.Description", "") or ""
             wi_title_raw = wi_fields.get("System.Title", "") or ""
+            # WI tipi/durumu → state; yasam dongusu acıksa 'In Progress' + atama
+            self._wi_begin(wi_fields)
             wi_ac_raw = wi_fields.get("Microsoft.VSTS.Common.AcceptanceCriteria", "") or ""
             wi_ac_plain = _re.sub(r'<[^>]+>', ' ', wi_ac_raw).strip()
             wi_desc_clean = _re.sub(r'<[^>]+>', ' ', wi_desc_raw).strip()
@@ -5731,6 +5836,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  ⏩ Branch'te zaten aktif PR var: #{existing_pr_id}, yeniden kullaniliyor")
             self.state.pr_id = str(existing_pr_id)
             self.state.pr_url = existing_url
+            self._wi_transition("review")
             self._step_done("create_pr_task", f"PR #{self.state.pr_id} (mevcut): {self.state.pr_url}")
             if self.state.job_id:
                 self._db.update_job(self.state.job_id, pr_id=self.state.pr_id, pr_url=self.state.pr_url)
@@ -5796,6 +5902,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         self.state.pr_id = str(pr_result["pr_id"])
         self.state.pr_url = pr_result["url"]
+        self._wi_transition("review")
         _log(f"  PR #{self.state.pr_id}: {self.state.pr_url}")
         self._step_done("create_pr_task", f"PR #{self.state.pr_id}: {self.state.pr_url}")
         if self.state.job_id:
@@ -6092,12 +6199,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
         step_key = "pr_build_gate"
         self._step_start(step_key)
         if self.state.dry_run:
+            self.state.build_status = "skipped"
             self._step_done(step_key, "DRY-RUN: atlandi (PR yok)")
             return
         if not _pc.get("CREW_PR_BUILD_GATE"):
+            self.state.build_status = "disabled"
             self._step_done(step_key, "Devre disi (CREW_PR_BUILD_GATE=0)")
             return
         if not self.state.pr_id:
+            self.state.build_status = "skipped"
             self._step_done(step_key, "Atlandi — PR yok")
             return
 
@@ -6119,6 +6229,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 outcome = "timeout"
             if outcome == "no_pipeline":
                 _log("  PR build bulunamadi — bu repoda PR-test pipeline'i yok, gate atlaniyor")
+                self.state.build_status = "no_pipeline"
                 self._step_done(step_key, "Repoda PR-test pipeline'i yok — gate atlandi")
                 return
             if outcome == "timeout":
@@ -6165,6 +6276,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                             self._db.needs_human_job(self.state.job_id, msg)
                         except Exception as _e_nh:
                             _log(f"  needs_human durumu yazilamadi: {_e_nh}")
+                    self.state.build_status = "timeout"
                     raise NeedsHumanReview(msg)
                 _log(f"  ↳ Son sansta build bitti: {(build or {}).get('result')}")
             # outcome == "completed"
@@ -6176,6 +6288,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"`{build.get('definition')}` build #{build.get('build_id')} başarılı — testler yeşil.\n\n"
                     f"---\n*Agile SDLC Crew - PR Build Gate*"
                 )
+                self.state.build_status = "succeeded"
                 self._step_done(step_key, f"Build {build.get('build_id')} succeeded ({build.get('definition')})")
                 return
 
@@ -6204,6 +6317,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         self._db.needs_human_job(self.state.job_id, _msg_bf)
                     except Exception as _e_nh:
                         _log(f"  needs_human durumu yazilamadi: {_e_nh}")
+                self.state.build_status = str(result or "failed")
                 raise NeedsHumanReview(_msg_bf)
 
             attempt += 1
@@ -6742,12 +6856,64 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.completion_text = completion_text
         self._step_done("completion_report_task", completion_text[:3000])
         _log(f"  Tamamlanma raporu olusturuldu")
+
+        # ── Definition of Done (deterministik; wi_lifecycle.evaluate_dod) ──
+        # Job #189 `completed` bitti ama UAT raporu REJECTED (AC2 FAIL) idi —
+        # terminal sozlesme (review onayi + build yesil) UAT'i gormuyordu.
+        # Tablo tamamlanma yorumuna girer; CREW_DOD_ENFORCE acıksa ❌ → needs_human.
+        from agile_sdlc_crew import pipeline_config as _pc_dod
+        from agile_sdlc_crew import wi_lifecycle as _wl_dod
+        _dod_md = ""
+        _dod = None
+        _dod_enforce = False
+        if _pc_dod.get("CREW_DOD_CHECKLIST"):
+            try:
+                _dod_enforce = bool(_pc_dod.get("CREW_DOD_ENFORCE"))
+                _open_issues = None
+                if self.state.review_issues:
+                    _open_issues = sum(1 for _i in self.state.review_issues
+                                       if (_i or {}).get("status") != "closed")
+                _dod = _wl_dod.evaluate_dod(
+                    review_approved=(_review_approved(self.state.review_text)
+                                     if self.state.review_text else None),
+                    open_review_issues=_open_issues,
+                    build_status=self.state.build_status,
+                    uat_text=self.state.uat_text,
+                    pushed_files=[(_p or {}).get("file") or (_p or {}).get("path") or ""
+                                  for _p in (self.state.all_pushes or [])],
+                    require_tests=bool(_pc_dod.get("CREW_REQUIRE_TESTS")),
+                    pr_id=self.state.pr_id,
+                )
+                self.state.dod = [_i.as_dict() for _i in _dod.items]
+                _dod_md = "\n\n" + _wl_dod.render_dod(_dod, enforce=_dod_enforce)
+                _log("  📋 DoD: " + ("geçti" if _dod.passed
+                                    else "GEÇİLEMEDİ — " + ", ".join(_i.label for _i in _dod.failed))
+                     + (f" ({len(_dod.unverified)} madde doğrulanamadı)" if _dod.unverified else ""))
+            except Exception as _e_dod:
+                _log(f"  DoD hesaplanamadi (kritik degil): {_e_dod}")
+
         _add_wi_comment(self._client, self.state.work_item_id,
             f"## Tamamlanma Raporu\n\n"
             f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
-            f"{completion_text[:3000]}\n\n"
+            f"{completion_text[:3000]}"
+            f"{_dod_md}\n\n"
             f"---\n*Agile SDLC Crew - Pipeline tamamlandi*"
         )
+
+        if _dod is not None and not _dod.passed and _dod_enforce:
+            _msg_dod = ("DoD gecilemedi: "
+                        + ", ".join(_i.label for _i in _dod.failed if _i.mandatory)
+                        + f" — PR #{self.state.pr_id} acik, insan karari bekliyor")
+            _log(f"  🚨 {_msg_dod}")
+            if self._db and self.state.job_id:
+                try:
+                    self._db.needs_human_job(self.state.job_id, _msg_dod)
+                except Exception as _e_nh:
+                    _log(f"  needs_human durumu yazilamadi: {_e_nh}")
+            raise NeedsHumanReview(_msg_dod)
+
+        # DoD gecti (ya da zorlama kapali) → WI'i QA'ya devret
+        self._wi_transition("handoff")
 
         # Geçmiş-iş repo indeksine yaz — yalnızca başarılı PR (buraya ulaşmak
         # PR oluştu + review onayladı demek; dry-run bu metodun başında döner).

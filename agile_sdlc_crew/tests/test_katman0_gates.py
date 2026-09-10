@@ -1446,6 +1446,288 @@ def test_md_to_html_headings_tables():
     check("tablo sonrası paragraf devam eder", "<p>son</p>" in t, t)
 
 
+# ── 27. WI yaşam döngüsü — süreçten bağımsız durum seçimi + sahiplik aralığı ─
+#
+# FLO süreci (Boards Management, 2026-09-10 Azure'dan okundu): Task/Bug için
+# Backlog→To Do→In Progress→Code Review→QA To Do→QA→UAT→Preprod Check→Blocked→
+# Ready for Production(Resolved)→Done; User Story'de 'QA To Do' yok. Agile
+# şablonu: New/Active/Resolved/Closed. Issue: Active/Closed. Adlar sabit
+# kodlanamaz — tercih listesi + tipin durum listesi.
+
+_FLO_TASK = [{"name": n, "category": c} for n, c in [
+    ("Backlog", "Proposed"), ("To Do", "Proposed"), ("In Progress", "InProgress"),
+    ("Code Review", "InProgress"), ("QA To Do", "InProgress"), ("QA", "InProgress"),
+    ("UAT", "InProgress"), ("Preprod Check", "InProgress"), ("Blocked", "InProgress"),
+    ("Ready for Production", "Resolved"), ("Done", "Completed"), ("Canceled", "Removed")]]
+_FLO_STORY = [s for s in _FLO_TASK if s["name"] != "QA To Do"] + [{"name": "Prod Check", "category": "InProgress"}]
+_AGILE = [{"name": n, "category": c} for n, c in [
+    ("New", "Proposed"), ("Active", "InProgress"), ("Resolved", "Resolved"), ("Closed", "Completed")]]
+_ISSUE = [{"name": "Active", "category": "InProgress"}, {"name": "Closed", "category": "Completed"}]
+
+
+def test_wi_lifecycle_transitions():
+    print("\n[27] WI yaşam döngüsü — durum seçimi, sahiplik aralığı, geri alma")
+    from agile_sdlc_crew import wi_lifecycle as wl
+
+    check("Task start → In Progress", wl.pick_state(_FLO_TASK, "start") == "In Progress")
+    check("Task review → Code Review", wl.pick_state(_FLO_TASK, "review") == "Code Review")
+    check("Task wait → Blocked", wl.pick_state(_FLO_TASK, "wait") == "Blocked")
+    check("Task handoff → QA To Do", wl.pick_state(_FLO_TASK, "handoff") == "QA To Do")
+    check("User Story handoff → QA (QA To Do yok)", wl.pick_state(_FLO_STORY, "handoff") == "QA")
+    check("Agile start → Active", wl.pick_state(_AGILE, "start") == "Active")
+    check("Agile review → Active (Code Review yok, geri düşer)", wl.pick_state(_AGILE, "review") == "Active")
+    check("Agile handoff → Resolved", wl.pick_state(_AGILE, "handoff") == "Resolved")
+    check("Agile wait → yok (Blocked yok)", wl.pick_state(_AGILE, "wait") is None)
+    check("Issue handoff → yok", wl.pick_state(_ISSUE, "handoff") is None)
+    check("büyük/küçük harf duyarsız eşleşme",
+          wl.pick_state([{"name": "in progress", "category": "InProgress"}], "start") == "in progress")
+
+    owned = wl.owned_states(_FLO_TASK)
+    check("sahiplik: Proposed + In Progress/Code Review/Blocked",
+          {"backlog", "to do", "in progress", "code review", "blocked"} <= owned, str(owned))
+    check("sahiplik DIŞI: QA To Do, QA, UAT, Ready for Production, Done",
+          not ({"qa to do", "qa", "uat", "ready for production", "done"} & owned))
+
+    check("To Do → start = In Progress", wl.plan_transition("To Do", _FLO_TASK, "start") == "In Progress")
+    check("Backlog (Proposed) → start = In Progress", wl.plan_transition("Backlog", _FLO_TASK, "start") == "In Progress")
+    check("zaten In Progress → start = no-op", wl.plan_transition("In Progress", _FLO_TASK, "start") is None)
+    check("Blocked → start = In Progress (needs_info sonrası ↻)", wl.plan_transition("Blocked", _FLO_TASK, "start") == "In Progress")
+    check("In Progress → review = Code Review", wl.plan_transition("In Progress", _FLO_TASK, "review") == "Code Review")
+    check("Code Review → handoff = QA To Do", wl.plan_transition("Code Review", _FLO_TASK, "handoff") == "QA To Do")
+    check("QA To Do (insan ilerletmiş) → start = DOKUNMA", wl.plan_transition("QA To Do", _FLO_TASK, "start") is None)
+    check("Ready for Production → review = DOKUNMA", wl.plan_transition("Ready for Production", _FLO_TASK, "review") is None)
+    check("Done → handoff = DOKUNMA", wl.plan_transition("Done", _FLO_TASK, "handoff") is None)
+    check("boş mevcut durum → yine hedef verir", wl.plan_transition("", _FLO_TASK, "start") == "In Progress")
+
+    check("revert: In Progress→To Do (PR yok)", wl.plan_revert("In Progress", "To Do", _FLO_TASK, pr_exists=False) == "To Do")
+    check("revert: PR varsa YOK (Code Review'da kalır)", wl.plan_revert("Code Review", "To Do", _FLO_TASK, pr_exists=True) is None)
+    check("revert: mevcut == başlangıç → yok", wl.plan_revert("To Do", "To Do", _FLO_TASK, pr_exists=False) is None)
+    check("revert: başlangıç sahiplik dışı (QA To Do) → yok", wl.plan_revert("In Progress", "QA To Do", _FLO_TASK, pr_exists=False) is None)
+    check("revert: mevcut insan durumu (QA) → yok", wl.plan_revert("QA", "To Do", _FLO_TASK, pr_exists=False) is None)
+    check("revert: Blocked→To Do (needs_info sonrası hata)", wl.plan_revert("Blocked", "To Do", _FLO_TASK, pr_exists=False) == "To Do")
+
+    check("test yolu: Test/…/CustomerReturnReasonDefaultTest.php",
+          wl.is_test_path("Test/Controller/Api/V1/CustomerReturnReasonDefaultTest.php"))
+    check("test yolu: tests/unit/x.py", wl.is_test_path("tests/unit/x.py"))
+    check("test yolu: src/a.spec.ts", wl.is_test_path("src/a.spec.ts"))
+    check("test yolu DEĞİL: app/Customer.php", not wl.is_test_path("app/Customer.php"))
+    check("test yolu DEĞİL: resources/translation/fr_FR.yml", not wl.is_test_path("resources/translation/fr_FR.yml"))
+    check("test yolu DEĞİL: Contest/Latest.php (kelime içi 'test')", not wl.is_test_path("Contest/Latest.php"))
+
+
+# ── 28. Definition of Done — job #189: completed ama UAT REJECTED ────────
+
+_UAT_189_SHAPE = """## UAT Report
+
+**Acceptance Criteria:**
+
+1. **AC1** — Given: global site, When: reason_option_default, Then: dil uygun. — **PASS** — Evidence: fr_FR.yml.
+
+2. **AC2** — Given: rus sitesi, Then: rusca. — **FAIL** — Evidence gap: no Russian resource; a Russian-site call cannot pass.
+
+3. **AC3** — Given: Turk sitesi, Then: regresyon yok. — **PASS** — Evidence: additive change.
+
+**Overall Evaluation:** REJECTED
+
+**Gaps:**
+- AC2 not satisfied
+"""
+
+
+def test_dod_checklist():
+    print("\n[28] Definition of Done — deterministik tablo (#189 UAT REJECTED görünür olmalı)")
+    from agile_sdlc_crew import wi_lifecycle as wl
+
+    u = wl.parse_uat(_UAT_189_SHAPE)
+    check("UAT parse: overall REJECTED", u["overall"] == "REJECTED", str(u))
+    check("UAT parse: 2 PASS / 1 FAIL (açıklamadaki 'cannot pass' sayılmaz)",
+          (u["pass"], u["fail"]) == (2, 1), str(u))
+    check("UAT parse: madde kararları sırayla", u["items"] == [(1, "PASS"), (2, "FAIL"), (3, "PASS")], str(u["items"]))
+    check("UAT parse: boş metin → None/0", wl.parse_uat("")["overall"] is None and wl.parse_uat("")["items"] == [])
+    check("UAT parse: Türkçe KABUL", wl.parse_uat("Overall Evaluation: KABUL")["overall"] == "ACCEPTED")
+
+    pushed = ["Customer.php", "resources/translation/fr_FR.yml",
+              "Test/Controller/Api/V1/CustomerReturnReasonDefaultTest.php"]
+    d = wl.evaluate_dod(review_approved=True, open_review_issues=0, build_status="succeeded",
+                        uat_text=_UAT_189_SHAPE, pushed_files=pushed, require_tests=True, pr_id="42951")
+    check("#189 şekli: DoD GEÇİLEMEDİ (UAT ❌)", not d.passed)
+    check("#189 şekli: kalan tek madde UAT", [i.key for i in d.failed] == ["uat"], str([i.key for i in d.failed]))
+    check("#189 şekli: review/build/test/pr ✅",
+          all(i.ok for i in d.items if i.key in ("review", "issues", "build", "tests", "pr")))
+    md = wl.render_dod(d, enforce=False)
+    check("render: tablo + ❌ + 'DoD geçilemedi' + zorlama kapalı notu",
+          "| Madde | Durum | Not |" in md and "❌" in md and "DoD geçilemedi" in md and "CREW_DOD_ENFORCE" in md)
+    md_e = wl.render_dod(d, enforce=True)
+    check("render (enforce): needs_human notu", "needs_human" in md_e)
+
+    ok_uat = _UAT_189_SHAPE.replace("— **FAIL** —", "— **PASS** —").replace("REJECTED", "ACCEPTED")
+    d2 = wl.evaluate_dod(review_approved=True, open_review_issues=0, build_status="succeeded",
+                         uat_text=ok_uat, pushed_files=pushed, require_tests=True, pr_id="42951")
+    check("hepsi yeşil → DoD geçti, doğrulanamayan yok", d2.passed and not d2.unverified)
+    d3 = wl.evaluate_dod(review_approved=True, open_review_issues=None, build_status="no_pipeline",
+                         uat_text=ok_uat, pushed_files=["app/X.php"], require_tests=False, pr_id="1")
+    check("pipeline yok + test şartı kapalı → ⚪ bloklamaz, DoD geçti",
+          d3.passed and {i.key for i in d3.unverified} == {"issues", "build", "tests"}, str([(i.key, i.ok) for i in d3.items]))
+    d4 = wl.evaluate_dod(review_approved=True, open_review_issues=0, build_status="failed",
+                         uat_text=ok_uat, pushed_files=["app/X.php"], require_tests=True, pr_id="1")
+    check("build failed + test yok (şart açık) → iki ❌", {i.key for i in d4.failed} == {"build", "tests"})
+    d5 = wl.evaluate_dod(review_approved=False, open_review_issues=2, build_status="succeeded",
+                         uat_text=ok_uat, pushed_files=pushed, require_tests=True, pr_id="")
+    check("onay yok + 2 açık madde + PR yok → üç ❌", {i.key for i in d5.failed} == {"review", "issues", "pr"})
+    check("render: ⚪ işareti doğrulanamayan için", "⚪" in wl.render_dod(d3, enforce=False))
+
+    job = None
+    try:
+        from agile_sdlc_crew import db
+        job = db.get_job(189)
+    except Exception:
+        job = None
+    if not job:
+        skip("#189 gerçek UAT çıktısı", "DB erişilemedi")
+        return
+    steps = {s["step_key"]: s.get("output") or "" for s in (job.get("steps") or [])}
+    real = wl.parse_uat(steps.get("uat_task", ""))
+    check("#189 GERÇEK UAT: REJECTED, 2 PASS / 1 FAIL",
+          real["overall"] == "REJECTED" and (real["pass"], real["fail"]) == (2, 1), str(real))
+    dr = wl.evaluate_dod(review_approved=_review_approved(steps.get("review_pr_task", "")),
+                         open_review_issues=0, build_status="succeeded",
+                         uat_text=steps.get("uat_task", ""), pushed_files=pushed,
+                         require_tests=True, pr_id=str(job.get("pr_id") or ""))
+    check("#189 GERÇEK: review ✅ build ✅ UAT ❌ → DoD geçilemedi",
+          not dr.passed and [i.key for i in dr.failed] == ["uat"], str([(i.key, i.ok) for i in dr.items]))
+
+
+# ── 29. Flow kancaları: stub client ile geçiş kaydı + koruma kuralları ───
+
+class _StubAzClient:
+    """Sadece wi_lifecycle'ın dokunduğu yüzey. Her PATCH kaydedilir."""
+    def __init__(self, states, fields):
+        self.states, self.fields, self.ops = states, fields, []
+
+    def get_work_item(self, wid):
+        return {"id": wid, "fields": dict(self.fields)}
+
+    def get_work_item_type_states(self, t):
+        return list(self.states)
+
+    def set_work_item_state(self, wid, state):
+        self.ops.append(("state", int(wid), state))
+        self.fields["System.State"] = state
+        return {}
+
+    def get_authenticated_user(self):
+        return {"id": "u1", "displayName": "Pipeline", "uniqueName": "pipeline@example.com"}
+
+    def assign_work_item(self, wid, ident):
+        self.ops.append(("assign", int(wid), ident))
+        return {}
+
+
+def test_wi_lifecycle_flow_hooks():
+    print("\n[29] Flow kancaları — stub client, knob'lar, dry-run/kickoff-only koruması")
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.flow import NeedsHumanReview as _NHR
+
+    knobs = {"CREW_WI_LIFECYCLE": True, "CREW_WI_ASSIGN_IF_EMPTY": False}
+    _orig_get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _orig_get(k)
+    try:
+        def mk(state="To Do", assigned=None, **st):
+            fields = {"System.WorkItemType": "Task", "System.State": state}
+            if assigned:
+                fields["System.AssignedTo"] = {"displayName": assigned, "uniqueName": assigned}
+            f = AgileSDLCFlow()
+            f.state.work_item_id = "73121"
+            for k, v in st.items():
+                setattr(f.state, k, v)
+            f._client = _StubAzClient(_FLO_TASK, fields)
+            return f
+
+        f = mk()
+        f._wi_begin(f._client.fields)
+        check("begin: tip/durum state'e alındı",
+              f.state.wi_type == "Task" and f.state.wi_state_initial == "To Do" and len(f.state.wi_states) == 12)
+        check("begin: To Do → In Progress yazıldı", f._client.ops == [("state", 73121, "In Progress")], str(f._client.ops))
+        check("begin: mevcut durum güncellendi", f.state.wi_state_current == "In Progress")
+        f._wi_begin(f._client.fields)
+        check("begin idempotent (ikinci çağrı yazmaz)", len(f._client.ops) == 1)
+        check("review → Code Review", f._wi_transition("review") == "Code Review" and f._client.ops[-1][2] == "Code Review")
+        check("handoff → QA To Do", f._wi_transition("handoff") == "QA To Do")
+        check("QA To Do'dan sonra start = dokunma (sahiplik dışı)", f._wi_transition("start") is None and len(f._client.ops) == 3)
+
+        f = mk()
+        f._wi_begin(f._client.fields)
+        f.wi_lifecycle_on_exception(NeedsMoreInfo("eksik detay"))
+        check("needs_info → Blocked", f._client.ops[-1][2] == "Blocked", str(f._client.ops))
+        f = mk()
+        f._wi_begin(f._client.fields)
+        f.wi_lifecycle_on_exception(_NHR("review kapanmadı"))
+        check("needs_human → Blocked", f._client.ops[-1][2] == "Blocked")
+        f = mk()
+        f._wi_begin(f._client.fields)
+        f.wi_lifecycle_on_exception(RuntimeError("patladı"))
+        check("genel hata, PR yok → To Do'ya geri", f._client.ops[-1] == ("state", 73121, "To Do"), str(f._client.ops))
+        f = mk()
+        f._wi_begin(f._client.fields)
+        f._wi_transition("review")
+        f.state.pr_id = "42951"
+        n = len(f._client.ops)
+        f.wi_lifecycle_on_exception(RuntimeError("patladı"))
+        check("genel hata, PR VAR → Code Review'da kalır", len(f._client.ops) == n and f.state.wi_state_current == "Code Review")
+
+        f = mk(state="QA To Do")
+        f._wi_begin(f._client.fields)
+        check("insan QA'ya taşımış → start yazmaz ama bağlam okunur",
+              f._client.ops == [] and f.state.wi_state_initial == "QA To Do")
+
+        f = mk(dry_run=True)
+        f._wi_begin(f._client.fields)
+        check("dry-run: bağlam okunur, Azure'a yazılmaz", f._client.ops == [] and f.state.wi_type == "Task")
+        f = mk(kickoff_only=True)
+        f._wi_begin(f._client.fields)
+        check("kickoff-only: yazılmaz", f._client.ops == [])
+
+        knobs["CREW_WI_LIFECYCLE"] = False
+        f = mk()
+        f._wi_begin(f._client.fields)
+        check("knob kapalı: bağlam okunur (DoD/log için), yazılmaz",
+              f._client.ops == [] and f.state.wi_state_initial == "To Do")
+        f.wi_lifecycle_on_exception(RuntimeError("x"))
+        check("knob kapalı: hata yolunda da yazılmaz", f._client.ops == [])
+
+        knobs["CREW_WI_LIFECYCLE"] = True
+        knobs["CREW_WI_ASSIGN_IF_EMPTY"] = True
+        f = mk()
+        f._wi_begin(f._client.fields)
+        check("atama: boş → PAT sahibine", ("assign", 73121, "pipeline@example.com") in f._client.ops
+              and f.state.wi_assigned_by_pipeline and f.state.wi_assigned_to == "pipeline@example.com")
+        f = mk(assigned="ebru@example.com")
+        f._wi_begin(f._client.fields)
+        check("atama: dolu → dokunma", not any(o[0] == "assign" for o in f._client.ops)
+              and f.state.wi_assigned_to == "ebru@example.com")
+
+        class _Boom(_StubAzClient):
+            def set_work_item_state(self, wid, state):
+                raise RuntimeError("TF401320: geçiş kuralı")
+        f = mk()
+        f._client = _Boom(_FLO_TASK, f._client.fields)
+        f._wi_begin(f._client.fields)
+        check("Azure reddetti → pipeline devam, mevcut durum değişmez",
+              f.state.wi_state_current == "To Do" and f.state.wi_type == "Task")
+    finally:
+        pc.get = _orig_get
+
+    src_main = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/main.py").read_text()
+    i_hook, i_fail = src_main.find("flow.wi_lifecycle_on_exception(e)"), src_main.find("_db.fail_job(job_id, str(e))")
+    check("main.run_pipeline: yaşam döngüsü kancası fail_job'dan ÖNCE", 0 < i_hook < i_fail)
+    src_flow = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("step11: DoD → yorum → enforce → handoff sırası",
+          0 < src_flow.find("_wl_dod.evaluate_dod(") < src_flow.find('f"{_dod_md}\\n\\n"')
+          < src_flow.find("raise NeedsHumanReview(_msg_dod)") < src_flow.find('self._wi_transition("handoff")'))
+    check("build gate her çıkışta build_status yazar (6 yol)",
+          src_flow.count("self.state.build_status = ") >= 7)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -1464,7 +1746,10 @@ def main():
               test_build_gate_stale_build,
               test_readiness_gate,
               test_call_context_cross_thread,
-              test_md_to_html_headings_tables):
+              test_md_to_html_headings_tables,
+              test_wi_lifecycle_transitions,
+              test_dod_checklist,
+              test_wi_lifecycle_flow_hooks):
         try:
             t()
         except Exception as e:

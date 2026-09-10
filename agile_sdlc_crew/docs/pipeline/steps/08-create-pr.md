@@ -39,6 +39,7 @@ yeniden kullanır, SSL/network hataları için retry uygular.
 - **KN-27** — Plan-push coverage kontrolü (<0.7 → abort). Bkz. [decision-points.md#kn-27](../decision-points.md#kn-27)
 - **KN-28** — Mevcut aktif PR yeniden kullanımı. Bkz. [decision-points.md#kn-28](../decision-points.md#kn-28)
 - **KN-29** — PR oluşturma retry + SSL recovery. Bkz. [decision-points.md#kn-29](../decision-points.md#kn-29)
+- **KN-35** — WI yaşam döngüsü: PR oluştu ya da mevcut PR yeniden kullanıldı → `_wi_transition("review")` (In Progress → Code Review; `CREW_WI_LIFECYCLE` açıksa). Bkz. [decision-points.md#kn-35](../decision-points.md#kn-35)
 
 ## Resume / dry-run
 - Resume yok.

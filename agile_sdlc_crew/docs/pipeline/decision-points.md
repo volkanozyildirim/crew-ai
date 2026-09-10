@@ -274,3 +274,26 @@ kanıtı** her zaman en güçlü; **repo adı benzerliği** en zayıf sinyaldir.
 **Geçmiş-iş önerisi (KN-33)** üç noktaya da advisory olarak eklenir: önce başarılı
 PR'lar `/repo-decisions` indeksine yazılır, sonra benzer WI'larda o repolar aday
 olarak öne çıkar.
+
+---
+
+## KN-35 — WI yaşam döngüsü: durum geçişi yapılsın mı, hangi ada?
+- **Nerede:** `01-requirements-analysis` (`_wi_begin`, WI okunduktan hemen sonra; HAL yolunda `hal_planning` başı) · `08-create-pr` (`_wi_transition("review")`) · `main.run_pipeline` except (`wi_lifecycle_on_exception`) · `12-completion-report` (`_wi_transition("handoff")`). Saf mantık: `wi_lifecycle.plan_transition / plan_revert`.
+- **Karar:** Bu olayda (`start | review | wait | handoff | revert`) WI'ın `System.State`'i değişsin mi; değişecekse takımın sürecindeki hangi ada?
+- **Girdi:** `CREW_WI_LIFECYCLE` (varsayılan kapalı; dry-run ve kickoff-only'de her zaman kapalı) · tipin `workitemtypes/{type}/states` listesi (ad + kategori) · WI'ın mevcut durumu · olay başına tercih listesi (`STATE_PREFS`: start → In Progress/Active/…, review → Code Review/In Review/…, wait → Blocked/On Hold/…, handoff → QA To Do/QA/Ready for Test/Resolved/…) · PR var mı (revert için).
+- **Sonuç:** Tercih listesinde süreçte bulunan ilk ad hedef olur. Hedef yoksa / WI zaten hedefteyse / WI **sahiplik aralığı dışındaysa** (Proposed kategorisi + In Progress/Code Review/Blocked dışında: QA, UAT, Preprod, Ready for Production, Done…) → **dokunma**, logla. Azure geçişi reddederse (400) → logla, pipeline devam. Revert yalnızca PR yokken ve yalnızca pipeline'ın koyduğu durumdan başlangıca.
+- **Neden:** Pipeline bugüne kadar hiç durum yazmadı; 73121 (job #189) ve 73061 elle taşındı. Adlar sabit kodlanamaz (FLO süreci özel: Task'ta `QA To Do`, User Story'de yok; Agile şablonunda `Active/Resolved`). Sahiplik aralığı, insanın ilerlettiği bir işi geri çekme riskini sıfırlar. Spec: `docs/superpowers/specs/2026-09-10-scrum-functions-design.md`.
+
+## KN-36 — Definition of Done değerlendirmesi
+- **Nerede:** `12-completion-report` · `step11_completion_report` → `wi_lifecycle.evaluate_dod / render_dod`
+- **Karar:** İş gerçekten "bitti" mi? Hangi maddeler geçti, hangileri kaldı, hangileri doğrulanamadı?
+- **Girdi:** `_review_approved(review_text)` · `state.review_issues` açık madde sayısı · `state.build_status` (gate'in yazdığı: succeeded/failed/…/no_pipeline/disabled/skipped) · `parse_uat(uat_text)` (Overall ACCEPTED/REJECTED + madde başına ilk PASS/FAIL) · `all_pushes` yollarında test deseni · `CREW_REQUIRE_TESTS` · `pr_id`.
+- **Sonuç:** Her madde ✅/❌/⚪. Zorunlu bir madde ❌ ise **DoD geçilemedi**; ⚪ (doğrulanamadı) bloklamaz, raporlanır. Tablo tamamlanma yorumuna eklenir (`CREW_DOD_CHECKLIST`, varsayılan açık). LLM yok.
+- **Neden:** Job #189 `completed` bitti ama UAT raporu REJECTED (AC2 FAIL) idi; terminal sözleşme (review onayı + build yeşil) UAT'ı görmüyordu. Görünürlük önce, zorlama sonra (KN-37).
+
+## KN-37 — DoD geçilemezse iş ne olur?
+- **Nerede:** `12-completion-report` · `step11_completion_report`, DoD yorumundan hemen sonra
+- **Karar:** DoD ❌ → `needs_human` mı, yine `completed` mı?
+- **Girdi:** `CREW_DOD_ENFORCE` (varsayılan kapalı) · DoD sonucu.
+- **Sonuç:** Açıksa `db.needs_human_job` + `NeedsHumanReview` (PR açık kalır; KN-35 açıksa WI → Blocked; `handoff` geçişi yapılmaz). Kapalıysa iş `completed`, tablo "zorlama kapalı" notuyla uyarır ve WI `handoff` ile QA'ya devredilir.
+- **Neden:** UAT ajanı yalnızca PR diff'ini görür; #189'daki AC2 FAIL, reviewer R1 gibi yanlış pozitif olabilir (ru_RU anahtarları repoda zaten vardı). Zorlamayı açmadan önce birkaç koşuda tablo izlenmeli — "bilmiyorum ≠ geçti" ilkesi ⚪ ile korunur, ama "ajan yanıldı" riski insan kararına bırakılır.
