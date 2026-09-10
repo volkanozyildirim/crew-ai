@@ -1,6 +1,6 @@
-# Scrum İşlevleri — Tasarım (program + Faz 1–4 ayrıntısı)
+# Scrum İşlevleri — Tasarım (program + Faz 1–5 ayrıntısı)
 
-**Tarih:** 2026-09-10 · **Durum:** Faz 1 PR #8 · Faz 2 PR #9 · Faz 3 PR #10 · Faz 4 uygulanıyor · **Kaynak karar:** kullanıcı,
+**Tarih:** 2026-09-10 · **Durum:** Faz 1 PR #8 · Faz 2 PR #9 · Faz 3 PR #10 · Faz 4 PR #11 · Faz 5 uygulanıyor · **Kaynak karar:** kullanıcı,
 "agile metodolojinin tüm fonksiyonlarını sisteme eklemeliyiz" → boşluk analizi →
 "önerine göre ilerle".
 
@@ -20,7 +20,7 @@ böler ve Faz 1'i uygulanabilir ayrıntıda tasarlar.
 | **2** | **Tahminleme + alt iş kaydı** — BA `estimate` + yapısal sinyaller → Fibonacci SP (yalnızca yükselir); parent tipi WI için plan → child Task | `jobs.estimate_sp`, tamamlanma yorumunda tahmin/gerçekleşen; WI'da SP (boşsa); child Task'lar board'da |
 | **3** | **Retrospektif** — sprint / son N gün için deterministik öğrenme raporu (neden sınıfları, kırılan adımlar, review/build/UAT kapıları, SP başına dk/$) → eşik tabanlı kılavuz-kuralı önerileri, insan onayıyla kickoff kılavuzuna | `GET /api/retro`, dashboard 🔁 Retro modalı, "＋ Ekle" ile kural |
 | **4** | **Sprint Planning + Daily** — sprintten aday listesi (Proposed durum, tip, açık iş yok), öncelik+SP sırası, kapasite (kullanıcı / takım velocity), retro tabanlı $/dk tahmini, onaylı toplu kuyruk; günlük özet (biten/koşan/kuyruk/engeller) dashboard + zamanlayıcı + Telegram | 🗓️ Planla ve ☀️ Günlük modalleri; `/api/sprint-plan(/queue)`, `/api/daily(/send)` |
-| 5 | İş tipine göre akış + PO ajanı — Bug (reproduce → fix → regresyon testi), Spike (kodsuz araştırma), PO değer/öncelik kararı | Tip bazlı router; PO çıktısı kickoff'a girdi |
+| **5** | **İş tipine göre akış + PO ajanı** — `flow_kind` (bug/story/task/spike; spike yalnızca açık işaret); Bug: reproduce-first kılavuzu + DoD'da regresyon testi zorunlu; Story: AC izi; Spike: plan/kod yok, mimar keşfi → araştırma raporu WI'a, `_SpikeStop`; PO ajanı (tek çağrı, danışma) değer/aciliyet/öncelik/GO-HOLD + kapsam kararları | `state.flow_kind`, context kılavuzu, spike raporu yorumu; `state.po_json`, PO yorumu + kickoff/tasarım context'i |
 
 Her faz kendi PR'ı; her davranış env/dashboard ile açılıp kapanır (proje kuralı:
 risk/maliyet etkisi varsa **varsayılan kapalı**).
@@ -169,3 +169,20 @@ Takım SP'yi **Task** seviyesinde ve **`Custom.StoryPoints`** alanında tutuyor 
 **Knob'lar:** `CREW_SPRINT_PLANNING` (açık; plan salt okunur, kuyruk yazımı butonla) · `CREW_DAILY_ENABLED` (kapalı; dışa gönderim). Env: `CREW_DAILY_TIME`, `CREW_DAILY_DIR`, `CREW_DAILY_TELEGRAM_TOKEN`, `CREW_DAILY_TELEGRAM_CHAT_ID`.
 
 **Yapılmayanlar:** WI'lar arası bağımlılık sırası (ilişki grafı — Faz 5+), sprint hedefi metni, Teams/Slack kanalı (Telegram Bot API yeterli başlangıç), günlük özeti WI yorumu olarak yazmak.
+
+## Faz 5 — İş tipine göre akış + Product Owner (2026-09-10)
+
+**Akış türü (`type_flow.flow_kind`, KN-43):** `bug | story | task | spike | other`; `_wi_begin`'de belirlenir (`CREW_TYPE_FLOW`, açık). Spike yalnızca açık işaretle (tip, etiket tam kelime, başlık öneki) — çıkarımla değil.
+
+| Tür | Değişen |
+|---|---|
+| bug | context kılavuzu: reproduce-first, plan regresyon testi içermeli, minimal fix, reviewer testsiz düzeltmeyi reddeder, UAT komşu senaryo; **DoD'da test zorunlu** |
+| story | her değişiklik bir AC'ye izlenir, dikey dilim, kullanıcıya görünen değişiklik Türkçe |
+| spike | step4'te plan üretilmez: klon varsa bir kez mimar keşfi → `spike_report` WI yorumu → kalan adımlar "Atlandı — spike" → `_SpikeStop` (job completed, PR yok) |
+| task / other | değişiklik yok |
+
+Kılavuz `_build_step_context`'te `parts` sonuna girer (iş-değişmezi → prompt cache prefix'i korunur).
+
+**Product Owner (`_po_assessment`, KN-44):** `CREW_PO_ASSESSMENT` (kapalı) açıksa step1 sonunda, hazırlık kapısı geçildikten sonra tek LLM çağrısı: `product_owner` ajanı (tool'suz, `reasoning_remote` profili) + `po_assessment_task` → JSON `{business_value, urgency, priority P1-P4, decision GO|HOLD, scope_decisions[], risks_if_delayed, rationale}` (metinler Türkçe). `parse_po` normalize eder; WI yorumu tablo; kickoff/tasarım context'ine blok. HOLD danışma — pipeline durmaz. Spike ve kickoff-only'de çalışmaz.
+
+**Yapılmayanlar:** PO HOLD → needs_human kapısı (faz 5.1, birkaç koşu izlendikten sonra); Bug için otomatik reproduce testi çalıştırma (build gate zaten koşuyor); spike raporunu takip User Story olarak açma.

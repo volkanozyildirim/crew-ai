@@ -2221,6 +2221,126 @@ def test_daily_summary():
           and "confirm(sel.length+' iş pipeline kuyruğuna" in src_ui)
 
 
+# ── 36. İş tipine göre akış — spike tespiti, kılavuz, rapor, PO parse ─────
+
+def test_type_flow():
+    print("\n[36] İş tipine göre akış — spike tespiti (yalnızca açık işaret), kılavuz, rapor, PO parse")
+    from agile_sdlc_crew import type_flow as tf
+
+    check("spike: tip Spike / Research", tf.is_spike("Spike") and tf.is_spike("Research"))
+    check("spike: etiket 'spike' / 'PoC' / 'araştırma' (noktalı virgül listesinde)",
+          tf.is_spike("Task", "backend; spike") and tf.is_spike("Task", "PoC") and tf.is_spike("Task", "araştırma;ops"))
+    check("spike: başlık '[Spike] …' / 'Spike: …' / 'POC - …'",
+          tf.is_spike("Task", "", "[Spike] Kargo API karşılaştırması") and tf.is_spike("Task", "", "Spike: cache stratejisi")
+          and tf.is_spike("Task", "", "POC - Redis"))
+    check("spike DEĞİL: başlıkta geçen 'spike' kelimesi / etiket 'spiker' / 'research' içeren başka kelime",
+          not tf.is_spike("Task", "", "Trafik spike'ında sepet hatası") and not tf.is_spike("Task", "spiker")
+          and not tf.is_spike("Task", "", "Researcher paneli"))
+    check("akış türü: Bug→bug, User Story/Feature→story, Task→task, Test Case→other, spike önce",
+          tf.flow_kind("Bug") == "bug" and tf.flow_kind("User Story") == "story" and tf.flow_kind("Feature") == "story"
+          and tf.flow_kind("Task") == "task" and tf.flow_kind("Test Case") == "other" and tf.flow_kind("Bug", "spike") == "spike")
+    check("kılavuz: bug regresyon testi + minimal fix; story AC izi; spike 'Do NOT write production code'; task boş",
+          "regression test" in tf.guidance("bug") and "no refactors" in tf.guidance("bug")
+          and "acceptance criterion" in tf.guidance("story") and "Do NOT write production code" in tf.guidance("spike")
+          and tf.guidance("task") == "" and tf.guidance("") == "")
+    check("kılavuz İngilizce kural, Türkçe çıktı notu", "in Turkish" in tf.guidance("bug") and "in Turkish" in tf.guidance("spike"))
+
+    rep = tf.spike_report("[Spike] Kargo API", _BA_WITH_ESTIMATE, "Bulgu: `app/Cargo.php` tek noktadan çağrılıyor.",
+                          repo_name="webservice", estimate_sp=5)
+    check("spike raporu: başlık, repo, tahmin, kapsam (BA summary + FR'ler), bulgular, kod yok notu",
+          rep.startswith("## 🔬 Araştırma Raporu (Spike)") and "`webservice`" in rep and "5 SP" in rep
+          and "Getirilen iade nedeni metni" in rep and "**FR1**" in rep and "### Bulgular (mimar keşfi)" in rep
+          and "app/Cargo.php" in rep and "kod üretilmedi, PR açılmadı" in rep, rep[:200])
+    rep2 = tf.spike_report("X", "düz metin", "")
+    check("spike raporu: klon yok → iş analizine dayanır notu, BA JSON yok → kapsam yok",
+          "Repo klonu bulunamadığı" in rep2 and "### Kapsam" not in rep2)
+
+    po = tf.parse_po('```json\n{"business_value": 8, "urgency": "6", "priority": "p2", "decision": "go", '
+                     '"scope_decisions": ["Rusça çeviri kapsamda", " "], "risks_if_delayed": "Rus sitesi Türkçe metin gösterir", '
+                     '"rationale": "Global site deneyimi"}\n```')
+    check("PO parse: sayılar kırpılır, priority/decision normalize, boş kapsam maddesi atılır",
+          po == {"business_value": 8, "urgency": 6, "priority": "P2", "decision": "GO",
+                 "scope_decisions": ["Rusça çeviri kapsamda"], "risks_if_delayed": "Rus sitesi Türkçe metin gösterir",
+                 "rationale": "Global site deneyimi"}, str(po))
+    check("PO parse: 15 → 10'a kırp, 'P9' → '', 'hold' → HOLD",
+          tf.parse_po('{"business_value": 15, "priority": "P9", "decision": "hold"}')["business_value"] == 10
+          and tf.parse_po('{"priority": "P9", "decision": "hold"}')["priority"] == ""
+          and tf.parse_po('{"decision": "hold"}')["decision"] == "HOLD")
+    check("PO parse: bozuk / JSON değil → None", tf.parse_po("no json") is None and tf.parse_po("{oops") is None)
+    md = tf.render_po_comment(po)
+    check("PO yorumu: tablo + kapsam + gecikme + gerekçe + danışma notu",
+          "## 🎯 PO Değerlendirmesi" in md and "| İş değeri | 8 / 10 |" in md and "✅ GO" in md
+          and "- Rusça çeviri kapsamda" in md and "**Gecikirse:**" in md and "danışma niteliğinde" in md)
+    check("PO yorumu: HOLD işareti", "⏸️ HOLD" in tf.render_po_comment({"decision": "HOLD"}))
+
+
+# ── 37. Faz 5 flow kancaları — flow_kind state'e, kılavuz context'te, spike/DoD bağları ─
+
+def test_type_flow_hooks():
+    print("\n[37] Faz 5 kancaları — flow_kind, context kılavuzu, PO context, spike stop, Bug DoD")
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.flow import _SpikeStop, _KickoffOnlyStop
+
+    knobs = {"CREW_TYPE_FLOW": True, "CREW_WI_LIFECYCLE": False}
+    _orig_get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _orig_get(k)
+    try:
+        def mk(wi_type="Bug", tags="", title="Sepet hatası"):
+            f = AgileSDLCFlow()
+            f._db = None
+            f.state.work_item_id = "73121"
+            f._client = _StubAzClient(_FLO_TASK, {"System.WorkItemType": wi_type, "System.State": "To Do",
+                                                   "System.Tags": tags, "System.Title": title})
+            f._wi_begin(f._client.fields)
+            return f
+
+        f = mk("Bug")
+        check("Bug → flow_kind=bug, başlık/etiket state'e", f.state.flow_kind == "bug" and f.state.wi_title == "Sepet hatası")
+        f.state.requirements_text = _BA_WITH_ESTIMATE
+        ctx = f._build_step_context("technical_design_task")
+        check("teknik tasarım context'inde Bug kılavuzu", "WORK ITEM TYPE GUIDANCE: Bug" in ctx and "regression test" in ctx)
+        f.state.po_text = '{"decision": "GO", "rationale": "değerli"}'
+        check("PO metni kickoff/tasarım context'ine girer, requirements'a girmez",
+              "PO Değerlendirmesi" in f._build_step_context("kickoff_meeting_task")
+              and "PO Değerlendirmesi" not in f._build_step_context("requirements_analysis_task"))
+        f2 = mk("Task", tags="spike")
+        check("Task + 'spike' etiketi → spike", f2.state.flow_kind == "spike")
+        f3 = mk("Task")
+        check("Task → task, context'e kılavuz eklenmez", f3.state.flow_kind == "task"
+              and "WORK ITEM TYPE GUIDANCE" not in f3._build_step_context("technical_design_task"))
+        knobs["CREW_TYPE_FLOW"] = False
+        f4 = mk("Bug")
+        check("knob kapalı → flow_kind boş, kılavuz yok", f4.state.flow_kind == "" and "GUIDANCE" not in f4._build_step_context("technical_design_task"))
+    finally:
+        pc.get = _orig_get
+
+    check("_SpikeStop, _KickoffOnlyStop alt sınıfı (main/server ayrımı değişmez)", issubclass(_SpikeStop, _KickoffOnlyStop))
+    src_flow = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    i_spike, i_bfirst = src_flow.find('if self.state.flow_kind == "spike":'), src_flow.find("# ── ARCHITECT: B-first")
+    check("step4: spike dalı B-first plan üretiminden ÖNCE (plan LLM çağrısı yapılmaz)", 0 < i_spike < i_bfirst)
+    check("step4 spike: rapor → technical_design_task done → kalan 8 adım 'atlandı' → _SpikeStop",
+          "raise _SpikeStop(" in src_flow and '"completion_report_task"):' in src_flow
+          and src_flow.find("def _run_spike") > 0 and "Atlandı — spike" in src_flow)
+    check("DoD: Bug akışında test zorunlu", 'or self.state.flow_kind == "bug"' in src_flow)
+    check("PO: hazırlık kapısından sonra, kickoff'tan önce (step1 sonu)", src_flow.find("self._po_assessment()") > src_flow.find('self._step_done("requirements_analysis_task"'))
+    src_main = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/main.py").read_text()
+    check("main: spike stop kickoff-only ile aynı yolda, farklı log", "_SpikeStop" in src_main)
+    src_crew = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/crew.py").read_text()
+    check("crew: product_owner ajanı (tool'suz) + create_po_crew", "def product_owner(self)" in src_crew and "def create_po_crew" in src_crew and "tools=[]," in src_crew)
+    import yaml as _y
+    base = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/config"
+    agents = _y.safe_load((base / "agents.yaml").read_text()); tasks = _y.safe_load((base / "tasks.yaml").read_text())
+    profiles = _y.safe_load((base / "llm_profiles.yaml").read_text())
+    check("YAML: product_owner ajanı, po_assessment_task (TURKISH alanlar), agent_defaults profili",
+          "product_owner" in agents and "in TURKISH" in agents["product_owner"]["backstory"]
+          and tasks["po_assessment_task"]["agent"] == "product_owner" and "in TURKISH" in tasks["po_assessment_task"]["expected_output"]
+          and (profiles.get("agent_defaults") or {}).get("product_owner") == "reasoning_remote")
+    overrides = _y.safe_load((base / "agent_llm_overrides.yaml").read_text()) or {}
+    po_ov = (overrides.get("agents") or {}).get("product_owner") or {}
+    check("dashboard override: product_owner claude_cli (CREW_USE_LOCAL_LLM=1 onu qwen3'e düşürmesin)",
+          po_ov.get("provider") == "claude_cli" and po_ov.get("model"), str(po_ov))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2248,7 +2368,9 @@ def main():
               test_estimate_flow_hooks,
               test_retrospective,
               test_sprint_planning,
-              test_daily_summary):
+              test_daily_summary,
+              test_type_flow,
+              test_type_flow_hooks):
         try:
             t()
         except Exception as e:

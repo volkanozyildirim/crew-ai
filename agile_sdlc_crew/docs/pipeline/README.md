@@ -26,7 +26,8 @@ verdiğini** tek yerden okuyabilmek.
   alt iş kaydı** (`estimation.py`, `wi_children.py`; KN-38, KN-39). Faz 3 = **retrospektif**
   (`retrospective.py`, `GET /api/retro`, dashboard 🔁; KN-40). Faz 4 = **sprint
   planlama + günlük özet** (`sprint_planning.py`, `daily.py`, dashboard 🗓️/☀️; KN-41,
-  KN-42). Sonraki faz: iş tipine göre akış + PO.
+  KN-42). Faz 5 = **iş tipine göre akış (Bug/Story/Spike) + Product Owner**
+  (`type_flow.py`, `product_owner` ajanı; KN-43, KN-44).
   Spec: `docs/superpowers/specs/2026-09-10-scrum-functions-design.md`.
 
 ## Akış (CrewAI yolu)

@@ -332,3 +332,17 @@ olarak öne çıkar.
 - **Girdi:** `jobs` (finished_at penceresi; running; queued) · **açık engeller** = WI'nın en son işi needs_info/needs_human (retry edilmemiş) · `CREW_DAILY_ENABLED` (knob, kapalı) · env `CREW_DAILY_TIME` (09:00), `CREW_DAILY_DIR`, `CREW_DAILY_TELEGRAM_TOKEN/CHAT_ID`.
 - **Sonuç:** Markdown: özet satırı (biten/koşan/kuyruk/maliyet), Bitenler (durum, WI linki, PR, SP, dk, $; hata özeti), Şu an koşan (adım + süre), Kuyruk, İnsan bekleyenler (kaç gün). Dosyaya her zaman; Telegram yalnızca token+chat varsa (düz metin). Zamanlayıcı bayrağı her turda okur → dashboard'dan kapatınca susar. kickoff-only/dry-run işler dışarıda.
 - **Neden:** Daily Scrum'ın sorusu "ne bitti, ne koşuyor, ne engel var" — hepsi DB'de vardı, kimse okumuyordu. Dışa gönderim yaptığı için zamanlayıcı varsayılan kapalı; anlık özet her zaman açık.
+
+## KN-43 — İş tipine göre akış: Bug / Story / Spike
+- **Nerede:** `01-requirements-analysis` (`_wi_begin` → `state.flow_kind`) · `_build_step_context` (her adımın context'ine tip kılavuzu) · `05-technical-design` (spike dalı, B-first plan üretiminden **önce**: `_run_spike` → `_SpikeStop`) · `12-completion-report` (Bug'da DoD test zorunlu). Saf mantık: `type_flow.py`.
+- **Karar:** Bu WI hangi akış türünde (`bug | story | task | spike | other`) ve bu türe göre ne değişir?
+- **Girdi:** `System.WorkItemType`, `System.Tags`, `System.Title` · `CREW_TYPE_FLOW` (açık). Spike **yalnızca açık işaretle**: tip Spike/Research, etiket `spike|poc|research|araştırma` (etiket listesi içinde tam kelime), ya da başlık `[Spike] …` / `Spike: …` / `POC - …`. Başlıkta geçen "spike" kelimesi (ör. "trafik spike'ı") spike DEĞİLDİR.
+- **Sonuç:** Bug → context'e "reproduce-first, regresyon testi zorunlu, minimal fix, reviewer testsiz düzeltmeyi reddeder, UAT komşu senaryo" kılavuzu; DoD'da test dosyası zorunlu. Story → "her değişiklik bir AC'ye izlenir, dikey dilim, kullanıcıya görünen değişiklik Türkçe yazılır". Spike → plan üretilmez; klon varsa bir kez mimar keşfi, `spike_report` (kapsam + bulgular + açık sorular + takip tahmini) WI yorumu, `technical_design_task` done, kalan 8 adım "Atlandı — spike", `_SpikeStop` (`_KickoffOnlyStop` alt sınıfı → job completed). Task/other → değişiklik yok.
+- **Neden:** Tip okunuyor ama kullanılmıyordu; Bug ve Story aynı talimatı alıyordu, araştırma işi kod üretmeye zorlanıyordu. Kılavuz `parts` sonuna eklenir (iş-değişmezi) → prompt cache prefix'i bozulmaz.
+
+## KN-44 — Product Owner değerlendirmesi (danışma)
+- **Nerede:** `01-requirements-analysis` sonu (`_po_assessment`, hazırlık kapısı geçildikten sonra, kickoff'tan önce) · `crew.create_po_crew` (tool'suz PO ajanı, `po_assessment_task`) · `type_flow.parse_po / render_po_comment`.
+- **Karar:** İşin iş değeri, aciliyeti, önceliği (P1-P4) ve GO/HOLD; kapsam kararları.
+- **Girdi:** `CREW_PO_ASSESSMENT` (kapalı; tek LLM çağrısı ~$0.1-0.3) · WI + BA analizi (context) · spike değil · kickoff-only değil.
+- **Sonuç:** JSON parse → `state.po_json`, ham metin `state.po_text` → kickoff/teknik tasarım context'ine "PO Değerlendirmesi" bloğu (requirements adımına girmez) + WI yorumu (tablo: değer/aciliyet/öncelik/karar, kapsam kararları, gecikme riski, gerekçe). **HOLD kapı değil**: loglanır, pipeline devam eder. Parse edilemezse ham metin context'e, yorum yazılmaz.
+- **Neden:** Yedi ajanda değer/öncelik kararı veren rol yoktu. Kapı yapılmadı çünkü PO'nun HOLD'u insan kararı gerektirir; ilk koşularda yorumun kalitesi izlenip sonra gate'e (needs_human) bağlanabilir (faz 5.1).

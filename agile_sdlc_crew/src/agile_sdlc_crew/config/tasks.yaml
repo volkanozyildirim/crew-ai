@@ -1013,3 +1013,49 @@ scrum_review_task:
     - [concrete suggestion 1]
     - [concrete suggestion 2]
   agent: scrum_master
+
+# ══════════════════════════════════════════════════════════════
+# Product Owner assessment (Scrum faz 5; CREW_PO_ASSESSMENT)
+# ══════════════════════════════════════════════════════════════
+
+po_assessment_task:
+  description: >
+    TASK: As Product Owner, assess work item #{work_item_id} BEFORE the team
+    designs and implements it. Use the work item detail and the business
+    analyst's requirements (FR/TR/AC) in the context below.
+
+    Answer, from the business side:
+    1. Business value (1-10): what does the customer or the business gain?
+    2. Urgency (1-10): why now; what breaks or is lost if it waits?
+    3. Scope: list the decisions that fix the boundary — what is explicitly
+       IN, what is OUT, and any contradiction between description and
+       acceptance criteria that the WI owner must resolve.
+    4. Priority P1 (now) … P4 (someday) and a GO / HOLD recommendation.
+
+    Do not propose technical solutions. Do not invent requirements that are
+    not in the work item.
+
+    PREVIOUS STEP OUTPUTS:
+    {previous_context}
+  expected_output: >
+    Return ONLY valid JSON. NO free text outside the JSON.
+
+    ```json
+    {
+      "business_value": 1-10,
+      "urgency": 1-10,
+      "priority": "P1 | P2 | P3 | P4",
+      "decision": "GO | HOLD",
+      "scope_decisions": ["...", "..."],
+      "risks_if_delayed": "...",
+      "rationale": "..."
+    }
+    ```
+
+    RULES:
+    - scope_decisions, risks_if_delayed and rationale in TURKISH (they are
+      posted to the work item as a comment).
+    - rationale: ONE or TWO sentences naming the main value driver.
+    - decision HOLD only for unclear value, contradictory scope or a blocking
+      dependency; explain it in rationale.
+  agent: product_owner

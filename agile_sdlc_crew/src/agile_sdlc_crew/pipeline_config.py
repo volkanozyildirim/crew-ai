@@ -410,6 +410,21 @@ SCHEMA: list[dict] = [
         "default": False,
         "desc": "Açıkken sunucu her gün CREW_DAILY_TIME (env, varsayılan 09:00) saatinde günlük özeti (son 24 saat: biten/koşan/kuyruk/insan bekleyen işler, maliyet) üretir, CREW_DAILY_DIR'e (varsayılan /tmp/crew_daily) yazar ve CREW_DAILY_TELEGRAM_TOKEN + CREW_DAILY_TELEGRAM_CHAT_ID (env) tanımlıysa Telegram'a gönderir. Kapalıyken de dashboard ☀️ butonu ve /api/daily anlık özet verir. Dışa gönderim yaptığı için varsayılan kapalı.",
     },
+    # ── Scrum islevleri — Faz 5: is tipine gore akis + Product Owner ──
+    {
+        "key": "CREW_TYPE_FLOW",
+        "label": "İş Tipine Göre Akış (Bug / Story / Spike)",
+        "type": "bool",
+        "default": True,
+        "desc": "WI tipi + etiket + başlıktan akış türü belirlenir ve adım context'ine tip kılavuzu eklenir. Bug: reproduce-first, plan regresyon testi içermeli, minimal fix, reviewer testsiz düzeltmeyi reddeder, DoD'da test zorunlu. User Story: her değişiklik bir AC'ye izlenir, dikey dilim. Spike (YALNIZCA açık işaret: tip Spike/Research, etiket spike|poc|research|araştırma, ya da başlık '[Spike] …'): kod üretilmez — mimar bir kez keşif yapar, Türkçe araştırma raporu WI'a yazılır, kod/PR adımları 'atlandı', iş completed. Task: değişiklik yok. Kapalıyken herkes aynı akışı koşar (eski davranış).",
+    },
+    {
+        "key": "CREW_PO_ASSESSMENT",
+        "label": "Product Owner Değerlendirmesi",
+        "type": "bool",
+        "default": False,
+        "desc": "İş analizi bitip hazırlık kapısı geçildikten sonra PO ajanı TEK LLM çağrısıyla iş değeri (1-10), aciliyet (1-10), öncelik (P1-P4), GO/HOLD ve kapsam kararlarını (Türkçe) üretir. Çıktı WI yorumuna ve kickoff/teknik tasarım context'ine girer. Danışma niteliğinde — HOLD pipeline'ı durdurmaz (loglanır). Ek LLM maliyeti (~$0.1-0.3) olduğu için varsayılan kapalı; spike işlerde çalışmaz.",
+    },
     {
         "key": "CREW_FRESHEN_ALL_REPOS",
         "label": "Tüm Klonları Tazele (paralel fetch)",
