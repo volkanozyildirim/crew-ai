@@ -990,6 +990,14 @@ class PipelineState(BaseModel):
     build_status: str = ""
     # step11 DoD tablosu: [{key, label, ok(True|False|None), note, mandatory}]
     dod: list[dict] = Field(default_factory=list)
+    # Faz 2 — tahmin + alt is kayitlari (estimation.py, wi_children.py)
+    wi_story_points: float | None = None   # WI'da zaten olan SP (insan tahmini ezilmez)
+    wi_area_path: str = ""
+    wi_iteration_path: str = ""
+    # {sp, class(S/M/L), source, stage, ba_sp, confidence, rationale, structural_sp, reasons[]}
+    estimate: dict = Field(default_factory=dict)
+    # Pipeline'in actigi child Task'lar: [{id, title, files[], done?}]
+    child_tasks: list[dict] = Field(default_factory=list)
 
 
 # ── Flow ─────────────────────────────────────────────
@@ -1420,8 +1428,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.wi_state_current = info["wi_state"]
         self.state.wi_states = info["wi_states"]
         self.state.wi_assigned_to = info["wi_assigned_to"]
+        self.state.wi_story_points = info.get("wi_story_points")
+        self.state.wi_area_path = info.get("wi_area_path", "") or ""
+        self.state.wi_iteration_path = info.get("wi_iteration_path", "") or ""
         _log(f"  🗂️ WI #{self.state.work_item_id}: {info['wi_type'] or '?'} · durum '{info['wi_state']}'"
-             + (f" · atanan {info['wi_assigned_to']}" if info["wi_assigned_to"] else " · atanmamış"))
+             + (f" · atanan {info['wi_assigned_to']}" if info["wi_assigned_to"] else " · atanmamış")
+             + (f" · {info['wi_story_points']:g} SP" if info.get("wi_story_points") is not None else " · SP boş"))
         if not self._wi_lifecycle_enabled():
             return
         self._wi_transition("start")
@@ -1470,6 +1482,107 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 self.state.wi_state_current = target
         except Exception as e:
             _log(f"  🗂️ WI gecisi (hata yolu) basarisiz: {e}")
+
+    # ── Tahmin + alt is kayitlari (faz 2; estimation.py, wi_children.py) ──
+    # Takim SP'yi Task seviyesinde tutuyor (son 45 gun: 153 Task'in 89'unda
+    # dolu; Effort/OriginalEstimate hic yok). Tahmin = max(BA blogu, yapisal
+    # sinyaller) → Fibonacci; zarf gibi yalnizca yukselir. Yazma yalnizca
+    # CREW_WI_WRITE_ESTIMATE acik ve WI'da SP bossa. Alt is: parent tipi WI
+    # (User Story/Bug/Feature) icin plan degisikligi basina child Task.
+
+    def _estimate(self, stage: str) -> None:
+        from agile_sdlc_crew import pipeline_config as _pc_est
+        from agile_sdlc_crew import estimation as _est
+        try:
+            if not _pc_est.get("CREW_ESTIMATE"):
+                return
+            ba = _est.parse_ba_estimate(self.state.requirements_text or "")
+            n_req = len(_requirement_ids(self.state.requirements_text or ""))
+            n_files = len((self.state.plan or {}).get("changes") or []) if stage == "plan" else 0
+            explored = bool(getattr(self, "_needed_explore", False)) if stage == "plan" else False
+            structural, reasons = _est.structural_estimate(n_req, n_files, explored, stage)
+            prev = (self.state.estimate or {}).get("sp")
+            sp, source = _est.reconcile(ba["sp"] if ba else None, structural, prev)
+            self.state.estimate = {
+                "sp": sp, "class": _est.size_class(sp), "source": source, "stage": stage,
+                "ba_sp": ba["sp"] if ba else None,
+                "confidence": ba.get("confidence") if ba else None,
+                "rationale": (ba.get("rationale") if ba else "") or "",
+                "structural_sp": structural, "reasons": reasons,
+            }
+            _log(f"  📐 Tahmin [{stage}]: {sp} SP ({self.state.estimate['class']}, {source}) — "
+                 f"BA {ba['sp'] if ba else '—'}"
+                 + (f" (%{ba['confidence']} güven)" if ba and ba.get("confidence") is not None else "")
+                 + f", yapısal {structural} [{'; '.join(reasons)}]"
+                 + (f"; önceki {prev}" if prev else ""))
+            if stage != "plan":
+                return
+            if self._db and self.state.job_id:
+                try:
+                    self._db.update_job(self.state.job_id, estimate_sp=int(sp))
+                except Exception as _e_db:
+                    _log(f"  📐 estimate_sp yazilamadi: {_e_db}")
+            if (_pc_est.get("CREW_WI_WRITE_ESTIMATE") and not self.state.dry_run
+                    and not self.state.kickoff_only):
+                if self.state.wi_story_points is not None:
+                    _log(f"  📐 WI'da SP zaten var ({self.state.wi_story_points:g}) — insan tahmini ezilmedi")
+                else:
+                    _est.write_story_points(self._client, self.state.work_item_id, sp, logger=_log)
+        except Exception as e:
+            _log(f"  📐 Tahmin hesaplanamadi (kritik degil): {e}")
+
+    def _after_plan_finalized(self) -> None:
+        """Plan kesinlesti (normal / resume / HAL yolu): tahmin + alt is kayitlari."""
+        self._estimate("plan")
+        self._create_child_tasks()
+
+    def _create_child_tasks(self) -> None:
+        from agile_sdlc_crew import pipeline_config as _pc_ch
+        from agile_sdlc_crew import wi_children as _wc
+        try:
+            if (not _pc_ch.get("CREW_WI_CHILD_TASKS") or self.state.dry_run
+                    or self.state.kickoff_only or self.state.child_tasks):
+                return
+            if not _wc.parent_allows_children(self.state.wi_type):
+                _log(f"  🧩 Alt iş yok: WI tipi '{self.state.wi_type or '?'}' parent tipi değil")
+                return
+            items = _wc.plan_child_tasks(self.state.plan or {}, self.state.repo_name,
+                                         int(_pc_ch.get("CREW_WI_CHILD_TASKS_MAX") or 8))
+            if not items:
+                return
+            created = _wc.create_children(
+                self._client, int(self.state.work_item_id),
+                {"System.AreaPath": self.state.wi_area_path,
+                 "System.IterationPath": self.state.wi_iteration_path},
+                items, logger=_log)
+            self.state.child_tasks = created
+            if created:
+                _log(f"  🧩 {len(created)} alt iş kaydı hazır (parent #{self.state.work_item_id})")
+        except Exception as e:
+            _log(f"  🧩 Alt iş kayıtları açılamadı (kritik degil): {e}")
+
+    def _complete_child_task(self, file_path: str) -> None:
+        """step6: dosya push edildi → ilgili child Task tamamlandi (Done/Closed…)."""
+        from agile_sdlc_crew import wi_children as _wc
+        from agile_sdlc_crew import wi_lifecycle as _wl
+        if not self.state.child_tasks or self.state.dry_run:
+            return
+        try:
+            ch = _wc.child_for_file(self.state.child_tasks, file_path)
+            if not ch or ch.get("done") or not ch.get("id"):
+                return
+            states = getattr(self, "_child_states", None)
+            if states is None:
+                try:
+                    states = self._client.get_work_item_type_states(_wc.CHILD_TYPE)
+                except Exception:
+                    states = []
+                self._child_states = states
+            target = _wl.pick_state(states, "complete")
+            if target and _wl.apply_state(self._client, str(ch["id"]), target, logger=_log):
+                ch["done"] = True
+        except Exception as e:
+            _log(f"  🧩 Alt iş kapatilamadi ({file_path}): {e}")
 
     def _run_discover_repos(self, candidate_repos: list[str], evidence: dict | None = None, repo_history: list[dict] | None = None) -> None:
         """LLM'e en alakali aday repo'larin summary'lerini ver, hedef repo'yu sec.
@@ -3570,6 +3683,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         )
         self.state.plan = plan
         self._apply_envelope("plan")
+        self._after_plan_finalized()
         self._step_done("technical_design_task", f"Repo: {repo_name}, {len(plan.get('changes', []))} dosya")
 
         # Planlama yorumu
@@ -3867,6 +3981,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             requirements_text = req_result.raw or ""
 
         self.state.requirements_text = requirements_text
+        self._estimate("requirements")  # kaba tahmin (faz 2); plan asamasinda kesinlesir
 
         # ── HAZIRLIK KAPISI (asama 1): WI yeterince detayli mi? (#190) ──
         # Skor < esik → is `needs_info` (silinmez), eksik detaylar WI'a yorum.
@@ -4228,6 +4343,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 self.state.repo_name = repo
                 self._discovered_repo = repo
             self._apply_envelope("plan")  # resume yolunda da (job #188)
+            self._after_plan_finalized()
             _log(f"  ⏩ Plan resume: repo={self.state.repo_name}, {len(p.get('changes', []))} degisiklik")
             return True
 
@@ -5116,6 +5232,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # tam veya en azindan buyuk pencereli sakla (onceden [:3000] ile kesilip
         # sonraki run'da JSON bozuk geliyordu)
         self._apply_envelope("plan")
+        self._after_plan_finalized()
         self._step_done("technical_design_task", _json.dumps(plan, ensure_ascii=False)[:50_000])
         _log(f"  Teknik tasarim tamamlandi")
 
@@ -5410,6 +5527,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log("    ⏩ Önceki işte branch'e push edilmiş (base'e göre değişik) — yeniden yazılmıyor")
                 all_pushes.append({"file": file_path, "success": True,
                                    "change_type": change_type, "note": "resume-branch"})
+                self._complete_child_task(file_path)
                 try:
                     implemented_codes[file_path] = (
                         self._client.get_file_content(repo_name, file_path, branch_name) or "")[:3000]
@@ -5431,6 +5549,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 ):
                     _log(f"    ⏩ Branch'te ayni icerik zaten push edilmis, atlanıyor")
                     all_pushes.append({"file": file_path, "success": True, "change_type": change_type, "note": "skip-exists"})
+                    self._complete_child_task(file_path)
                     implemented_codes[file_path] = branch_content[:3000]
                     continue
             except Exception:
@@ -5712,6 +5831,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 else:
                     _log(f"    Push #{push_result.get('push_id','?')} ({push_result['change_type']})")
                 all_pushes.append(push_result)
+                self._complete_child_task(file_path)
                 # Sonraki dosyalar bu dosyanin kodunu referans alabilsin
                 implemented_codes[file_path] = final_content[:3000]
                 # Dev in-place edit ettiyse calisma kopyasini geri al (sizinti onleme)
@@ -6897,9 +7017,29 @@ class AgileSDLCFlow(Flow[PipelineState]):
             except Exception as _e_dod:
                 _log(f"  DoD hesaplanamadi (kritik degil): {_e_dod}")
 
+        # Tahmin + gerceklesen (faz 2): retrospektif verisi — "5 SP · 17 dk · $3.96"
+        _est_line = ""
+        try:
+            from agile_sdlc_crew import estimation as _est_r
+            _elapsed = None
+            if self._db and self.state.job_id:
+                _j = self._db.get_job(self.state.job_id) or {}
+                _st = _j.get("started_at")
+                if _st:
+                    from datetime import datetime as _dt_el
+                    _elapsed = max(0.0, (_dt_el.now() - _st).total_seconds() / 60.0)
+            _cost = float(getattr(self, "_job_real_cost_usd", 0.0) or 0.0) or None
+            _line = _est_r.render_estimate_line(self.state.estimate or {},
+                                                elapsed_min=_elapsed, cost_usd=_cost)
+            if _line:
+                _est_line = _line + "\n\n"
+        except Exception as _e_el:
+            _log(f"  Tahmin satiri olusturulamadi: {_e_el}")
+
         _add_wi_comment(self._client, self.state.work_item_id,
             f"## Tamamlanma Raporu\n\n"
             f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
+            f"{_est_line}"
             f"{completion_text[:3000]}"
             f"{_dod_md}\n\n"
             f"---\n*Agile SDLC Crew - Pipeline tamamlandi*"

@@ -1,6 +1,6 @@
-# Scrum İşlevleri — Tasarım (program + Faz 1 ayrıntısı)
+# Scrum İşlevleri — Tasarım (program + Faz 1–2 ayrıntısı)
 
-**Tarih:** 2026-09-10 · **Durum:** Faz 1 uygulanıyor · **Kaynak karar:** kullanıcı,
+**Tarih:** 2026-09-10 · **Durum:** Faz 1 PR #8 · Faz 2 uygulanıyor · **Kaynak karar:** kullanıcı,
 "agile metodolojinin tüm fonksiyonlarını sisteme eklemeliyiz" → boşluk analizi →
 "önerine göre ilerle".
 
@@ -17,7 +17,7 @@ böler ve Faz 1'i uygulanabilir ayrıntıda tasarlar.
 | Faz | Kapsam | Ölçülebilir çıktı |
 |---|---|---|
 | **1** | **WI yaşam döngüsü + DoD** — durum geçişleri, isteğe bağlı atama, deterministik DoD listesi | Board pipeline'ı yansıtır; DoD tablosu tamamlanma yorumunda; UAT REJECTED artık görünür |
-| 2 | Tahminleme + alt iş kaydı — S/M/L zarfı → Story Points/Effort; kickoff "Open Tasks" → child Task | WI'da SP dolu; plan dosyaları child Task olarak board'da |
+| **2** | **Tahminleme + alt iş kaydı** — BA `estimate` + yapısal sinyaller → Fibonacci SP (yalnızca yükselir); parent tipi WI için plan → child Task | `jobs.estimate_sp`, tamamlanma yorumunda tahmin/gerçekleşen; WI'da SP (boşsa); child Task'lar board'da |
 | 3 | Retrospektif — sprint sonu öğrenme raporu (review red nedenleri, build kırılmaları, needs_info, maliyet, süre) → kickoff kılavuz kurallarına besleme | Sprint kapanışında `.md`/`.pptx` + önerilen kurallar |
 | 4 | Sprint Planning + Daily — velocity tabanlı seçim, bağımlılık sırası, günlük Telegram/WI özeti | Board'dan "sprint'i kuyrukla"; 09:00 günlük özet |
 | 5 | İş tipine göre akış + PO ajanı — Bug (reproduce → fix → regresyon testi), Spike (kodsuz araştırma), PO değer/öncelik kararı | Tip bazlı router; PO çıktısı kickoff'a girdi |
@@ -112,3 +112,38 @@ pozitif olabilir; zorlamadan önce birkaç koşuda tablo izlenmeli.
 - Dry-run'da hiçbir Azure yazımı (mevcut kural).
 - `System.Reason` / özel geçiş alanları — süreç isterse 400 loglanır; ihtiyaç
   çıkarsa faz 1.1.
+
+## Faz 2 — Tahminleme + alt iş kaydı (2026-09-10)
+
+### Gözlem (Azure, son 45 gün, E-commerce Logistic Operations)
+
+| Tip | n | StoryPoints dolu | Effort/OriginalEstimate | Parent'lı |
+|---|---|---|---|---|
+| Task | 153 | 89 | 0 | 111 |
+| Bug | 20 | 9 | 0 | 1 |
+| User Story | 27 | 0 | 0 | 25 |
+
+Takım SP'yi **Task** seviyesinde tutuyor; hiyerarşi User Story → Task. Pipeline'ın koştuğu WI'lar Task (73121, 73061; SP boş).
+
+### Tasarım
+
+**Tahmin (`estimation.py`):** BA JSON'una `estimate {story_points ∈ Fibonacci, confidence, rationale(TR)}` eklendi (kural İngilizce, metin Türkçe). Python: `parse_ba_estimate` · `structural_estimate(n_req, n_files, explored, stage)` (req: ≤3→2, ≤5→3, ≤8→5, >8→8; plan: ≥3 dosya +1, ≥6 dosya +2, keşif +1 basamak; tavan 13) · `reconcile` = max(BA, yapısal, önceki) → Fibonacci, **yalnızca yükselir**. İki aşama: step1 kaba, step4 kesin (normal/resume/HAL). `jobs.estimate_sp` kolonu; tamamlanma yorumunda "Tahmin 5 SP (M, BA) · Gerçekleşen 17 dk · $3.96" (Faz 3 retrospektif verisi). Yazma: `CREW_WI_WRITE_ESTIMATE` açık ve WI'da SP boşsa `StoryPoints` (tipte yoksa `Effort`).
+
+**Alt iş (`wi_children.py`):** yalnızca parent tipi WI (User Story, Bug, Feature, Epic, Improvement). Plan değişikliği başına child Task (`[repo] Düzenle Dosya.php — açıklama`, `crew-generated` etiketi, alan/iterasyon parent'tan, Hierarchy-Reverse ilişkisi); `CREW_WI_CHILD_TASKS_MAX` aşılırsa dizine göre grup. Parent'ta üretilmiş child varsa yeniden açılmaz (idempotent). step6'da dosya push edildikçe ilgili child `complete` tercihine göre kapanır (Done/Closed/…).
+
+### Yapılandırma
+
+| Knob | Tip | Varsayılan |
+|---|---|---|
+| `CREW_ESTIMATE` | bool | **açık** (yalnızca log/DB/yorum) |
+| `CREW_WI_WRITE_ESTIMATE` | bool | kapalı |
+| `CREW_WI_CHILD_TASKS` | bool | kapalı |
+| `CREW_WI_CHILD_TASKS_MAX` | int | 8 |
+
+### Dokunulan yerler
+`PipelineState.{wi_story_points, wi_area_path, wi_iteration_path, estimate, child_tasks}` · `flow._estimate / _after_plan_finalized / _create_child_tasks / _complete_child_task` · `AzureDevOpsClient.create_work_item / get_work_item_children` · `db.jobs.estimate_sp` · `tasks.yaml` BA estimate bloğu · KN-38, KN-39 · testler 30–32.
+
+### Yapılmayanlar (bilinçli)
+- Task tipi WI'a child açmak; child'lara SP dağıtmak (takım child SP'yi elle giriyor).
+- Kickoff "Open Tasks / Stories" serbest metninden WI üretmek (LLM metninden board kaydı → gürültü riski).
+- Tahmini WI yorumu olarak yazmak (tamamlanma yorumundaki satır yeter; ayrı yorum gürültü).

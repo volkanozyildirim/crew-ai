@@ -297,3 +297,17 @@ olarak öne çıkar.
 - **Girdi:** `CREW_DOD_ENFORCE` (varsayılan kapalı) · DoD sonucu.
 - **Sonuç:** Açıksa `db.needs_human_job` + `NeedsHumanReview` (PR açık kalır; KN-35 açıksa WI → Blocked; `handoff` geçişi yapılmaz). Kapalıysa iş `completed`, tablo "zorlama kapalı" notuyla uyarır ve WI `handoff` ile QA'ya devredilir.
 - **Neden:** UAT ajanı yalnızca PR diff'ini görür; #189'daki AC2 FAIL, reviewer R1 gibi yanlış pozitif olabilir (ru_RU anahtarları repoda zaten vardı). Zorlamayı açmadan önce birkaç koşuda tablo izlenmeli — "bilmiyorum ≠ geçti" ilkesi ⚪ ile korunur, ama "ajan yanıldı" riski insan kararına bırakılır.
+
+## KN-38 — Story point tahmini: kaynak ve yazma
+- **Nerede:** `01-requirements-analysis` (`_estimate("requirements")`, BA çıktısı state'e alınır alınmaz) · `05-technical-design` (`_after_plan_finalized` → `_estimate("plan")`; normal, resume ve HAL yollarının üçünde) · `12-completion-report` (tahmin + gerçekleşen satırı). Saf mantık: `estimation.py`.
+- **Karar:** WI kaç story point? Azure'a yazılsın mı?
+- **Girdi:** BA JSON `estimate {story_points, confidence, rationale}` (eski cache/bloğu atlayan model → None) · yapısal sinyaller: FR+TR+AC sayısı, plan dosya sayısı, keşif gerekti mi (`_apply_envelope` ile aynı girdiler) · önceki aşamanın değeri · `CREW_ESTIMATE` (açık) · `CREW_WI_WRITE_ESTIMATE` (kapalı) · WI'daki mevcut SP.
+- **Sonuç:** nihai = max(BA, yapısal, önceki) → Fibonacci; **yalnızca yükselir**. Loglanır, `jobs.estimate_sp`'ye yazılır. Yazma knob'u açık, dry-run/kickoff-only değil ve WI'da SP **boşsa** `StoryPoints` (tipte yoksa `Effort`) yazılır; doluysa "insan tahmini ezilmedi".
+- **Neden:** Takım SP'yi Task seviyesinde tutuyor (son 45 gün: 153 Task'ın 89'unda dolu; Effort/OriginalEstimate hiç yok; 73121/73061 boştu) ve sprint raporu bu alanı okuyor. Tek kaynağa güvenmemek için BA + yapısal; aşağı düzeltme, zarftaki gibi, yarıda kalan işi "küçük" gösterme riski taşır.
+
+## KN-39 — Plandan alt iş kaydı (child Task) açılsın mı?
+- **Nerede:** `05-technical-design` (`_after_plan_finalized` → `_create_child_tasks`) · `07-implement-code` (`_complete_child_task`, üç push yolunda: gerçek push, resume-branch, skip-exists). Saf mantık: `wi_children.py`.
+- **Karar:** Plan değişiklikleri parent WI'ın altında child Task olsun mu; hangi child ne zaman kapanır?
+- **Girdi:** `CREW_WI_CHILD_TASKS` (kapalı) · WI tipi (yalnızca User Story/Bug/Feature/Epic/Improvement) · plan `changes[]` · `CREW_WI_CHILD_TASKS_MAX` (8) · parent'ta `crew-generated` etiketli child var mı · parent alan/iterasyon.
+- **Sonuç:** Task tipi WI → hiçbir şey (takımın olağan durumu). Parent tipi → değişiklik başına child (`[repo] Düzenle Dosya.php — açıklama`, etiket `crew-generated`, alan/iterasyon kopyası); max aşılırsa dizine göre grup. Üretilmiş child varsa **yeniden açmaz**, mevcutları bağlar. Dosya push edilince ilgili child `Done` (tipin sürecinde `complete` tercihi). Dry-run/kickoff-only → kapalı.
+- **Neden:** Takımda hiyerarşi User Story → Task (%73 parent'lı). Task altına Task board'u kirletir; etiket + idempotency retry/resume'da çift kayıt riskini kaldırır.

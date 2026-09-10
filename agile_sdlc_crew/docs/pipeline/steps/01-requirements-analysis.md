@@ -57,6 +57,7 @@ analizi** ve **mevcut PR yorumlarının okunması** burada yapılır.
 - **KN-06** — Mevcut PR seçimi (active/completed/abandoned). Bkz. [decision-points.md#kn-06](../decision-points.md#kn-06)
 - **KN-09** — SM Review kapısı. Bkz. [decision-points.md#kn-09](../decision-points.md#kn-09)
 - **KN-35** — WI yaşam döngüsü: WI okunur okunmaz tip/durum/atama `state.wi_*`'a alınır (her zaman); `CREW_WI_LIFECYCLE` açıksa `start` geçişi (To Do/Backlog/Blocked → In Progress) + isteğe bağlı boş-atama doldurma (`CREW_WI_ASSIGN_IF_EMPTY`). `_wi_begin`. Bkz. [decision-points.md#kn-35](../decision-points.md#kn-35)
+- **KN-38** — Kaba story point tahmini: BA `estimate` bloğu + gereksinim sayısı → `state.estimate` (`_estimate("requirements")`); plan aşamasında kesinleşir, yalnızca yükselir. Bkz. [decision-points.md#kn-38](../decision-points.md#kn-38)
 
 ## Resume / dry-run
 - Resume: BA çıktısı + kabul kriterleri cache'ten okunur.
