@@ -328,6 +328,35 @@ SCHEMA: list[dict] = [
         "default": 50,
         "desc": "Aşama 2 eşiği. Plan kapıları (amend dahil) sonrasında planın kapsadığı gereksinim yüzdesi bunun altındaysa `needs_info`. 73061'de 4/25 = %16 idi.",
     },
+    # ── Scrum islevleri — Faz 1: WI yasam dongusu + Definition of Done ──
+    {
+        "key": "CREW_WI_LIFECYCLE",
+        "label": "WI Yaşam Döngüsü (board durum geçişleri)",
+        "type": "bool",
+        "default": False,
+        "desc": "Pipeline iş kaydının System.State alanını takımın süreciyle senkron taşır: iş alındı → In Progress (Active), PR açıldı → Code Review, needs_info/needs_human → Blocked, DoD geçti → QA To Do (User Story'de QA). Durum adları sabit değil: tipin süreç durum listesinden tercih sırasıyla seçilir; süreçte yoksa geçiş yapılmaz. GÜVENLİK: yalnızca Proposed (Backlog/To Do) + In Progress/Code Review/Blocked'taki WI'lara dokunur — QA, UAT, Preprod, Ready for Production, Done'daki (insanın ilerlettiği) WI asla geri çekilmez. Genel hatada PR yoksa başlangıç durumuna geri alınır; PR varsa Code Review'da kalır. Done'a hiç taşınmaz (prod kararı insanın). Bugüne kadar hiç yazılmıyordu: 73121'i (job #189 PR + review + build yeşil) insanlar elle 'Ready for Production'a taşıdı. Takımın board'una yazdığı için varsayılan KAPALI; dry-run ve kickoff-only'de her zaman kapalı.",
+    },
+    {
+        "key": "CREW_WI_ASSIGN_IF_EMPTY",
+        "label": "Atanmamış WI'ı Pipeline Kullanıcısına Ata",
+        "type": "bool",
+        "default": False,
+        "desc": "WI Yaşam Döngüsü açıkken, iş alındığında System.AssignedTo BOŞSA PAT sahibine (connectionData.authenticatedUser) atar. Dolu atama asla değiştirilmez; PR açıldıktan sonra da devralınmaz. Kapalıysa atama hiç yapılmaz.",
+    },
+    {
+        "key": "CREW_DOD_CHECKLIST",
+        "label": "Definition of Done Tablosu",
+        "type": "bool",
+        "default": True,
+        "desc": "Tamamlanma raporuna deterministik DoD tablosu ekler: kod incelemesi onaylandı (REVIEW_DECISION: APPROVE), açık review maddesi yok, PR test build'i yeşil, UAT kabul etti (Overall ACCEPTED ve 0 FAIL), test dosyası dahil (CREW_REQUIRE_TESTS ise zorunlu), PR bağlı. ✅ geçti · ❌ kaldı · ⚪ doğrulanamadı (ör. repoda PR-test pipeline'ı yok). LLM çağrısı yok, yalnızca yorum — risk yok. Job #189 `completed` bitmişti ama UAT raporu REJECTED (AC2 FAIL) idi; terminal sözleşme bunu göstermiyordu.",
+    },
+    {
+        "key": "CREW_DOD_ENFORCE",
+        "label": "DoD Geçilemezse needs_human",
+        "type": "bool",
+        "default": False,
+        "desc": "DoD'da zorunlu bir madde açıkça ❌ ise iş `completed` yerine `needs_human` olur (PR açık kalır, WI Yaşam Döngüsü açıksa Blocked). ⚪ doğrulanamayan maddeler bloklamaz. Varsayılan kapalı: UAT ajanı yalnızca PR diff'ini görüyor — #189'daki AC2 FAIL, reviewer R1 gibi yanlış pozitif olabilir (ru_RU anahtarları repoda zaten vardı). Önce birkaç koşuda tabloyu izleyin, sonra açın.",
+    },
     {
         "key": "CREW_FRESHEN_ALL_REPOS",
         "label": "Tüm Klonları Tazele (paralel fetch)",

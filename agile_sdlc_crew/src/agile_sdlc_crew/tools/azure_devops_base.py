@@ -115,6 +115,45 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
+    # ── WI yasam dongusu (wi_lifecycle.py) ──
+
+    def get_work_item_type_states(self, type_name: str) -> list[dict]:
+        """Bir WI tipinin surecteki durumlari: [{name, category, color}].
+        category ∈ Proposed | InProgress | Resolved | Completed | Removed."""
+        from urllib.parse import quote
+        url = f"{self._base_api_url}/wit/workitemtypes/{quote(type_name)}/states"
+        params = {"api-version": "7.1"}
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("value", []) or []
+
+    def set_work_item_state(self, work_item_id: int, state: str) -> dict:
+        """System.State yaz (surec kurallari gecise izin vermiyorsa Azure 400 doner)."""
+        return self.update_work_item(work_item_id, [
+            {"op": "add", "path": "/fields/System.State", "value": state},
+        ])
+
+    def get_authenticated_user(self) -> dict:
+        """PAT sahibi: {id, displayName, uniqueName}."""
+        url = f"{self.org_url}/_apis/connectionData"
+        params = {"api-version": "7.1-preview.1"}
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        u = resp.json().get("authenticatedUser", {}) or {}
+        props = u.get("properties") or {}
+        account = (props.get("Account") or {}).get("$value", "")
+        return {
+            "id": u.get("id", ""),
+            "displayName": u.get("providerDisplayName", "") or u.get("customDisplayName", ""),
+            "uniqueName": account,
+        }
+
+    def assign_work_item(self, work_item_id: int, identity: str) -> dict:
+        """System.AssignedTo = identity (uniqueName / e-posta / displayName)."""
+        return self.update_work_item(work_item_id, [
+            {"op": "add", "path": "/fields/System.AssignedTo", "value": identity},
+        ])
+
     # ── Git / Repo API'leri ──
 
     def _project_api_url(self, project: str) -> str:

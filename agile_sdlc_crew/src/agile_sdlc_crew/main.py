@@ -949,6 +949,12 @@ def run_pipeline(
 
     except Exception as e:
         tracker.finish()
+        # WI yasam dongusu (CREW_WI_LIFECYCLE): needs_info/needs_human → Blocked,
+        # diger hata → PR yoksa baslangic durumuna geri al. Hata yutar.
+        try:
+            flow.wi_lifecycle_on_exception(e)
+        except Exception:
+            pass
         # NeedsHumanReview 'basarisiz' DEGIL: flow durumu zaten 'needs_human'
         # yazdi ve PR'i acik birakti. Job #188'de bu genel except onu fail_job
         # ile EZDI → DB 'failed' gosterdi (server.py'deki ayrim buraya kadar
