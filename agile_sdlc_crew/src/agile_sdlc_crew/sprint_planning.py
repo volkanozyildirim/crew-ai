@@ -53,7 +53,7 @@ def latest_job_status(wi_ids: list[str]) -> dict[str, dict]:
             cur.execute(
                 "SELECT j.work_item_id, j.id, j.status FROM jobs j "
                 "JOIN (SELECT work_item_id, MAX(id) AS mid FROM jobs "
-                "      WHERE COALESCE(kickoff_only,0)=0 AND COALESCE(dry_run,0)=0 "
+                "      WHERE COALESCE(kickoff_only,0)=0 AND COALESCE(dry_run,0)=0 AND COALESCE(job_kind,'pipeline')='pipeline' "
                 "      AND work_item_id IN (" + ",".join(["%s"] * len(wi_ids)) + ") "
                 "      GROUP BY work_item_id) m ON m.mid = j.id",
                 [str(w) for w in wi_ids],

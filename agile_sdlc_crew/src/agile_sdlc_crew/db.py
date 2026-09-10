@@ -148,6 +148,7 @@ def init_db():
         _ensure_column(cur, "jobs", "total_tool_calls", "INT DEFAULT 0")
         _ensure_column(cur, "jobs", "total_turns", "INT DEFAULT 0")
         _ensure_column(cur, "jobs", "estimate_sp", "TINYINT NULL")
+        _ensure_column(cur, "jobs", "job_kind", "VARCHAR(20) NOT NULL DEFAULT 'pipeline'")
         _ensure_column(cur, "job_steps", "cost_usd", "DECIMAL(12,6) DEFAULT 0")
         _ensure_column(cur, "job_steps", "tool_calls", "INT DEFAULT 0")
         _ensure_column(cur, "job_steps", "turns", "INT DEFAULT 0")
@@ -246,6 +247,7 @@ _ALLOWED_JOB_FIELDS = frozenset({
     "status", "use_hal", "repo_name", "branch_name", "pr_id", "pr_url",
     "current_step", "error_message", "wi_title", "started_at", "finished_at",
     "estimate_sp",  # faz 2: nihai story point tahmini (retrospektif verisi)
+    "job_kind",     # pipeline | pr_fix | pr_review — dashboard rozetleri ve retro ayrimi
 })
 
 
@@ -542,7 +544,7 @@ def get_all_jobs(limit: int = 50) -> list[dict]:
         cur.execute(
             "SELECT id, work_item_id, wi_title, status, use_hal, repo_name, "
             "branch_name, pr_url, dry_run, current_step, error_message, "
-            "created_at, started_at, finished_at "
+            "created_at, started_at, finished_at, job_kind "
             "FROM jobs ORDER BY id DESC LIMIT %s",
             (limit,),
         )

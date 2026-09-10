@@ -28,6 +28,8 @@ verdiğini** tek yerden okuyabilmek.
   planlama + günlük özet** (`sprint_planning.py`, `daily.py`, dashboard 🗓️/☀️; KN-41,
   KN-42). Faz 5 = **iş tipine göre akış (Bug/Story/Spike) + Product Owner**
   (`type_flow.py`, `product_owner` ajanı; KN-43, KN-44).
+- **PR inceleme katkısı**: insanın geliştirdiği PR'a danışma review'ı — board 🔍,
+  `POST /api/pr-review`, `pr_review.py`; kod/oy/durum değişmez (KN-45).
   Spec: `docs/superpowers/specs/2026-09-10-scrum-functions-design.md`.
 
 ## Akış (CrewAI yolu)
