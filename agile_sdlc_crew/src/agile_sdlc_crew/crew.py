@@ -179,6 +179,7 @@ LLM_ANALYST = lambda: build_for_agent("business_analyst")
 LLM_QA = lambda: build_for_agent("qa_engineer")
 LLM_UAT = lambda: build_for_agent("uat_specialist")
 LLM_SCRUM = lambda: build_for_agent("scrum_master")
+LLM_PO = lambda: build_for_agent("product_owner")  # faz 5: PO degerlendirmesi
 
 
 class AgileSDLCCrew:
@@ -199,6 +200,7 @@ class AgileSDLCCrew:
         self.llm_qa = LLM_QA()
         self.llm_uat = LLM_UAT()
         self.llm_scrum = LLM_SCRUM()
+        self.llm_po = LLM_PO()
         self.status_tracker: StatusTracker | None = None
         self.local_repo_mgr = None  # LocalRepoManager, flow.py tarafindan set edilir
         self.vector_store = None  # VectorStore, flow.py tarafindan set edilir
@@ -1209,6 +1211,22 @@ class AgileSDLCCrew:
         sm = self.scrum_master()
         t1 = self._task("completion_report_task", sm)
         return Crew(agents=[sm], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
+
+    def product_owner(self) -> Agent:
+        """Faz 5: Product Owner — is degeri / aciliyet / kapsam / GO-HOLD.
+        Tool'suz: karar WI + BA analizinden (context) verilir, repo gezmez."""
+        return Agent(
+            config=self._agent_config_with_knowledge("product_owner"),
+            llm=self.llm_po,
+            verbose=True,
+            max_iter=3,
+            tools=[],
+        )
+
+    def create_po_crew(self) -> Crew:
+        po = self.product_owner()
+        t1 = self._task("po_assessment_task", po)
+        return Crew(agents=[po], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
 
     def create_scrum_review_crew(self) -> Crew:
         """Scrum Master: review a step's output, output APPROVE or IMPROVE."""

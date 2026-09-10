@@ -123,3 +123,4 @@ agent_defaults:
   uat_specialist: reasoning_remote
   code_reviewer: reasoning_remote
   scrum_master: scrum_remote
+  product_owner: reasoning_remote

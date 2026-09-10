@@ -941,10 +941,14 @@ def run_pipeline(
         _log(f"{'='*60}")
         return None if kickoff_only else flow.state.pr_url
 
-    except _KickoffOnlyStop:
-        # Beklenen erken durdurma: kickoff-only modunda step0 sonrasi cikilir.
+    except _KickoffOnlyStop as _stop:
+        # Beklenen erken durdurma: kickoff-only modunda step0 sonrasi cikilir;
+        # spike (faz 5) icin arastirma raporu yazildi, kod adimlari atlandi.
         tracker.finish()
-        _log("  Kickoff-only stop: pipeline beklendigi gibi durduruldu")
+        if type(_stop).__name__ == "_SpikeStop":
+            _log("  Spike: araştırma raporu WI'a yazıldı, kod adımları atlandı — iş tamamlandı")
+        else:
+            _log("  Kickoff-only stop: pipeline beklendigi gibi durduruldu")
         return None
 
     except Exception as e:

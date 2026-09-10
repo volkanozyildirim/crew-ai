@@ -306,6 +306,9 @@ def load_wi_context(client, work_item_id: str, fields: dict | None = None) -> di
         "wi_story_points": float(sp) if isinstance(sp, (int, float)) else None,
         "wi_area_path": fields.get("System.AreaPath", "") or "",
         "wi_iteration_path": fields.get("System.IterationPath", "") or "",
+        # faz 5 (is tipine gore akis): etiket + baslik → spike tespiti
+        "wi_tags": fields.get("System.Tags", "") or "",
+        "wi_title": fields.get("System.Title", "") or "",
     }
 
 

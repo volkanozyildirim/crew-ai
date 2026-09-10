@@ -906,6 +906,13 @@ class _KickoffOnlyStop(Exception):
     pass
 
 
+class _SpikeStop(_KickoffOnlyStop):
+    """Sentinel (faz 5): WI bir spike (arastirma) — teknik tasarimda mimar
+    kesfi yapilip rapor WI'a yazildi, kod/PR adimlari atlanir. _KickoffOnlyStop
+    alt sinifi: main/server ayrimi degismeden 'basari' sayilir (job completed)."""
+    pass
+
+
 # WI/gereksinim metnindeki, bizim KENDI JSON semamizdan gelen meta adlar —
 # her WI'da aynilar, grep sinyali degil gurultu. Modul seviyesinde: pydantic
 # Flow sinifinda alt-cizgili sinif niteligi PrivateAttr'a donusuyor.
@@ -998,6 +1005,12 @@ class PipelineState(BaseModel):
     estimate: dict = Field(default_factory=dict)
     # Pipeline'in actigi child Task'lar: [{id, title, files[], done?}]
     child_tasks: list[dict] = Field(default_factory=list)
+    # Faz 5 — is tipine gore akis + PO (type_flow.py)
+    wi_tags: str = ""
+    wi_title: str = ""
+    flow_kind: str = ""      # bug | story | task | spike | other ("" = CREW_TYPE_FLOW kapali)
+    po_text: str = ""        # PO ajaninin ham ciktisi (context'e girer)
+    po_json: dict = Field(default_factory=dict)
 
 
 # ── Flow ─────────────────────────────────────────────
@@ -1219,6 +1232,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 pass
 
         # Kararli bolumler once, adima gore degisenler sonra.
+        # ── Faz 5: is tipine gore kilavuz + PO degerlendirmesi ──────────
+        # Is-degismezi (her adimda ayni byte'lar) → parts sonuna; prefix
+        # kararliligini bozmaz. Bug: reproduce-first + regresyon testi;
+        # Story: AC'ye iz + dikey dilim; Spike: kod yok, rapor var.
+        if s.flow_kind:
+            try:
+                from agile_sdlc_crew import type_flow as _tf_ctx
+                _g = _tf_ctx.guidance(s.flow_kind)
+                if _g:
+                    parts.append("\n" + _g)
+            except Exception:
+                pass
+        if s.po_text and step_key not in ("requirements_analysis_task", "po_assessment_task"):
+            parts.append(f"\n# PO Değerlendirmesi (Product Owner — danışma niteliğinde)\n{s.po_text[:2500]}")
+
         return _cb.measure(step_key, "\n".join(parts + tail))
 
     def _step_start(self, step_key: str):
@@ -1431,6 +1459,18 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.wi_story_points = info.get("wi_story_points")
         self.state.wi_area_path = info.get("wi_area_path", "") or ""
         self.state.wi_iteration_path = info.get("wi_iteration_path", "") or ""
+        self.state.wi_tags = info.get("wi_tags", "") or ""
+        self.state.wi_title = info.get("wi_title", "") or ""
+        # Faz 5: is tipine gore akis turu (bug/story/task/spike) — CREW_TYPE_FLOW
+        try:
+            from agile_sdlc_crew import pipeline_config as _pc_tf
+            from agile_sdlc_crew import type_flow as _tf
+            if _pc_tf.get("CREW_TYPE_FLOW"):
+                self.state.flow_kind = _tf.flow_kind(self.state.wi_type, self.state.wi_tags, self.state.wi_title)
+                if self.state.flow_kind in ("bug", "spike"):
+                    _log(f"  🧭 İş tipi akışı: {self.state.flow_kind} — {_tf.KIND_TR.get(self.state.flow_kind, '')}")
+        except Exception as _e_tf:
+            _log(f"  🧭 İş tipi akışı belirlenemedi: {_e_tf}")
         _log(f"  🗂️ WI #{self.state.work_item_id}: {info['wi_type'] or '?'} · durum '{info['wi_state']}'"
              + (f" · atanan {info['wi_assigned_to']}" if info["wi_assigned_to"] else " · atanmamış")
              + (f" · {info['wi_story_points']:g} SP" if info.get("wi_story_points") is not None else " · SP boş"))
@@ -1560,6 +1600,81 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"  🧩 {len(created)} alt iş kaydı hazır (parent #{self.state.work_item_id})")
         except Exception as e:
             _log(f"  🧩 Alt iş kayıtları açılamadı (kritik degil): {e}")
+
+    # ── Faz 5: spike + PO ─────────────────────────────────────────────────
+
+    def _run_spike(self, ctx: str, prefetch_repo: str, ctx_hint: str, repo_dirs: list, cli) -> None:
+        """Arastirma isi: mimar kesfi (varsa klon) → rapor → WI yorumu → kalan
+        adimlar 'atlandi'. Kod/PR yok. Hatalar yutulmaz — rapor yazilamazsa
+        is failed olmali (kullanici bos bir 'completed' gormesin)."""
+        from agile_sdlc_crew.main import _add_wi_comment as _awc_sp
+        from agile_sdlc_crew import type_flow as _tf
+        _log("  🔬 SPIKE: kod üretilmeyecek — mimar keşfi + araştırma raporu")
+        findings = ""
+        if repo_dirs:
+            try:
+                cli.set_repo_ctx(repo_dirs, "Read,Grep,Glob,LS")
+                self._needed_explore = True
+                findings = self._architect_explore(ctx, prefetch_repo, ctx_hint) or ""
+            finally:
+                try:
+                    cli.clear_repo_ctx()
+                except Exception:
+                    pass
+        else:
+            _log("  🔬 Repo klonu yok — rapor iş analizine dayanır")
+        report = _tf.spike_report(
+            self.state.wi_title, self.state.requirements_text, str(findings),
+            repo_name=self.state.repo_name,
+            estimate_sp=(self.state.estimate or {}).get("sp"),
+        )
+        if not self.state.dry_run:
+            _awc_sp(self._client, self.state.work_item_id, report)
+        self._step_done("technical_design_task", report[:50_000])
+        for _k in ("create_branch_task", "implement_change_task", "create_pr_task", "review_pr_task",
+                   "pr_build_gate", "test_planning_task", "uat_task", "completion_report_task"):
+            try:
+                self._step_start(_k)
+                self._step_done(_k, "Atlandı — spike (araştırma işi), kod üretilmez")
+            except Exception:
+                pass
+        _log("  🔬 Araştırma raporu WI'a yazıldı; kod adımları atlandı")
+
+    def _po_assessment(self) -> None:
+        """Product Owner degerlendirmesi (CREW_PO_ASSESSMENT): is degeri, aciliyet,
+        oncelik, GO/HOLD, kapsam kararlari. Danisma niteliginde — kapi degil;
+        kickoff/tasarim context'ine ve WI yorumuna girer. Tek LLM cagrisi."""
+        from agile_sdlc_crew import pipeline_config as _pc_po
+        from agile_sdlc_crew import type_flow as _tf
+        from agile_sdlc_crew.main import _add_wi_comment as _awc_po
+        try:
+            if not _pc_po.get("CREW_PO_ASSESSMENT") or self.state.kickoff_only:
+                return
+            if self.state.flow_kind == "spike":
+                return  # arastirma isinde PO karari anlamsiz
+            _log("\n-- PO DEGERLENDIRMESI (Product Owner) --")
+            ctx = self._build_step_context("po_assessment_task")
+            crew = self._agile_crew.create_po_crew()
+            result = crew.kickoff(inputs={"work_item_id": self.state.work_item_id, "previous_context": ctx})
+            try:
+                self._track_and_check_budget(result, "requirements_analysis_task")
+            except Exception:
+                pass
+            raw = (result.raw or "") if result else ""
+            po = _tf.parse_po(raw)
+            self.state.po_text = raw[:4000]
+            if not po:
+                _log("  🎯 PO çıktısı parse edilemedi — ham metin context'e eklendi")
+                return
+            self.state.po_json = po
+            _log(f"  🎯 PO: değer {po.get('business_value')}/10 · aciliyet {po.get('urgency')}/10 · "
+                 f"{po.get('priority') or '—'} · {po.get('decision') or '—'}")
+            if po.get("decision") == "HOLD":
+                _log("  🎯 PO HOLD dedi — danışma niteliğinde, pipeline devam ediyor (kapı değil)")
+            if not self.state.dry_run:
+                _awc_po(self._client, self.state.work_item_id, _tf.render_po_comment(po))
+        except Exception as e:
+            _log(f"  🎯 PO değerlendirmesi yapılamadı (kritik değil): {e}")
 
     def _complete_child_task(self, file_path: str) -> None:
         """step6: dosya push edildi → ilgili child Task tamamlandi (Done/Closed…)."""
@@ -4082,6 +4197,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._apply_envelope("requirements")
         self._step_done("requirements_analysis_task", requirements_text[:3000])
         _log(f"  Is analizi tamamlandi")
+        self._po_assessment()  # faz 5: PO degerlendirmesi (CREW_PO_ASSESSMENT), hazirlik kapisi gecildikten sonra
 
     @listen(crew_step1_requirements)
     def step0_kickoff_meeting(self):
@@ -5033,6 +5149,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 str(self._repo_mgr.base_dir / r) for r in _cand[:4]
                 if (self._repo_mgr.base_dir / r).exists()
             ]
+
+        # ── SPIKE (faz 5): kod yok, arastirma raporu var ─────────────────
+        # Tip/etiket/baslik acikca spike diyorsa plan uretilmez: bir kez
+        # repo-tool'lu kesif → Turkce rapor WI yorumuna → kalan adimlar
+        # 'atlandi' → _SpikeStop (job completed). Yanlis pozitif riski
+        # yalnizca ACIK isaretle sinirli (type_flow.is_spike).
+        if self.state.flow_kind == "spike":
+            self._run_spike(ctx, prefetch_repo, ctx_hint, _repo_dirs, _cli)
+            raise _SpikeStop("spike: araştırma raporu yazıldı, kod adımları atlandı")
 
         # ── ARCHITECT: B-first (ucuz, tool'suz) → gerekirse keşif (A) → B ──
         # Neden B-first: pre-fetch (grep-eşleşen gerçek dosyalar) çoğu WI için
@@ -7006,7 +7131,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     uat_text=self.state.uat_text,
                     pushed_files=[(_p or {}).get("file") or (_p or {}).get("path") or ""
                                   for _p in (self.state.all_pushes or [])],
-                    require_tests=bool(_pc_dod.get("CREW_REQUIRE_TESTS")),
+                    # Bug akisinda regresyon testi DoD'da zorunlu (faz 5)
+                    require_tests=bool(_pc_dod.get("CREW_REQUIRE_TESTS")) or self.state.flow_kind == "bug",
                     pr_id=self.state.pr_id,
                 )
                 self.state.dod = [_i.as_dict() for _i in _dod.items]
