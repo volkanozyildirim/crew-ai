@@ -127,6 +127,12 @@ class SprintReportRequest(BaseModel):
     iteration_path: str = ""
 
 
+class SprintQueueRequest(BaseModel):
+    """Sprint planından seçilen WI satırları: [{id, title}] (faz 4)."""
+    rows: list[dict] = []
+    use_hal: bool = False
+
+
 # ── API Routes ──
 
 @app.get("/")
@@ -1721,6 +1727,97 @@ async def retrospective_report(days: int = 14, iteration_path: str = ""):
         return JSONResponse(rep)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── Sprint planlama + günlük özet (Scrum faz 4; sprint_planning.py, daily.py) ──
+
+def _wi_base_url() -> str:
+    try:
+        c = AzureDevOpsClient()
+        return f"{c.org_url}/{c.project}/_workitems/edit"
+    except Exception:
+        return ""
+
+
+@app.get("/api/sprint-plan")
+async def sprint_plan(iteration_path: str = "", team: str = "",
+                      capacity_sp: float | None = None, velocity: int = 1):
+    """Seçili sprintin WI'larından pipeline aday listesi: Proposed durum, tip,
+    açık/tamamlanmış iş kontrolü; öncelik+SP sırası; kapasiteye göre ön-seçim;
+    retro ortalamalarıyla maliyet/süre tahmini. Salt okunur."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew import sprint_planning as _sp
+    if not _pc.get("CREW_SPRINT_PLANNING"):
+        return JSONResponse({"error": "Sprint planlama kapali (CREW_SPRINT_PLANNING)"}, status_code=409)
+    ip = (iteration_path or "").strip()
+    if not ip:
+        return JSONResponse({"error": "iteration_path gerekli"}, status_code=400)
+    try:
+        client = AzureDevOpsClient()
+        plan = await asyncio.to_thread(
+            _sp.build_plan, client, ip, team=team, capacity_sp=capacity_sp,
+            with_velocity=bool(velocity),
+        )
+        return JSONResponse(plan)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/sprint-plan/queue")
+async def sprint_plan_queue(req: SprintQueueRequest):
+    """Seçilen WI'ları toplu kuyruğa al (açık işi olan atlanır). İnsan onayı UI'da."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew import sprint_planning as _sp
+    if not _pc.get("CREW_SPRINT_PLANNING"):
+        return JSONResponse({"error": "Sprint planlama kapali (CREW_SPRINT_PLANNING)"}, status_code=409)
+    rows = [r for r in (req.rows or []) if str(r.get("id", "")).strip().isdigit()]
+    if not rows:
+        return JSONResponse({"error": "Seçili WI yok"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_sp.queue_selected, rows, use_hal=req.use_hal)
+        if res.get("queued"):
+            _ensure_worker()
+        return JSONResponse(res, status_code=202 if res.get("queued") else 200)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/daily")
+async def daily_summary(hours: int = 24):
+    """Günlük özet (Daily Scrum): son N saatte biten/koşan/kuyruktaki işler,
+    insan bekleyen engeller, maliyet. Deterministik markdown."""
+    from agile_sdlc_crew import daily as _daily
+    try:
+        hours = max(1, min(int(hours or 24), 24 * 14))
+        rep = await asyncio.to_thread(_daily.build_daily, hours, _wi_base_url())
+        rep["telegram_configured"] = _daily.telegram_configured()
+        return JSONResponse(rep)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/daily/send")
+async def daily_send(hours: int = 24):
+    """Günlük özeti üret, dosyaya yaz ve (yapılandırılmışsa) Telegram'a gönder."""
+    from agile_sdlc_crew import daily as _daily
+    try:
+        hours = max(1, min(int(hours or 24), 24 * 14))
+        rep = await asyncio.to_thread(_daily.publish_daily, hours)
+        return JSONResponse(rep)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.on_event("startup")
+async def _start_daily_scheduler():
+    """CREW_DAILY_ENABLED açıkken her gün CREW_DAILY_TIME'da özet üret/gönder.
+    Bayrak her turda okunur → dashboard'dan kapatınca thread susar."""
+    from agile_sdlc_crew import daily as _daily
+    from agile_sdlc_crew import pipeline_config as _pc
+    try:
+        _daily.start_scheduler(lambda: bool(_pc.get("CREW_DAILY_ENABLED")))
+    except Exception as e:
+        pipeline_log.warning(f"Günlük özet zamanlayıcı başlatılamadı: {e}")
 
 
 # ── Static files ──

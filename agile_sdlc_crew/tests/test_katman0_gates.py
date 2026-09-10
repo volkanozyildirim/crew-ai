@@ -2075,6 +2075,152 @@ def test_retrospective():
     check("server: /api/retro + CREW_RETRO kapısı", '@app.get("/api/retro")' in src_srv and 'CREW_RETRO' in src_srv)
 
 
+# ── 34. Sprint planlama — aday, sıra, kapasite, tahmin, toplu kuyruk ──────
+
+def test_sprint_planning():
+    print("\n[34] Sprint planlama — aday kuralı, sıra, kapasite, tahmin, güvenli kuyruk")
+    from agile_sdlc_crew import sprint_planning as sp
+
+    check("Proposed: Backlog/To Do evet, In Progress/QA hayır (FLO süreç listesi)",
+          sp.is_proposed("Backlog", _FLO_TASK) and sp.is_proposed("To Do", _FLO_TASK)
+          and not sp.is_proposed("In Progress", _FLO_TASK) and not sp.is_proposed("QA To Do", _FLO_TASK))
+    check("Proposed yedek (süreç listesi yok): To Do/New evet, Active hayır",
+          sp.is_proposed("To Do", None) and sp.is_proposed("New", []) and not sp.is_proposed("Active", None))
+
+    items = [
+        {"id": 1, "title": "A", "type": "Task", "state": "To Do", "priority": 2, "storyPoints": 3},
+        {"id": 2, "title": "B", "type": "Task", "state": "To Do", "priority": 1, "storyPoints": 5},
+        {"id": 3, "title": "C", "type": "Task", "state": "In Progress", "priority": 1, "storyPoints": 2},
+        {"id": 4, "title": "D", "type": "Test Case", "state": "To Do", "priority": 1, "storyPoints": 0},
+        {"id": 5, "title": "E", "type": "Bug", "state": "Backlog", "priority": 1, "storyPoints": 2},
+        {"id": 6, "title": "F", "type": "Task", "state": "To Do", "priority": 1, "storyPoints": 0},
+        {"id": 7, "title": "G", "type": "Task", "state": "To Do", "priority": 3, "storyPoints": 1},
+        {"id": 8, "title": "H", "type": "Task", "state": "To Do", "priority": 1, "storyPoints": 2},
+        {"id": 9, "title": "I", "type": "Task", "state": "To Do", "priority": 1, "storyPoints": 1},
+    ]
+    jobs = {"5": {"id": 50, "status": "running"}, "7": {"id": 70, "status": "completed"},
+            "8": {"id": 80, "status": "needs_info"}, "9": {"id": 90, "status": "failed"}}
+    rows = sp.order_candidates(sp.classify_candidates(items, {"Task": _FLO_TASK, "Bug": _FLO_TASK}, jobs))
+    by = {r["id"]: r for r in rows}
+    check("uygun: 1, 2, 6, 9 (failed → yeniden denenebilir)", {r["id"] for r in rows if r["eligible"]} == {1, 2, 6, 9})
+    check("nedenler: başlanmış / tip dışı / açık iş / tamamlandı / insan bekliyor",
+          "başlanmış" in by[3]["reason"] and "pipeline dışı" in by[4]["reason"] and "açık iş #50" in by[5]["reason"]
+          and "tamamlandı" in by[7]["reason"] and "insan bekliyor" in by[8]["reason"] and "yeniden" in by[9]["reason"])
+    check("sıra: uygunlar önce; öncelik ↑, SP ↑, SP=0 sona → 9, 2, 6, 1",
+          [r["id"] for r in rows if r["eligible"]] == [9, 2, 6, 1], str([r["id"] for r in rows]))
+    sp.select_by_capacity(rows, 6)
+    check("kapasite 6 SP: 9 (1) + 2 (5) = 6 → seçili; 6 (SP yok) da işaretli, 1 (3) sığmaz",
+          {r["id"] for r in rows if r["selected"]} == {9, 2, 6}, str([(r["id"], r["selected"]) for r in rows]))
+    sp.select_by_capacity(rows, None)
+    check("kapasite yok → tüm uygunlar seçili", {r["id"] for r in rows if r["selected"]} == {1, 2, 6, 9})
+    est = sp.effort_estimate(rows, cost_per_sp=0.9, min_per_sp=4.0, cost_per_job=3.0, min_per_job=15.0)
+    check("tahmin: 4 iş, 9 SP (+1 SP'siz iş başına ortalama) → $11.1, 51 dk",
+          est["count"] == 4 and est["sp"] == 9 and est["sp_unknown"] == 1
+          and round(est["cost_usd"], 2) == 11.1 and round(est["minutes"]) == 51, str(est))
+    est2 = sp.effort_estimate(rows, cost_per_sp=None, min_per_sp=None, cost_per_job=3.0, min_per_job=15.0)
+    check("tahmin: SP oranı yoksa iş başına", est2["cost_usd"] == 12.0 and est2["minutes"] == 60.0)
+
+    created = []
+    _o_status, _o_create = sp.latest_job_status, None
+    from agile_sdlc_crew import db as _dbm
+    _o_create = _dbm.create_job
+    try:
+        sp.latest_job_status = lambda ids: {"2": {"id": 20, "status": "queued"}}
+        _dbm.create_job = lambda wid, use_hal, wi_title="", **kw: created.append((wid, use_hal, wi_title)) or (100 + len(created))
+        res = sp.queue_selected([{"id": 1, "title": "A"}, {"id": 2, "title": "B"}, {"id": 9, "title": "I"}])
+        check("kuyruk: açık işi olan #2 atlandı, 1 ve 9 kuyruklandı (use_hal=False)",
+              [q["wi"] for q in res["queued"]] == ["1", "9"] and res["skipped"][0]["wi"] == "2"
+              and all(c[1] is False for c in created), str(res))
+    finally:
+        sp.latest_job_status = _o_status
+        _dbm.create_job = _o_create
+
+    class _C:
+        def get_iteration_work_items(self, ip):
+            return items
+        def get_work_item_type_states(self, t):
+            return _FLO_TASK
+    _o_vel, _o_rt = sp.team_velocity, None
+    from agile_sdlc_crew import retrospective as _rt
+    _o_an, _o_col = _rt.analyze, _rt.collect
+    try:
+        sp.latest_job_status = lambda ids: jobs
+        sp.team_velocity = lambda client, team, n=3: 7.0
+        _rt.collect = lambda **kw: []
+        _rt.analyze = lambda jobs_: {"cost_per_sp": 1.0, "min_per_sp": 5.0, "cost_avg_completed": 3.0, "minutes_avg_completed": 20.0}
+        plan = sp.build_plan(_C(), "BM\\Ops\\2026_19", team="Ops")
+        check("build_plan: sprint adı, 9 iş, 4 uygun, kapasite velocity 7 → 9+2+6 seçili",
+              plan["sprint"] == "2026_19" and plan["items_total"] == 9 and plan["eligible"] == 4
+              and plan["capacity_sp"] == 7.0 and "velocity" in plan["capacity_source"]
+              and {r["id"] for r in plan["rows"] if r["selected"]} == {9, 2, 6}, str(plan["estimate"]))
+        check("build_plan: oranlar retro'dan", plan["rates"]["cost_per_sp"] == 1.0 and plan["estimate"]["count"] == 3)
+        plan2 = sp.build_plan(_C(), "X", team="", capacity_sp=1)
+        check("kapasite 1 (kullanıcı) → yalnızca 9 (1 SP) + SP'siz 6", {r["id"] for r in plan2["rows"] if r["selected"]} == {9, 6}
+              and plan2["capacity_source"] == "kullanıcı")
+    finally:
+        sp.latest_job_status = _o_status
+        sp.team_velocity = _o_vel
+        _rt.analyze, _rt.collect = _o_an, _o_col
+
+
+# ── 35. Günlük özet — render, düz metin, zamanlayıcı yardımcıları ────────
+
+def test_daily_summary():
+    print("\n[35] Günlük özet — bölümler, engeller, düz metin, zaman hesabı")
+    from datetime import datetime, timedelta
+    from agile_sdlc_crew import daily
+
+    now = datetime(2026, 9, 10, 9, 0)
+    d = {
+        "now": now, "since": now - timedelta(hours=24),
+        "finished": [
+            {"id": 189, "work_item_id": "73121", "wi_title": "İade nedeni dil", "status": "completed", "pr_url": "https://x/pr/42951",
+             "total_cost_usd": 3.96, "estimate_sp": 5, "started_at": now - timedelta(minutes=137), "finished_at": now - timedelta(minutes=120), "error_message": None},
+            {"id": 191, "work_item_id": "73061", "wi_title": "COD nokta", "status": "needs_info", "pr_url": "", "total_cost_usd": 0.13,
+             "estimate_sp": None, "started_at": now - timedelta(minutes=61), "finished_at": now - timedelta(minutes=60),
+             "error_message": "NEEDS_INFO: hazırlık skoru 5/100 < eşik 60"},
+        ],
+        "running": [{"id": 200, "work_item_id": "73200", "wi_title": "Koşan iş", "current_step": "implement_change_task", "started_at": now - timedelta(minutes=12)}],
+        "queued": [{"id": 201, "work_item_id": "73201"}, {"id": 202, "work_item_id": "73202"}],
+        "waiting": [{"id": 191, "work_item_id": "73061", "wi_title": "COD nokta", "status": "needs_info",
+                     "error_message": "NEEDS_INFO: 6 eksik detay", "finished_at": now - timedelta(days=2)}],
+    }
+    md = daily.render_markdown(d, wi_base_url="https://dev.azure.com/o/p/_workitems/edit")
+    check("başlık tarih + saat", md.startswith("## ☀️ Günlük özet — 10 Eyl 2026 09:00"))
+    check("özet satırı: 2 iş bitti · $4.09 · koşan 1 · kuyrukta 2", "2 iş bitti · $4.09 · koşan 1 · kuyrukta 2" in md, md.splitlines()[2])
+    check("biten: durum, WI linki, PR, SP, dk, $", "✅ tamamlandı — [#73121](https://dev.azure.com/o/p/_workitems/edit/73121) İade nedeni dil · [PR](https://x/pr/42951) · 5 SP · 17 dk · $3.96" in md)
+    check("needs_info hata özeti italik", "_NEEDS_INFO: hazırlık skoru 5/100 < eşik 60_" in md)
+    check("koşan: adım + süre", "🔄 [#73200]" in md and "`implement_change_task`, 12 dk" in md)
+    check("kuyruk listesi", "- #73201, #73202" in md)
+    check("engeller: kaç gün", "### İnsan bekleyenler (engeller)" in md and "· 2 gün" in md)
+    plain = daily.to_plain(md)
+    check("düz metin: link/kalın/başlık işaretleri yok", "**" not in plain and "](" not in plain and not plain.startswith("#")
+          and "https://x/pr/42951" in plain)
+    empty = daily.render_markdown({"now": now, "since": now - timedelta(hours=24), "finished": [], "running": [], "queued": [], "waiting": []})
+    check("hareket yok metni", "Hareket yok" in empty)
+    check("HH:MM parse: 09:00, 7:30, bozuk → 09:00", daily._parse_hhmm("09:00") == (9, 0) and daily._parse_hhmm("7:30") == (7, 30)
+          and daily._parse_hhmm("x") == (9, 0))
+    check("seconds_until: bugün 09:00 geçmişse yarına", daily.seconds_until(datetime(2026, 9, 10, 10, 0), 9, 0) == 23 * 3600
+          and daily.seconds_until(datetime(2026, 9, 10, 8, 30), 9, 0) == 1800)
+    check("Telegram yapılandırması env'e bağlı (test ortamında kapalı olabilir)", isinstance(daily.telegram_configured(), bool))
+
+    try:
+        rep = daily.build_daily(hours=24 * 60)
+    except Exception as ex:
+        skip("gerçek DB günlük özeti", f"DB erişilemedi: {type(ex).__name__}")
+        rep = None
+    if rep:
+        check("GERÇEK DB: özet üretildi, sayaçlar tutarlı", rep["markdown"].startswith("## ☀️") and set(rep["counts"]) == {"finished", "running", "queued", "waiting"})
+
+    src_srv = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/server.py").read_text()
+    check("server: /api/sprint-plan (+queue), /api/daily (+send), startup zamanlayıcı",
+          '@app.get("/api/sprint-plan")' in src_srv and '@app.post("/api/sprint-plan/queue")' in src_srv
+          and '@app.get("/api/daily")' in src_srv and '@app.post("/api/daily/send")' in src_srv and "start_scheduler" in src_srv)
+    src_ui = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("dashboard: 🗓️ Planla + ☀️ Günlük modalleri, onaylı kuyruk", 'id="planModal"' in src_ui and 'id="dailyModal"' in src_ui
+          and "confirm(sel.length+' iş pipeline kuyruğuna" in src_ui)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2100,7 +2246,9 @@ def main():
               test_estimation,
               test_child_tasks_planning,
               test_estimate_flow_hooks,
-              test_retrospective):
+              test_retrospective,
+              test_sprint_planning,
+              test_daily_summary):
         try:
             t()
         except Exception as e:
