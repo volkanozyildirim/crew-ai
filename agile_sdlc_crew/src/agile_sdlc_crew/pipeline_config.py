@@ -357,6 +357,36 @@ SCHEMA: list[dict] = [
         "default": False,
         "desc": "DoD'da zorunlu bir madde açıkça ❌ ise iş `completed` yerine `needs_human` olur (PR açık kalır, WI Yaşam Döngüsü açıksa Blocked). ⚪ doğrulanamayan maddeler bloklamaz. Varsayılan kapalı: UAT ajanı yalnızca PR diff'ini görüyor — #189'daki AC2 FAIL, reviewer R1 gibi yanlış pozitif olabilir (ru_RU anahtarları repoda zaten vardı). Önce birkaç koşuda tabloyu izleyin, sonra açın.",
     },
+    # ── Scrum islevleri — Faz 2: tahminleme + alt is kayitlari ──
+    {
+        "key": "CREW_ESTIMATE",
+        "label": "Story Point Tahmini",
+        "type": "bool",
+        "default": True,
+        "desc": "BA çıktısındaki `estimate` bloğu (Fibonacci SP + güven + gerekçe) ile yapısal sinyaller (FR/TR/AC sayısı, plan dosya sayısı, keşif) birleştirilir: nihai = max(BA, yapısal), yalnızca yükselir (zarf gibi). İki aşama: requirements (kaba) → plan (kesin). Sonuç loglanır, `jobs.estimate_sp`'ye yazılır ve tamamlanma yorumunda 'Tahmin 5 SP · Gerçekleşen 17 dk · $3.96' satırı olur (retrospektif verisi). Azure'a YAZMAZ — yazma için CREW_WI_WRITE_ESTIMATE. LLM çağrısı yok.",
+    },
+    {
+        "key": "CREW_WI_WRITE_ESTIMATE",
+        "label": "Tahmini WI'a Yaz (StoryPoints)",
+        "type": "bool",
+        "default": False,
+        "desc": "Plan kesinleştiğinde nihai SP'yi WI'ın Microsoft.VSTS.Scheduling.StoryPoints alanına yazar (tipte yoksa Effort). YALNIZCA alan boşsa — insan tahmini asla ezilmez. Takım SP'yi Task seviyesinde tutuyor (son 45 gün: 153 Task'ın 89'unda dolu; 73121/73061 boştu). Sprint raporu bu alanı okuduğu için pipeline işleri rapora SP ile girer. Board'a yazdığı için varsayılan kapalı; dry-run/kickoff-only'de kapalı.",
+    },
+    {
+        "key": "CREW_WI_CHILD_TASKS",
+        "label": "Plandan Alt İş Kaydı (child Task) Aç",
+        "type": "bool",
+        "default": False,
+        "desc": "WI bir PARENT tipiyse (User Story, Bug, Feature, Epic, Improvement) teknik plan kesinleştiğinde her plan değişikliği için `crew-generated` etiketli bir child Task açar (başlık '[repo] Düzenle Dosya.php — açıklama', alan/iterasyon parent'tan); step6'da dosya push edildikçe ilgili Task Done'a çekilir. WI zaten Task ise (takımın olağan durumu) hiçbir şey yapmaz. Parent'ta üretilmiş child varsa yeniden açmaz (retry/resume idempotent). Board'a yazdığı için varsayılan kapalı.",
+    },
+    {
+        "key": "CREW_WI_CHILD_TASKS_MAX",
+        "label": "En Çok Alt İş Kaydı",
+        "type": "int",
+        "default": 8,
+        "min": 1,
+        "desc": "Plan değişikliği bu sayıyı aşarsa child'lar dosya yerine dizine (ilk iki seviye) göre gruplanır; en çok bu kadar child açılır.",
+    },
     {
         "key": "CREW_FRESHEN_ALL_REPOS",
         "label": "Tüm Klonları Tazele (paralel fetch)",

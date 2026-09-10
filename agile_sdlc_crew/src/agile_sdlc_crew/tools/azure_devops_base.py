@@ -154,6 +154,47 @@ class AzureDevOpsClient:
             {"op": "add", "path": "/fields/System.AssignedTo", "value": identity},
         ])
 
+    # ── Alt is kayitlari (wi_children.py) ──
+
+    def create_work_item(self, type_name: str, fields: dict, parent_id: int | None = None) -> dict:
+        """Yeni WI (JSON-patch). parent_id verilirse Hierarchy-Reverse iliskisiyle
+        parent'in altina baglanir. Doner: Azure WI JSON (id, fields, ...)."""
+        from urllib.parse import quote
+        ops = [{"op": "add", "path": f"/fields/{k}", "value": v} for k, v in fields.items()]
+        if parent_id:
+            ops.append({
+                "op": "add", "path": "/relations/-",
+                "value": {
+                    "rel": "System.LinkTypes.Hierarchy-Reverse",
+                    "url": f"{self._base_api_url}/wit/workItems/{int(parent_id)}",
+                },
+            })
+        url = f"{self._base_api_url}/wit/workitems/${quote(type_name)}"
+        params = {"api-version": self.API_VERSION}
+        resp = requests.post(url, headers=self._patch_headers, json=ops, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_work_item_children(self, parent_id: int) -> list[dict]:
+        """Parent'in Hierarchy-Forward cocuklari (id + fields: Title, State, Tags, WorkItemType)."""
+        wi = self.get_work_item(int(parent_id))
+        ids = []
+        for rel in (wi or {}).get("relations", []) or []:
+            if rel.get("rel") == "System.LinkTypes.Hierarchy-Forward":
+                try:
+                    ids.append(int(str(rel.get("url", "")).rstrip("/").rsplit("/", 1)[-1]))
+                except ValueError:
+                    continue
+        if not ids:
+            return []
+        url = f"{self._base_api_url}/wit/workitemsbatch"
+        body = {"ids": ids[:200], "fields": ["System.Id", "System.Title", "System.State",
+                                             "System.Tags", "System.WorkItemType"]}
+        resp = requests.post(url, headers={**self._headers, "Content-Type": "application/json"},
+                             json=body, params={"api-version": self.API_VERSION}, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("value", []) or []
+
     # ── Git / Repo API'leri ──
 
     def _project_api_url(self, project: str) -> str:
