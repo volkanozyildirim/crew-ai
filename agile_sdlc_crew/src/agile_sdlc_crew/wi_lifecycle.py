@@ -288,9 +288,15 @@ def load_wi_context(client, work_item_id: str, fields: dict | None = None) -> di
             states = client.get_work_item_type_states(wtype)
         except Exception as e:  # noqa: BLE001
             log.warning(f"  WI durum listesi alinamadi ({wtype}): {e}")
-    sp = fields.get("Microsoft.VSTS.Scheduling.StoryPoints")
-    if sp is None:
-        sp = fields.get("Microsoft.VSTS.Scheduling.Effort")
+    # Org'un gercek SP alani Custom.StoryPoints (son 45 gun: 153 Task'in 150'sinde
+    # dolu; board/sprint raporu/velocity bunu okur). Microsoft.VSTS...StoryPoints
+    # eski/varsayilan (degerlerin %99'u 3.0). Sira: Custom → Microsoft → Effort.
+    sp = None
+    for _k in ("Custom.StoryPoints", "Microsoft.VSTS.Scheduling.StoryPoints",
+               "Microsoft.VSTS.Scheduling.Effort"):
+        if fields.get(_k) is not None:
+            sp = fields.get(_k)
+            break
     return {
         "wi_type": wtype,
         "wi_state": fields.get("System.State", "") or "",

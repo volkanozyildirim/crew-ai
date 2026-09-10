@@ -1647,6 +1647,11 @@ def test_wi_lifecycle_flow_hooks():
         f._wi_begin(f._client.fields)
         check("begin: tip/durum state'e alındı",
               f.state.wi_type == "Task" and f.state.wi_state_initial == "To Do" and len(f.state.wi_states) == 12)
+        f2 = mk()
+        f2._client.fields["Custom.StoryPoints"] = 2
+        f2._client.fields["Microsoft.VSTS.Scheduling.StoryPoints"] = 3.0
+        f2._wi_begin(f2._client.fields)
+        check("begin: SP okuma sırası Custom.StoryPoints önce (2, 3.0 değil)", f2.state.wi_story_points == 2.0)
         check("begin: To Do → In Progress yazıldı", f._client.ops == [("state", 73121, "In Progress")], str(f._client.ops))
         check("begin: mevcut durum güncellendi", f.state.wi_state_current == "In Progress")
         f._wi_begin(f._client.fields)
@@ -1782,10 +1787,15 @@ def test_estimation():
                 raise RuntimeError("400 Client Error: TF51535 field does not exist")
             self.ops.append((wid, fld, ops[0]["value"]))
     c = _C()
-    check("SP yaz: StoryPoints", est.write_story_points(c, "73121", 5) == "Microsoft.VSTS.Scheduling.StoryPoints"
-          and c.ops == [(73121, "Microsoft.VSTS.Scheduling.StoryPoints", 5.0)])
-    c = _C(fail_fields={"Microsoft.VSTS.Scheduling.StoryPoints"})
-    check("SP yaz: tipte StoryPoints yok → Effort", est.write_story_points(c, "1", 3) == "Microsoft.VSTS.Scheduling.Effort")
+    check("SP yaz: önce Custom.StoryPoints (org'un gerçek alanı), int",
+          est.write_story_points(c, "73121", 5) == "Custom.StoryPoints" and c.ops == [(73121, "Custom.StoryPoints", 5)])
+    c = _C(fail_fields={"Custom.StoryPoints"})
+    check("SP yaz: Custom yok → Microsoft StoryPoints (float)",
+          est.write_story_points(c, "1", 3) == "Microsoft.VSTS.Scheduling.StoryPoints" and c.ops[-1][2] == 3.0)
+    c = _C(fail_fields={"Custom.StoryPoints", "Microsoft.VSTS.Scheduling.StoryPoints"})
+    check("SP yaz: ikisi de yok → Effort", est.write_story_points(c, "1", 3) == "Microsoft.VSTS.Scheduling.Effort")
+    line_t = est.render_estimate_line({"sp": 5, "source": "BA"}, elapsed_min=17.2, cost_usd=3.96, team_sp=2)
+    check("satır: takım tahmini varsa ikisi yan yana", "Takım tahmini:** 2 SP" in line_t and "Pipeline tahmini:** 5 SP" in line_t, line_t)
     check("SP yaz: ağ hatası → '' (pipeline devam)", est.write_story_points(_C(hard=True), "1", 3) == "")
 
     job = None
@@ -1918,8 +1928,8 @@ def test_estimate_flow_hooks():
         f = mk()
         f.state.plan = _plan(3)
         f._estimate("plan")
-        check("yazma açık + WI'da SP boş → StoryPoints=5 yazıldı",
-              ("field", 73121, "Microsoft.VSTS.Scheduling.StoryPoints", 5.0) in f._client.ops, str(f._client.ops))
+        check("yazma açık + WI'da SP boş → Custom.StoryPoints=5 yazıldı",
+              ("field", 73121, "Custom.StoryPoints", 5) in f._client.ops, str(f._client.ops))
         f = mk(sp=3.0)
         f.state.plan = _plan(3)
         f._estimate("plan")
