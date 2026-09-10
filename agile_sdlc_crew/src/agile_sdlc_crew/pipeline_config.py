@@ -387,6 +387,14 @@ SCHEMA: list[dict] = [
         "min": 1,
         "desc": "Plan değişikliği bu sayıyı aşarsa child'lar dosya yerine dizine (ilk iki seviye) göre gruplanır; en çok bu kadar child açılır.",
     },
+    # ── Scrum islevleri — Faz 3: retrospektif ──
+    {
+        "key": "CREW_RETRO",
+        "label": "Retrospektif Raporu (dashboard 🔁)",
+        "type": "bool",
+        "default": True,
+        "desc": "Board'daki 🔁 Retro butonu ve /api/retro: seçili sprintin (ya da son N günün) pipeline işlerinden deterministik öğrenme raporu — sonuç dağılımı ve nedenleri, kırılan adımlar, review ilk-tur onayı / düzeltme turu, PR build, UAT kabul/red, teslim edilen SP ve SP başına dk/$, tekrar koşan WI'lar, en pahalı işler. Veriye bağlı eşiklerden kılavuz-kuralı önerileri üretir; kurallar yalnızca insan 'Kılavuza ekle' dediğinde kickoff kılavuzuna girer. LLM çağrısı yok, salt okunur.",
+    },
     {
         "key": "CREW_FRESHEN_ALL_REPOS",
         "label": "Tüm Klonları Tazele (paralel fetch)",

@@ -23,8 +23,9 @@ verdiğini** tek yerden okuyabilmek.
   Spec: `docs/superpowers/specs/2026-06-15-azure-devops-backfill-design.md`.
 - **Scrum işlevleri programı** (5 faz): Faz 1 = **WI yaşam döngüsü + Definition of
   Done** (`wi_lifecycle.py`; KN-35, KN-36, KN-37). Faz 2 = **story point tahmini +
-  alt iş kaydı** (`estimation.py`, `wi_children.py`; KN-38, KN-39). Sonraki fazlar:
-  retrospektif, sprint planning + daily, iş tipine göre akış + PO.
+  alt iş kaydı** (`estimation.py`, `wi_children.py`; KN-38, KN-39). Faz 3 = **retrospektif**
+  (`retrospective.py`, `GET /api/retro`, dashboard 🔁; KN-40). Sonraki fazlar:
+  sprint planning + daily, iş tipine göre akış + PO.
   Spec: `docs/superpowers/specs/2026-09-10-scrum-functions-design.md`.
 
 ## Akış (CrewAI yolu)

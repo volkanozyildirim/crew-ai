@@ -1693,6 +1693,36 @@ async def sprint_report_download(report_id: str):
     )
 
 
+# ── Retrospektif (Scrum faz 3; retrospective.py) ──
+
+@app.get("/api/retro")
+async def retrospective_report(days: int = 14, iteration_path: str = ""):
+    """Deterministik retrospektif: sprint (iteration_path → o sprintin WI'larinin
+    isleri) ya da son N gun. LLM yok; jobs/job_steps'ten okur. Kural onerileri
+    insan onayiyla /api/kickoff-guidance'a eklenir (UI 'Kılavuza ekle')."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew import retrospective as _retro
+    try:
+        if not _pc.get("CREW_RETRO"):
+            return JSONResponse({"error": "Retrospektif kapali (CREW_RETRO)"}, status_code=409)
+        wi_ids = None
+        days = max(1, min(int(days or 14), 365))
+        title = f"son {days} gün"
+        ip = (iteration_path or "").strip()
+        if ip:
+            client = AzureDevOpsClient()
+            items = await asyncio.to_thread(client.get_iteration_work_items, ip)
+            wi_ids = [str(i.get("id")) for i in (items or []) if i.get("id")]
+            title = ip.replace("/", "\\").split("\\")[-1] or ip
+        rep = await asyncio.to_thread(
+            _retro.build_report, title=title,
+            since_days=None if ip else days, wi_ids=wi_ids,
+        )
+        return JSONResponse(rep)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ── Static files ──
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR), html=False), name="static")

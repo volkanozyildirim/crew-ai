@@ -1981,6 +1981,100 @@ def test_estimate_flow_hooks():
     check("tasks.yaml: BA estimate bloğu + ESTIMATE kuralı", '"estimate": {' in src_yaml and "ESTIMATE (mandatory)" in src_yaml)
 
 
+# ── 33. Retrospektif — deterministik analiz, sınıflandırma, öneriler, rapor ─
+
+def test_retrospective():
+    print("\n[33] Retrospektif — sonuç sınıfları, kalite kapıları, SP metrikleri, kural önerileri")
+    from datetime import datetime, timedelta
+    from agile_sdlc_crew import retrospective as rt
+
+    now = datetime.now()
+
+    def job(i, status, err="", cost=1.0, mins=10, sp=None, wi="1", steps=()):
+        return {"id": i, "work_item_id": wi, "status": status, "error_message": err,
+                "total_cost_usd": cost, "started_at": now - timedelta(minutes=mins), "finished_at": now,
+                "estimate_sp": sp,
+                "steps": [{"step_key": k, "status": st, "output": out} for k, st, out in steps]}
+
+    jobs = [
+        job(1, "completed", cost=3.96, mins=17, sp=5, wi="73121", steps=[
+            ("review_pr_task", "completed", "REVIEW_DECISION: APPROVE\nVerdict: APPROVE — 2 düzeltme turundan sonra onaylandı."),
+            ("pr_build_gate", "completed", "Build 132551 succeeded (webservice-test)"),
+            ("uat_task", "completed", _UAT_189_SHAPE)]),
+        job(2, "needs_info", "NEEDS_INFO: hazırlık skoru 5/100 < eşik 60 — WI'da 6 eksik detay", cost=0.13, mins=1, wi="73061"),
+        job(3, "needs_human", "Review: 1 deneme sonrasi kapanmayan madde (N1) — PR #42951 acik", cost=3.43, wi="73121", steps=[
+            ("review_pr_task", "completed", "REVIEW_DECISION: NEEDS_HUMAN\nİnsan müdahalesi gerekli — 1 deneme sonrası kapanmayan madde")]),
+        job(4, "failed", "Sunucu yeniden baslatildi, is yarida kaldi", cost=0.5, steps=[("technical_design_task", "failed", "")]),
+        job(5, "failed", "Plan-push uyumsuzlugu: 1/2 dosya push edildi, %70 esigin altinda. PR iptal.", cost=4.89, wi="73121",
+            steps=[("implement_change_task", "failed", "")]),
+        job(6, "completed", cost=2.0, mins=10, sp=2, wi="5", steps=[
+            ("review_pr_task", "completed", "REVIEW_DECISION: APPROVE\nVerdict: APPROVE"),
+            ("pr_build_gate", "completed", "Repoda PR-test pipeline'i yok — gate atlandi"),
+            ("uat_task", "completed", "## UAT Report\n\n1. AC1 - PASS - ok\n\n**Overall Evaluation:** ACCEPTED")]),
+        job(7, "running", cost=0),
+    ]
+    a = rt.analyze(jobs)
+    check("running iş sayılmaz → 6 terminal iş", a["jobs"] == 6)
+    check("durum dağılımı", a["status"] == {"completed": 2, "needs_info": 1, "needs_human": 1, "failed": 2}, str(a["status"]))
+    check("başarı oranı %33", round(a["success_rate"]) == 33)
+    oc = dict(a["outcomes"])
+    check("nedenler: hazırlık kapısı / review madde / altyapı / push",
+          oc.get("WI detayı yetersiz (hazırlık kapısı)") == 1 and oc.get("Review: kapanmayan madde") == 1
+          and oc.get("Altyapı: sunucu yeniden başlatıldı") == 1 and oc.get("Implement: dosya push edilemedi") == 1, str(oc))
+    check("kırılan adımlar", dict(a["step_failures"]) == {"technical_design_task": 1, "implement_change_task": 1})
+    rv = a["review"]
+    check("review: 3 iş, ilk tur 1, 2 düzeltme turu, 1 needs_human",
+          (rv["jobs"], rv["first_pass"], rv["retries_total"], rv["needs_human"]) == (3, 1, 2, 1), str(rv))
+    check("build: yeşil 1, pipeline yok 1", a["build"] == {"yeşil": 1, "pipeline yok": 1}, str(a["build"]))
+    check("UAT: kabul 1, red 1 (#189 şekli)", a["uat"] == {"kabul": 1, "red": 1}, str(a["uat"]))
+    check("hazırlık skoru ortalaması 5", a["readiness_avg"] == 5)
+    check("toplam maliyet 14.91", round(a["cost_total"], 2) == 14.91)
+    check("teslim edilen SP 7", a["sp_delivered"] == 7)
+    check("SP başına 4.2 dk · $0.90", round(a["min_per_sp"], 1) == 4.2 and round(a["cost_per_sp"], 2) == 0.9, f"{a['min_per_sp']} {a['cost_per_sp']}")
+    check("tekrar koşan WI: 73121 ×3", a["rerun_wis"] == [("73121", 3)])
+    check("en pahalı iş #5 ($4.89)", a["top_cost"][0][1] == 5)
+
+    rules = rt.suggest_rules(a)
+    texts = " ".join(r["text"] for r in rules)
+    check("kural önerileri: review testleri okusun + UAT kanıt + tekrar koşu (3)",
+          len(rules) == 3 and "MEVCUT testlerini" in texts and "UAT uzmanı" in texts and "ikinci kez" in texts, str([r["why"] for r in rules]))
+    check("needs_info oranı %17 < %20 → hazırlık kuralı yok", "kabul kriteri alanı boş" not in texts)
+    cfg = rt.suggest_config(a)
+    check("yapılandırma önerileri: DOD_ENFORCE + restart (2)", len(cfg) == 2 and "CREW_DOD_ENFORCE" in cfg[0] and "restart" in cfg[1], str(cfg))
+    md = rt.render_markdown(a, title="2026_19_Sudo", rules=rules, config=cfg)
+    check("rapor: başlık, özet tablosu, SP, öneri bölümleri, tekrar koşu",
+          "## 🔁 Retrospektif — 2026_19_Sudo" in md and "| İş sayısı | 6 |" in md and "| Teslim edilen SP | 7 |" in md
+          and "### Önerilen kılavuz kuralları" in md and "### Yapılandırma önerileri" in md and "#73121 (3×)" in md)
+    check("rapor: en pahalı işler tablosu", "| #5 | #73121 | failed | $4.89 |" in md)
+
+    co = rt.classify_outcome
+    check("sınıflandırma: DoD / build / bütçe / diğer / tamamlandı",
+          co("needs_human", "DoD gecilemedi: UAT") == "DoD geçilemedi"
+          and co("needs_human", "PR build 2 duzeltme sonrasi hala 'failed'") == "PR build kırmızı / doğrulanamadı"
+          and co("failed", "Butce asildi: $18") == "Bütçe aşımı"
+          and co("failed", "zzz") == "Diğer hata" and co("completed", None) == "Tamamlandı")
+    e = rt.analyze([])
+    check("boş pencere → 0 iş, rapor 'iş yok' der", e["jobs"] == 0 and "iş yok" in rt.render_markdown(e, title="x")
+          and rt.suggest_rules(e) == [] and rt.suggest_config(e) == [])
+
+    try:
+        rep = rt.build_report(title="son 60 gün", since_days=60)
+    except Exception as ex:
+        skip("gerçek DB retrospektifi", f"DB erişilemedi: {type(ex).__name__}")
+        return
+    check("GERÇEK DB: son 60 günde iş var, rapor üretildi",
+          rep["jobs"] >= 1 and "## 🔁 Retrospektif" in rep["markdown"] and isinstance(rep["suggested_rules"], list), str(rep["jobs"]))
+    import json as _j
+    _j.dumps(rep)
+    check("GERÇEK DB: rapor JSON'a serileşir (Decimal/datetime sızmaz)", True)
+
+    src_ui = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("dashboard: 🔁 Retro butonu + modal + tablo render", "openRetro()" in src_ui and 'id="retroModal"' in src_ui
+          and "md-table" in src_ui and "adoptRetroRule" in src_ui)
+    src_srv = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/server.py").read_text()
+    check("server: /api/retro + CREW_RETRO kapısı", '@app.get("/api/retro")' in src_srv and 'CREW_RETRO' in src_srv)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2005,7 +2099,8 @@ def main():
               test_wi_lifecycle_flow_hooks,
               test_estimation,
               test_child_tasks_planning,
-              test_estimate_flow_hooks):
+              test_estimate_flow_hooks,
+              test_retrospective):
         try:
             t()
         except Exception as e:

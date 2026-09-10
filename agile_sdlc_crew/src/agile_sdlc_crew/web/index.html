@@ -70,6 +70,11 @@ header {
 /* ── Main ── */
 .main { display:grid; grid-template-columns:1fr 380px; min-height:calc(100vh - 62px); }
 
+/* ── Markdown tablo (mdToHtml) ── */
+.md-table { border-collapse:collapse; margin:8px 0; font-size:12px; }
+.md-table th, .md-table td { border:1px solid var(--border); padding:4px 8px; text-align:left; vertical-align:top; }
+.md-table th { background:var(--bg-elevated); font-weight:600; }
+
 /* ── Board ── */
 .board-area { padding:20px 24px; overflow-y:auto; }
 .sprint-selector { display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
@@ -391,6 +396,7 @@ header {
       <button class="sm-btn ghost" onclick="loadTeams()" style="padding:4px 7px">&#8635;</button>
       <button class="sm-btn" onclick="openBackfill()" title="Seçili takımın geçmiş done+PR'lı işlerini indeksle" style="padding:4px 10px;font-size:12px">📚 Geçmiş İşleri Tara</button>
       <button class="sm-btn" onclick="openSprintReport()" title="Seçili sprintin işlerini parent'a göre gruplayıp .pptx sprint raporu üret" style="padding:4px 10px;font-size:12px">📊 Sprint Raporu</button>
+      <button class="sm-btn" onclick="openRetro()" title="Seçili sprintin (ya da son N günün) pipeline işlerinden retrospektif: nerede takıldı, kalite kapıları, SP başına süre/maliyet, önerilen kılavuz kuralları" style="padding:4px 10px;font-size:12px">🔁 Retro</button>
     </div>
     <div class="sprint-summary" id="summary" style="display:none"></div>
     <div id="kanban"><div class="board-empty">Takım ve sprint seçerek board'u görüntüleyin.</div></div>
@@ -767,7 +773,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
 function mdToHtml(text){
   if(!text)return '';
   const lines=text.split('\n');
-  let html='',inPre=false,inList=false;
+  let html='',inPre=false,inList=false,inTable=false,tableHead=false;
   for(let i=0;i<lines.length;i++){
     let l=lines[i];
     if(l.startsWith('```')){
@@ -776,6 +782,16 @@ function mdToHtml(text){
       continue;
     }
     if(inPre){html+=esc(l)+'\n';continue;}
+    // | pipe tablo | (retro raporu, DoD tablosu)
+    if(l.trim().startsWith('|')){
+      if(inList){html+='</ul>';inList=false;}
+      const cells=l.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>c.trim());
+      if(cells.length&&cells.every(c=>/^:?-{3,}:?$/.test(c)))continue;
+      if(!inTable){html+='<table class="md-table">';inTable=true;tableHead=true;}
+      const tag=tableHead?'th':'td';tableHead=false;
+      html+='<tr>'+cells.map(c=>`<${tag}>${inlineMd(esc(c))}</${tag}>`).join('')+'</tr>';
+      continue;
+    }else if(inTable){html+='</table>';inTable=false;}
     if(l.startsWith('### ')){if(inList){html+='</ul>';inList=false;}html+=`<h3>${esc(l.slice(4))}</h3>`;continue;}
     if(l.startsWith('## ')){if(inList){html+='</ul>';inList=false;}html+=`<h2>${esc(l.slice(3))}</h2>`;continue;}
     if(l.startsWith('# ')){if(inList){html+='</ul>';inList=false;}html+=`<h1>${esc(l.slice(2))}</h1>`;continue;}
@@ -788,6 +804,7 @@ function mdToHtml(text){
   }
   if(inPre)html+='</pre>';
   if(inList)html+='</ul>';
+  if(inTable)html+='</table>';
   return html;
 }
 function inlineMd(s){
@@ -2555,6 +2572,60 @@ async function pollSprintReport(){
 // sayfa açılışında devam eden üretim varsa butonu 'üretiliyor' göster (kullanıcı popup'ı açmasa da)
 document.addEventListener('DOMContentLoaded',()=>{ if(srGetActive())setTimeout(()=>{const b=document.querySelector('[onclick="openSprintReport()"]'); if(b)b.textContent='📊 Rapor üretiliyor…';},300); });
 
+</script>
+
+<!-- Retro Modal (Scrum faz 3) -->
+<div id="retroModal" style="display:none;position:fixed;inset:0;z-index:280;background:rgba(0,0,0,0.78);backdrop-filter:blur(4px);" onclick="if(event.target===this)closeRetro()">
+  <div style="position:absolute;top:6%;left:50%;transform:translateX(-50%);width:min(860px,94vw);max-height:88vh;background:var(--bg-card);border-radius:16px;border:1px solid var(--border);display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,0.5)">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border);gap:12px">
+      <div style="display:flex;gap:10px;align-items:center;flex:1">
+        <span style="font-size:18px">🔁</span>
+        <h2 style="font-size:16px;font-weight:700">Retrospektif</h2>
+        <select id="retroScope" class="sprint-select" onchange="loadRetro()" style="margin-left:12px"></select>
+      </div>
+      <button onclick="closeRetro()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div id="retroBody" style="padding:14px 20px;overflow:auto;font-size:13px;line-height:1.55"></div>
+  </div>
+</div>
+<script>
+function openRetro(){
+  const sel=document.getElementById('sprintSel'); const iter=(sel||{}).value||'';
+  const sc=document.getElementById('retroScope');
+  sc.innerHTML=(iter?`<option value="sprint">Sprint: ${esc((sel.selectedOptions[0]||{}).text||iter)}</option>`:'')
+    +'<option value="7">Son 7 gün</option><option value="14">Son 14 gün</option><option value="30">Son 30 gün</option><option value="90">Son 90 gün</option>';
+  sc.value=iter?'sprint':'14';
+  document.getElementById('retroModal').style.display='flex';
+  loadRetro();
+}
+function closeRetro(){document.getElementById('retroModal').style.display='none';}
+async function loadRetro(){
+  const sc=document.getElementById('retroScope').value;
+  const iter=(document.getElementById('sprintSel')||{}).value||'';
+  const body=document.getElementById('retroBody');
+  body.innerHTML='<div style="color:var(--text-dim)">Hesaplanıyor…</div>';
+  const q=sc==='sprint'?('iteration_path='+encodeURIComponent(iter)):('days='+encodeURIComponent(sc));
+  try{
+    const r=await fetch('/api/retro?'+q+'&t='+Date.now()); const d=await r.json();
+    if(d.error){body.innerHTML='<div style="color:var(--danger)">'+esc(d.error)+'</div>';return;}
+    let html=mdToHtml(d.markdown||'');
+    window._retroRules=d.suggested_rules||[];
+    if(window._retroRules.length){
+      html+='<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:10px;font-size:12px"><b>Kılavuza ekle</b> — eklenen kural her işin kickoff toplantısında ekibe gösterilir (mevcut kurallar: LLM ayarları → Kickoff kılavuzu).</div>';
+      window._retroRules.forEach((r,i)=>{html+=`<div style="display:flex;gap:10px;align-items:flex-start;margin-top:8px;font-size:12px"><button class="sm-btn" style="padding:3px 9px;font-size:11px;flex-shrink:0" onclick="adoptRetroRule(this,${i})">＋ Ekle</button><div>${esc(r.text)}<div style="color:var(--text-dim);margin-top:2px">Neden: ${esc(r.why)}</div></div></div>`;});
+    }
+    body.innerHTML=html;
+  }catch(e){body.innerHTML='Hata: '+esc(String(e));}
+}
+async function adoptRetroRule(btn,i){
+  const r=(window._retroRules||[])[i]; if(!r)return;
+  btn.disabled=true;
+  try{
+    const res=await fetch('/api/kickoff-guidance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:r.text,source_wi:'retro'})});
+    btn.textContent=res.ok?'✓ Eklendi':'Hata';
+    if(!res.ok)btn.disabled=false;
+  }catch(e){btn.textContent='Hata';btn.disabled=false;}
+}
 </script>
 
 <!-- Backfill Modal -->

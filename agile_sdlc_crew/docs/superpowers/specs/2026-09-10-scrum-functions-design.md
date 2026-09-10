@@ -1,6 +1,6 @@
-# Scrum İşlevleri — Tasarım (program + Faz 1–2 ayrıntısı)
+# Scrum İşlevleri — Tasarım (program + Faz 1–3 ayrıntısı)
 
-**Tarih:** 2026-09-10 · **Durum:** Faz 1 PR #8 · Faz 2 uygulanıyor · **Kaynak karar:** kullanıcı,
+**Tarih:** 2026-09-10 · **Durum:** Faz 1 PR #8 · Faz 2 PR #9 · Faz 3 uygulanıyor · **Kaynak karar:** kullanıcı,
 "agile metodolojinin tüm fonksiyonlarını sisteme eklemeliyiz" → boşluk analizi →
 "önerine göre ilerle".
 
@@ -18,7 +18,7 @@ böler ve Faz 1'i uygulanabilir ayrıntıda tasarlar.
 |---|---|---|
 | **1** | **WI yaşam döngüsü + DoD** — durum geçişleri, isteğe bağlı atama, deterministik DoD listesi | Board pipeline'ı yansıtır; DoD tablosu tamamlanma yorumunda; UAT REJECTED artık görünür |
 | **2** | **Tahminleme + alt iş kaydı** — BA `estimate` + yapısal sinyaller → Fibonacci SP (yalnızca yükselir); parent tipi WI için plan → child Task | `jobs.estimate_sp`, tamamlanma yorumunda tahmin/gerçekleşen; WI'da SP (boşsa); child Task'lar board'da |
-| 3 | Retrospektif — sprint sonu öğrenme raporu (review red nedenleri, build kırılmaları, needs_info, maliyet, süre) → kickoff kılavuz kurallarına besleme | Sprint kapanışında `.md`/`.pptx` + önerilen kurallar |
+| **3** | **Retrospektif** — sprint / son N gün için deterministik öğrenme raporu (neden sınıfları, kırılan adımlar, review/build/UAT kapıları, SP başına dk/$) → eşik tabanlı kılavuz-kuralı önerileri, insan onayıyla kickoff kılavuzuna | `GET /api/retro`, dashboard 🔁 Retro modalı, "＋ Ekle" ile kural |
 | 4 | Sprint Planning + Daily — velocity tabanlı seçim, bağımlılık sırası, günlük Telegram/WI özeti | Board'dan "sprint'i kuyrukla"; 09:00 günlük özet |
 | 5 | İş tipine göre akış + PO ajanı — Bug (reproduce → fix → regresyon testi), Spike (kodsuz araştırma), PO değer/öncelik kararı | Tip bazlı router; PO çıktısı kickoff'a girdi |
 
@@ -147,3 +147,15 @@ Takım SP'yi **Task** seviyesinde ve **`Custom.StoryPoints`** alanında tutuyor 
 - Task tipi WI'a child açmak; child'lara SP dağıtmak (takım child SP'yi elle giriyor).
 - Kickoff "Open Tasks / Stories" serbest metninden WI üretmek (LLM metninden board kaydı → gürültü riski).
 - Tahmini WI yorumu olarak yazmak (tamamlanma yorumundaki satır yeter; ayrı yorum gürültü).
+
+## Faz 3 — Retrospektif (2026-09-10)
+
+**Kaynak:** yalnızca MySQL (`jobs`, `job_steps`); LLM yok. **Pencere:** dashboard'da seçili sprint (iteration path → `get_iteration_work_items` → o WI'ların işleri) ya da son 7/14/30/90 gün. kickoff-only ve dry-run işler dışarıda.
+
+**Analiz (`retrospective.analyze`):** durum dağılımı ve başarı oranı; `classify_outcome` ile Türkçe neden sınıfları (hazırlık kapısı, review kapanmayan madde, PR build, DoD, altyapı restart, push edilemedi, bütçe, plan üretilemedi…); kırılan adımlar; review ilk-tur onay / toplam düzeltme turu / needs_human / RED; PR build yeşil-kırmızı-pipeline yok-atlandı; UAT kabul/red (`parse_uat`); needs_info ortalama hazırlık skoru; toplam ve iş başına maliyet/süre; teslim edilen SP, SP başına dk ve $ (`jobs.estimate_sp`, Faz 2); tekrar koşan WI'lar; en pahalı 5 iş.
+
+**Öneriler:** `suggest_rules` veriye bağlı eşiklerle kickoff-kılavuzu kuralı üretir (KN-40); `suggest_config` yapılandırma önerileri (`CREW_DOD_ENFORCE`, restart disiplini, zarf). Kurallar dashboard'da "＋ Ekle" ile `POST /api/kickoff-guidance` (`source_wi=retro`) — insan onayı şart.
+
+**Yüzey:** `GET /api/retro?days=N | iteration_path=…` → `{markdown, summary, suggested_rules, config_suggestions}`; board'da 🔁 Retro modalı (kapsam seçici, markdown render, kural ekleme). `mdToHtml` pipe tabloyu öğrendi (retro ve DoD tabloları için). Knob: `CREW_RETRO` (açık; salt okunur).
+
+**Yapılmayanlar:** LLM anlatı özeti (isteğe bağlı sonraki adım), raporu WI/Teams'e göndermek, otomatik kural ekleme.
