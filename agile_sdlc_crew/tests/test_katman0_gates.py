@@ -2406,6 +2406,106 @@ def test_pr_review_contribution():
           "reviewWi(" in src_ui and "'Code Review'" in src_ui and "İNCELEME" in src_ui and "confirm(`#${id}" in src_ui)
 
 
+
+# ── 39. Backlog refinement — Definition of Ready skoru, sorgu, eylemler, sınırlar ─
+
+def test_backlog_refinement():
+    print("\n[39] Backlog refinement — DoR skoru, WIQL, SP önerisi, yorum/etiket, soru parse, knob'lar")
+    from datetime import datetime, timezone, timedelta
+    from agile_sdlc_crew import backlog_refinement as br
+
+    now = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    wiql = br.backlog_wiql(area_path="Boards\\Team's Area", states=["Backlog", "To Do"])
+    check("WIQL: durum + tip filtresi, area UNDER, tek tırnak kaçışı",
+          "[System.State] IN ('Backlog', 'To Do')" in wiql and "UNDER 'Boards\\Team''s Area'" in wiql
+          and "'User Story'" in wiql and "IterationPath" not in wiql, wiql)
+    wiql2 = br.backlog_wiql(area_path="X", iteration_path="P\\S1", states=["New"])
+    check("WIQL: sprint kapsamında iteration filtresi, area yok", "[System.IterationPath] = 'P\\S1'" in wiql2 and "AreaPath" not in wiql2)
+    check("AC sayısı: madde imi/numara/Given sayılır, düz metin satır", br.count_criteria("<ul><li>a</li><li>b</li></ul>") == 2
+          and br.count_criteria("1. x<br>2. y<br>3. z") == 3 and br.count_criteria("Given a\nWhen b\nThen c") == 3 and br.count_criteria("") == 0)
+
+    def item(**kw):
+        base = {"id": 1, "title": "Kargo etiketinde alıcı telefonu maskelensin", "type": "Task", "state": "Backlog",
+                "priority": 2, "sp": 3, "assignedTo": "", "tags": "", "description": "<p>" + "Açıklama metni. " * 10 + "</p>",
+                "acceptance": "<ul><li>AC1 maskeli</li><li>AC2 log yok</li></ul>", "repro": "",
+                "created": (now - timedelta(days=3)).isoformat(), "iterationPath": "", "areaPath": "", "parent_id": 10, "url": ""}
+        base.update(kw); return base
+    ok = br.assess(item(), now=now)
+    check("tam iş: skor 100, hazır, eksik yok, SP önerisi yok", ok["score"] == 100 and ok["ready"] and not ok["gaps"] and ok["suggest_sp"] is None, str(ok["gaps"]))
+    r = br.assess(item(acceptance="", sp=None, parent_id=None), now=now)
+    codes = [g["code"] for g in r["gaps"]]
+    check("Task: AC yok −25, SP yok −10, ebeveyn yok −10 → 55, eksik", codes == ["no_ac", "no_sp", "no_parent"] and r["score"] == 55 and not r["ready"], f"{codes} {r['score']}")
+    check("SP yoksa yapısal öneri (AC yok → 2)", r["suggest_sp"] == 2, str(r["suggest_sp"]))
+    desc_head = "<p>Proje özeti uzun uzun anlatılıyor burada, servisler ve akış.</p><p>Kabul Kriterleri:</p><ul><li>Soru kaydedilir</li><li>Cevap 5 sn içinde döner</li></ul>"
+    r = br.assess(item(acceptance="", description=desc_head), now=now)
+    check("AC alanı yok (bu org'da alan yok) ama açıklamada 'Kabul Kriterleri' başlığı → eksik yok, 2 AC",
+          not r["gaps"] and r["n_ac"] == 2 and r["ac_source"] == "explicit", str(r["gaps"]))
+    desc_impl = "<p>" + "Proje özeti cümlesi. " * 6 + "</p><ul><li>QuestionCreationService</li><li>RuleEngineService</li></ul>"
+    r = br.assess(item(acceptance="", description=desc_impl), now=now)
+    check("AC başlığı yok ama maddeler var → 'açık değil' −10 (pipeline gibi açıklamadan çıkarılır)",
+          [g["code"] for g in r["gaps"]] == ["ac_implicit"] and r["score"] == 90 and r["ready"], str(r["gaps"]))
+    r = br.assess(item(type="Bug", acceptance="", repro=""), now=now)
+    check("Bug: AC yerine repro aranır", [g["code"] for g in r["gaps"]] == ["no_repro"])
+    r = br.assess(item(type="Bug", acceptance="", repro="<ol><li>Aç</li><li>Tıkla</li></ol>"), now=now)
+    check("Bug: repro varsa eksik yok", not r["gaps"])
+    r = br.assess(item(title="[Spike] Redis TTL araştırması", type="Task", acceptance="", description="<p>" + "Redis TTL davranışı nasıl? " * 6 + "</p>", sp=None), now=now)
+    check("Spike: AC aranmaz, soru var; SP önerisi yok", "no_ac" not in [g["code"] for g in r["gaps"]] and r["kind"] == "spike" and r["suggest_sp"] is None, str(r["gaps"]))
+    r = br.assess(item(description="", sp=13, priority=None, title="Kısa", created=(now - timedelta(days=45)).isoformat()), now=now)
+    codes = [g["code"] for g in r["gaps"]]
+    check("açıklama yok −30, SP>8 −10, öncelik −5, başlık −5, bayat −5 → 45",
+          codes == ["no_description", "too_big", "no_priority", "short_title", "stale"] and r["score"] == 45, f"{codes} {r['score']}")
+    r = br.assess(item(description="<p>Kısa bir açıklama burada.</p>"), now=now, min_desc_chars=100)
+    check("kısa açıklama (20 ≤ n < eşik) −15", [g["code"] for g in r["gaps"]] == ["short_description"] and r["score"] == 85)
+    check("eşik parametrik: 85 ≥ 70 hazır, 85 < 90 eksik", br.assess(item(description="<p>Kısa bir açıklama burada.</p>"), now=now)["ready"]
+          and not br.assess(item(description="<p>Kısa bir açıklama burada.</p>"), now=now, min_score=90)["ready"])
+    check("etiket tespiti büyük/küçük harf duyarsız", br.assess(item(tags="flo; Needs-Refinement"), now=now)["tagged"])
+
+    rows = [br.assess(item(), now=now), br.assess(item(id=2, acceptance="", sp=None), now=now)]
+    s = br.summarize(rows)
+    check("özet: toplam/hazır/eksik/SP'siz/eksik sayaçları", s["total"] == 2 and s["ready"] == 1 and s["not_ready"] == 1 and s["sp_missing"] == 1
+          and s["gap_counts"] == {"no_ac": 1, "no_sp": 1} and s["sp_suggested"] == 2, str(s))
+    md = br.gaps_comment_markdown(rows[1])
+    check("yorum: skor, eksikler, SP önerisi, Tempo imzası", "Hazırlık skoru:** 65/100" in md and "- Kabul kriteri yok" in md
+          and "SP önerisi:** 2" in md and md.rstrip().endswith("*Tempo — Backlog Refinement*"), md)
+    from agile_sdlc_crew.branding import is_bot_comment
+    check("yorum imzası bot yorumu olarak tanınır", is_bot_comment(md))
+
+    class _C:
+        def __init__(self): self.ops = None; self.tags = "flo; Needs-Refinement; ops"
+        def get_work_item(self, wid): return {"id": wid, "fields": {"System.Tags": self.tags}}
+        def update_work_item(self, wid, ops): self.ops = ops; return {}
+    c = _C()
+    check("etiket kaldır: diğerleri korunur", br.set_tag(c, 5, add=False) == "flo; ops" and c.ops[0]["path"] == "/fields/System.Tags")
+    c.tags = "flo"
+    check("etiket ekle: mevcut korunur, tekrar eklenmez", br.set_tag(c, 5, add=True) == "flo; needs-refinement" and br.set_tag(_C(), 5, add=True) == "flo; Needs-Refinement; ops")
+    check("SP yaz: WI'da tahmin varsa dokunmaz", br.write_suggested_sp(c, {"id": 5, "sp": 3, "suggest_sp": 2}) == "")
+
+    q = br.parse_questions('bla ```json\n{"summary":"Eksik","questions":[{"question":"Hangi dil?","why":"AC"},"düz soru"],"draft_acceptance_criteria":["AC olmalı"]}\n```')
+    check("soru parse: JSON bloğu, düz string soruya çevrilir", q["summary"] == "Eksik" and len(q["questions"]) == 2
+          and q["questions"][1] == {"question": "düz soru", "why": ""} and q["draft_acceptance_criteria"] == ["AC olmalı"])
+    check("soru parse: JSON yoksa None", br.parse_questions("serbest metin") is None)
+    qmd = br.questions_comment_markdown(rows[1], q)
+    check("soru yorumu: S1/AC1 numaralı, imzalı", "S1. Hangi dil?" in qmd and "AC1. AC olmalı" in qmd and "*Tempo — Backlog Refinement*" in qmd)
+
+    from agile_sdlc_crew import pipeline_config as _pc
+    check("knob'lar: refinement açık, eşik 70, bayat 30, WRITE ve LLM KAPALI",
+          _pc.get("CREW_BACKLOG_REFINEMENT") is True and _pc.get("CREW_REFINEMENT_MIN_SCORE") == 70
+          and _pc.get("CREW_REFINEMENT_STALE_DAYS") == 30 and _pc.get("CREW_REFINEMENT_WRITE") is False and _pc.get("CREW_REFINEMENT_LLM") is False)
+    root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
+    src = (root / "backlog_refinement.py").read_text()
+    check("sınırlar: durum/kuyruk yok — set_work_item_state, create_job, push_file geçmez",
+          "set_work_item_state" not in src and "create_job" not in src and "push_file" not in src)
+    tasks = (root / "config/tasks.yaml").read_text()
+    check("tasks.yaml: refinement_questions_task (BA, JSON, Türkçe)", "refinement_questions_task:" in tasks and "agent: business_analyst" in tasks.split("refinement_questions_task:")[1])
+    check("crew: create_refinement_crew tool'suz", "def create_refinement_crew" in (root / "crew.py").read_text())
+    srv = (root / "server.py").read_text()
+    check("server: GET /api/refinement + POST action, knob kapıları, job_kind=refinement",
+          '@app.get("/api/refinement")' in srv and '@app.post("/api/refinement/action")' in srv
+          and "CREW_REFINEMENT_WRITE" in srv and "CREW_REFINEMENT_LLM" in srv and 'job_kind="refinement"' in srv)
+    ui = (root / "web/index.html").read_text()
+    check("dashboard: Refinement sekmesi, kapsam seçimi, eylem onayı", "showTab('refine')" in ui and 'id="rfScope"' in ui
+          and "rfAct(" in ui and "confirm(`#${id} için İş Analisti" in ui)
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2436,7 +2536,8 @@ def main():
               test_daily_summary,
               test_type_flow,
               test_type_flow_hooks,
-              test_pr_review_contribution):
+              test_pr_review_contribution,
+              test_backlog_refinement):
         try:
             t()
         except Exception as e:

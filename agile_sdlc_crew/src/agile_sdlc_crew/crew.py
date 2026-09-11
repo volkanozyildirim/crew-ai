@@ -1228,6 +1228,19 @@ class AgileSDLCCrew:
         t1 = self._task("po_assessment_task", po)
         return Crew(agents=[po], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
 
+    def create_refinement_crew(self) -> Crew:
+        """Faz 6: backlog refinement — İş Analisti tool'suz, tek çağrı: netleştirme
+        soruları + taslak AC (`refinement_questions_task`). Repo gezmez, tahmin yapmaz."""
+        ba = Agent(
+            config=self._agent_config_with_knowledge("business_analyst", "requirements_analysis"),
+            llm=self.llm_analyst,
+            verbose=True,
+            max_iter=3,
+            tools=[],
+        )
+        t1 = self._task("refinement_questions_task", ba)
+        return Crew(agents=[ba], tasks=[t1], process=Process.sequential, verbose=True, memory=False)
+
     def create_scrum_review_crew(self) -> Crew:
         """Scrum Master: review a step's output, output APPROVE or IMPROVE."""
         sm = self.scrum_master()

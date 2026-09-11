@@ -1867,6 +1867,108 @@ async def pr_review(req: PRReviewRequest):
                         status_code=202)
 
 
+# ── Backlog refinement (Scrum faz 6; backlog_refinement.py) ──
+
+class RefinementActionRequest(BaseModel):
+    work_item_id: str
+    action: str  # comment | sp | tag_add | tag_remove | questions
+
+
+def _refinement_knobs() -> dict:
+    from agile_sdlc_crew import pipeline_config as _pc
+    return {
+        "enabled": bool(_pc.get("CREW_BACKLOG_REFINEMENT")),
+        "min_score": int(_pc.get("CREW_REFINEMENT_MIN_SCORE")),
+        "stale_days": int(_pc.get("CREW_REFINEMENT_STALE_DAYS")),
+        "min_desc_chars": int(_pc.get("CREW_MIN_WI_CONTENT_CHARS")),
+        "write_enabled": bool(_pc.get("CREW_REFINEMENT_WRITE")),
+        "llm_enabled": bool(_pc.get("CREW_REFINEMENT_LLM")),
+    }
+
+
+@app.get("/api/refinement")
+async def backlog_refinement(team: str = "", iteration_path: str = "", scope: str = "backlog"):
+    """Definition of Ready raporu: Proposed durumdaki User Story/Bug/Task işleri
+    deterministik kontrolden geçer (LLM yok). scope=sprint → iteration_path;
+    scope=backlog → takımın alan yolu altındaki tüm Proposed işler. Salt okunur."""
+    from agile_sdlc_crew import backlog_refinement as _br
+    k = _refinement_knobs()
+    if not k["enabled"]:
+        return JSONResponse({"error": "Backlog refinement kapali (CREW_BACKLOG_REFINEMENT)"}, status_code=409)
+    scope = "sprint" if scope == "sprint" else "backlog"
+    if scope == "sprint" and not iteration_path.strip():
+        return JSONResponse({"error": "Sprint kapsamı için iteration_path gerekli"}, status_code=400)
+    if scope == "backlog" and not team.strip():
+        return JSONResponse({"error": "Backlog kapsamı için team gerekli"}, status_code=400)
+    try:
+        client = AzureDevOpsClient()
+        rep = await asyncio.to_thread(
+            _br.build_report, client, team=team.strip(), iteration_path=iteration_path.strip(), scope=scope,
+            min_score=k["min_score"], stale_days=k["stale_days"], min_desc_chars=k["min_desc_chars"],
+            base_url=_wi_base_url(),
+        )
+        rep["write_enabled"] = k["write_enabled"]
+        rep["llm_enabled"] = k["llm_enabled"]
+        return JSONResponse(rep)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/refinement/action")
+async def backlog_refinement_action(req: RefinementActionRequest):
+    """Tek WI için insan tetikli eylem. comment/sp/tag_* → CREW_REFINEMENT_WRITE;
+    questions → CREW_REFINEMENT_LLM (İş Analisti tek çağrı, job_kind='refinement';
+    WRITE de açıksa yorum olarak yazılır). Durum değişmez, kuyruğa alınmaz."""
+    from agile_sdlc_crew import backlog_refinement as _br
+    k = _refinement_knobs()
+    if not k["enabled"]:
+        return JSONResponse({"error": "Backlog refinement kapali (CREW_BACKLOG_REFINEMENT)"}, status_code=409)
+    wi = (req.work_item_id or "").strip()
+    if not _re.match(r"^\d{1,10}$", wi):
+        return JSONResponse({"error": "Gecersiz Work Item ID"}, status_code=400)
+    act = (req.action or "").strip()
+    if act not in ("comment", "sp", "tag_add", "tag_remove", "questions"):
+        return JSONResponse({"error": "Gecersiz eylem"}, status_code=400)
+    if act != "questions" and not k["write_enabled"]:
+        return JSONResponse({"error": "Yazma eylemleri kapali (CREW_REFINEMENT_WRITE)"}, status_code=409)
+    if act == "questions" and not k["llm_enabled"]:
+        return JSONResponse({"error": "Soru uretimi kapali (CREW_REFINEMENT_LLM)"}, status_code=409)
+    try:
+        client = AzureDevOpsClient()
+        common = dict(min_score=k["min_score"], stale_days=k["stale_days"], min_desc_chars=k["min_desc_chars"])
+        if act == "questions":
+            job_id = db.create_job(wi, use_hal=False)
+            db.update_job(job_id, job_kind="refinement")
+            db.start_job(job_id)
+            try:
+                res = await asyncio.to_thread(_br.generate_questions, client, int(wi), job_id=job_id,
+                                              post=k["write_enabled"], **common)
+                db.complete_job(job_id)
+            except Exception:
+                db.fail_job(job_id, "refinement soru uretimi basarisiz")
+                raise
+            res["job_id"] = job_id
+            res.pop("raw", None)
+            return JSONResponse(res)
+        row, _item = await asyncio.to_thread(_br.assess_single, client, int(wi), base_url=_wi_base_url(), **common)
+        if act == "comment":
+            await asyncio.to_thread(_br.post_gaps_comment, client, row)
+            return JSONResponse({"ok": True, "action": act, "row": row, "message": "Eksikler WI yorumu olarak yazıldı"})
+        if act == "sp":
+            field = await asyncio.to_thread(_br.write_suggested_sp, client, row)
+            if not field:
+                return JSONResponse({"ok": False, "action": act, "row": row,
+                                     "message": "SP yazılmadı: WI'da tahmin var ya da öneri yok"})
+            row["sp"] = float(row["suggest_sp"])
+            return JSONResponse({"ok": True, "action": act, "row": row, "message": f"SP {row['suggest_sp']} yazıldı ({field})"})
+        tags = await asyncio.to_thread(_br.set_tag, client, int(wi), _br.NEEDS_TAG, act == "tag_add")
+        row["tagged"] = act == "tag_add"
+        return JSONResponse({"ok": True, "action": act, "row": row, "tags": tags,
+                             "message": ("Etiket eklendi: " if act == "tag_add" else "Etiket kaldırıldı: ") + _br.NEEDS_TAG})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ── Static files ──
 if WEB_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR), html=False), name="static")
