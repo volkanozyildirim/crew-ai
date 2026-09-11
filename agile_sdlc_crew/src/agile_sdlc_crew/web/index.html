@@ -356,6 +356,22 @@ header {
 .log-time { color:var(--faint); flex:none; }
 .log-msg { color:var(--text); }
 
+/* ── Backlog refinement ── */
+#rfFilter .chip.on { background:var(--text); color:var(--bg); }
+.rf { width:100%; border-collapse:collapse; font-size:12.5px; }
+.rf th { text-align:left; font-size:11px; font-weight:600; color:var(--text-dim); padding:6px 14px; border-top:1px solid var(--border); white-space:nowrap; }
+.rf td { padding:9px 14px; border-top:1px solid var(--border); vertical-align:top; }
+.rf td.num, .rf th.num { text-align:right; font-family:'Geist Mono',Menlo,monospace; white-space:nowrap; }
+.rf .ttl { font-weight:500; line-height:1.35; }
+.rf .sub { font-size:11px; color:var(--text-dim); margin-top:2px; }
+.rf .gaps { display:flex; flex-wrap:wrap; gap:4px; }
+.rf .score { display:inline-flex; align-items:center; gap:6px; font-family:'Geist Mono',Menlo,monospace; }
+.rf .score i { display:inline-block; width:44px; height:6px; border-radius:999px; background:var(--border); overflow:hidden; position:relative; }
+.rf .score i b { position:absolute; left:0; top:0; bottom:0; }
+.rf .acts { display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end; }
+.rf .acts .sm-btn { height:24px; padding:0 8px; font-size:11px; }
+.rf tr.qrow td { background:var(--bg-elevated); font-size:12.5px; line-height:1.5; }
+.rf .q { margin:4px 0; }
 /* ── Retro sekmesi (eski modal id'si korunur, inline panel) ── */
 #retroModal { display:none; padding:20px 24px; }
 #retroModal .retro-box { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; display:flex; flex-direction:column; max-width:1100px; }
@@ -377,6 +393,7 @@ header {
     <button class="tab" data-tab="board" onclick="showTab('board')">Board</button>
     <button class="tab" data-tab="jobs" onclick="showTab('jobs')">İşler <span class="badge" id="tabJobsBadge"></span></button>
     <button class="tab" data-tab="retro" onclick="showTab('retro')">Retro</button>
+    <button class="tab" data-tab="refine" onclick="showTab('refine')">Refinement <span class="badge" id="tabRefineBadge"></span></button>
   </nav>
   <div class="header-right">
     <div class="crumb">
@@ -474,6 +491,31 @@ header {
 
   <!-- Retro -->
   <section class="pane" id="paneRetro"></section>
+
+  <!-- Backlog refinement (Scrum faz 6) -->
+  <section class="pane" id="paneRefine">
+    <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
+      <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:10px">
+          <span style="font-size:15px;font-weight:600">Backlog Refinement</span>
+          <select class="sprint-select" id="rfScope" onchange="loadRefinement()" style="height:28px;font-weight:500">
+            <option value="sprint">Seçili sprint</option>
+            <option value="backlog">Tüm backlog</option>
+          </select>
+          <span style="display:flex;gap:4px" id="rfFilter">
+            <button class="chip dim" data-f="all" onclick="rfSetFilter('all')" style="border:none;cursor:pointer;font-family:inherit">Tümü</button>
+            <button class="chip dim" data-f="gap" onclick="rfSetFilter('gap')" style="border:none;cursor:pointer;font-family:inherit">Eksik</button>
+            <button class="chip dim" data-f="ready" onclick="rfSetFilter('ready')" style="border:none;cursor:pointer;font-family:inherit">Hazır</button>
+          </span>
+          <span style="flex:1"></span>
+          <span id="rfStatus" style="font-size:12px;color:var(--text-dim)"></span>
+          <button class="sm-btn ghost small" onclick="loadRefinement()">Yenile</button>
+        </div>
+        <div id="rfSummary" style="display:none;gap:10px;padding:0 14px 12px;flex-wrap:wrap"></div>
+        <div id="rfBody"><div class="board-empty">Takım ve sprint seçin.</div></div>
+      </div>
+    </div>
+  </section>
 </div>
 
 <!-- Step Detail Modal -->
@@ -932,6 +974,85 @@ function showTab(name){
   if(pane)pane.classList.add('on');
   try{localStorage.setItem('tempo_tab',name)}catch(e){}
   if(name==='retro'&&typeof openRetro==='function')openRetro();
+  if(name==='refine'&&typeof loadRefinement==='function'&&!_rf)loadRefinement();
+}
+// ── Backlog refinement (Scrum faz 6) ──
+let _rf=null,_rfFilter='all',_rfQ={};
+function rfSetFilter(f){_rfFilter=f;renderRefinement()}
+async function loadRefinement(){
+  const scope=(document.getElementById('rfScope')||{}).value||'sprint';
+  const iter=(document.getElementById('sprintSel')||{}).value||'', team=(document.getElementById('teamSel')||{}).value||'';
+  const body=document.getElementById('rfBody'),st=document.getElementById('rfStatus');
+  if((scope==='sprint'&&!iter)||(scope==='backlog'&&!team)){body.innerHTML='<div class="board-empty">Takım ve sprint seçin.</div>';return}
+  st.textContent='Hesaplanıyor…';
+  try{
+    const r=await fetch('/api/refinement?scope='+scope+'&team='+encodeURIComponent(team)+'&iteration_path='+encodeURIComponent(iter)+'&t='+Date.now());
+    const d=await r.json();
+    if(d.error){body.innerHTML='<div class="board-empty" style="color:var(--danger)">'+esc(d.error)+'</div>';st.textContent='';return}
+    _rf=d;_rfQ={};st.textContent=(d.scope==='sprint'?'Sprint':'Backlog')+' · '+d.rows.length+' iş · eşik '+d.min_score;
+    renderRefinement();renderRefineBadge();
+  }catch(e){body.innerHTML='Hata: '+esc(String(e));st.textContent=''}
+}
+function renderRefineBadge(){
+  const b=document.getElementById('tabRefineBadge');if(!b)return;
+  b.textContent=_rf&&_rf.summary&&_rf.summary.not_ready?String(_rf.summary.not_ready):'';
+  const ov=document.getElementById('ovRefine');
+  if(ov&&_rf)ov.innerHTML=`<div class="prog"><span>Refinement</span><div class="bar"><div style="width:${_rf.summary.total?Math.round(_rf.summary.ready/_rf.summary.total*100):0}%;background:var(--warning)"></div></div><span class="mono" style="width:auto">${_rf.summary.ready}/${_rf.summary.total} hazır</span></div>`;
+}
+function rfScoreHtml(r){const c=r.ready?'var(--success)':r.score>=40?'var(--warning)':'var(--danger)';return `<span class="score"><i><b style="width:${r.score}%;background:${c}"></b></i>${r.score}</span>`}
+function renderRefinement(){
+  const d=_rf,body=document.getElementById('rfBody'),sum=document.getElementById('rfSummary');if(!d)return;
+  document.querySelectorAll('#rfFilter .chip').forEach(b=>b.classList.toggle('on',b.dataset.f===_rfFilter));
+  const s=d.summary;
+  const topGaps=Object.entries(s.gap_counts||{}).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([k,v])=>`<span class="chip dim">${esc(s.gap_labels[k]||k)} · ${v}</span>`).join('');
+  sum.style.display='flex';
+  sum.innerHTML=`<div class="stat"><div class="stat-val">${s.total}</div><div class="stat-lbl">iş</div></div>
+    <div class="stat"><div class="stat-val" style="color:var(--success)">${s.ready}</div><div class="stat-lbl">hazır</div></div>
+    <div class="stat"><div class="stat-val" style="color:var(--warning)">${s.not_ready}</div><div class="stat-lbl">eksik</div></div>
+    <div class="stat"><div class="stat-val">${fmtSP(s.sp_total)}<small> SP</small></div><div class="stat-lbl">${s.sp_missing} işin SP'si yok${s.sp_suggested?' · öneri +'+s.sp_suggested:''}</div></div>
+    <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;align-self:center">${topGaps}</div>
+    ${!d.write_enabled?'<span class="chip dim" style="align-self:center" title="CREW_REFINEMENT_WRITE kapalı: yorum/SP/etiket butonları pasif">yazma kapalı</span>':''}${!d.llm_enabled?'<span class="chip dim" style="align-self:center" title="CREW_REFINEMENT_LLM kapalı">soru üretimi kapalı</span>':''}`;
+  const rows=d.rows.filter(r=>_rfFilter==='all'||(_rfFilter==='ready'?r.ready:!r.ready));
+  if(!rows.length){body.innerHTML='<div class="board-empty">Bu filtrede iş yok.</div>';return}
+  const tm={Bug:{i:'B',c:'bug'},'User Story':{i:'U',c:'userstory'},Task:{i:'T',c:'task'},'Product Backlog Item':{i:'P',c:'userstory'},Improvement:{i:'I',c:'feature'}};
+  const wd=d.write_enabled?'':'disabled title="CREW_REFINEMENT_WRITE kapalı"',ld=d.llm_enabled?'':'disabled title="CREW_REFINEMENT_LLM kapalı"';
+  body.innerHTML=`<table class="rf"><tr><th>WI</th><th>İş</th><th>Durum</th><th class="num">Önc.</th><th class="num">SP</th><th>Skor</th><th>Eksikler</th><th style="text-align:right">Eylem</th></tr>`+rows.map(r=>{
+    const t=tm[r.type]||{i:'?',c:'task'};
+    const gaps=r.gaps.length?r.gaps.map(g=>`<span class="chip ${g.penalty>=25?'fail':g.penalty>=10?'human':'dim'}" title="−${g.penalty}">${esc(g.label)}</span>`).join(''):'<span class="chip ok">Hazır</span>';
+    const sp=r.sp?fmtSP(Number(r.sp)):(r.suggest_sp?`<span style="color:var(--text-dim)" title="Öneri (yapısal): ${esc(r.suggest_sp_why||'')}">~${r.suggest_sp}</span>`:'—');
+    const q=_rfQ[r.id];
+    return `<tr data-id="${r.id}">
+      <td class="num"><a href="${esc(r.url||'#')}" target="_blank" style="text-decoration:none">${r.id}</a></td>
+      <td><div class="ttl" style="display:flex;gap:7px;align-items:flex-start"><span class="wi-type-icon ${t.c}" style="margin-top:2px">${t.i}</span><span>${esc(r.title)}</span></div><div class="sub">${esc(r.type)}${r.assignedTo?' · '+esc(r.assignedTo):''}${r.parent_id?' · ebeveyn #'+r.parent_id:''}${r.age_days!=null?' · '+r.age_days+' gün':''}${r.tagged?' · <span class="chip human" style="font-size:10px">needs-refinement</span>':''}</div></td>
+      <td><span class="chip dim">${esc(r.state)}</span></td>
+      <td class="num">${r.priority??'—'}</td><td class="num">${sp}</td><td>${rfScoreHtml(r)}</td>
+      <td><div class="gaps">${gaps}</div></td>
+      <td><div class="acts">
+        <button class="sm-btn ghost" ${ld} onclick="rfAct(${r.id},'questions',this)" title="İş Analisti: netleştirme soruları + taslak AC">Soru üret</button>
+        <button class="sm-btn ghost" ${wd} onclick="rfAct(${r.id},'comment',this)" title="Eksikleri WI yorumu olarak yaz">Yorum yaz</button>
+        ${(!r.sp&&r.suggest_sp)?`<button class="sm-btn ghost" ${wd} onclick="rfAct(${r.id},'sp',this)" title="Önerilen SP'yi boş alana yaz">SP ${r.suggest_sp} yaz</button>`:''}
+        <button class="sm-btn ghost" ${wd} onclick="rfAct(${r.id},'${r.tagged?'tag_remove':'tag_add'}',this)" title="needs-refinement etiketi">${r.tagged?'Etiketi kaldır':'Etiketle'}</button>
+      </div></td></tr>`+(q?`<tr class="qrow"><td></td><td colspan="7">${q.summary?`<div class="q"><b>Özet:</b> ${esc(q.summary)}</div>`:''}${(q.questions||[]).map((x,i)=>`<div class="q">S${i+1}. ${esc(x.question||'')}${x.why?` <span style="color:var(--text-dim)">— ${esc(x.why)}</span>`:''}</div>`).join('')}${(q.draft_acceptance_criteria||[]).length?`<div class="q" style="margin-top:6px"><b>Taslak AC:</b></div>`+q.draft_acceptance_criteria.map((a,i)=>`<div class="q">AC${i+1}. ${esc(a)}</div>`).join(''):''}${q.posted?'<div class="q" style="color:var(--success)">WI yorumu olarak yazıldı.</div>':''}${q.job_id?`<div class="q sub">iş #${q.job_id}</div>`:''}</td></tr>`:'');
+  }).join('')+'</table>';
+}
+async function rfAct(id,action,btn){
+  const labels={questions:'Sorular üretiliyor…',comment:'Yazılıyor…',sp:'Yazılıyor…',tag_add:'Etiketleniyor…',tag_remove:'Kaldırılıyor…'};
+  if(action==='questions'&&!confirm(`#${id} için İş Analisti netleştirme soruları üretecek (tek LLM çağrısı, ~$0.1). Devam?`))return;
+  const old=btn.textContent;btn.disabled=true;btn.textContent=labels[action]||'…';
+  try{
+    const r=await fetch('/api/refinement/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:String(id),action})});
+    const d=await r.json();
+    if(d.error){alert('Hata: '+d.error);return}
+    if(action==='questions'){_rfQ[id]=d;}
+    if(d.row&&_rf){const i=_rf.rows.findIndex(x=>x.id===id);if(i>=0)_rf.rows[i]={..._rf.rows[i],...d.row};_rf.summary=rfSummarize(_rf.rows)}
+    if(d.message)document.getElementById('rfStatus').textContent=d.message;
+    renderRefinement();renderRefineBadge();
+  }catch(e){alert('Hata: '+e)}
+  finally{btn.disabled=false;btn.textContent=old}
+}
+function rfSummarize(rows){
+  const s={..._rf.summary,total:rows.length,ready:rows.filter(r=>r.ready).length,not_ready:rows.filter(r=>!r.ready).length,sp_total:rows.reduce((a,r)=>a+Number(r.sp||0),0),sp_missing:rows.filter(r=>!r.sp).length,gap_counts:{}};
+  rows.forEach(r=>r.gaps.forEach(g=>{s.gap_counts[g.code]=(s.gap_counts[g.code]||0)+1}));return s;
 }
 // Tema: sistem → açık → koyu
 function applyTheme(){
@@ -1096,7 +1217,10 @@ function renderOvSprint(){
       <div class="prog"><span>Tamamlandı</span><div class="bar"><div style="width:${Math.round(done/n*100)}%;background:var(--success)"></div></div><span class="mono">${done}</span></div>
       <div class="prog"><span>Pipeline</span><div class="bar"><div style="width:${Math.round(withJob.length/n*100)}%"></div></div><span class="mono">${withJob.length}</span></div>
       <div class="prog"><span>PR açık</span><div class="bar"><div style="width:${Math.round(pr/n*100)}%;background:var(--run)"></div></div><span class="mono">${pr}</span></div>
+      <div id="ovRefine"></div>
     </div>`;
+  renderRefineBadge();
+  if(!_rf||_rf.iteration_path!==p){const sc=document.getElementById('rfScope');if(sc)sc.value='sprint';loadRefinement()}
 }
 document.addEventListener('DOMContentLoaded',()=>{
   // Retro eski modal id'siyle inline panele taşınır (test/regresyon: openRetro + #retroModal korunur)

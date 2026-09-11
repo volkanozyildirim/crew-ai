@@ -1059,3 +1059,45 @@ po_assessment_task:
     - decision HOLD only for unclear value, contradictory scope or a blocking
       dependency; explain it in rationale.
   agent: product_owner
+
+refinement_questions_task:
+  description: >
+    TASK: Backlog refinement for work item #{work_item_id}. The item is in the
+    backlog (not started). A deterministic Definition-of-Ready check already
+    found the gaps listed below. As Business Analyst, help the product owner
+    make this item ready for a sprint WITHOUT inventing requirements.
+
+    1. Write the clarifying questions a developer would have to ask before
+       implementing this. Prefer questions that resolve the listed gaps and
+       any contradiction between description and acceptance criteria.
+       Each question is concrete and answerable by the work item owner.
+    2. Draft acceptance criteria ONLY from what the description already
+       states or clearly implies. Mark uncertain ones with "(doğrulanmalı)".
+       If the description is empty, return an empty list.
+    3. One-sentence summary of what is missing overall.
+
+    Do not propose technical solutions. Do not estimate. Do not repeat the
+    gap list verbatim.
+
+    WORK ITEM:
+    {wi_context}
+  expected_output: >
+    Return ONLY valid JSON. NO free text outside the JSON.
+
+    ```json
+    {
+      "summary": "...",
+      "questions": [
+        {"question": "...", "why": "..."}
+      ],
+      "draft_acceptance_criteria": ["...", "..."]
+    }
+    ```
+
+    RULES:
+    - summary, question, why and draft_acceptance_criteria in TURKISH (they
+      are posted to the work item as a comment).
+    - 3 to 6 questions; why is ONE short clause naming the gap it closes.
+    - draft_acceptance_criteria: testable sentences ("… olduğunda … olmalı"),
+      at most 8; empty list if nothing can be derived.
+  agent: business_analyst
