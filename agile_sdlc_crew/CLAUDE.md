@@ -109,6 +109,12 @@ In `tools/`. The Azure DevOps tools share `AzureDevOpsClient` (`azure_devops_bas
 
 `pr_build_gate` (env `CREW_PR_BUILD_GATE`) runs between `step8_code_review` and step9/step10. Azure DevOps runs a `<repo>-test` build on every PR (`refs/pull/{id}/merge`); the gate polls `AzureDevOpsClient.get_pr_build`, and if tests fail loops the developer to fix them (source + test files) until green (`CREW_PR_BUILD_MAX_RETRIES`). No pipeline on the repo → gate is skipped. `CREW_REQUIRE_TESTS` makes the architect include test files in the plan and the reviewer reject PRs missing test coverage.
 
+### Branding & dashboard shell
+
+Product name is **Tempo** (tagline "Sprintin ritmi"); constants live in `branding.py` (`PRODUCT_NAME`, `PRODUCT_SIGNATURE`, `is_bot_comment`). WI/PR comment signatures are `*Tempo …*`; `is_bot_comment` still recognises the legacy `Agile SDLC Crew` marker so old bot comments are filtered correctly. The Python package name `agile_sdlc_crew`, step keys and `CREW_*` env vars are unchanged.
+
+`web/index.html` (single file) is organised as top-bar tabs — **Genel bakış** (running job hero with the 13-step strip from `/api/jobs/{id}`, human-waiting list, sprint card, team from `status.json` agents, activity log), **Board** (kanban; WI cards carry a 13-segment pipeline strip via `wiPipelineBadge`), **İşler** (grouped job list + step timeline detail, side by side), **Retro** (the old `#retroModal` markup moved inline into `#paneRetro`; `openRetro()` and the id are kept because `tests/test_katman0_gates.py` greps for them). Theme tokens are CSS variables on `:root` (light) with dark under `prefers-color-scheme` and `data-theme`; `toggleTheme()` cycles system → light → dark (`localStorage.tempo_theme`). Keep the old variable names (`--bg-card`, `--accent-light`, `--text-dim`, …) — the settings/kickoff modals depend on them. Fonts: Geist + Geist Mono; no emoji in shell chrome (inline SVG icons).
+
 ## Notes for editing
 
 - All step keys (e.g. `kickoff_meeting_task`) are stable identifiers used in `tasks.yaml`, `STEP_DEFINITIONS`, `dashboard.TASK_DISPLAY_NAMES`, MySQL, and `status.json` — renaming one means renaming everywhere.

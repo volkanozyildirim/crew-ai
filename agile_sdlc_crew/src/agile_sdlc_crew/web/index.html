@@ -3,76 +3,182 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agile SDLC Crew</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<title>Tempo</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230e7c86'/%3E%3Ccircle cx='32' cy='32' r='20' fill='none' stroke='%23fff' stroke-width='7'/%3E%3Cpath d='M32 32 L45 19' stroke='%23fff' stroke-width='9' stroke-linecap='round'/%3E%3C/svg%3E">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+/* ── Tempo tema token'ları · açık varsayılan, koyu sistem/elle ── */
 :root {
-  --bg: #0f1117;
-  --bg-card: #1a1d27;
-  --bg-elevated: #242736;
-  --border: #2e3247;
-  --accent: #6c5ce7;
-  --accent-light: #a29bfe;
-  --success: #00b894;
-  --warning: #fdcb6e;
-  --danger: #e17055;
-  --text: #f0f0f5;
-  --text-dim: #8b8fa3;
+  color-scheme: light;
+  --bg: #f6f5f2; --bg-card: #ffffff; --bg-elevated: #f1efeb; --border: #e4e1db;
+  --text: #1b1a17; --text-dim: #6f6c66; --faint: #a39f97;
+  --accent: #0e7c86; --accent-light: #0b6670; --accent-soft: #dff1f2; --accent-ink: #ffffff;
+  --run: #2f6fed; --run-soft: #e3ebfd; --success: #1f9d6a; --ok-soft: #e2f4ec;
+  --danger: #d64545; --fail-soft: #fbe3e2; --warning: #e08a1e; --human-soft: #fdefd8; --info: #2f6fed;
+  --shadow: 0 8px 24px rgba(27,26,23,0.10);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  color-scheme: dark;
+  --bg: #111110; --bg-card: #1a1917; --bg-elevated: #22211e; --border: #2c2a26;
+  --text: #ecebe6; --text-dim: #9c988f; --faint: #6a675f;
+  --accent: #3fb7bf; --accent-light: #6fd0d6; --accent-soft: #12383b; --accent-ink: #0b1c1e;
+  --run: #6f9bff; --run-soft: #1c2a4d; --success: #3fbf8a; --ok-soft: #14352a;
+  --danger: #f07070; --fail-soft: #3f1f1f; --warning: #f0a53a; --human-soft: #3d2a10; --info: #6f9bff;
+  --shadow: 0 8px 24px rgba(0,0,0,0.45);
+}}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111110; --bg-card: #1a1917; --bg-elevated: #22211e; --border: #2c2a26;
+  --text: #ecebe6; --text-dim: #9c988f; --faint: #6a675f;
+  --accent: #3fb7bf; --accent-light: #6fd0d6; --accent-soft: #12383b; --accent-ink: #0b1c1e;
+  --run: #6f9bff; --run-soft: #1c2a4d; --success: #3fbf8a; --ok-soft: #14352a;
+  --danger: #f07070; --fail-soft: #3f1f1f; --warning: #f0a53a; --human-soft: #3d2a10; --info: #6f9bff;
+  --shadow: 0 8px 24px rgba(0,0,0,0.45);
 }
 * { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:'Inter',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; overflow-x:hidden; }
+body { font-family:'Geist','Helvetica Neue',Arial,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; overflow-x:hidden; -webkit-font-smoothing:antialiased; }
+a { color:var(--accent-light); }
+.mono { font-family:'Geist Mono',Menlo,monospace; }
+.ico { width:16px; height:16px; flex:none; }
+.hidden { display:none !important; }
 
-/* ── Header ── */
+/* ── Üst bar ── */
 header {
-  background: linear-gradient(135deg, #1a1d27 0%, #242736 100%);
-  border-bottom: 1px solid var(--border);
-  padding: 14px 24px;
-  display: flex; align-items: center; justify-content: space-between;
+  min-height:56px; background:var(--bg-card); border-bottom:1px solid var(--border);
+  padding:0 16px; display:flex; align-items:center; gap:12px; position:sticky; top:0; z-index:50;
 }
-.logo { display:flex; align-items:center; gap:12px; }
-.logo-icon {
-  width:38px; height:38px; border-radius:10px;
-  background: linear-gradient(135deg, var(--accent), #e17055);
-  display:flex; align-items:center; justify-content:center;
-  font-size:18px; font-weight:800; color:white;
+.logo { display:flex; align-items:center; gap:9px; flex:none; }
+.logo-icon { width:28px; height:28px; display:flex; }
+.logo-icon svg { width:28px; height:28px; }
+.logo h1 { display:inline-flex; align-items:center; font-size:19px; font-weight:700; letter-spacing:-0.03em; line-height:1; }
+.logo h1 svg { margin-left:1px; margin-top:3px; }
+.tabs { display:flex; gap:2px; margin-left:6px; }
+.tab {
+  height:32px; padding:0 12px; border-radius:8px; display:inline-flex; align-items:center; gap:6px;
+  font-size:13px; font-weight:500; color:var(--text-dim); background:none; border:none; cursor:pointer; font-family:inherit; white-space:nowrap;
 }
-.logo h1 { font-size:17px; font-weight:700; letter-spacing:-0.5px; }
-.header-right { display:flex; align-items:center; gap:14px; }
-.header-time { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--text-dim); }
-.trigger-bar { display:flex; align-items:center; gap:8px; }
+.tab:hover { color:var(--text); }
+.tab.on { background:var(--bg-elevated); color:var(--text); font-weight:600; }
+.tab .badge { font-size:11px; font-weight:600; padding:0 6px; border-radius:999px; background:var(--human-soft); color:var(--warning); line-height:16px; }
+.tab .badge:empty { display:none; }
+.header-right { display:flex; align-items:center; gap:8px; margin-left:auto; flex-wrap:nowrap; justify-content:flex-end; min-width:0; }
+.header-time { font-family:'Geist Mono',Menlo,monospace; font-size:12px; color:var(--text-dim); }
+@media(max-width:1700px){ .header-time{display:none} }
+@media(max-width:1400px){ .sprint-info{display:none} .tabs{margin-left:0} .tab{padding:0 9px} }
+.crumb { display:flex; align-items:center; gap:4px; }
+.sprint-select {
+  background:var(--bg-card); border:1px solid var(--border); color:var(--text);
+  height:32px; padding:0 30px 0 10px; border-radius:8px; font-size:13px; font-weight:600; font-family:inherit; outline:none; cursor:pointer;
+  max-width:190px; appearance:none; -webkit-appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%236f6c66' stroke-width='1.5'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat:no-repeat; background-position:right 8px center; background-size:14px;
+}
+.sprint-select:focus { border-color:var(--accent); }
+.sprint-info { font-size:12px; color:var(--text-dim); white-space:nowrap; }
+.sprint-badge { display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; margin-left:4px; }
+.sprint-badge.current { background:var(--ok-soft); color:var(--success); }
+.sprint-badge.future { background:var(--accent-soft); color:var(--accent-light); }
+.sprint-badge.past { background:var(--bg-elevated); color:var(--text-dim); }
+.trigger-bar {
+  display:flex; align-items:center; gap:6px; height:34px; padding:0 4px 0 10px;
+  border:1px solid var(--border); border-radius:9px; background:var(--bg);
+}
 .trigger-input {
-  background:var(--bg); border:1px solid var(--border); color:var(--text);
-  padding:8px 14px; border-radius:8px; font-size:14px; font-family:'Inter',sans-serif;
-  width:140px; outline:none; transition:border-color 0.2s;
+  background:none; border:none; color:var(--text); padding:0 4px; font-size:13px; font-family:inherit; width:118px; outline:none;
 }
-.trigger-input:focus { border-color:var(--accent); }
-.trigger-input::placeholder { color:var(--text-dim); }
-.hal-toggle { font-size:13px; color:var(--text-dim); display:flex; align-items:center; gap:5px; cursor:pointer; }
-.hal-toggle input { accent-color:var(--accent); width:16px; height:16px; }
+.trigger-input::placeholder { color:var(--faint); }
+.hal-toggle { font-size:12px; color:var(--text-dim); display:flex; align-items:center; gap:5px; cursor:pointer; white-space:nowrap; }
+.hal-toggle input { accent-color:var(--accent); width:14px; height:14px; }
 .sm-btn {
-  background:var(--accent); color:white; border:none;
-  padding:8px 20px; border-radius:8px; font-size:13px;
-  font-weight:600; cursor:pointer; font-family:'Inter',sans-serif; transition:all 0.2s;
+  display:inline-flex; align-items:center; gap:6px; height:30px; padding:0 12px; border-radius:8px;
+  background:var(--accent); color:var(--accent-ink); border:1px solid var(--accent);
+  font-size:12.5px; font-weight:600; cursor:pointer; font-family:inherit; transition:filter .15s, border-color .15s; white-space:nowrap;
 }
-.sm-btn:hover { background:var(--accent-light); }
+.sm-btn:hover { filter:brightness(1.08); }
 .sm-btn:disabled { opacity:0.5; cursor:not-allowed; }
-.sm-btn.ghost {
-  background:var(--bg-elevated); color:var(--text-dim); border:1px solid var(--border);
-}
-.sm-btn.ghost:hover { border-color:var(--accent); color:var(--accent); }
-.sm-btn.settings-btn {
-  background:linear-gradient(135deg, var(--accent), var(--accent-light));
-  color:white; padding:8px 16px; display:inline-flex; align-items:center; gap:6px;
-  box-shadow:0 2px 8px rgba(108,92,231,0.3);
-}
-.sm-btn.settings-btn:hover { box-shadow:0 4px 12px rgba(108,92,231,0.5); transform:translateY(-1px); }
+.sm-btn.ghost { background:var(--bg-card); color:var(--text); border:1px solid var(--border); }
+.sm-btn.ghost:hover { border-color:var(--accent); color:var(--accent-light); filter:none; }
+.sm-btn.icon { width:30px; padding:0; justify-content:center; color:var(--text-dim); }
+.sm-btn.settings-btn { background:var(--bg-card); color:var(--text-dim); border:1px solid var(--border); width:30px; padding:0; justify-content:center; }
+.sm-btn.settings-btn:hover { color:var(--accent-light); border-color:var(--accent); }
+.sm-btn.small { height:26px; padding:0 10px; font-size:12px; }
 
-/* ── Main ── */
-.main { display:grid; grid-template-columns:1fr 380px; min-height:calc(100vh - 62px); }
+/* ── Sekmeler / ana alan ── */
+.main { min-height:calc(100vh - 56px); }
+.pane { display:none; }
+.pane.on { display:block; }
+.card { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; }
+.card-head { display:flex; align-items:center; gap:10px; padding:12px 14px; }
+.h { font-size:11px; font-weight:600; color:var(--text-dim); letter-spacing:.05em; text-transform:uppercase; }
+.chip { font-size:11px; padding:2px 8px; border-radius:999px; font-weight:600; white-space:nowrap; display:inline-flex; align-items:center; gap:5px; }
+.chip.run { background:var(--run-soft); color:var(--run); }
+.chip.ok { background:var(--ok-soft); color:var(--success); }
+.chip.fail { background:var(--fail-soft); color:var(--danger); }
+.chip.human { background:var(--human-soft); color:var(--warning); }
+.chip.dim { background:var(--bg-elevated); color:var(--text-dim); }
+.chip.acc { background:var(--accent-soft); color:var(--accent-light); }
+.sd { width:8px; height:8px; border-radius:50%; flex:none; }
+.sd.running,.sd.run { background:var(--run); box-shadow:0 0 0 3px var(--run-soft); animation:pulse 1.2s infinite; }
+.sd.completed { background:var(--success); }
+.sd.failed { background:var(--danger); }
+.sd.needs_human,.sd.needs_info,.sd.queued { background:var(--warning); }
+.sd.idle { border:1.5px solid var(--border); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.45} }
+
+/* ── Genel bakış ── */
+#paneOverview { display:none; grid-template-columns:minmax(0,1fr) 300px; }
+#paneOverview.on { display:grid; }
+.ov-left { padding:20px 24px; display:flex; flex-direction:column; gap:16px; min-width:0; }
+.ov-right { background:var(--bg-card); border-left:1px solid var(--border); padding:16px 18px; display:flex; flex-direction:column; gap:12px; min-height:calc(100vh - 56px); }
+.hero { padding:18px 22px; }
+.hero-head { display:flex; align-items:center; gap:12px; margin-bottom:14px; flex-wrap:wrap; }
+.hero-title { font-size:16px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:1; }
+.hero-meta { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim); white-space:nowrap; }
+.steps { display:flex; align-items:flex-start; }
+.step { display:flex; flex-direction:column; align-items:center; gap:8px; flex:1; min-width:0; cursor:default; }
+.step.clickable { cursor:pointer; }
+.dot { width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex:none; font-size:10px; font-weight:600; }
+.dot.completed { background:var(--success); color:#fff; }
+.dot.running { background:var(--run); color:#fff; box-shadow:0 0 0 5px var(--run-soft); }
+.dot.failed { background:var(--danger); color:#fff; }
+.dot.pending { background:var(--bg-card); border:1.5px solid var(--border); color:var(--faint); }
+.dot.skipped { background:var(--bg-elevated); border:1.5px dashed var(--border); color:var(--faint); }
+.lbl { font-size:11px; color:var(--text-dim); text-align:center; line-height:1.25; max-width:74px; }
+.lbl.running { color:var(--text); font-weight:600; }
+.hero-now { display:flex; align-items:center; gap:14px; margin-top:16px; padding:12px 14px; background:var(--bg-elevated); border-radius:10px; }
+.hero-now .av { background:var(--run); }
+.hero-now-title { font-size:13px; font-weight:600; }
+.hero-now-log { font-family:'Geist Mono',Menlo,monospace; font-size:11.5px; color:var(--text-dim); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cost { width:220px; flex:none; }
+.cost-row { display:flex; justify-content:space-between; font-size:11px; color:var(--text-dim); margin-bottom:4px; }
+.bar { height:6px; border-radius:999px; background:var(--border); overflow:hidden; }
+.bar > div { height:100%; background:var(--accent); }
+.ov-grid { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:16px; }
+.row { display:flex; align-items:center; gap:10px; padding:10px 14px; border-top:1px solid var(--border); font-size:12.5px; cursor:pointer; }
+.row:hover { background:var(--bg-elevated); }
+.row.hot { background:var(--human-soft); }
+.row .jt { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.row .jt.b { font-weight:500; }
+.stat { padding:10px 12px; border-radius:10px; background:var(--bg-elevated); }
+.stat-val { font-size:22px; font-weight:700; }
+.stat-val small { font-size:12px; font-weight:500; color:var(--text-dim); }
+.stat-lbl { font-size:11px; color:var(--text-dim); }
+.prog { display:flex; align-items:center; gap:10px; font-size:12px; }
+.prog span:first-child { width:84px; color:var(--text-dim); }
+.prog .bar { flex:1; height:8px; }
+.prog .mono { width:24px; text-align:right; }
+.agent { display:flex; align-items:center; gap:10px; padding:9px 0; border-top:1px solid var(--border); font-size:12.5px; }
+.agent:first-child { border-top:none; }
+.av { width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; color:#fff; flex:none; background:var(--faint); }
+.agent .nm { font-weight:600; }
+.agent .cur { font-size:11px; color:var(--text-dim); }
+.agent.working .av { background:var(--run); }
+.agent.working .cur { color:var(--run); }
+.agent.done .av { background:var(--success); }
 
 /* ── PR inceleme katkısı butonu (board kartı) ── */
-.wi-review-btn { margin-left:auto; background:rgba(108,92,231,0.15); border:1px solid var(--border); color:var(--accent-light); border-radius:6px; font-size:11px; padding:1px 6px; cursor:pointer; }
-.wi-review-btn:hover { background:var(--accent); color:#fff; }
+.wi-review-btn { margin-left:auto; background:var(--accent-soft); border:1px solid transparent; color:var(--accent-light); border-radius:6px; font-size:11px; padding:1px 6px; cursor:pointer; display:inline-flex; align-items:center; }
+.wi-review-btn:hover { background:var(--accent); color:var(--accent-ink); }
 
 /* ── Markdown tablo (mdToHtml) ── */
 .md-table { border-collapse:collapse; margin:8px 0; font-size:12px; }
@@ -80,363 +186,278 @@ header {
 .md-table th { background:var(--bg-elevated); font-weight:600; }
 
 /* ── Board ── */
-.board-area { padding:20px 24px; overflow-y:auto; }
-.sprint-selector { display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
-.sprint-select {
-  background:var(--bg-elevated); border:1px solid var(--border);
-  color:var(--text); padding:8px 14px; border-radius:8px;
-  font-size:13px; font-family:'Inter',sans-serif; outline:none;
-  min-width:240px; cursor:pointer;
-}
-.sprint-select:focus { border-color:var(--accent); }
-.sprint-select option { background:var(--bg-card); }
-.sprint-info { font-size:12px; color:var(--text-dim); }
-.sprint-badge {
-  display:inline-block; font-size:11px; font-weight:600; padding:3px 10px;
-  border-radius:12px; margin-left:6px;
-}
-.sprint-badge.current { background:rgba(0,184,148,0.2); color:var(--success); }
-.sprint-badge.future { background:rgba(108,92,231,0.2); color:var(--accent-light); }
-.sprint-badge.past { background:rgba(139,143,163,0.15); color:var(--text-dim); }
+.board-area { padding:16px 22px 20px; overflow-y:auto; }
+.sprint-selector { display:flex; align-items:center; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
 .sprint-summary { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
-.sprint-stat {
-  background:var(--bg-card); border:1px solid var(--border); border-radius:10px;
-  padding:10px 18px; text-align:center; min-width:70px;
-}
+.sprint-stat { background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:10px 16px; text-align:center; min-width:70px; }
 .sprint-stat-val { font-size:22px; font-weight:700; }
 .sprint-stat-lbl { font-size:10px; color:var(--text-dim); margin-top:2px; }
 .kanban-board { display:grid; gap:12px; min-height:300px; overflow-x:auto; }
-.kanban-column { background:var(--bg-card); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
-.kanban-column-header {
-  padding:12px 14px; border-bottom:1px solid var(--border);
-  display:flex; align-items:center; justify-content:space-between;
-}
-.kanban-column-title { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
-.kanban-column-count { font-size:11px; font-weight:600; background:var(--bg-elevated); padding:3px 9px; border-radius:10px; color:var(--text-dim); }
+.kanban-column { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+.kanban-column-header { padding:12px 14px; display:flex; align-items:center; justify-content:space-between; border-top-width:3px; border-top-style:solid; }
+.kanban-column-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-dim); }
+.kanban-column-count { font-size:11px; font-weight:600; background:var(--bg-elevated); padding:2px 8px; border-radius:10px; color:var(--text-dim); }
 .kanban-column-meta { display:flex; align-items:center; gap:6px; flex-shrink:0; }
-.kanban-column-sp { font-size:11px; font-weight:700; padding:3px 8px; border-radius:10px; background:rgba(108,92,231,0.18); color:var(--accent-light); }
-.kanban-column-body { padding:8px; display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 280px); overflow-y:auto; }
+.kanban-column-sp { font-size:11px; font-weight:700; padding:2px 8px; border-radius:10px; background:var(--accent-soft); color:var(--accent-light); }
+.kanban-column-body { padding:0 10px 10px; display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 250px); overflow-y:auto; }
 
 /* ── WI Card ── */
-.wi-card {
-  background:var(--bg-elevated); border:1px solid var(--border);
-  border-radius:8px; padding:12px; transition:all 0.2s; cursor:default;
-}
-.wi-card:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 4px 12px rgba(0,0,0,0.3); }
+.wi-card { background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:12px 12px 10px; transition:border-color .15s, box-shadow .15s; cursor:default; }
+.wi-card:hover { border-color:var(--accent); box-shadow:var(--shadow); }
 .wi-card-header { display:flex; align-items:center; gap:7px; margin-bottom:6px; }
-.wi-type-icon {
-  width:20px; height:20px; border-radius:4px; flex-shrink:0;
-  display:flex; align-items:center; justify-content:center;
-  font-size:9px; font-weight:700; color:white;
-}
-.wi-type-icon.bug { background:#e17055; }
-.wi-type-icon.userstory { background:#00b894; }
-.wi-type-icon.task { background:#fdcb6e; color:#2d3436; }
-.wi-type-icon.feature { background:#6c5ce7; }
-.wi-type-icon.epic { background:#e84393; }
-.wi-id { font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
-.wi-link { text-decoration:none; transition:color 0.15s; }
+.wi-type-icon { width:16px; height:16px; border-radius:4px; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:800; color:#fff; }
+.wi-type-icon.bug { background:var(--danger); }
+.wi-type-icon.userstory { background:var(--success); }
+.wi-type-icon.task { background:var(--warning); }
+.wi-type-icon.feature { background:var(--accent); color:var(--accent-ink); }
+.wi-type-icon.epic { background:#b45fa8; }
+.wi-id { font-size:11px; color:var(--text-dim); font-family:'Geist Mono',Menlo,monospace; }
+.wi-link { text-decoration:none; color:var(--text-dim); transition:color .15s; }
 .wi-link:hover { color:var(--accent-light); text-decoration:underline; }
-.wi-priority { font-size:10px; margin-left:auto; font-weight:600; }
-/* SP rozeti — kart basliginin sag ucu, priority'den sonra */
-.wi-sp {
-  font-size:10px; font-weight:700; padding:2px 7px; border-radius:9px;
-  background:rgba(108,92,231,0.18); color:var(--accent-light); flex-shrink:0;
-}
-.wi-sp.none { background:none; padding:2px 3px; color:var(--text-dim); font-weight:600; }
-.wi-priority[data-p="1"] { color:#e17055; }
-.wi-priority[data-p="2"] { color:#fdcb6e; }
-.wi-priority[data-p="3"] { color:#74b9ff; }
-.wi-title { font-size:13px; font-weight:500; line-height:1.4; margin-bottom:8px; }
+.wi-priority { font-size:10px; margin-left:auto; font-weight:600; color:var(--text-dim); }
+.wi-sp { font-size:11px; font-weight:700; padding:1px 6px; border-radius:6px; background:var(--bg-elevated); color:var(--text); flex-shrink:0; }
+.wi-sp.none { background:none; padding:1px 3px; color:var(--faint); font-weight:600; }
+.wi-priority[data-p="1"] { color:var(--danger); }
+.wi-priority[data-p="2"] { color:var(--warning); }
+.wi-priority[data-p="3"] { color:var(--run); }
+.wi-title { font-size:13px; font-weight:600; line-height:1.35; margin-bottom:8px; }
 .wi-footer { display:flex; align-items:center; justify-content:space-between; gap:6px; }
-.wi-assignee { font-size:11px; color:var(--text-dim); display:flex; align-items:center; gap:5px; }
-.wi-assignee-dot {
-  width:20px; height:20px; border-radius:50%; background:var(--accent);
-  display:inline-flex; align-items:center; justify-content:center;
-  font-size:8px; font-weight:700; color:white; flex-shrink:0;
-}
+.wi-assignee { font-size:11px; color:var(--text-dim); display:flex; align-items:center; gap:6px; }
+.wi-assignee-dot { width:20px; height:20px; border-radius:50%; background:var(--bg-elevated); display:inline-flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; color:var(--text); flex-shrink:0; }
 .wi-tags { display:flex; flex-wrap:wrap; gap:4px; }
-.wi-tag { font-size:9px; padding:2px 8px; border-radius:4px; background:rgba(108,92,231,0.15); color:var(--accent-light); }
+.wi-tag { font-size:10px; padding:2px 7px; border-radius:999px; background:var(--bg-elevated); color:var(--text-dim); }
 .wi-card.selectable { cursor:pointer; }
-.wi-card.selected { border-color:var(--accent); background:rgba(108,92,231,0.12); }
-.wi-check {
-  width:16px; height:16px; border-radius:4px; border:2px solid var(--border);
-  background:none; cursor:pointer; flex-shrink:0; appearance:none;
-  display:flex; align-items:center; justify-content:center; transition:all 0.15s;
-}
+.wi-card.selected { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+.wi-check { width:16px; height:16px; border-radius:4px; border:1.5px solid var(--border); background:none; cursor:pointer; flex-shrink:0; appearance:none; display:flex; align-items:center; justify-content:center; }
 .wi-check:checked { background:var(--accent); border-color:var(--accent); }
-.wi-check:checked::after { content:'\2713'; color:white; font-size:10px; font-weight:700; }
+.wi-check:checked::after { content:'\2713'; color:var(--accent-ink); font-size:10px; font-weight:700; }
 .board-loading,.board-empty { text-align:center; padding:50px 20px; color:var(--text-dim); font-size:14px; }
 
-/* ── Pipeline badge on WI card ── */
-.wi-pipeline {
-  display:flex; align-items:center; gap:5px; margin-top:6px;
-  padding:5px 8px; border-radius:5px; font-size:10px;
-  background:var(--bg); border:1px solid var(--border);
-}
-.wi-pipeline.running { border-color:var(--accent); background:rgba(108,92,231,0.08); }
-.wi-pipeline.completed { border-color:var(--success); background:rgba(0,184,148,0.08); }
-.wi-pipeline.failed { border-color:var(--danger); background:rgba(225,112,85,0.08); }
-.wi-pipeline.queued { border-color:var(--warning); background:rgba(253,203,110,0.08); }
-.wi-pipeline-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
-.wi-pipeline-dot.running { background:var(--accent); animation:pulse 1s infinite; }
-.wi-pipeline-dot.completed { background:var(--success); }
-.wi-pipeline-dot.failed { background:var(--danger); }
-.wi-pipeline-dot.queued { background:var(--warning); }
-.wi-pipeline-label { color:var(--text-dim); }
-.wi-pipeline-step { color:var(--text); font-weight:500; }
+/* ── Pipeline şeridi (WI kartı) ── */
+.wi-seg { display:flex; gap:2px; height:4px; margin-top:8px; }
+.wi-seg span { flex:1; border-radius:2px; background:var(--border); }
+.wi-seg .d { background:var(--success); } .wi-seg .r { background:var(--run); } .wi-seg .f { background:var(--danger); } .wi-seg .w { background:var(--warning); }
+.wi-pipeline { display:flex; align-items:center; gap:8px; margin-top:8px; font-size:11px; }
+.wi-pipeline-dot { display:none; }
+.wi-pipeline-step { color:var(--text-dim); font-weight:500; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wi-pipeline-pr { margin-left:auto; font-family:'Geist Mono',Menlo,monospace; }
 .wi-pipeline-pr a { color:var(--accent-light); text-decoration:none; font-weight:500; }
 .wi-pipeline-pr a:hover { text-decoration:underline; }
 
-/* ── Floating Action Bar ── */
+/* ── Yüzen toplu-kuyruk barı ── */
 .board-action-bar {
   position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(80px);
-  background:linear-gradient(135deg, #242736, #1a1d27);
-  border:1px solid var(--border);
-  padding:12px 24px; display:flex; align-items:center; gap:16px;
-  z-index:100; opacity:0; transition:all 0.3s; border-radius:12px;
-  box-shadow:0 8px 32px rgba(0,0,0,0.5); min-width:300px;
+  background:var(--bg-card); border:1px solid var(--border); padding:12px 20px; display:flex; align-items:center; gap:16px;
+  z-index:100; opacity:0; transition:all .3s; border-radius:12px; box-shadow:var(--shadow); min-width:300px;
 }
 .board-action-bar.visible { transform:translateX(-50%) translateY(0); opacity:1; }
 .bar-info { font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px; }
-.bar-count { background:var(--accent); color:white; padding:3px 10px; border-radius:10px; font-size:12px; font-weight:700; }
+.bar-count { background:var(--accent); color:var(--accent-ink); padding:2px 9px; border-radius:10px; font-size:12px; font-weight:700; }
 
-/* ── Right Panel ── */
-.right-panel {
-  border-left:1px solid var(--border); background:var(--bg-card);
-  display:flex; flex-direction:column; overflow-y:auto;
-}
-.panel-header {
-  font-size:13px; font-weight:700; padding:14px 18px;
-  border-bottom:1px solid var(--border);
-  display:flex; align-items:center; justify-content:space-between;
-}
-.panel-header .badge {
-  font-size:11px; font-weight:600; padding:3px 10px; border-radius:10px;
-  background:var(--bg-elevated); color:var(--text-dim);
-}
-
-/* ── Job List ── */
-.job-list { padding:8px 12px; }
-.job-item {
-  display:flex; align-items:center; gap:8px;
-  padding:10px 10px; border-radius:8px; font-size:13px;
-  transition:all 0.2s; cursor:pointer; position:relative;
-}
+/* ── İşler: liste + detay ── */
+#paneJobs { display:none; grid-template-columns:400px minmax(0,1fr); min-height:calc(100vh - 56px); }
+#paneJobs.on { display:grid; }
+.right-panel { border-right:1px solid var(--border); background:var(--bg-card); display:flex; flex-direction:column; overflow-y:auto; max-height:calc(100vh - 56px); }
+.panel-header { font-size:13px; font-weight:600; padding:12px 16px; display:flex; align-items:center; gap:8px; }
+.panel-header .badge { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; background:var(--bg-elevated); color:var(--text-dim); }
+.job-list { padding:0 0 12px; }
+.grp { padding:14px 16px 6px; font-size:11px; font-weight:600; color:var(--text-dim); letter-spacing:.05em; text-transform:uppercase; display:flex; align-items:center; gap:6px; }
+.grp .n { color:var(--faint); font-weight:500; }
+.job-item { display:flex; align-items:center; gap:8px; padding:8px 16px 8px 14px; font-size:13px; cursor:pointer; position:relative; border-left:2px solid transparent; }
 .job-item:hover { background:var(--bg-elevated); }
+.job-item.sel { background:var(--accent-soft); border-left-color:var(--accent); }
 .job-item:hover .job-del, .job-item:hover .job-retry { opacity:1; }
-.job-item+.job-item { border-top:1px solid var(--border); }
 .jdot { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
 .jdot.queued { background:var(--warning); }
-.jdot.running { background:var(--accent); animation:pulse 1s infinite; }
+.jdot.running { background:var(--run); animation:pulse 1.2s infinite; }
 .jdot.completed { background:var(--success); }
 .jdot.failed { background:var(--danger); }
-    .jdot.needs_human { background:var(--warning,#f0ad4e); }
-    .jdot.needs_info { background:var(--info,#5bc0de); }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-.jwi { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--accent-light); }
-.jtitle { flex:1; font-size:12px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.jstep { font-size:10px; color:var(--text-dim); background:var(--bg); padding:2px 8px; border-radius:4px; }
-.jmeta { font-size:10px; color:var(--text-dim); }
-.job-del { opacity:0; background:none; border:none; color:var(--danger); cursor:pointer; font-size:16px; padding:0 4px; }
-.job-retry { opacity:0; background:none; border:none; color:var(--accent-light); cursor:pointer; font-size:13px; padding:0 4px; transition:opacity 0.15s; }
+.jdot.needs_human { background:var(--warning); }
+.jdot.needs_info { background:var(--warning); }
+.jwi { font-family:'Geist Mono',Menlo,monospace; font-size:11.5px; color:var(--text-dim); flex:none; }
+.jtitle { flex:1; font-size:12.5px; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.jstep { font-size:11px; color:var(--text-dim); white-space:nowrap; }
+.jmeta { font-size:11px; color:var(--text-dim); white-space:nowrap; }
+.jmeta.chip { font-size:10px; }
+.job-del { opacity:0; background:none; border:none; color:var(--danger); cursor:pointer; font-size:16px; padding:0 4px; line-height:1; }
+.job-retry { opacity:0; background:none; border:none; color:var(--accent-light); cursor:pointer; font-size:13px; padding:0 4px; transition:opacity .15s; display:inline-flex; align-items:center; }
 .job-retry:hover { color:var(--accent); }
 
-/* ── Job Detail (replaces job list when open) ── */
-.job-detail { display:none; flex-direction:column; }
-.job-detail.open { display:flex; }
-.detail-header {
-  display:flex; align-items:center; justify-content:space-between;
-  padding:14px 18px; border-bottom:1px solid var(--border);
-}
-.detail-header h3 { font-size:13px; font-weight:700; }
-.detail-close { background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:13px; font-family:'Inter',sans-serif; }
-.detail-close:hover { color:var(--danger); }
-.detail-meta { padding:10px 18px; display:flex; flex-wrap:wrap; gap:8px; border-bottom:1px solid var(--border); }
-.meta-tag { font-size:11px; background:var(--bg-elevated); padding:4px 10px; border-radius:6px; color:var(--text-dim); }
+/* ── İş detayı ── */
+.job-detail { display:flex; flex-direction:column; min-width:0; }
+.detail-empty { padding:60px 20px; text-align:center; color:var(--text-dim); font-size:13px; }
+.detail-header { display:flex; align-items:center; gap:12px; padding:0 24px; height:56px; border-bottom:1px solid var(--border); background:var(--bg-card); }
+.detail-header h3 { font-size:15px; font-weight:600; display:flex; align-items:center; gap:10px; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; flex:1; }
+.detail-close { display:none; }
+.detail-meta { padding:14px 24px; display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; border-bottom:1px solid var(--border); background:var(--bg-card); }
+.meta-tag { font-size:13px; font-weight:500; display:flex; flex-direction:column; gap:2px; min-width:0; overflow:hidden; }
+.meta-tag .k { font-size:11px; color:var(--text-dim); font-weight:400; }
 .meta-tag a { color:var(--accent-light); text-decoration:none; }
 .meta-tag a:hover { text-decoration:underline; }
-.step-list { padding:8px 18px; overflow-y:auto; flex:1; }
-.step-row {
-  display:flex; align-items:center; gap:8px; padding:8px 0;
-  border-bottom:1px solid var(--border); cursor:pointer;
-}
-.step-row:last-child { border:none; }
-.step-row:hover { opacity:0.85; }
-.si { font-size:13px; width:18px; text-align:center; flex-shrink:0; }
-.si.completed { color:var(--success); }
-.si.running { color:var(--accent); animation:pulse 1s infinite; }
-.si.failed { color:var(--danger); }
-.si.pending,.si.skipped { color:var(--text-dim); }
-.sn { font-size:12px; font-weight:500; flex:1; }
-.sa { font-size:10px; color:var(--text-dim); }
-.sd { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
-.st { font-size:9px; color:var(--text-dim); transition:transform 0.2s; }
-.st.open { transform:rotate(90deg); }
-.step-out { display:none; padding:4px 0 8px 26px; }
-.step-out.open { display:block; }
-.step-out pre {
-  font-family:'JetBrains Mono',monospace; font-size:11px;
-  background:var(--bg); padding:10px; border-radius:6px;
-  max-height:220px; overflow-y:auto; white-space:pre-wrap; word-break:break-all;
-  color:var(--text-dim); line-height:1.5; margin:0;
-}
-.step-out pre.err { color:var(--danger); }
-.step-expand {
-  display:inline-block; margin-top:6px; font-size:10px; color:var(--accent-light);
-  background:rgba(108,92,231,0.12); border:1px solid rgba(108,92,231,0.3);
-  border-radius:4px; padding:2px 10px; cursor:pointer; transition:all 0.15s;
-  font-family:'Inter',sans-serif;
-}
-.step-expand:hover { background:rgba(108,92,231,0.25); }
+.meta-tag.err { grid-column:1 / -1; color:var(--danger); }
+.step-list { padding:22px 24px; }
+.tl { display:grid; grid-template-columns:22px minmax(0,1fr); column-gap:14px; }
+.tl .n { width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; }
+.tl .n.completed { background:var(--ok-soft); color:var(--success); }
+.tl .n.running { background:var(--run-soft); color:var(--run); animation:pulse 1.2s infinite; }
+.tl .n.failed { background:var(--fail-soft); color:var(--danger); }
+.tl .n.pending { border:1.5px solid var(--border); color:var(--faint); }
+.tl .n.skipped { background:var(--bg-elevated); color:var(--faint); }
+.tl .c { padding:0 0 16px; display:flex; flex-direction:column; gap:3px; min-width:0; }
+.tl .c.clk { cursor:pointer; }
+.tl .c.clk:hover .hh { color:var(--accent-light); }
+.tl .hh { display:flex; align-items:center; gap:10px; font-size:13.5px; font-weight:600; min-height:22px; flex-wrap:wrap; }
+.tl .m { font-size:12px; color:var(--text-dim); display:flex; gap:12px; flex-wrap:wrap; }
+.tag { font-size:11px; font-weight:500; padding:2px 7px; border-radius:6px; background:var(--bg-elevated); color:var(--text-dim); }
+.by-agent { padding:0 24px 24px; }
+.by-agent table { border-collapse:collapse; font-size:12px; width:100%; }
+.by-agent td, .by-agent th { padding:5px 8px; border-bottom:1px solid var(--border); text-align:left; }
+.by-agent th { color:var(--text-dim); font-weight:600; font-size:11px; }
+.by-agent td.num { text-align:right; font-family:'Geist Mono',Menlo,monospace; }
 
-/* ── Step Detail Modal ── */
-#stepModal {
-  display:none; position:fixed; inset:0; z-index:1000;
-  background:rgba(0,0,0,0.7); backdrop-filter:blur(4px);
-  align-items:center; justify-content:center;
-}
+/* ── Adım detay modali ── */
+#stepModal { display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.55); backdrop-filter:blur(4px); align-items:center; justify-content:center; }
 #stepModal.open { display:flex; }
-.modal-box {
-  background:var(--bg-card); border:1px solid var(--border);
-  border-radius:14px; width:min(900px,96vw); max-height:90vh;
-  display:flex; flex-direction:column; box-shadow:0 24px 64px rgba(0,0,0,0.6);
-}
-.modal-header {
-  padding:16px 20px; border-bottom:1px solid var(--border);
-  display:flex; align-items:center; gap:10px;
-}
+.modal-box { background:var(--bg-card); border:1px solid var(--border); border-radius:14px; width:min(900px,96vw); max-height:90vh; display:flex; flex-direction:column; box-shadow:var(--shadow); }
+.modal-header { padding:16px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
 .modal-header h2 { font-size:15px; font-weight:700; flex:1; }
 .modal-meta { display:flex; gap:8px; align-items:center; }
-.modal-badge {
-  font-size:10px; font-weight:600; padding:3px 10px; border-radius:10px;
-}
-.modal-close {
-  background:none; border:none; color:var(--text-dim); cursor:pointer;
-  font-size:18px; line-height:1; padding:0 4px; transition:color 0.15s;
-}
+.modal-badge { font-size:10px; font-weight:600; padding:3px 10px; border-radius:10px; }
+.modal-close { background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:18px; line-height:1; padding:0 4px; }
 .modal-close:hover { color:var(--danger); }
-.modal-body {
-  flex:1; overflow-y:auto; padding:20px;
-}
-/* Markdown-like rendering inside modal */
-.modal-md h1,.modal-md h2,.modal-md h3 {
-  color:var(--text); font-weight:700; margin:16px 0 8px;
-  padding-bottom:4px; border-bottom:1px solid var(--border);
-}
-.modal-md h1 { font-size:16px; }
-.modal-md h2 { font-size:14px; }
-.modal-md h3 { font-size:13px; border:none; color:var(--accent-light); }
+.modal-body { flex:1; overflow-y:auto; padding:20px; }
+.modal-md h1,.modal-md h2,.modal-md h3 { color:var(--text); font-weight:700; margin:16px 0 8px; padding-bottom:4px; border-bottom:1px solid var(--border); }
+.modal-md h1 { font-size:16px; } .modal-md h2 { font-size:14px; } .modal-md h3 { font-size:13px; border:none; color:var(--accent-light); }
 .modal-md p { font-size:13px; color:var(--text-dim); line-height:1.7; margin:6px 0; }
 .modal-md ul,.modal-md ol { padding-left:20px; margin:6px 0; }
 .modal-md li { font-size:13px; color:var(--text-dim); line-height:1.7; margin:2px 0; }
-.modal-md code {
-  font-family:'JetBrains Mono',monospace; font-size:11px;
-  background:var(--bg); padding:1px 5px; border-radius:3px; color:var(--accent-light);
-}
-.modal-md pre {
-  font-family:'JetBrains Mono',monospace; font-size:11px;
-  background:var(--bg); padding:12px; border-radius:6px;
-  white-space:pre-wrap; word-break:break-all; color:var(--text-dim);
-  line-height:1.5; margin:8px 0; border:1px solid var(--border);
-  overflow-x:auto;
-}
+.modal-md code { font-family:'Geist Mono',Menlo,monospace; font-size:11px; background:var(--bg-elevated); padding:1px 5px; border-radius:3px; color:var(--accent-light); }
+.modal-md pre { font-family:'Geist Mono',Menlo,monospace; font-size:11px; background:var(--bg-elevated); padding:12px; border-radius:6px; white-space:pre-wrap; word-break:break-all; color:var(--text-dim); line-height:1.5; margin:8px 0; border:1px solid var(--border); overflow-x:auto; }
 .modal-md strong { color:var(--text); font-weight:600; }
 .modal-md hr { border:none; border-top:1px solid var(--border); margin:12px 0; }
-.modal-md.err { color:var(--danger); font-family:'JetBrains Mono',monospace; font-size:12px; white-space:pre-wrap; }
+.modal-md.err { color:var(--danger); font-family:'Geist Mono',Menlo,monospace; font-size:12px; white-space:pre-wrap; }
 
-/* ── Activity Log ── */
-.log-area { border-top:1px solid var(--border); }
-#logContainer {
-  padding:8px 18px; max-height:180px; overflow-y:auto;
-  font-family:'JetBrains Mono',monospace; font-size:11px;
-}
-.log-entry { padding:2px 0; }
-.log-time { color:var(--success); margin-right:6px; }
-.log-msg { color:var(--text-dim); }
+/* ── Aktivite ── */
+.log-area { display:flex; flex-direction:column; flex:1; min-height:0; }
+#logContainer { flex:1; overflow-y:auto; font-family:'Geist Mono',Menlo,monospace; font-size:11.5px; line-height:1.5; max-height:420px; }
+.log-entry { padding:3px 0; display:flex; gap:10px; }
+.log-time { color:var(--faint); flex:none; }
+.log-msg { color:var(--text); }
 
-.hidden { display:none !important; }
+/* ── Retro sekmesi (eski modal id'si korunur, inline panel) ── */
+#retroModal { display:none; padding:20px 24px; }
+#retroModal .retro-box { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; display:flex; flex-direction:column; max-width:1100px; }
 
 /* Responsive */
-@media(max-width:900px) { .main{grid-template-columns:1fr} .right-panel{border-left:none;border-top:1px solid var(--border)} }
-@media(max-width:1100px) { .kanban-board{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))!important} }
-@media(max-width:600px) { .kanban-board{grid-template-columns:1fr!important} }
+@media(max-width:1100px) { #paneOverview.on{grid-template-columns:1fr} .ov-right{border-left:none;border-top:1px solid var(--border);min-height:0} .ov-grid{grid-template-columns:1fr} #paneJobs.on{grid-template-columns:1fr} .right-panel{border-right:none;border-bottom:1px solid var(--border);max-height:none} .kanban-board{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))!important} header{height:auto;padding:8px 16px;flex-wrap:wrap} .main{min-height:0} }
+@media(max-width:600px) { .kanban-board{grid-template-columns:1fr!important} .cost{width:100%} }
 </style>
 </head>
 <body>
 
 <header>
-  <div class="logo">
-    <div class="logo-icon">A</div>
-    <h1>Agile SDLC Crew</h1>
+  <div class="logo" title="Tempo · Sprintin ritmi">
+    <div class="logo-icon"><svg viewBox="0 0 64 64" aria-label="Tempo"><rect width="64" height="64" rx="16" fill="var(--accent)"/><circle cx="32" cy="32" r="20" fill="none" stroke="var(--accent-ink)" stroke-width="4" stroke-dasharray="6.5 3.166" transform="rotate(-90 32 32)" opacity=".8"/><path d="M32 32 L44 20" stroke="var(--accent-ink)" stroke-width="5.5" stroke-linecap="round"/><circle cx="32" cy="32" r="4.5" fill="var(--accent-ink)"/></svg></div>
+    <h1>temp<svg width="12" height="12" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24" fill="none" stroke="var(--accent)" stroke-width="9" stroke-dasharray="7.8 3.8" transform="rotate(-90 32 32)"/><path d="M32 32 L46 18" stroke="var(--accent)" stroke-width="9" stroke-linecap="round"/></svg></h1>
   </div>
+  <nav class="tabs" aria-label="Bölümler">
+    <button class="tab on" data-tab="overview" onclick="showTab('overview')">Genel bakış</button>
+    <button class="tab" data-tab="board" onclick="showTab('board')">Board</button>
+    <button class="tab" data-tab="jobs" onclick="showTab('jobs')">İşler <span class="badge" id="tabJobsBadge"></span></button>
+    <button class="tab" data-tab="retro" onclick="showTab('retro')">Retro</button>
+  </nav>
   <div class="header-right">
-    <div class="trigger-bar">
-      <input type="text" id="wiInput" placeholder="Work Item ID" class="trigger-input" />
-      <label class="hal-toggle"><input type="checkbox" id="halMode" /> HAL</label>
-      <label class="hal-toggle" title="Dry-run: push/PR/review atlanir, sonuc lokal kalir"><input type="checkbox" id="dryRun" /> 🔬 Dry Run</label>
-      <button class="sm-btn" onclick="triggerRun()">Başlat</button>
+    <div class="crumb">
+      <select class="sprint-select" id="teamSel" onchange="onTeamChange()" title="Takım"><option value="">Takım seçin...</option></select>
+      <select class="sprint-select" id="sprintSel" onchange="loadBoard()" title="Sprint"><option value="">Önce takım seçin...</option></select>
+      <span class="sprint-info" id="sprintInfo"></span>
+      <button class="sm-btn ghost icon" onclick="loadTeams()" title="Takım ve sprint listesini yenile"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3"/></svg></button>
     </div>
-    <button class="sm-btn ghost" onclick="resetDashboard()">Sıfırla</button>
-    <button class="sm-btn ghost" onclick="openKickoffDebug()" title="Sadece kickoff calistir, sonucu degerlendir, onayla veya iyilestir">
-      <span style="font-size:14px;line-height:1">🎯</span> Kickoff Debug
-    </button>
-    <button class="sm-btn settings-btn" onclick="openSettings()" title="Pipeline Ayarları (agentlar, gorevler, LLM, env)">
-      <span style="font-size:16px;line-height:1">&#9881;</span> Ayarlar
-    </button>
+    <div class="trigger-bar">
+      <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="var(--faint)" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
+      <input type="text" id="wiInput" placeholder="İş öğesi numarası…" class="trigger-input" onkeydown="if(event.key==='Enter')triggerRun()" />
+      <label class="hal-toggle" title="Dry-run: push/PR/review atlanır, sonuç lokal kalır"><input type="checkbox" id="dryRun" /> Dry run</label>
+      <label class="hal-toggle" title="HAL planlama yolu (CrewAI yerine)"><input type="checkbox" id="halMode" /> HAL</label>
+      <button class="sm-btn small" onclick="triggerRun()">Başlat</button>
+    </div>
+    <button class="sm-btn ghost icon" onclick="openKickoffDebug()" title="Kickoff Debug: sadece kickoff çalıştır, sonucu değerlendir, onayla veya iyileştir"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.5"/><path d="M8 2v2M8 12v2M2 8h2M12 8h2"/></svg></button>
+    <button class="sm-btn ghost icon" onclick="resetDashboard()" title="Durum panelini sıfırla"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5v3h3"/><path d="M8 5.5V8l2 1.5"/></svg></button>
+    <button class="sm-btn ghost icon" id="themeBtn" onclick="toggleTheme()" title="Tema: sistem / açık / koyu"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3.5"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg></button>
+    <button class="sm-btn settings-btn" onclick="openSettings()" title="Pipeline ayarları (ajanlar, görevler, LLM, env)"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg></button>
     <span class="header-time" id="clock">--:--</span>
   </div>
 </header>
 
 <div class="main">
-  <!-- Board -->
-  <div class="board-area">
-    <div class="sprint-selector">
-      <label style="font-size:13px;color:var(--text-dim);font-weight:600;">TAKIM:</label>
-      <select class="sprint-select" id="teamSel" onchange="onTeamChange()"><option value="">Takım seçin...</option></select>
-      <label style="font-size:13px;color:var(--text-dim);font-weight:600;margin-left:4px;">SPRINT:</label>
-      <select class="sprint-select" id="sprintSel" onchange="loadBoard()"><option value="">Önce takım seçin...</option></select>
-      <span class="sprint-info" id="sprintInfo"></span>
-      <button class="sm-btn ghost" onclick="loadTeams()" style="padding:4px 7px">&#8635;</button>
-      <button class="sm-btn" onclick="openBackfill()" title="Seçili takımın geçmiş done+PR'lı işlerini indeksle" style="padding:4px 10px;font-size:12px">📚 Geçmiş İşleri Tara</button>
-      <button class="sm-btn" onclick="openSprintReport()" title="Seçili sprintin işlerini parent'a göre gruplayıp .pptx sprint raporu üret" style="padding:4px 10px;font-size:12px">📊 Sprint Raporu</button>
-      <button class="sm-btn" onclick="openRetro()" title="Seçili sprintin (ya da son N günün) pipeline işlerinden retrospektif: nerede takıldı, kalite kapıları, SP başına süre/maliyet, önerilen kılavuz kuralları" style="padding:4px 10px;font-size:12px">🔁 Retro</button>
-      <button class="sm-btn" onclick="openPlan()" title="Seçili sprintin başlanmamış işlerinden pipeline aday listesi: öncelik + SP sırası, kapasite, tahmini maliyet/süre; seçilenleri toplu kuyruğa al" style="padding:4px 10px;font-size:12px">🗓️ Planla</button>
-      <button class="sm-btn" onclick="openDaily()" title="Günlük özet: son 24 saatte biten/koşan/kuyruktaki işler, insan bekleyen engeller, maliyet" style="padding:4px 10px;font-size:12px">☀️ Günlük</button>
-    </div>
-    <div class="sprint-summary" id="summary" style="display:none"></div>
-    <div id="kanban"><div class="board-empty">Takım ve sprint seçerek board'u görüntüleyin.</div></div>
-  </div>
-
-  <!-- Right Panel -->
-  <div class="right-panel">
-    <!-- Jobs -->
-    <div id="jobsSection">
-      <div class="panel-header">İşler <span class="badge" id="qStats"></span></div>
-      <div class="job-list" id="jobList"></div>
-    </div>
-
-    <!-- Job Detail (opens on click, replaces jobs) -->
-    <div class="job-detail" id="jobDetail">
-      <div class="detail-header">
-        <h3 id="detailTitle">İş Detayı</h3>
-        <div style="display:flex;gap:8px;align-items:center">
-          <button class="sm-btn" id="detailRetryBtn" onclick="retryCurrentJob()" style="display:none;padding:4px 12px;font-size:11px">↻ Tekrar Dene</button>
-          <button class="detail-close" onclick="closeDetail()">✕ Kapat</button>
+  <!-- Genel bakış -->
+  <section class="pane" id="paneOverview">
+    <div class="ov-left">
+      <div class="card hero" id="hero"><div class="board-empty" style="padding:24px">Yükleniyor…</div></div>
+      <div class="ov-grid">
+        <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
+          <div class="card-head"><span class="h">İnsan bekleyen &amp; son işler</span><span style="flex:1"></span><a href="#" onclick="showTab('jobs');return false" style="font-size:12px;font-weight:600;text-decoration:none">İşler sekmesi</a></div>
+          <div id="ovJobs"></div>
+        </div>
+        <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
+          <div class="card-head"><span class="h" id="ovSprintTitle">Sprint</span><span style="flex:1"></span><span id="ovSprintBadge"></span></div>
+          <div id="ovSprint" style="padding:0 14px 14px;display:flex;flex-direction:column;gap:12px"><div class="board-empty" style="padding:20px 0">Takım ve sprint seçin.</div></div>
+          <div style="display:flex;gap:8px;padding:0 14px 14px;flex-wrap:wrap">
+            <button class="sm-btn ghost small" onclick="openPlan()" title="Sprint planı: aday listesi, kapasite, tahmini maliyet/süre; seçilenleri toplu kuyruğa al">Sprint planı</button>
+            <button class="sm-btn ghost small" onclick="showTab('retro')">Retro</button>
+            <button class="sm-btn ghost small" onclick="openSprintReport()" title="Seçili sprintin işlerini parent'a göre gruplayıp .pptx sprint raporu üret">Rapor (.pptx)</button>
+            <button class="sm-btn ghost small" onclick="openDaily()" title="Günlük özet: son 24 saatte biten/koşan/kuyruktaki işler, insan bekleyen engeller, maliyet">Günlük özet</button>
+            <button class="sm-btn ghost small" onclick="openBackfill()" title="Seçili takımın geçmiş done+PR'lı işlerini indeksle">Geçmiş işleri tara</button>
+          </div>
         </div>
       </div>
-      <div class="detail-meta" id="detailMeta"></div>
-      <div class="step-list" id="stepList"></div>
     </div>
+    <aside class="ov-right">
+      <div class="h">Ekip</div>
+      <div id="teamList"><div class="board-empty" style="padding:16px 0">Durum bekleniyor…</div></div>
+      <div class="h" style="margin-top:6px">Aktivite</div>
+      <div class="log-area">
+        <div id="logContainer">
+          <div class="log-entry"><span class="log-time">--:--</span><span class="log-msg">Bekliyor...</span></div>
+        </div>
+      </div>
+    </aside>
+  </section>
 
-    <!-- Log -->
-    <div class="log-area">
-      <div class="panel-header">Aktivite</div>
-      <div id="logContainer">
-        <div class="log-entry"><span class="log-time">[--:--]</span><span class="log-msg">Bekliyor...</span></div>
+  <!-- Board -->
+  <section class="pane" id="paneBoard">
+    <div class="board-area">
+      <div class="sprint-selector">
+        <div class="sprint-summary" id="summary" style="display:none;margin:0"></div>
+      </div>
+      <div id="kanban"><div class="board-empty">Takım ve sprint seçerek board'u görüntüleyin.</div></div>
+    </div>
+  </section>
+
+  <!-- İşler -->
+  <section class="pane" id="paneJobs">
+    <div class="right-panel">
+      <div id="jobsSection">
+        <div class="panel-header">İşler <span class="badge" id="qStats"></span></div>
+        <div class="job-list" id="jobList"></div>
       </div>
     </div>
-  </div>
+    <div class="job-detail" id="jobDetail">
+      <div class="detail-empty" id="detailEmpty">Soldan bir iş seçin. Adımlar, maliyet ve çıktılar burada görünür.</div>
+      <div id="detailBody" class="hidden">
+        <div class="detail-header">
+          <h3 id="detailTitle">İş Detayı</h3>
+          <button class="sm-btn ghost small" id="detailRetryBtn" onclick="retryCurrentJob()" style="display:none">Tekrar dene</button>
+          <button class="detail-close" onclick="closeDetail()">Kapat</button>
+        </div>
+        <div class="detail-meta" id="detailMeta"></div>
+        <div class="step-list" id="stepList"></div>
+        <div class="by-agent" id="detailAgents"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Retro -->
+  <section class="pane" id="paneRetro"></section>
 </div>
 
 <!-- Step Detail Modal -->
@@ -463,7 +484,7 @@ header {
     <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)">
       <div style="display:flex;gap:8px;align-items:center">
         <span style="font-size:18px">&#9881;</span>
-        <h2 style="font-size:16px;font-weight:700">Pipeline Ayarlari</h2>
+        <h2 style="font-size:16px;font-weight:700">Pipeline Ayarları</h2>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <div id="settingsSaveStatus" style="font-size:12px;color:var(--success);display:none">Kaydedildi</div>
@@ -472,17 +493,17 @@ header {
     </div>
     <div style="display:flex;border-bottom:1px solid var(--border)">
       <button class="cfg-tab active" data-cfg="agents" onclick="switchCfgTab('agents')">Agentlar</button>
-      <button class="cfg-tab" data-cfg="tasks" onclick="switchCfgTab('tasks')">Gorevler</button>
+      <button class="cfg-tab" data-cfg="tasks" onclick="switchCfgTab('tasks')">Görevler</button>
       <button class="cfg-tab" data-cfg="llm" onclick="switchCfgTab('llm')">LLM</button>
       <button class="cfg-tab" data-cfg="llm_profiles" onclick="switchCfgTab('llm_profiles')">Profiller</button>
       <button class="cfg-tab" data-cfg="embed" onclick="switchCfgTab('embed')">Embedding</button>
       <button class="cfg-tab" data-cfg="vision" onclick="switchCfgTab('vision')">Vision</button>
       <button class="cfg-tab" data-cfg="pipeline" onclick="switchCfgTab('pipeline')">Pipeline</button>
       <button class="cfg-tab" data-cfg="creds" onclick="switchCfgTab('creds')">Kimlik Bilgileri</button>
-      <button class="cfg-tab" data-cfg="env" onclick="switchCfgTab('env')">Ortam Degiskenleri</button>
+      <button class="cfg-tab" data-cfg="env" onclick="switchCfgTab('env')">Ortam Değişkenleri</button>
     </div>
     <div style="flex:1;overflow:auto;position:relative">
-      <textarea id="cfgEditor" spellcheck="false" style="width:100%;height:100%;background:var(--bg);color:#e6db74;border:none;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;resize:none;outline:none;tab-size:2"></textarea>
+      <textarea id="cfgEditor" spellcheck="false" style="width:100%;height:100%;background:var(--bg);color:#e6db74;border:none;padding:16px 20px;font-family:'Geist Mono',Menlo,monospace;font-size:13px;line-height:1.6;resize:none;outline:none;tab-size:2"></textarea>
       <div id="cfgEnvView" style="display:none;padding:16px 20px"></div>
       <div id="cfgLlmView" style="display:none;padding:16px 20px"></div>
       <div id="cfgEmbedView" style="display:none;padding:16px 20px"></div>
@@ -502,19 +523,19 @@ header {
 </div>
 
 <style>
-.cfg-tab{background:none;border:none;color:var(--text-dim);padding:10px 20px;font-size:13px;font-family:'Inter',sans-serif;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s}
+.cfg-tab{background:none;border:none;color:var(--text-dim);padding:10px 20px;font-size:13px;font-family:inherit;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s}
 .cfg-tab:hover{color:var(--text)}
 .cfg-tab.active{color:var(--accent-light);border-bottom-color:var(--accent)}
 
 /* Combobox (LLM tab model selector) */
 .combo{position:relative;display:inline-block;min-width:280px}
-.combo>input{width:100%;box-sizing:border-box;padding-right:32px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 32px 6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace}
+.combo>input{width:100%;box-sizing:border-box;padding-right:32px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 32px 6px 10px;border-radius:6px;font-size:12px;font-family:'Geist Mono',Menlo,monospace}
 .combo>input:focus{outline:none;border-color:var(--accent)}
 .combo>button.combo-toggle{position:absolute;right:1px;top:1px;bottom:1px;width:26px;background:transparent;border:none;border-left:1px solid var(--border);color:var(--text-dim);cursor:pointer;font-size:10px;padding:0;border-radius:0 6px 6px 0}
 .combo>button.combo-toggle:hover{color:var(--accent-light);background:var(--bg-elevated)}
 .combo-list{position:absolute;top:calc(100% + 2px);left:0;right:0;z-index:300;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;max-height:240px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.5);display:none}
 .combo-list.open{display:block}
-.combo-item{padding:7px 12px;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer;color:var(--text);border-bottom:1px solid var(--border)}
+.combo-item{padding:7px 12px;font-family:'Geist Mono',Menlo,monospace;font-size:12px;cursor:pointer;color:var(--text);border-bottom:1px solid var(--border)}
 .combo-item:last-child{border-bottom:none}
 .combo-item:hover{background:var(--bg-elevated);color:var(--accent-light)}
 .combo-item.current{background:rgba(108,92,231,0.12);color:var(--accent-light);font-weight:600}
@@ -526,19 +547,19 @@ header {
 .diff-head{padding:12px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--bg-elevated);border-radius:10px 10px 0 0}
 .diff-title{font-size:14px;font-weight:600;color:var(--text);font-family:ui-sans-serif,system-ui,sans-serif}
 .diff-title .badge-dry{font-size:10px;padding:2px 7px;border-radius:4px;background:rgba(255,196,0,0.15);color:#ffc400;margin-left:6px}
-.diff-stats{font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+.diff-stats{font-size:11px;color:var(--text-dim);font-family:'Geist Mono',Menlo,monospace}
 .diff-stats .add{color:#3fb950}
 .diff-stats .rem{color:#f85149}
 .diff-body{padding:16px;overflow-y:auto;flex:1}
 .diff-file{margin-bottom:18px;border:1px solid var(--border);border-radius:6px;overflow:hidden;background:#0d1117}
-.diff-file-head{padding:8px 12px;background:#161b22;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font-family:'JetBrains Mono',monospace;font-size:12px;border-bottom:1px solid #30363d;user-select:none}
+.diff-file-head{padding:8px 12px;background:#161b22;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font-family:'Geist Mono',Menlo,monospace;font-size:12px;border-bottom:1px solid #30363d;user-select:none}
 .diff-file-head:hover{background:#1c2128}
 .diff-file-head .fpath{color:#c9d1d9;font-weight:500}
 .diff-file-head .fmeta{font-size:11px}
 .diff-file-head .chev{color:var(--text-dim);transition:transform .15s}
 .diff-file.collapsed .chev{transform:rotate(-90deg)}
 .diff-file.collapsed .diff-file-body{display:none}
-.diff-file-body{padding:0;font-family:'JetBrains Mono','Menlo',monospace;font-size:12px;line-height:1.5;overflow-x:auto;background:#0d1117}
+.diff-file-body{padding:0;font-family:'Geist Mono',Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;background:#0d1117}
 .diff-line{display:flex;white-space:pre;color:#c9d1d9}
 .diff-line .lno{flex:0 0 50px;text-align:right;padding:0 8px;color:#6e7681;background:#0d1117;border-right:1px solid #21262d;user-select:none}
 .diff-line .lcontent{flex:1;padding:0 8px}
@@ -561,7 +582,7 @@ header {
   <div class="bar-info"><span class="bar-count" id="selCount">0</span> iş seçildi</div>
   <div style="display:flex;gap:5px">
     <button class="sm-btn ghost" onclick="clearSel()">Temizle</button>
-    <button class="sm-btn" id="queueBtn" onclick="queueSel()">Kuyruğa Ekle ▶</button>
+    <button class="sm-btn" id="queueBtn" onclick="queueSel()">Kuyruğa ekle</button>
   </div>
 </div>
 
@@ -576,7 +597,7 @@ header {
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <button onclick="koLoadList()" class="sm-btn ghost" style="font-size:11px;padding:5px 11px" title="Listeyi yenile">↻ Yenile</button>
-        <button onclick="koToggleGuidance()" class="sm-btn ghost" style="font-size:11px;padding:5px 11px" title="Global ogrenilmis kurallar">📚 Yonergeler <span id="koGuidanceCount" style="color:var(--text-dim)"></span></button>
+        <button onclick="koToggleGuidance()" class="sm-btn ghost" style="font-size:11px;padding:5px 11px" title="Global ogrenilmis kurallar">📚 Yönergeler <span id="koGuidanceCount" style="color:var(--text-dim)"></span></button>
         <button onclick="closeKickoffDebug()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
       </div>
     </div>
@@ -591,15 +612,15 @@ header {
             <button onclick="koToggleManualWi()" id="koManualWiBtn" style="background:none;border:none;color:var(--text-dim);font-size:10px;cursor:pointer;text-decoration:underline" title="Manuel WI ID gir">manuel</button>
           </div>
           <select id="koWiSelect" style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;margin-bottom:7px">
-            <option value="">— Sprint'ten is sec —</option>
+            <option value="">— Sprint'ten iş seç —</option>
           </select>
           <input type="text" id="koWiInput" placeholder="Work Item ID (manuel)" style="display:none;width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;margin-bottom:7px" />
           <textarea id="koFeedbackInput" placeholder="Opsiyonel: bu calistirma icin extra yonlendirme..." rows="2" style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;resize:vertical;font-family:inherit"></textarea>
-          <button onclick="koStartRun()" class="sm-btn" style="width:100%;margin-top:7px;font-size:12px;padding:7px 10px">▶ Kickoff Calistir</button>
+          <button onclick="koStartRun()" class="sm-btn" style="width:100%;margin-top:7px;font-size:12px;padding:7px 10px">▶ Kickoff Çalıştır</button>
         </div>
-        <div style="padding:10px 12px 4px 12px;font-size:11px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Gecmis Calistirmalar</div>
+        <div style="padding:10px 12px 4px 12px;font-size:11px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Geçmiş Çalıştırmalar</div>
         <div id="koList" style="flex:1;overflow-y:auto;padding:4px 8px 12px 8px">
-          <div style="padding:14px;color:var(--text-dim);font-size:12px">Yukleniyor...</div>
+          <div style="padding:14px;color:var(--text-dim);font-size:12px">Yükleniyor...</div>
         </div>
       </div>
 
@@ -619,7 +640,7 @@ header {
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <div style="display:flex;gap:10px;align-items:center">
         <span style="font-size:18px">📚</span>
-        <h2 style="font-size:15px;font-weight:700">Ogrenilmis Yonergeler — her kickoff'a enjekte edilir</h2>
+        <h2 style="font-size:15px;font-weight:700">Öğrenilmiş Yönergeler — her kickoff'a enjekte edilir</h2>
       </div>
       <button onclick="koToggleGuidance()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
     </div>
@@ -639,12 +660,12 @@ setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocal
 
 // ── Status polling → log only ──
 async function fetchStatus(){
-  try{const r=await fetch('/api/status?t='+Date.now());if(r.ok){const d=await r.json();renderLog(d.log)}}catch(e){}
+  try{const r=await fetch('/api/status?t='+Date.now());if(r.ok){const d=await r.json();_status=d;renderLog(d.log);renderTeam(d.agents)}}catch(e){}
 }
 function renderLog(log){
   const c=document.getElementById('logContainer');
   if(!log||!log.length)return;
-  c.innerHTML=log.map(e=>`<div class="log-entry"><span class="log-time">[${e.time}]</span> <span class="log-msg">${e.message}</span></div>`).join('');
+  c.innerHTML=log.map(e=>`<div class="log-entry"><span class="log-time">${esc(String(e.time||''))}</span><span class="log-msg">${esc(String(e.message||''))}</span></div>`).join('');
   c.scrollTop=c.scrollHeight;
 }
 
@@ -654,28 +675,35 @@ async function fetchJobs(){
 }
 function renderJobs(jobs){
   const list=document.getElementById('jobList'),st=document.getElementById('qStats');
-  if(!jobs||!jobs.length){list.innerHTML='<div style="font-size:10px;color:var(--text-dim);padding:8px">Kuyruk boş</div>';st.textContent='';return}
+  renderOverview(jobs||[]);
+  if(!jobs||!jobs.length){list.innerHTML='<div class="board-empty" style="padding:24px">Kuyruk boş</div>';st.textContent='';return}
   const run=jobs.filter(j=>j.status==='running').length,q=jobs.filter(j=>j.status==='queued').length;
   st.textContent=run?`${run} aktif`:q?`${q} kuyrukta`:`${jobs.length} iş`;
-  list.innerHTML=jobs.slice(0,20).map(j=>{
-    let dur='';
-    if(j.started_at){const s=new Date(j.started_at),e=j.finished_at?new Date(j.finished_at):new Date(),sec=Math.floor((e-s)/1000);dur=sec>=60?Math.floor(sec/60)+'dk':sec+'sn'}
-    const isDry=Number(j.dry_run||0)===1;
-    const hasDiff=(j.status==='completed'||j.status==='running')&&j.repo_name&&j.branch_name;
-    return `<div class="job-item" onclick="viewJob(${j.id})">
+  const groups=[['İnsan bekliyor',j=>j.status==='needs_human'||j.status==='needs_info'],['Çalışıyor',j=>j.status==='running'],['Kuyrukta',j=>j.status==='queued'],['Başarısız',j=>j.status==='failed'],['Tamamlanan',j=>j.status==='completed']];
+  const seen=new Set();let html='';
+  for(const [name,f] of groups){const g=jobs.filter(j=>!seen.has(j.id)&&f(j));g.forEach(j=>seen.add(j.id));if(!g.length)continue;html+=`<div class="grp">${name}<span class="n">${g.length}</span></div>`+g.map(jobRow).join('')}
+  const rest=jobs.filter(j=>!seen.has(j.id));if(rest.length)html+=`<div class="grp">Diğer<span class="n">${rest.length}</span></div>`+rest.map(jobRow).join('');
+  list.innerHTML=html;
+}
+function jobRow(j){
+  const dur=fmtDurShort(j.started_at,j.finished_at);
+  const isDry=Number(j.dry_run||0)===1;
+  const hasDiff=(j.status==='completed'||j.status==='running')&&j.repo_name&&j.branch_name;
+  const retryable=(j.status==='failed'||j.status==='completed'||j.status==='needs_human'||j.status==='needs_info');
+  return `<div class="job-item${j.id===_jid?' sel':''}" data-id="${j.id}" onclick="viewJob(${j.id})">
       <div class="jdot ${j.status}"></div>
-      <span class="jwi">#${j.work_item_id}</span>
-      ${isDry?`<span class="jmeta" style="background:rgba(255,196,0,0.12);color:#ffc400" title="Dry-run: lokal, push yok">🔬 DRY</span>`:''}
-      ${j.job_kind==='pr_review'?`<span class="jmeta" style="background:rgba(108,92,231,0.15);color:var(--accent-light)" title="PR inceleme katkısı (danışma) — insan PR'ı">🔍 İNCELEME</span>`:''}
-      <span class="jtitle">${esc(j.wi_title||j.repo_name||j.status)}</span>
-      ${j.current_step?`<span class="jstep">${j.current_step.replace('_task','')}</span>`:''}
+      <span class="jwi">${esc(String(j.work_item_id))}</span>
+      ${isDry?`<span class="jmeta chip dim" title="Dry-run: lokal, push yok">DRY</span>`:''}
+      ${j.job_kind==='pr_review'?`<span class="jmeta chip acc" title="PR inceleme katkısı (danışma) — insan PR'ı">İNCELEME</span>`:''}
+      <span class="jtitle" title="${esc(j.wi_title||'')}">${esc(j.wi_title||j.repo_name||('İş #'+j.id))}</span>
+      ${j.current_step?`<span class="jstep">${esc(stepLabel(j.current_step))}</span>`:''}
       ${dur?`<span class="jmeta">${dur}</span>`:''}
-      ${hasDiff?`<button class="job-retry" onclick="event.stopPropagation();showDiff(${j.id})" title="Diff goster" style="background:rgba(108,92,231,0.15);color:var(--accent-light)">📊</button>`:''}
-      ${isDry&&j.status==='completed'?`<button class="job-retry" onclick="event.stopPropagation();showDryRunReport(${j.id})" title="Dry-run raporunu goster" style="background:rgba(255,196,0,0.15);color:#ffc400">📄</button>`:''}
-      ${(!isDry&&j.pr_url)?`<span class="jmeta"><a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()" style="color:var(--accent-light)">PR</a></span>`:''}
-      ${(j.status==='failed'||j.status==='completed'||j.status==='needs_human'||j.status==='needs_info')?`<button class="job-retry" onclick="event.stopPropagation();retryJob(${j.id})" title="Tekrar dene">↻</button>`:''}
-      <button class="job-del" onclick="event.stopPropagation();delJob(${j.id},'${j.status}')">&times;</button>
-    </div>`}).join('');
+      ${hasDiff?`<button class="job-retry" onclick="event.stopPropagation();showDiff(${j.id})" title="Diff göster" style="font-size:11px">Diff</button>`:''}
+      ${isDry&&j.status==='completed'?`<button class="job-retry" onclick="event.stopPropagation();showDryRunReport(${j.id})" title="Dry-run raporunu göster" style="font-size:11px">Rapor</button>`:''}
+      ${(!isDry&&j.pr_url)?`<a class="jmeta" href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()" style="color:var(--accent-light);font-weight:600;text-decoration:none">PR</a>`:''}
+      ${retryable?`<button class="job-retry" onclick="event.stopPropagation();retryJob(${j.id})" title="Tekrar dene">${SVG_RETRY}</button>`:''}
+      <button class="job-del" onclick="event.stopPropagation();delJob(${j.id},'${j.status}')" title="Sil">&times;</button>
+    </div>`;
 }
 async function delJob(id,s){
   if(!confirm(s==='running'?'Çalışan işi zorla sil?':'İşi sil?'))return;
@@ -695,58 +723,64 @@ async function retryJob(id){
 let _jid=null,_jpoll=null,_open={},_stepCache={};
 function viewJob(id){
   _jid=id;_open={};_stepCache={};
-  document.getElementById('jobsSection').classList.add('hidden');
-  document.getElementById('jobDetail').classList.add('open');
+  showTab('jobs');
+  document.getElementById('detailEmpty').classList.add('hidden');
+  document.getElementById('detailBody').classList.remove('hidden');
+  document.querySelectorAll('.job-item').forEach(e=>e.classList.toggle('sel',e.dataset.id===String(id)));
   refreshDetail();clearInterval(_jpoll);_jpoll=setInterval(refreshDetail,3000);
 }
 function closeDetail(){
   _jid=null;clearInterval(_jpoll);
-  document.getElementById('jobDetail').classList.remove('open');
-  document.getElementById('jobsSection').classList.remove('hidden');
+  document.getElementById('detailBody').classList.add('hidden');
+  document.getElementById('detailEmpty').classList.remove('hidden');
+  document.querySelectorAll('.job-item').forEach(e=>e.classList.remove('sel'));
 }
 async function refreshDetail(){
   if(!_jid)return;
-  try{const r=await fetch('/api/jobs/'+_jid+'?t='+Date.now());if(!r.ok)return;const j=await r.json();_stepCache={};(j.steps||[]).forEach(s=>{_stepCache[s.id]=s});renderDetail(j);if(j.status==='completed'||j.status==='failed')clearInterval(_jpoll)}catch(e){}
+  try{const r=await fetch('/api/jobs/'+_jid+'?t='+Date.now());if(!r.ok)return;const j=await r.json();_stepCache={};(j.steps||[]).forEach(s=>{_stepCache[s.id]=s});renderDetail(j);if(j.status==='completed'||j.status==='failed'||j.status==='needs_human'||j.status==='needs_info')clearInterval(_jpoll)}catch(e){}
 }
 function renderDetail(j){
-  const sl={queued:'Kuyrukta',running:'Çalışıyor',completed:'Tamamlandı',failed:'Başarısız'};
-  const sc={queued:'var(--warning)',running:'var(--accent)',completed:'var(--success)',failed:'var(--danger)'};
-  document.getElementById('detailTitle').innerHTML=`#${j.id} WI#${j.work_item_id} <span style="font-size:9px;padding:2px 6px;border-radius:5px;background:${sc[j.status]||'gray'}20;color:${sc[j.status]||'gray'}">${sl[j.status]||j.status}</span>`;
-
-  let m='';
-  if(j.wi_title)m+=`<div class="meta-tag" style="flex-basis:100%">${esc(j.wi_title)}</div>`;
-  if(j.started_at){const s=new Date(j.started_at),e=j.finished_at?new Date(j.finished_at):new Date(),sec=Math.floor((e-s)/1000);m+=`<div class="meta-tag">⏱ ${sec>=60?Math.floor(sec/60)+'dk '+(sec%60)+'sn':sec+'sn'}</div>`}
+  const _tk=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+'k':String(n);};
+  document.getElementById('detailTitle').innerHTML=`<span class="chip ${JS_CHIP[j.status]||'dim'}">${esc(JS_LABEL[j.status]||j.status)}</span><span class="mono" style="font-size:12.5px;color:var(--text-dim)">#${esc(String(j.work_item_id))}</span><span style="overflow:hidden;text-overflow:ellipsis">${esc(j.wi_title||j.repo_name||('İş #'+j.id))}</span>${Number(j.dry_run)===1?'<span class="chip dim">Dry run</span>':''}${j.job_kind==='pr_review'?'<span class="chip acc">İNCELEME</span>':''}`;
+  const kv=(k,v)=>v?`<div class="meta-tag"><span class="k">${k}</span><span>${v}</span></div>`:'';
   let repoBase='';
   if(j.pr_url){const mm=j.pr_url.match(/^(.*?\/_git\/[^\/]+)/);if(mm)repoBase=mm[1];}
-  if(j.repo_name){if(repoBase)m+=`<div class="meta-tag">📦 <a href="${esc(repoBase)}" target="_blank" onclick="event.stopPropagation()">${esc(j.repo_name)}</a></div>`;else m+=`<div class="meta-tag">📦 ${esc(j.repo_name)}</div>`;}
-  if(j.branch_name){if(repoBase)m+=`<div class="meta-tag">🌿 <a href="${esc(repoBase)}?version=GB${encodeURIComponent(j.branch_name)}" target="_blank" onclick="event.stopPropagation()">${esc(j.branch_name)}</a></div>`;else m+=`<div class="meta-tag">🌿 ${esc(j.branch_name)}</div>`;}
-  if(j.pr_url)m+=`<div class="meta-tag">PR <a href="${esc(j.pr_url)}" target="_blank">#${esc(j.pr_id||'')}</a></div>`;
-  if(j.error_message&&j.status==='failed')m+=`<div class="meta-tag" style="color:var(--danger);flex-basis:100%">⚠ ${esc(j.error_message)}</div>`;
-  // Maliyet & arac muhasebesi
-  const _tk=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+'k':String(n);};
+  let m='';
+  const repo=j.repo_name?(repoBase?`<a href="${esc(repoBase)}" target="_blank">${esc(j.repo_name)}</a>`:esc(j.repo_name)):'';
+  const br=j.branch_name?(repoBase?`<a href="${esc(repoBase)}?version=GB${encodeURIComponent(j.branch_name)}" target="_blank" class="mono" style="font-size:12px">${esc(j.branch_name)}</a>`:`<span class="mono" style="font-size:12px">${esc(j.branch_name)}</span>`):'';
+  m+=kv('Repo · branch',[repo,br].filter(Boolean).join(' · '));
+  m+=kv('PR',j.pr_url?`<a href="${esc(j.pr_url)}" target="_blank">${j.pr_id?'#'+esc(String(j.pr_id)):'Aç'}</a>`:'');
+  m+=kv('Süre',fmtDur(j.started_at,j.finished_at));
+  m+=kv('Tahmin',j.estimate_sp?fmtSP(Number(j.estimate_sp))+' SP':'');
   if(j.cost&&j.cost.totals){const t=j.cost.totals;const c=Number(t.total_cost_usd||0);
-    if(c>0||t.total_llm_calls)m+=`<div class="meta-tag">💰 $${c.toFixed(2)} · ${t.total_llm_calls||0} çağrı · ${t.total_tool_calls||0} araç · ${t.total_turns||0} tur</div>`;
+    m+=kv('Maliyet',(c>0||t.total_llm_calls)?`<span class="mono" style="font-size:12px">$${c.toFixed(2)} / $${_budget.toFixed(2)}</span>`:'');
+    m+=kv('Çağrı · araç · tur',t.total_llm_calls?`${t.total_llm_calls||0} · ${t.total_tool_calls||0} · ${t.total_turns||0}`:'');
     const itok=Number(t.total_input_tokens||0),otok=Number(t.total_output_tokens||0);
-    if(itok||otok)m+=`<div class="meta-tag">🔢 ${_tk(itok)} in / ${_tk(otok)} out token</div>`;}
-  if(j.cost&&j.cost.by_agent&&j.cost.by_agent.length){
-    const rows=j.cost.by_agent.filter(a=>a.agent).map(a=>`${esc(a.agent)}: $${Number(a.cost_usd||0).toFixed(2)} (${a.calls||0}ç/${a.tool_calls||0}a/${a.turns||0}t · ${_tk(a.input_tokens)}in/${_tk(a.output_tokens)}out)`).join(' · ');
-    if(rows)m+=`<div class="meta-tag" style="flex-basis:100%;font-size:9px;opacity:.85">👥 ${rows}</div>`;}
+    m+=kv('Token (giriş / çıkış)',(itok||otok)?`<span class="mono" style="font-size:12px">${_tk(itok)} / ${_tk(otok)}</span>`:'');}
+  m+=kv('Başlangıç',j.started_at?new Date(j.started_at).toLocaleString('tr-TR'):'');
+  if(j.error_message&&(j.status==='failed'||j.status==='needs_human'||j.status==='needs_info'))m+=`<div class="meta-tag err"><span class="k">${j.status==='failed'?'Hata':'Mesaj'}</span><span style="white-space:pre-wrap;font-weight:400;font-size:12.5px">${esc(j.error_message)}</span></div>`;
   document.getElementById('detailMeta').innerHTML=m;
-  document.getElementById('detailRetryBtn').style.display=(j.status==='failed'||j.status==='completed')?'inline-block':'none';
+  document.getElementById('detailRetryBtn').style.display=(j.status==='failed'||j.status==='completed'||j.status==='needs_human'||j.status==='needs_info')?'inline-flex':'none';
 
-  const ic={completed:'✓',running:'▶',failed:'✕',pending:'●',skipped:'─'};
-  document.getElementById('stepList').innerHTML=(j.steps||[]).map(s=>{
-    const has=s.output||s.error_message,op=_open[s.id];
-    let d='';if(s.started_at){const ds=Math.floor(((s.finished_at?new Date(s.finished_at):new Date())-new Date(s.started_at))/1000);d=ds>=60?Math.floor(ds/60)+'dk '+(ds%60)+'sn':ds+'sn'}
-    return `<div>
-      <div class="step-row" onclick="${has?`openModal(${s.id})`:''}">
-        <div class="si ${s.status}">${ic[s.status]||'●'}</div>
-        <span class="sn">${esc(s.step_name)}</span>
-        <span class="sa">${esc(s.agent||'')}</span>
-        ${d?`<span class="sd">${d}</span>`:''}
-        ${has?`<span class="st">↗</span>`:''}
-      </div>
-    </div>`}).join('');
+  const ic={completed:'✓',running:'▶',failed:'✕',pending:'',skipped:'–'};
+  const steps=(j.steps||[]);
+  document.getElementById('stepList').innerHTML=steps.length?`<div class="tl">`+steps.map(s=>{
+    const has=s.output||s.error_message;
+    const d=fmtDur(s.started_at,s.finished_at);
+    const c=Number(s.cost_usd||0);
+    const meta=[d,c>0?'$'+c.toFixed(2):'',s.tool_calls?s.tool_calls+' araç':'',s.turns?s.turns+' tur':''].filter(Boolean);
+    return `<div class="n ${s.status}">${ic[s.status]||''}</div><div class="c${has?' clk':''}" ${has?`onclick="openModal(${s.id})"`:''}>
+      <div class="hh">${esc(s.step_name||stepLabel(s.step_key))}${s.agent?`<span class="tag">${esc(agentLabel(s.agent))}</span>`:''}${s.status==='failed'?'<span class="chip fail">Hata</span>':''}${s.status==='skipped'?'<span class="chip dim">Atlandı</span>':''}${has?'<span style="font-size:11px;color:var(--text-dim);font-weight:400">çıktıyı aç</span>':''}</div>
+      ${meta.length?`<div class="m">${meta.map(x=>`<span>${esc(x)}</span>`).join('')}</div>`:''}
+    </div>`}).join('')+'</div>':'<div class="board-empty">Adım kaydı yok.</div>';
+
+  const ag=document.getElementById('detailAgents');
+  if(ag){
+    if(j.cost&&j.cost.by_agent&&j.cost.by_agent.filter(a=>a.agent).length){
+      ag.innerHTML=`<div class="h" style="margin-bottom:8px">Ajan başına maliyet</div><table><tr><th>Ajan</th><th style="text-align:right">Çağrı</th><th style="text-align:right">Araç</th><th style="text-align:right">Tur</th><th style="text-align:right">Giriş</th><th style="text-align:right">Çıkış</th><th style="text-align:right">USD</th></tr>`
+        +j.cost.by_agent.filter(a=>a.agent).map(a=>`<tr><td>${esc(agentLabel(a.agent))}</td><td class="num">${a.calls||0}</td><td class="num">${a.tool_calls||0}</td><td class="num">${a.turns||0}</td><td class="num">${_tk(a.input_tokens)}</td><td class="num">${_tk(a.output_tokens)}</td><td class="num">$${Number(a.cost_usd||0).toFixed(2)}</td></tr>`).join('')+'</table>';
+    } else ag.innerHTML='';
+  }
 }
 function toggleS(id){_open[id]=!_open[id];refreshDetail()}
 
@@ -857,6 +891,175 @@ async function resetDashboard(){
   try{await fetch('/api/reset',{method:'POST'});fetchStatus()}catch(e){}
 }
 
+
+// ── Tempo: sekmeler, tema, genel bakış ──
+// Yürütme sırası (flow.py): analiz → kickoff → ... → tamamlanma raporu. Anahtarlar db.STEP_DEFINITIONS ile aynı.
+const STEP_KEYS=['requirements_analysis_task','kickoff_meeting_task','discover_repos_task','dependency_analysis_task','technical_design_task','create_branch_task','implement_change_task','create_pr_task','review_pr_task','pr_build_gate','test_planning_task','uat_task','completion_report_task'];
+const STEP_NAMES={requirements_analysis_task:'İş Analizi',kickoff_meeting_task:'Kickoff Toplantısı',discover_repos_task:'Repo Keşfetme',dependency_analysis_task:'Bağımlılık Analizi',technical_design_task:'Teknik Tasarım',create_branch_task:'Branch',implement_change_task:'Kod Yazma & Push',create_pr_task:'PR Oluşturma',review_pr_task:'Kod İnceleme',pr_build_gate:'PR Test Build',test_planning_task:'Test Planlama',uat_task:'UAT Doğrulama',completion_report_task:'Tamamlanma Raporu'};
+const JS_LABEL={queued:'Kuyrukta',running:'Çalışıyor',completed:'Tamamlandı',failed:'Başarısız',needs_human:'İnsan bekliyor',needs_info:'Bilgi gerekli'};
+const JS_CHIP={queued:'dim',running:'run',completed:'ok',failed:'fail',needs_human:'human',needs_info:'human'};
+const AGENT_ORDER=['scrum_master','business_analyst','software_architect','senior_developer','code_reviewer','qa_engineer','uat_specialist'];
+const AGENT_INI={scrum_master:'SM',business_analyst:'İA',software_architect:'YM',senior_developer:'KG',code_reviewer:'Kİ',qa_engineer:'QA',uat_specialist:'UAT',product_owner:'PO'};
+const AGENT_NAME={scrum_master:'Scrum Master',business_analyst:'İş Analisti',software_architect:'Yazılım Mimarı',senior_developer:'Kıdemli Geliştirici',code_reviewer:'Kod İnceleyici',qa_engineer:'QA Mühendisi',uat_specialist:'UAT Uzmanı',product_owner:'Product Owner'};
+const SVG_RETRY='<svg class="ico" style="width:14px;height:14px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3"/></svg>';
+const SVG_PR='<svg class="ico" style="width:13px;height:13px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="3" r="1.5"/><circle cx="4" cy="13" r="1.5"/><circle cx="12" cy="13" r="1.5"/><path d="M4 4.5v7M12 11.5V7a3 3 0 0 0-3-3H7M8.5 2.5L7 4l1.5 1.5"/></svg>';
+function stepLabel(k){return STEP_NAMES[k]||(k||'').replace(/_task$/,'').replace(/_/g,' ')}
+function fmtDur(start,end){if(!start)return '';const s=new Date(start),e=end?new Date(end):new Date(),sec=Math.max(0,Math.floor((e-s)/1000));if(sec<60)return sec+' sn';const m=Math.floor(sec/60);return m>=60?Math.floor(m/60)+' sa '+(m%60)+' dk':m+' dk '+(sec%60)+' sn'}
+function fmtDurShort(start,end){if(!start)return '';const sec=Math.max(0,Math.floor(((end?new Date(end):new Date())-new Date(start))/1000));return sec>=60?Math.floor(sec/60)+' dk':sec+' sn'}
+function agentLabel(a){return AGENT_NAME[a]||a||''}
+
+// Sekmeler
+function showTab(name){
+  document.querySelectorAll('.tab[data-tab]').forEach(b=>b.classList.toggle('on',b.dataset.tab===name));
+  document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));
+  const pane=document.getElementById('pane'+name.charAt(0).toUpperCase()+name.slice(1));
+  if(pane)pane.classList.add('on');
+  try{localStorage.setItem('tempo_tab',name)}catch(e){}
+  if(name==='retro'&&typeof openRetro==='function')openRetro();
+}
+// Tema: sistem → açık → koyu
+function applyTheme(){
+  let t='system';try{t=localStorage.getItem('tempo_theme')||'system'}catch(e){}
+  if(t==='system')document.documentElement.removeAttribute('data-theme');else document.documentElement.setAttribute('data-theme',t);
+  const b=document.getElementById('themeBtn');if(b)b.title='Tema: '+({system:'sistem',light:'açık',dark:'koyu'}[t])+' (tıkla: değiştir)';
+}
+function toggleTheme(){
+  let t='system';try{t=localStorage.getItem('tempo_theme')||'system'}catch(e){}
+  const next={system:'light',light:'dark',dark:'system'}[t]||'system';
+  try{localStorage.setItem('tempo_theme',next)}catch(e){}
+  applyTheme();
+}
+applyTheme();
+
+// Genel bakış
+let _jobs=[],_status=null,_heroId=null,_heroJob=null,_budget=3;
+fetch('/api/config/env').then(r=>r.json()).then(d=>{const v=parseFloat(d&&d.CREW_MAX_JOB_COST);if(v>0)_budget=v}).catch(()=>{});
+function renderOverview(jobs){
+  _jobs=jobs||[];
+  const human=_jobs.filter(j=>j.status==='needs_human'||j.status==='needs_info');
+  const badge=document.getElementById('tabJobsBadge');if(badge)badge.textContent=human.length?String(human.length):'';
+  // İnsan bekleyen + son işler (en fazla 7 satır)
+  const seen=new Set();const rows=[];
+  const push=j=>{if(!seen.has(j.id)&&rows.length<7){seen.add(j.id);rows.push(j)}};
+  human.forEach(push);_jobs.filter(j=>j.status==='running').forEach(push);_jobs.filter(j=>j.status==='queued').forEach(push);_jobs.forEach(push);
+  const box=document.getElementById('ovJobs');
+  if(box)box.innerHTML=rows.length?rows.map(j=>{
+    const hot=j.status==='needs_human'||j.status==='needs_info';
+    let desc=j.wi_title||j.repo_name||'';
+    if(j.status==='failed'&&j.current_step)desc=stepLabel(j.current_step)+' adımında hata';
+    else if(j.status==='running'&&j.current_step)desc=stepLabel(j.current_step)+(j.wi_title?' · '+j.wi_title:'');
+    else if(j.status==='needs_info')desc=(j.current_step?stepLabel(j.current_step)+' — ':'')+'bilgi gerekli';
+    else if(j.status==='needs_human')desc=(j.current_step?stepLabel(j.current_step)+' — ':'')+'insan kararı bekliyor';
+    const act=hot?`<button class="sm-btn ghost small" onclick="event.stopPropagation();viewJob(${j.id})">${j.status==='needs_info'?'Yanıtla':'Karar ver'}</button>`
+      :j.status==='failed'?`<button class="sm-btn ghost small" onclick="event.stopPropagation();retryJob(${j.id})">Tekrar dene</button>`
+      :(!Number(j.dry_run)&&j.pr_url)?`<a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()" style="font-size:12px;font-weight:600;text-decoration:none">PR</a>`:'';
+    const dur=fmtDurShort(j.started_at,j.finished_at);
+    return `<div class="row${hot?' hot':''}" onclick="viewJob(${j.id})"><span class="sd ${j.status}"></span><span class="mono" style="color:var(--text-dim)">#${esc(String(j.work_item_id))}</span><span class="jt${hot?' b':''}">${esc(desc)}${dur?` <span style="color:var(--text-dim)">· ${dur}</span>`:''}</span><span class="chip ${JS_CHIP[j.status]||'dim'}">${Number(j.dry_run)===1?'Dry run':(JS_LABEL[j.status]||j.status)}</span>${act}</div>`;
+  }).join(''):'<div class="board-empty" style="padding:24px">Henüz iş yok.</div>';
+  refreshHero();
+}
+async function refreshHero(){
+  const pick=_jobs.find(j=>j.status==='running')||_jobs.find(j=>j.status==='queued')||_jobs.slice().sort((a,b)=>b.id-a.id)[0];
+  const hero=document.getElementById('hero');if(!hero)return;
+  if(!pick){hero.innerHTML='<div class="board-empty" style="padding:28px">Çalışan iş yok. Üstten bir iş öğesi numarası girip başlatın ya da board\'dan seçin.</div>';_heroId=null;return}
+  if(pick.status==='queued'&&!pick.started_at){_heroId=pick.id;renderHero(pick,[],null);return}
+  try{const r=await fetch('/api/jobs/'+pick.id+'?t='+Date.now());if(!r.ok)return;const j=await r.json();_heroId=j.id;_heroJob=j;renderHero(j,j.steps||[],j.cost)}catch(e){}
+}
+function renderHero(j,steps,cost){
+  const hero=document.getElementById('hero');if(!hero)return;
+  const byKey={};steps.forEach(s=>{byKey[s.step_key]=s});
+  let activeIdx=-1;
+  const stepsHtml=STEP_KEYS.map((k,i)=>{
+    const s=byKey[k];let st=s?s.status:'pending';
+    if(j.status==='queued')st='pending';
+    if(st==='running'||(st==='failed'&&activeIdx<0))activeIdx=i;
+    const ic=st==='completed'?'✓':st==='failed'?'✕':String(i+1);
+    const has=s&&(s.output||s.error_message);
+    return `<div class="step${has?' clickable':''}" ${has?`onclick="heroStep(${s.id})"`:''} title="${esc(stepLabel(k))}${s&&s.started_at?' · '+fmtDur(s.started_at,s.finished_at):''}"><div class="dot ${st}">${ic}</div><div class="lbl ${st==='running'?'running':''}">${esc(stepLabel(k))}</div></div>`;
+  }).join('');
+  const cur=activeIdx>=0?byKey[STEP_KEYS[activeIdx]]:null;
+  const agentKey=cur&&cur.agent||'';
+  const lastLog=(_status&&_status.log&&_status.log.length)?_status.log[_status.log.length-1]:null;
+  let nowLine='';
+  if(j.status==='running'){nowLine=`<div class="hero-now-title">${esc(agentLabel(agentKey)||'Pipeline')} · ${esc(cur?stepLabel(cur.step_key):'çalışıyor')}</div>`;}
+  else if(j.status==='queued'){nowLine='<div class="hero-now-title">Kuyrukta · sıra bekliyor</div>';}
+  else if(j.status==='failed'){nowLine=`<div class="hero-now-title" style="color:var(--danger)">${esc(cur?stepLabel(cur.step_key):'Pipeline')} adımında hata</div>`;}
+  else if(j.status==='needs_human'||j.status==='needs_info'){nowLine=`<div class="hero-now-title" style="color:var(--warning)">${JS_LABEL[j.status]} · ${esc(cur?stepLabel(cur.step_key):'')}</div>`;}
+  else nowLine=`<div class="hero-now-title">Tamamlandı${j.finished_at?' · '+new Date(j.finished_at).toLocaleString('tr-TR'):''}</div>`;
+  const logLine=j.status==='running'&&lastLog?`<div class="hero-now-log">[${esc(lastLog.time)}] ${esc(String(lastLog.message).replace(/<[^>]+>/g,''))}</div>`:(j.error_message&&j.status==='failed'?`<div class="hero-now-log" style="color:var(--danger)">${esc(j.error_message)}</div>`:'');
+  const c=cost&&cost.totals?Number(cost.totals.total_cost_usd||0):Number(j.total_cost_usd||0);
+  const pct=Math.min(100,Math.round(c/_budget*100));
+  const dur=fmtDur(j.started_at,j.finished_at);
+  const repo=[j.repo_name,j.branch_name].filter(Boolean).join(' · ');
+  hero.innerHTML=`<div class="hero-head">
+      <span class="chip ${JS_CHIP[j.status]||'dim'}" style="text-transform:uppercase">${esc(JS_LABEL[j.status]||j.status)}</span>
+      <span class="mono" style="font-size:13px;color:var(--text-dim)">#${esc(String(j.work_item_id))}</span>
+      <span class="hero-title" title="${esc(j.wi_title||'')}">${esc(j.wi_title||j.repo_name||'')}</span>
+      ${j.job_kind==='pr_review'?'<span class="chip acc" title="PR inceleme katkısı (danışma)">İNCELEME</span>':''}${Number(j.dry_run)===1?'<span class="chip dim">Dry run</span>':''}
+      ${repo?`<span class="hero-meta mono" title="${esc(repo)}">${SVG_PR.replace('width:13px;height:13px','width:14px;height:14px')}${esc(repo.length>48?repo.slice(0,46)+'…':repo)}</span>`:''}
+      ${dur?`<span class="hero-meta"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg>${dur}</span>`:''}
+      ${(!Number(j.dry_run)&&j.pr_url)?`<a class="sm-btn ghost small" href="${esc(j.pr_url)}" target="_blank" style="text-decoration:none">PR${j.pr_id?' '+esc(String(j.pr_id)):''}</a>`:''}
+      <button class="sm-btn ghost small" onclick="viewJob(${j.id})">Detay</button>
+    </div>
+    <div class="steps">${stepsHtml}</div>
+    <div class="hero-now">
+      <div class="av ${j.status==='running'?'':'idle'}" style="${j.status==='running'?'':'background:var(--faint)'}">${esc(AGENT_INI[agentKey]||'—')}</div>
+      <div style="flex:1;min-width:0">${nowLine}${logLine}</div>
+      <div class="cost"><div class="cost-row"><span>Maliyet</span><span class="mono">$${c.toFixed(2)} / $${_budget.toFixed(2)}</span></div><div class="bar"><div style="width:${pct}%${pct>=90?';background:var(--danger)':''}"></div></div></div>
+    </div>`;
+}
+function heroStep(stepId){
+  if(!_heroJob)return;
+  _stepCache={};(_heroJob.steps||[]).forEach(s=>{_stepCache[s.id]=s});
+  openModal(stepId);
+}
+function renderTeam(agents){
+  const box=document.getElementById('teamList');if(!box||!agents)return;
+  const keys=AGENT_ORDER.filter(k=>agents[k]).concat(Object.keys(agents).filter(k=>!AGENT_ORDER.includes(k)));
+  box.innerHTML=keys.map(k=>{
+    const a=agents[k]||{};const st=String(a.status||'idle').toLowerCase();
+    const working=['working','active','running','busy','thinking'].includes(st);
+    const done=['completed','done','finished'].includes(st);
+    const cur=working?(a.current_task?stepLabel(a.current_task):'Çalışıyor'):done?'Bitti':'Boşta';
+    return `<div class="agent ${working?'working':done?'done':''}"><div class="av">${esc(AGENT_INI[k]||k.slice(0,2).toUpperCase())}</div><div style="flex:1;min-width:0"><div class="nm">${esc(AGENT_NAME[k]||a.display_name||k)}</div><div class="cur">${esc(cur)}</div></div><span class="sd ${working?'run':done?'completed':'idle'}"></span></div>`;
+  }).join('');
+}
+function renderOvSprint(){
+  const box=document.getElementById('ovSprint'),title=document.getElementById('ovSprintTitle'),badge=document.getElementById('ovSprintBadge');
+  if(!box)return;
+  const p=(document.getElementById('sprintSel')||{}).value||'';
+  const sp=(sprints||[]).find(s=>s.path===p);
+  if(!p||!items||!items.length){title.textContent='Sprint';badge.innerHTML='';box.innerHTML='<div class="board-empty" style="padding:20px 0">Takım ve sprint seçin.</div>';return}
+  const sd=sp&&sp.startDate?new Date(sp.startDate).toLocaleDateString('tr-TR',{day:'2-digit',month:'2-digit'}):'',ed=sp&&sp.finishDate?new Date(sp.finishDate).toLocaleDateString('tr-TR',{day:'2-digit',month:'2-digit'}):'';
+  title.textContent='Sprint'+(sd?' · '+sd+' – '+ed:'');
+  const tf=sp?sp.timeFrame:'';
+  let left='';if(tf==='current'&&sp.finishDate){const d=Math.ceil((new Date(sp.finishDate)-new Date())/86400000);left=d>0?d+' gün kaldı':'son gün'}
+  badge.innerHTML=`<span class="sprint-badge ${tf||'past'}">${left||({current:'Aktif',future:'Gelecek',past:'Geçmiş'}[tf]||'')}</span>`;
+  const done=items.filter(i=>['Done','Closed','Resolved'].includes(i.state)).length;
+  const withJob=items.filter(i=>getJobForWi(i.id));
+  const pr=withJob.filter(i=>{const j=getJobForWi(i.id);return j&&j.pr_url&&!Number(j.dry_run)}).length;
+  const n=items.length||1;
+  box.innerHTML=`<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px">
+      <div class="stat"><div class="stat-val">${items.length}</div><div class="stat-lbl">iş öğesi</div></div>
+      <div class="stat"><div class="stat-val">${fmtSP(spSum(items))}<small> SP</small></div><div class="stat-lbl">${spCount(items)}/${items.length} tahminli</div></div>
+      <div class="stat"><div class="stat-val">${withJob.length}</div><div class="stat-lbl">pipeline'da</div></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <div class="prog"><span>Done</span><div class="bar"><div style="width:${Math.round(done/n*100)}%;background:var(--success)"></div></div><span class="mono">${done}</span></div>
+      <div class="prog"><span>Pipeline</span><div class="bar"><div style="width:${Math.round(withJob.length/n*100)}%"></div></div><span class="mono">${withJob.length}</span></div>
+      <div class="prog"><span>PR açık</span><div class="bar"><div style="width:${Math.round(pr/n*100)}%;background:var(--run)"></div></div><span class="mono">${pr}</span></div>
+    </div>`;
+}
+document.addEventListener('DOMContentLoaded',()=>{
+  // Retro eski modal id'siyle inline panele taşınır (test/regresyon: openRetro + #retroModal korunur)
+  const rm=document.getElementById('retroModal'),pr=document.getElementById('paneRetro');
+  if(rm&&pr)pr.appendChild(rm);
+  let t='overview';try{t=localStorage.getItem('tempo_tab')||'overview'}catch(e){}
+  if(!document.getElementById('pane'+t.charAt(0).toUpperCase()+t.slice(1)))t='overview';
+  showTab(t);
+});
+
+
 setInterval(fetchStatus,2000);setInterval(fetchJobs,3000);fetchStatus();fetchJobs();
 
 // ── Pipeline → Board eşleştirme ──
@@ -927,11 +1130,12 @@ async function loadBoard(){
     +`<div class="sprint-stat"><div class="sprint-stat-val" style="color:var(--accent-light)">${fmtSP(spSum(items))}</div><div class="sprint-stat-lbl">SP · ${spCount(items)}/${items.length} iş</div></div>`
     +sts.map(s=>`<div class="sprint-stat"><div class="sprint-stat-val" style="color:${sc(s)}">${bs[s]}</div><div class="sprint-stat-lbl">${esc(s)}</div></div>`).join('');
   sum.style.display='flex';
+  renderOvSprint();
   // Kanban
   const gr={};for(const i of items){if(!gr[i.state])gr[i.state]=[];gr[i.state].push(i)}
   const cols=Object.keys(gr).sort((a,b)=>so(a)-so(b));
-  c.innerHTML=`<div class="kanban-board" style="grid-template-columns:repeat(${cols.length},minmax(210px,1fr))">`+cols.map(s=>`<div class="kanban-column"><div class="kanban-column-header" style="border-top:3px solid ${sc(s)}"><span class="kanban-column-title">${esc(s)}</span><span class="kanban-column-meta"><span class="kanban-column-sp">${fmtSP(spSum(gr[s]))} SP</span><span class="kanban-column-count">${gr[s].length}</span></span></div><div class="kanban-column-body">${gr[s].map(wiCard).join('')}</div></div>`).join('')+'</div>';
-  }catch(e){c.innerHTML=`<div class="board-empty">Hata: ${esc(e.message)}</div>`;sum.style.display='none'}
+  c.innerHTML=`<div class="kanban-board" style="grid-template-columns:repeat(${cols.length},minmax(210px,1fr))">`+cols.map(s=>`<div class="kanban-column"><div class="kanban-column-header" style="border-top-color:${sc(s)}"><span class="kanban-column-title">${esc(s)}</span><span class="kanban-column-meta"><span class="kanban-column-sp">${fmtSP(spSum(gr[s]))} SP</span><span class="kanban-column-count">${gr[s].length}</span></span></div><div class="kanban-column-body">${gr[s].map(wiCard).join('')}</div></div>`).join('')+'</div>';
+  }catch(e){c.innerHTML=`<div class="board-empty">Hata: ${esc(e.message)}</div>`;sum.style.display='none';renderOvSprint()}
 }
 
 const SO=['New','Backlog','To Do','Active','Committed','In Progress','Blocked','Code Review','QA To Do','QA','Testing','UAT','Resolved','Ready for Production','Done','Closed','Canceled','Removed'];
@@ -953,7 +1157,7 @@ async function reviewWi(id){
     const r=await fetch('/api/pr-review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:String(id)})});
     const d=await r.json();
     alert(d.error?('Hata: '+d.error):d.message);
-    if(!d.error&&typeof loadJobs==='function')loadJobs();
+    if(!d.error)fetchJobs();
   }catch(e){alert('Hata: '+e);}
 }
 function wiCard(it){
@@ -969,7 +1173,7 @@ function wiCard(it){
       <div class="wi-type-icon ${t.c}">${t.i}</div>
       ${it.url?`<a class="wi-id wi-link" href="${esc(it.url)}" target="_blank" onclick="event.stopPropagation()">#${it.id}</a>`:`<span class="wi-id">#${it.id}</span>`}
       <span class="wi-priority" data-p="${it.priority}">${pl[it.priority]||''}</span>
-      ${RV.includes(it.state)?`<button class="wi-review-btn" onclick="event.stopPropagation();reviewWi(${it.id})" title="PR inceleme katkısı: WI'a bağlı PR'ı reviewer inceler, bulgular PR ve WI yorumu olur (danışma; kod/durum değişmez)">🔍</button>`:''}
+      ${RV.includes(it.state)?`<button class="wi-review-btn" onclick="event.stopPropagation();reviewWi(${it.id})" title="PR inceleme katkısı: WI'a bağlı PR'ı reviewer inceler, bulgular PR ve WI yorumu olur (danışma; kod/durum değişmez)"><svg class="ico" style="width:12px;height:12px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg></button>`:''}
       ${spOf(it)>0?`<span class="wi-sp">${fmtSP(spOf(it))}</span>`:`<span class="wi-sp none" title="Story point girilmemiş">—</span>`}
     </div>
     <div class="wi-title">${esc(it.title)}</div>
@@ -981,14 +1185,20 @@ function wiCard(it){
 function wiPipelineBadge(wiId){
   const j=getJobForWi(wiId);
   if(!j)return '';
-  const sl={queued:'Kuyrukta',running:'Çalışıyor',completed:'Tamamlandı',failed:'Başarısız'};
-  const step=j.current_step?j.current_step.replace(/_task$/,'').replace(/_/g,' '):'';
-  let info=sl[j.status]||j.status;
-  if(j.status==='running'&&step)info=step;
-  let pr='';
-  if(j.pr_url)pr=`<span class="wi-pipeline-pr"><a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()">PR#${esc(j.pr_id||'')}</a></span>`;
-  return `<div class="wi-pipeline ${j.status}">
-    <span class="wi-pipeline-dot ${j.status}"></span>
+  const idx=STEP_KEYS.indexOf(j.current_step);
+  const seg=STEP_KEYS.map((k,i)=>{
+    let c='';
+    if(j.status==='completed')c='d';
+    else if(idx>=0){ if(i<idx)c='d'; else if(i===idx)c=j.status==='running'?'r':j.status==='failed'?'f':(j.status==='needs_human'||j.status==='needs_info')?'w':''; }
+    return `<span class="${c}"></span>`;
+  }).join('');
+  let info=JS_LABEL[j.status]||j.status;
+  if(j.status==='running'&&j.current_step)info=stepLabel(j.current_step);
+  else if((j.status==='failed'||j.status==='needs_human'||j.status==='needs_info')&&j.current_step)info=info+' · '+stepLabel(j.current_step);
+  if(Number(j.dry_run)===1)info='Dry run · '+info;
+  const pr=(j.pr_url&&!Number(j.dry_run))?`<span class="wi-pipeline-pr"><a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()">PR</a></span>`:'';
+  return `<div class="wi-seg" title="${esc(info)}">${seg}</div><div class="wi-pipeline ${j.status}" onclick="event.stopPropagation();viewJob(${j.id})" style="cursor:pointer" title="İş detayını aç">
+    <span class="sd ${j.status}" style="width:6px;height:6px;box-shadow:none;animation:none"></span>
     <span class="wi-pipeline-step">${esc(info)}</span>
     ${pr}
   </div>`;
@@ -1003,7 +1213,7 @@ async function queueSel(){
   const dryRun=document.getElementById('dryRun')?.checked||false;
   let ok=0,fail=0;
   for(const cb of cbs){try{const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({work_item_id:cb.dataset.id,use_hal:hal,dry_run:dryRun})});const d=await r.json();if(d.status==='queued')ok++;else fail++}catch(e){fail++}}
-  btn.disabled=false;btn.textContent='Kuyruğa Ekle ▶';clearSel();fetchJobs();if(fail)alert(`${ok} eklendi, ${fail} başarısız.`);
+  btn.disabled=false;btn.textContent='Kuyruğa ekle';clearSel();fetchJobs();if(fail)alert(`${ok} eklendi, ${fail} başarısız.`);
 }
 
 function esc(s){return s?s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'):''}
@@ -1030,8 +1240,8 @@ function switchCfgTab(name){
   emb.style.display='none'; vis.style.display='none'; pip.style.display='none'; creds.style.display='none';
   // Footer Kaydet etiketini sekmeye gore degistir
   if(name==='env'||name==='embed'||name==='vision'||name==='creds'){saveBtn.style.display='none'}
-  else if(name==='llm'){saveBtn.style.display='inline-block';saveBtn.textContent='Tumunu Kaydet'}
-  else if(name==='pipeline'){saveBtn.style.display='inline-block';saveBtn.textContent='Tumunu Kaydet'}
+  else if(name==='llm'){saveBtn.style.display='inline-block';saveBtn.textContent='Tümünü Kaydet'}
+  else if(name==='pipeline'){saveBtn.style.display='inline-block';saveBtn.textContent='Tümünü Kaydet'}
   else{saveBtn.style.display='inline-block';saveBtn.textContent='Kaydet'}
   if(name==='env'){env.style.display='block';loadEnv()}
   else if(name==='llm'){llm.style.display='block';loadLlm()}
@@ -1045,27 +1255,27 @@ function switchCfgTab(name){
 async function loadCfg(name){
   const editor=document.getElementById('cfgEditor');
   const info=document.getElementById('cfgInfo');
-  editor.value='Yukleniyor...';
+  editor.value='Yükleniyor...';
   info.textContent=name+'.yaml';
   try{
     const r=await fetch('/api/config/'+name);
     if(r.ok){const d=await r.json();editor.value=d.content||'';info.textContent=name+'.yaml ('+editor.value.length+' char)'}
     else{const e=await r.json();editor.value='Hata: '+(e.error||r.status)}
-  }catch(e){editor.value='Baglanti hatasi: '+e}
+  }catch(e){editor.value='Bağlantı hatası: '+e}
 }
 async function loadEnv(){
   const view=document.getElementById('cfgEnvView');
-  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  view.innerHTML='<div style="color:var(--text-dim)">Yükleniyor...</div>';
   try{
     const r=await fetch('/api/config/env');
     if(r.ok){
       const d=await r.json();
       let html='<table style="width:100%;font-size:13px;border-collapse:collapse">';
-      html+='<tr style="color:var(--text-dim);font-size:11px;text-align:left"><th style="padding:6px 8px">Degisken</th><th style="padding:6px 8px">Deger</th></tr>';
+      html+='<tr style="color:var(--text-dim);font-size:11px;text-align:left"><th style="padding:6px 8px">Değişken</th><th style="padding:6px 8px">Değer</th></tr>';
       for(const[k,v]of Object.entries(d)){
-        html+=`<tr style="border-top:1px solid var(--border)"><td style="padding:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent-light)">${esc(k)}</td><td style="padding:8px;font-family:'JetBrains Mono',monospace;font-size:12px">${esc(v)||'<span style="color:var(--text-dim)">(bos)</span>'}</td></tr>`;
+        html+=`<tr style="border-top:1px solid var(--border)"><td style="padding:8px;font-family:'Geist Mono',Menlo,monospace;font-size:12px;color:var(--accent-light)">${esc(k)}</td><td style="padding:8px;font-family:'Geist Mono',Menlo,monospace;font-size:12px">${esc(v)||'<span style="color:var(--text-dim)">(boş)</span>'}</td></tr>`;
       }
-      html+='</table><div style="margin-top:12px;font-size:11px;color:var(--text-dim)">Env degiskenleri .env dosyasindan okunur. Degistirmek icin .env dosyasini duzenleyin ve sunucuyu yeniden baslatin.</div>';
+      html+='</table><div style="margin-top:12px;font-size:11px;color:var(--text-dim)">Env değişkenleri .env dosyasından okunur. Degistirmek icin .env dosyasini duzenleyin ve sunucuyu yeniden baslatin.</div>';
       view.innerHTML=html;
     }
   }catch(e){view.innerHTML='Hata: '+e}
@@ -1087,7 +1297,7 @@ async function _fetchModels(provider){
 }
 async function loadLlm(){
   const view=document.getElementById('cfgLlmView');
-  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  view.innerHTML='<div style="color:var(--text-dim)">Yükleniyor...</div>';
   try{
     const r=await fetch('/api/llm/state?t='+Date.now());
     if(!r.ok){view.innerHTML='Hata: '+r.status;return}
@@ -1111,14 +1321,14 @@ async function loadLlm(){
       const src=a.source||'';
       const srcStyle=`background:${sourceColor[src]||'var(--bg-elevated)'};color:#000;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600`;
       const isOverride=src==='dashboard';
-      const clearBtn=isOverride?`<button onclick="clearAgentLlm('${esc(a.agent_key)}')" class="sm-btn ghost" style="font-size:11px;padding:4px 10px" title="Override sil">Sifirla</button>`:'';
+      const clearBtn=isOverride?`<button onclick="clearAgentLlm('${esc(a.agent_key)}')" class="sm-btn ghost" style="font-size:11px;padding:4px 10px" title="Override sil">Sıfırla</button>`:'';
       const err=a.error?`<div style="color:#ef4444;font-size:11px">${esc(a.error)}</div>`:'';
       const profileTag=a.profile?`<div style="font-size:10px;color:var(--text-dim);margin-top:2px">profil: <code>${esc(a.profile)}</code></div>`:'';
       const provOpts=providers.map(p=>`<option value="${esc(p)}"${p===a.provider?' selected':''}>${esc(p)}</option>`).join('');
       html+=`<tr style="border-bottom:1px solid var(--border)" data-agent="${esc(a.agent_key)}">
         <td style="padding:8px;vertical-align:top">
           <div style="font-weight:600">${esc(a.display_name||a.agent_key)}</div>
-          <div style="font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace">${esc(a.agent_key)}</div>
+          <div style="font-size:10px;color:var(--text-dim);font-family:'Geist Mono',Menlo,monospace">${esc(a.agent_key)}</div>
           ${profileTag}${err}
         </td>
         <td style="padding:8px;vertical-align:top">
@@ -1137,7 +1347,7 @@ async function loadLlm(){
         <td style="padding:8px;vertical-align:top">
           <input class="llm-mt" data-agent="${esc(a.agent_key)}" type="number" min="64" max="200000" step="64" value="${a.max_tokens||4096}"
             onchange="autoSaveLlm(this)" onblur="autoSaveLlm(this)"
-            style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 8px;border-radius:6px;font-size:12px;width:80px;font-family:'JetBrains Mono',monospace" />
+            style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 8px;border-radius:6px;font-size:12px;width:80px;font-family:'Geist Mono',Menlo,monospace" />
         </td>
         <td style="padding:8px;vertical-align:top"><span style="${srcStyle}">${esc(sourceLbl[src]||src)}</span></td>
         <td style="padding:8px;vertical-align:top;text-align:right;white-space:nowrap">
@@ -1147,7 +1357,7 @@ async function loadLlm(){
       </tr>`;
     }
     html+='</tbody></table>';
-    html+=`<div style="margin-top:16px;font-size:11px;color:var(--text-dim);line-height:1.6">Cozumleme onceligi: <b>Env</b> &gt; <b>Dashboard</b> &gt; <b>agents.yaml</b> &gt; <b>Eski env</b> (CREW_USE_LOCAL_LLM) &gt; <b>Default</b><br>Provider'lar: ${providers.map(p=>`<code>${esc(p)}</code>`).join(', ')}. Hazir profiller "Profiller" sekmesinde duzenlenebilir.<br><b>Tip:</b> alanı düzenleyince otomatik kaydolur (toast bildirim çıkar). Tüm satırları zorla yeniden yazmak için "Tumunu Kaydet".</div>`;
+    html+=`<div style="margin-top:16px;font-size:11px;color:var(--text-dim);line-height:1.6">Cozumleme onceligi: <b>Env</b> &gt; <b>Dashboard</b> &gt; <b>agents.yaml</b> &gt; <b>Eski env</b> (CREW_USE_LOCAL_LLM) &gt; <b>Default</b><br>Provider'lar: ${providers.map(p=>`<code>${esc(p)}</code>`).join(', ')}. Hazir profiller "Profiller" sekmesinde duzenlenebilir.<br><b>Tip:</b> alanı düzenleyince otomatik kaydolur (toast bildirim çıkar). Tüm satırları zorla yeniden yazmak için "Tümünü Kaydet".</div>`;
     view.innerHTML=html;
 
     // Initial state'i _llmSaved cache'ine yaz — boylece blur sirasinda
@@ -1160,16 +1370,16 @@ async function loadLlm(){
       });
       _populateModels(a.agent_key, a.provider);
     }
-  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+  }catch(e){view.innerHTML='Bağlantı hatası: '+e}
 }
 async function _populateModels(agent_key, provider){
   if(!provider)return;
   const combo=document.querySelector(`.combo[data-agent="${agent_key}"]`);
   const hint=document.querySelector(`.llm-models-hint[data-agent="${agent_key}"]`);
   if(!combo)return;
-  if(hint)hint.textContent='Yukleniyor...';
+  if(hint)hint.textContent='Yükleniyor...';
   const list=combo.querySelector('.combo-list');
-  list.innerHTML='<div class="combo-empty">Yukleniyor...</div>';
+  list.innerHTML='<div class="combo-empty">Yükleniyor...</div>';
   const d=await _fetchModels(provider);
   combo.dataset.models=JSON.stringify(d.models||[]);
   _renderComboItems(combo);
@@ -1337,7 +1547,7 @@ function _fmtBytes(n){
 window._embedKnownDims={};
 async function loadEmbed(){
   const view=document.getElementById('cfgEmbedView');
-  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  view.innerHTML='<div style="color:var(--text-dim)">Yükleniyor...</div>';
   try{
     const r=await fetch('/api/embed/state?t='+Date.now());
     if(!r.ok){view.innerHTML='Hata: '+r.status;return}
@@ -1370,16 +1580,16 @@ async function loadEmbed(){
     </div>`;
 
     html+=`<label>Boyut (dim)</label>`;
-    html+=`<div><input id="embedDimInput" type="number" min="32" max="8192" step="1" value="${d.dimension}" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;width:100px;font-family:'JetBrains Mono',monospace" /> <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Bilinen modeller icin otomatik bulunur. Manuel override icin degistir.</span></div>`;
+    html+=`<div><input id="embedDimInput" type="number" min="32" max="8192" step="1" value="${d.dimension}" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;width:100px;font-family:'Geist Mono',Menlo,monospace" /> <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Bilinen modeller icin otomatik bulunur. Manuel override icin degistir.</span></div>`;
 
     html+=`<label>Base URL</label>`;
-    html+=`<input id="embedUrlInput" type="text" value="${esc(d.base_url)}" placeholder="provider default" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace" />`;
+    html+=`<input id="embedUrlInput" type="text" value="${esc(d.base_url)}" placeholder="provider default" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'Geist Mono',Menlo,monospace" />`;
 
     html+=`<label>API Key (env adi)</label>`;
-    html+=`<div><input id="embedApiKeyEnvInput" type="text" value="${esc(apiKeyEnv)}" placeholder="orn: LITELLM_API_KEY (openai-uyumlu icin)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace;min-width:240px" /> <span style="font-size:11px;color:var(--text-dim);margin-left:8px">.env'deki anahtarın <b>adi</b> (degeri DEGIL).</span></div>`;
+    html+=`<div><input id="embedApiKeyEnvInput" type="text" value="${esc(apiKeyEnv)}" placeholder="orn: LITELLM_API_KEY (openai-uyumlu icin)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'Geist Mono',Menlo,monospace;min-width:240px" /> <span style="font-size:11px;color:var(--text-dim);margin-left:8px">.env'deki anahtarın <b>adi</b> (degeri DEGIL).</span></div>`;
 
     html+=`<label>Vector DB</label>`;
-    html+=`<div style="font-family:'JetBrains Mono',monospace;font-size:12px"><code>${esc(d.db.path)}</code><div style="margin-top:4px;font-size:11px">${dbStatus}</div></div>`;
+    html+=`<div style="font-family:'Geist Mono',Menlo,monospace;font-size:12px"><code>${esc(d.db.path)}</code><div style="margin-top:4px;font-size:11px">${dbStatus}</div></div>`;
 
     html+='</div>';
     html+=`<div style="margin-top:18px;display:flex;gap:8px;flex-wrap:wrap">
@@ -1387,7 +1597,7 @@ async function loadEmbed(){
       <button class="sm-btn ghost" onclick="testEmbed()" style="font-size:13px;padding:8px 18px">Test Et</button>
       <button class="sm-btn ghost" onclick="clearEmbedDb()" style="font-size:13px;padding:8px 18px;color:#ef4444;border-color:#ef4444">Vector DB Temizle</button>
     </div>`;
-    html+=`<div id="embedTestResult" style="margin-top:14px;font-size:12px;font-family:'JetBrains Mono',monospace"></div>`;
+    html+=`<div id="embedTestResult" style="margin-top:14px;font-size:12px;font-family:'Geist Mono',Menlo,monospace"></div>`;
     html+=`<div style="margin-top:24px;border-top:1px solid var(--border);padding-top:14px;font-size:11px;color:var(--text-dim);line-height:1.6"><b>Provider'lar:</b> ${providers.map(p=>`<code>${esc(p)}</code>`).join(', ')} &nbsp; — &nbsp; <b>Bilinen modeller:</b> `;
     for(const [m,dim] of Object.entries(d.known_dims||{})){
       html+=`<code>${esc(m)}</code>(${dim}d) `;
@@ -1397,7 +1607,7 @@ async function loadEmbed(){
 
     // Provider'a gore model listesini doldur
     await _populateEmbedModelList(d.provider, d.model);
-  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+  }catch(e){view.innerHTML='Bağlantı hatası: '+e}
 }
 async function _populateEmbedModelList(provider, currentModel){
   const combo=document.querySelector('.combo[data-agent="__embed"]');
@@ -1451,7 +1661,7 @@ async function saveEmbed(){
     if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
     showToast(`✓ Embedding ayari kaydedildi (${provider}/${model}, ${dim}d)`,'success');
     loadEmbed();
-  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+  }catch(e){showToast('Bağlantı hatası: '+e,'error')}
 }
 async function testEmbed(){
   const out=document.getElementById('embedTestResult');
@@ -1467,8 +1677,8 @@ async function testEmbed(){
       showToast('Embedding hatasi','error');
     }
   }catch(e){
-    out.innerHTML=`<span style="color:#ef4444">✗ Baglanti hatasi:</span> ${esc(String(e))}`;
-    showToast('Baglanti hatasi','error');
+    out.innerHTML=`<span style="color:#ef4444">✗ Bağlantı hatası:</span> ${esc(String(e))}`;
+    showToast('Bağlantı hatası','error');
   }
 }
 async function clearEmbedDb(){
@@ -1479,14 +1689,14 @@ async function clearEmbedDb(){
     if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
     showToast('✓ Vector DB silindi','success');
     loadEmbed();
-  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+  }catch(e){showToast('Bağlantı hatası: '+e,'error')}
 }
 
 // ── Vision tab ──
 window._visionKnownModels={};
 async function loadVision(){
   const view=document.getElementById('cfgVisionView');
-  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  view.innerHTML='<div style="color:var(--text-dim)">Yükleniyor...</div>';
   try{
     const r=await fetch('/api/vision/state?t='+Date.now());
     if(!r.ok){view.innerHTML='Hata: '+r.status;return}
@@ -1513,17 +1723,17 @@ async function loadVision(){
     </div>`;
 
     html+=`<label>Base URL</label>`;
-    html+=`<input id="visionUrlInput" type="text" value="${esc(d.base_url)}" placeholder="provider default" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace" />`;
+    html+=`<input id="visionUrlInput" type="text" value="${esc(d.base_url)}" placeholder="provider default" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'Geist Mono',Menlo,monospace" />`;
 
     html+=`<label>API Key (env adi)</label>`;
-    html+=`<div><input id="visionApiKeyEnvInput" type="text" value="${esc(apiKeyEnv)}" placeholder="orn: LITELLM_API_KEY (openai-uyumlu icin)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace;min-width:240px" /> <span style="font-size:11px;color:var(--text-dim);margin-left:8px">.env'deki anahtarın <b>adi</b> (degeri DEGIL).</span></div>`;
+    html+=`<div><input id="visionApiKeyEnvInput" type="text" value="${esc(apiKeyEnv)}" placeholder="orn: LITELLM_API_KEY (openai-uyumlu icin)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'Geist Mono',Menlo,monospace;min-width:240px" /> <span style="font-size:11px;color:var(--text-dim);margin-left:8px">.env'deki anahtarın <b>adi</b> (degeri DEGIL).</span></div>`;
     html+='</div>';
 
     html+=`<div style="margin-top:18px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="sm-btn" onclick="saveVision()" style="font-size:13px;padding:8px 18px">Kaydet</button>
       <button class="sm-btn ghost" onclick="testVision()" style="font-size:13px;padding:8px 18px">Test Et</button>
     </div>`;
-    html+=`<div id="visionTestResult" style="margin-top:14px;font-size:12px;font-family:'JetBrains Mono',monospace"></div>`;
+    html+=`<div id="visionTestResult" style="margin-top:14px;font-size:12px;font-family:'Geist Mono',Menlo,monospace"></div>`;
     html+=`<div style="margin-top:24px;border-top:1px solid var(--border);padding-top:14px;font-size:11px;color:var(--text-dim);line-height:1.6"><b>Bilinen vision modelleri:</b> `;
     for(const [m,p] of Object.entries(d.known_models||{})){
       html+=`<code>${esc(m)}</code>(${esc(p)}) `;
@@ -1532,7 +1742,7 @@ async function loadVision(){
     view.innerHTML=html;
 
     await _populateVisionModelList(d.provider);
-  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+  }catch(e){view.innerHTML='Bağlantı hatası: '+e}
 }
 async function _populateVisionModelList(provider){
   const combo=document.querySelector('.combo[data-agent="__vision"]');
@@ -1573,7 +1783,7 @@ async function saveVision(){
     if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
     showToast(`✓ Vision ayari kaydedildi (${provider}/${model})`,'success');
     loadVision();
-  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+  }catch(e){showToast('Bağlantı hatası: '+e,'error')}
 }
 async function testVision(){
   const out=document.getElementById('visionTestResult');
@@ -1589,8 +1799,8 @@ async function testVision(){
       showToast('Vision hatasi','error');
     }
   }catch(e){
-    out.innerHTML=`<span style="color:#ef4444">✗ Baglanti hatasi:</span> ${esc(String(e))}`;
-    showToast('Baglanti hatasi','error');
+    out.innerHTML=`<span style="color:#ef4444">✗ Bağlantı hatası:</span> ${esc(String(e))}`;
+    showToast('Bağlantı hatası','error');
   }
 }
 
@@ -1598,7 +1808,7 @@ async function testVision(){
 const _credsRawCache={};  // namespace/provider -> raw values (edit modu)
 async function loadCreds(){
   const view=document.getElementById('cfgCredsView');
-  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  view.innerHTML='<div style="color:var(--text-dim)">Yükleniyor...</div>';
   try{
     const r=await fetch('/api/providers/credentials?t='+Date.now());
     if(!r.ok){view.innerHTML='Hata: '+r.status;return}
@@ -1621,14 +1831,14 @@ async function loadCreds(){
         const fields=data.fields||[];
         if(!fields.length){
           html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg)">
-            <div style="font-weight:600;font-family:'JetBrains Mono',monospace;color:var(--accent-light);margin-bottom:6px">${esc(prov)}</div>
+            <div style="font-weight:600;font-family:'Geist Mono',Menlo,monospace;color:var(--accent-light);margin-bottom:6px">${esc(prov)}</div>
             <div style="font-size:11px;color:var(--text-dim)">Credential gerektirmiyor</div>
           </div>`;
           continue;
         }
         html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg)" data-ns="${ns}" data-prov="${esc(prov)}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <div style="font-weight:600;font-family:'JetBrains Mono',monospace;color:var(--accent-light)">${esc(prov)}</div>
+            <div style="font-weight:600;font-family:'Geist Mono',Menlo,monospace;color:var(--accent-light)">${esc(prov)}</div>
             <button class="sm-btn ghost" onclick="clearProviderCreds('${ns}','${esc(prov)}')" style="font-size:10px;padding:2px 8px;color:#ef4444;border-color:#ef4444">Sil</button>
           </div>`;
         for(const f of fields){
@@ -1642,7 +1852,7 @@ async function loadCreds(){
           html+=`<div style="margin-bottom:8px">
             <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:3px">${esc(f.label||f.name)}${envHint}</label>
             <div style="display:flex;gap:4px">
-              <input id="${esc(inputId)}" type="${inputType}" data-secret="${f.secret?'1':'0'}" data-loaded="${val?'masked':'empty'}" placeholder="${esc(placeholder)}" value="${esc(val)}" ${f.secret&&val?'readonly':''} style="flex:1;background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'JetBrains Mono',monospace" />
+              <input id="${esc(inputId)}" type="${inputType}" data-secret="${f.secret?'1':'0'}" data-loaded="${val?'masked':'empty'}" placeholder="${esc(placeholder)}" value="${esc(val)}" ${f.secret&&val?'readonly':''} style="flex:1;background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;font-family:'Geist Mono',Menlo,monospace" />
               ${visTglBtn}
             </div>
           </div>`;
@@ -1654,7 +1864,7 @@ async function loadCreds(){
       html+='</div>';
     }
     view.innerHTML=html;
-  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+  }catch(e){view.innerHTML='Bağlantı hatası: '+e}
 }
 async function toggleCredVis(inputId, ns, provider, fieldName, btn){
   const input=document.getElementById(inputId);
@@ -1670,7 +1880,7 @@ async function toggleCredVis(inputId, ns, provider, fieldName, btn){
       input.readOnly=false;
       input.type='text';
       btn.textContent='Gizle';
-    }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+    }catch(e){showToast('Bağlantı hatası: '+e,'error')}
   }else{
     input.type=input.type==='password'?'text':'password';
     btn.textContent=input.type==='password'?'Goster':'Gizle';
@@ -1697,7 +1907,7 @@ async function saveProviderCreds(ns, provider){
     if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
     showToast(`✓ ${provider} kaydedildi (${(d.fields||[]).length} alan)`,'success');
     loadCreds();
-  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+  }catch(e){showToast('Bağlantı hatası: '+e,'error')}
 }
 async function clearProviderCreds(ns, provider){
   if(!confirm(`${provider} icin kayitli tum credential'ler silinecek. Devam?`))return;
@@ -1707,14 +1917,14 @@ async function clearProviderCreds(ns, provider){
     if(!r.ok){showToast('Hata: '+(d.error||r.status),'error');return}
     showToast(`✓ ${provider} credential'leri silindi`,'success');
     loadCreds();
-  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+  }catch(e){showToast('Bağlantı hatası: '+e,'error')}
 }
 
 // ── Pipeline Behavior tab ──
 const _pipelineSaved={};  // key -> string of value (degismedi-mi tespiti)
 async function loadPipeline(){
   const view=document.getElementById('cfgPipelineView');
-  view.innerHTML='<div style="color:var(--text-dim)">Yukleniyor...</div>';
+  view.innerHTML='<div style="color:var(--text-dim)">Yükleniyor...</div>';
   try{
     const r=await fetch('/api/pipeline/state?t='+Date.now());
     if(!r.ok){view.innerHTML='Hata: '+r.status;return}
@@ -1723,7 +1933,7 @@ async function loadPipeline(){
     const sourceLbl={dashboard:'Dashboard',env:'Env',default:'Default'};
     const sourceColor={dashboard:'var(--accent-light)',env:'#f9c74f',default:'var(--text-dim)'};
 
-    let html=`<div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">Pipeline davranis ayarlari. <b>Degisiklikler aninda kaydolur</b> (toast bildirim cikar). <b>Cozumleme onceligi:</b> Dashboard > Env (.env) > Schema default. <b>Dosya:</b> <code style="color:var(--accent-light)">config/pipeline_config.yaml</code>.</div>`;
+    let html=`<div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">Pipeline davranış ayarları. <b>Degisiklikler aninda kaydolur</b> (toast bildirim cikar). <b>Cozumleme onceligi:</b> Dashboard > Env (.env) > Schema default. <b>Dosya:</b> <code style="color:var(--accent-light)">config/pipeline_config.yaml</code>.</div>`;
 
     html+='<div style="display:grid;grid-template-columns:1fr;gap:10px">';
     for(const f of fields){
@@ -1743,13 +1953,13 @@ async function loadPipeline(){
         const step=f.type==='float'?'0.1':'1';
         inputHtml=`<input type="number" data-key="${esc(f.key)}" data-type="${esc(f.type)}" value="${f.value}" step="${step}"${minAttr}
           onchange="autoSavePipeline(this)" onblur="autoSavePipeline(this)"
-          style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;width:140px;font-family:'JetBrains Mono',monospace" />`;
+          style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;width:140px;font-family:'Geist Mono',Menlo,monospace" />`;
       }
       html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;background:var(--bg)" data-pipekey="${esc(f.key)}">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;gap:12px">
           <div style="flex:1">
             <div style="font-weight:600;font-size:13px">${esc(f.label)}${envHint}</div>
-            <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:'JetBrains Mono',monospace">${esc(f.key)} <span style="${srcStyle};margin-left:6px">${esc(sourceLbl[src]||src)}</span></div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:'Geist Mono',Menlo,monospace">${esc(f.key)} <span style="${srcStyle};margin-left:6px">${esc(sourceLbl[src]||src)}</span></div>
           </div>
           <div style="flex-shrink:0">${inputHtml}</div>
         </div>
@@ -1758,7 +1968,7 @@ async function loadPipeline(){
     }
     html+='</div>';
     view.innerHTML=html;
-  }catch(e){view.innerHTML='Baglanti hatasi: '+e}
+  }catch(e){view.innerHTML='Bağlantı hatası: '+e}
 }
 function _readPipelineField(field){
   const key=field.dataset.key;
@@ -1790,7 +2000,7 @@ async function autoSavePipeline(field){
       const badge=card.querySelector('[style*="border-radius:10px"]');
       if(badge){badge.textContent='Dashboard';badge.style.background='var(--accent-light)'}
     }
-  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+  }catch(e){showToast('Bağlantı hatası: '+e,'error')}
 }
 async function saveAllPipeline(){
   const inputs=document.querySelectorAll('#cfgPipelineView [data-key]');
@@ -1806,7 +2016,7 @@ async function saveAllPipeline(){
     if(!resp.ok){showToast('Hata: '+(d.error||resp.status),'error');return}
     showToast(`✓ ${Object.keys(body).length} alan kaydedildi`,'success');
     loadPipeline();
-  }catch(e){showToast('Baglanti hatasi: '+e,'error')}
+  }catch(e){showToast('Bağlantı hatası: '+e,'error')}
 }
 function reloadCfg(){
   if(_cfgTab==='env')loadEnv();
@@ -1829,7 +2039,7 @@ async function saveCfg(){
       setTimeout(()=>st.style.display='none',3000);
       document.getElementById('cfgInfo').textContent=_cfgTab+'.yaml ('+content.length+' char) — kaydedildi';
     }else{alert('Hata: '+(d.error||'Bilinmeyen hata'))}
-  }catch(e){alert('Baglanti hatasi: '+e)}
+  }catch(e){alert('Bağlantı hatası: '+e)}
 }
 // Tab key in editor
 document.getElementById('cfgEditor').addEventListener('keydown',function(e){
@@ -2024,11 +2234,11 @@ async function koLoadList(silent){
     const runs=d.runs||[];
     const el=document.getElementById('koList');
     if(!runs.length){
-      el.innerHTML='<div style="padding:14px;color:var(--text-dim);font-size:12px">Henuz kickoff debug calistirilmadi.</div>';
+      el.innerHTML='<div style="padding:14px;color:var(--text-dim);font-size:12px">Henüz kickoff debug çalıştırılmadı.</div>';
     }else{
       el.innerHTML=runs.map(r=>{
         const sel=r.id===_koSelectedId?'background:rgba(108,92,231,0.18);border-left:3px solid var(--accent)':'border-left:3px solid transparent';
-        const approved=r.kickoff_approved?'<span title="Onaylandi" style="color:#10b981;margin-left:6px">✓</span>':'';
+        const approved=r.kickoff_approved?'<span title="Onaylandı" style="color:#10b981;margin-left:6px">✓</span>':'';
         const fb=r.kickoff_feedback?` <span title="Feedback ile" style="color:#fbbf24">💬</span>`:'';
         const parent=r.parent_job_id?`<span style="font-size:10px;color:var(--text-dim)" title="Parent">↳#${r.parent_job_id}</span>`:'';
         return `<div onclick="koShowDetail(${r.id})" style="padding:8px 10px;margin-bottom:4px;border-radius:6px;cursor:pointer;${sel};transition:background .12s" onmouseover="if(${r.id}!==_koSelectedId)this.style.background='rgba(255,255,255,0.04)'" onmouseout="if(${r.id}!==_koSelectedId)this.style.background='transparent'">
@@ -2110,14 +2320,14 @@ async function koShowDetail(jobId,silent){
   _koDetailInFlight=true;
   _koSelectedId=jobId;
   const det=document.getElementById('koDetail');
-  if(!silent) det.innerHTML='<div style="color:var(--text-dim);font-size:13px">Yukleniyor...</div>';
+  if(!silent) det.innerHTML='<div style="color:var(--text-dim);font-size:13px">Yükleniyor...</div>';
   try{
     const r=await fetch('/api/kickoff-runs/'+jobId);
     const d=await r.json();
     if(d.error){det.innerHTML='<div style="color:#ef4444">'+escHtml(d.error)+'</div>';return}
     koRenderDetail(d);
     if(d?.job?.status) _koLastStatusById[jobId]=d.job.status;
-  }catch(e){det.innerHTML='<div style="color:#ef4444">Baglanti hatasi: '+escHtml(String(e))+'</div>'}
+  }catch(e){det.innerHTML='<div style="color:#ef4444">Bağlantı hatası: '+escHtml(String(e))+'</div>'}
   finally{_koDetailInFlight=false}
 }
 
@@ -2137,7 +2347,7 @@ function koRenderDetail(d){
       <h3 style="font-size:17px;margin:0">Kickoff #${j.id} · WI #${escHtml(String(wi))}</h3>
       <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;font-size:11px">
         <span data-status-badge style="padding:3px 9px;border-radius:10px;background:${koStatusColor(status)}22;color:${koStatusColor(status)};text-transform:uppercase;font-weight:600;letter-spacing:.04em">${status}</span>
-        ${j.kickoff_approved?'<span style="padding:3px 9px;border-radius:10px;background:#10b98122;color:#10b981;font-weight:600">✓ Onaylandi</span>':''}
+        ${j.kickoff_approved?'<span style="padding:3px 9px;border-radius:10px;background:#10b98122;color:#10b981;font-weight:600">✓ Onaylandı</span>':''}
         ${j.parent_job_id?`<span style="padding:3px 9px;border-radius:10px;background:var(--bg-elevated);color:var(--text-dim)" title="Iyilestirme zinciri">↳ #${j.parent_job_id}</span>`:''}
         <span style="padding:3px 9px;border-radius:10px;background:var(--bg-elevated);color:var(--text-dim)">${koFmtTime(j.created_at)}</span>
       </div>
@@ -2179,8 +2389,8 @@ function koRenderDetail(d){
           hist+=`<div style="margin-bottom:7px">
             <div><b>Deneme #${at.attempt}:</b> <span style="color:${sc>=8?'#10b981':sc>=5?'#fbbf24':'#ef4444'}">${sc}/10</span>${sk}</div>
             <div style="color:var(--text-dim);margin-top:2px">${escHtml(at.reasoning||'')}</div>
-            ${(at.weaknesses||[]).length?'<div style="margin-top:3px"><b style="color:#fca5a5">Zayifliklar:</b><ul style="margin:2px 0 0 18px">'+(at.weaknesses||[]).map(w=>'<li>'+escHtml(w)+'</li>').join('')+'</ul></div>':''}
-            ${(at.suggestions||[]).length?'<div style="margin-top:3px"><b style="color:#7dd3fc">Oneriler:</b><ul style="margin:2px 0 0 18px">'+(at.suggestions||[]).map(s=>'<li>'+escHtml(s)+'</li>').join('')+'</ul></div>':''}
+            ${(at.weaknesses||[]).length?'<div style="margin-top:3px"><b style="color:#fca5a5">Zayıflıklar:</b><ul style="margin:2px 0 0 18px">'+(at.weaknesses||[]).map(w=>'<li>'+escHtml(w)+'</li>').join('')+'</ul></div>':''}
+            ${(at.suggestions||[]).length?'<div style="margin-top:3px"><b style="color:#7dd3fc">Öneriler:</b><ul style="margin:2px 0 0 18px">'+(at.suggestions||[]).map(s=>'<li>'+escHtml(s)+'</li>').join('')+'</ul></div>':''}
           </div>`;
         }
         hist+='</div></details></div>';
@@ -2196,7 +2406,7 @@ function koRenderDetail(d){
           ${scoreBadge}
         </div>
         <details><summary style="cursor:pointer;color:var(--text-dim);font-size:11px">Cikti (${(a.output||'').length} karakter)</summary>
-          <pre style="margin:8px 0 0 0;padding:10px;background:var(--bg);border-radius:6px;font-size:11px;line-height:1.5;white-space:pre-wrap;max-height:340px;overflow:auto;font-family:'JetBrains Mono',monospace">${escHtml(a.output||'(bos)')}</pre>
+          <pre style="margin:8px 0 0 0;padding:10px;background:var(--bg);border-radius:6px;font-size:11px;line-height:1.5;white-space:pre-wrap;max-height:340px;overflow:auto;font-family:'Geist Mono',Menlo,monospace">${escHtml(a.output||'(boş)')}</pre>
         </details>
         ${hist}
       </div>`;
@@ -2207,18 +2417,18 @@ function koRenderDetail(d){
     html+=`<div style="border-top:1px solid var(--border);padding-top:14px;margin-top:6px">
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">
         <button onclick="koApprove(${j.id})" class="sm-btn" style="background:#10b981;border-color:#10b981;font-size:12px">✓ Onayla ve Pipeline ile Devam Et</button>
-        <button onclick="koToggleRefine()" class="sm-btn ghost" style="font-size:12px">📝 Iyilestir</button>
+        <button onclick="koToggleRefine()" class="sm-btn ghost" style="font-size:12px">İyileştir</button>
       </div>
       <div id="koRefineBox" style="display:none;border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:12px;background:rgba(251,191,36,.04)">
-        <div style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Iyilestirme yonergesi</div>
+        <div style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">İyileştirme yönergesi</div>
         <textarea id="koRefineText" rows="4" placeholder="Agentlara ne eksik / yanlis oldugunu, ne yapmalari gerektigini yaz..." style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;resize:vertical;font-family:inherit"></textarea>
         <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-size:12px">
           <input type="checkbox" id="koLearnGlobally" />
           <span>Bu yonergeyi <b>global kural</b> olarak ogren — gelecekteki tum kickoff'larda kullanilir</span>
         </label>
         <div style="display:flex;gap:8px;margin-top:10px">
-          <button onclick="koRefineRun(${j.id})" class="sm-btn" style="font-size:12px">▶ Iyilestirilmis Kickoff Calistir</button>
-          <button onclick="koToggleRefine()" class="sm-btn ghost" style="font-size:12px">Vazgec</button>
+          <button onclick="koRefineRun(${j.id})" class="sm-btn" style="font-size:12px">▶ Iyilestirilmis Kickoff Çalıştır</button>
+          <button onclick="koToggleRefine()" class="sm-btn ghost" style="font-size:12px">Vazgeç</button>
         </div>
       </div>
     </div>`;
@@ -2234,7 +2444,7 @@ function koRenderDetail(d){
       <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:var(--bg-elevated);border-bottom:1px solid var(--border)">
         <div style="display:flex;gap:8px;align-items:center;font-size:12px;font-weight:600">
           <span class="ko-spin" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#3b82f6;animation:koPulse 1s infinite"></span>
-          Canli pipeline log
+          Canlı pipeline log
           <span style="font-size:10px;font-weight:500;padding:2px 7px;border-radius:8px;background:var(--bg);border:1px solid var(--border);color:var(--text-dim)" id="koWSStatus">baglaniyor...</span>
         </div>
         <div style="display:flex;gap:10px;align-items:center;font-size:11px;color:var(--text-dim)">
@@ -2242,7 +2452,7 @@ function koRenderDetail(d){
           <span id="koLogCount">0 satir</span>
         </div>
       </div>
-      <pre id="koLogTail" style="margin:0;padding:10px 12px;font-family:'JetBrains Mono',monospace;font-size:10.5px;line-height:1.55;background:var(--bg);color:var(--text);max-height:480px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">Log yukleniyor...</pre>
+      <pre id="koLogTail" style="margin:0;padding:10px 12px;font-family:'Geist Mono',Menlo,monospace;font-size:10.5px;line-height:1.55;background:var(--bg);color:var(--text);max-height:480px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">Log yükleniyor...</pre>
     </div>
     <style>@keyframes koPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(1.3)}}</style>`;
   } else if(status==='completed'){
@@ -2281,7 +2491,7 @@ async function koApprove(jobId){
 
 async function koRefineRun(jobId){
   const fb=(document.getElementById('koRefineText')?.value||'').trim();
-  if(!fb){alert('Iyilestirme yonergesi bos olamaz');return}
+  if(!fb){alert('İyileştirme yönergesi bos olamaz');return}
   const learn=document.getElementById('koLearnGlobally')?.checked||false;
   try{
     const r=await fetch('/api/kickoff-runs/'+jobId+'/refine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback:fb,learn_globally:learn})});
@@ -2411,25 +2621,25 @@ async function showDiff(jobId){
     ov.onclick=function(e){if(e.target===ov)closeDiff()};
     ov.innerHTML=`<div class="diff-modal">
       <div class="diff-head">
-        <div class="diff-title" id="diffTitle">Diff yukleniyor...</div>
+        <div class="diff-title" id="diffTitle">Diff yükleniyor...</div>
         <div style="display:flex;gap:8px;align-items:center">
           <span class="diff-stats" id="diffStats"></span>
           <button class="detail-close" onclick="closeDiff()">✕ Kapat</button>
         </div>
       </div>
-      <div class="diff-body" id="diffBody"><div class="diff-loading">Diff cekiliyor...</div></div>
+      <div class="diff-body" id="diffBody"><div class="diff-loading">Diff çekiliyor...</div></div>
     </div>`;
     document.body.appendChild(ov);
   }
   ov.classList.add('open');
-  document.getElementById('diffBody').innerHTML='<div class="diff-loading">Diff cekiliyor...</div>';
-  document.getElementById('diffTitle').textContent='Diff yukleniyor...';
+  document.getElementById('diffBody').innerHTML='<div class="diff-loading">Diff çekiliyor...</div>';
+  document.getElementById('diffTitle').textContent='Diff yükleniyor...';
   document.getElementById('diffStats').innerHTML='';
   try{
     const r=await fetch('/api/jobs/'+jobId+'/diff');
     const d=await r.json();
     if(!r.ok){
-      document.getElementById('diffBody').innerHTML='<div class="diff-error">'+_escDiff(d.error||'Diff alinamadi')+'</div>';
+      document.getElementById('diffBody').innerHTML='<div class="diff-error">'+_escDiff(d.error||'Diff alınamadı')+'</div>';
       return;
     }
     const dryBadge=d.dry_run?'<span class="badge-dry">🔬 DRY</span>':'';
@@ -2589,7 +2799,7 @@ async function pollSprintReport(){
   }catch(e){}
 }
 // sayfa açılışında devam eden üretim varsa butonu 'üretiliyor' göster (kullanıcı popup'ı açmasa da)
-document.addEventListener('DOMContentLoaded',()=>{ if(srGetActive())setTimeout(()=>{const b=document.querySelector('[onclick="openSprintReport()"]'); if(b)b.textContent='📊 Rapor üretiliyor…';},300); });
+document.addEventListener('DOMContentLoaded',()=>{ if(srGetActive())setTimeout(()=>{const b=document.querySelector('[onclick="openSprintReport()"]'); if(b)b.textContent='Rapor üretiliyor…';},300); });
 
 </script>
 
@@ -2718,15 +2928,14 @@ async function sendDaily(){
 </script>
 
 <!-- Retro Modal (Scrum faz 3) -->
-<div id="retroModal" style="display:none;position:fixed;inset:0;z-index:280;background:rgba(0,0,0,0.78);backdrop-filter:blur(4px);" onclick="if(event.target===this)closeRetro()">
-  <div style="position:absolute;top:6%;left:50%;transform:translateX(-50%);width:min(860px,94vw);max-height:88vh;background:var(--bg-card);border-radius:16px;border:1px solid var(--border);display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,0.5)">
+<div id="retroModal">
+  <div class="retro-box">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border);gap:12px">
       <div style="display:flex;gap:10px;align-items:center;flex:1">
-        <span style="font-size:18px">🔁</span>
         <h2 style="font-size:16px;font-weight:700">Retrospektif</h2>
         <select id="retroScope" class="sprint-select" onchange="loadRetro()" style="margin-left:12px"></select>
       </div>
-      <button onclick="closeRetro()" style="background:none;border:none;color:var(--text-dim);font-size:22px;cursor:pointer">&times;</button>
+      <button class="sm-btn ghost small" onclick="loadRetro()">Yenile</button>
     </div>
     <div id="retroBody" style="padding:14px 20px;overflow:auto;font-size:13px;line-height:1.55"></div>
   </div>
@@ -2738,7 +2947,7 @@ function openRetro(){
   sc.innerHTML=(iter?`<option value="sprint">Sprint: ${esc((sel.selectedOptions[0]||{}).text||iter)}</option>`:'')
     +'<option value="7">Son 7 gün</option><option value="14">Son 14 gün</option><option value="30">Son 30 gün</option><option value="90">Son 90 gün</option>';
   sc.value=iter?'sprint':'14';
-  document.getElementById('retroModal').style.display='flex';
+  document.getElementById('retroModal').style.display='block';
   loadRetro();
 }
 function closeRetro(){document.getElementById('retroModal').style.display='none';}
