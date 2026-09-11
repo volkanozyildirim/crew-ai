@@ -167,6 +167,18 @@ header {
 .prog span:first-child { width:84px; color:var(--text-dim); }
 .prog .bar { flex:1; height:8px; }
 .prog .mono { width:24px; text-align:right; }
+/* Sprint performansı · ekip üyeleri */
+.perf-legend { display:inline-flex; align-items:center; gap:6px; font-size:11px; color:var(--text-dim); }
+.perf-legend i { display:inline-block; width:8px; height:8px; border-radius:2px; margin-left:8px; }
+.perf-legend i:first-child { margin-left:0; }
+.perf { width:100%; border-collapse:collapse; font-size:12.5px; }
+.perf th { text-align:left; font-size:11px; font-weight:600; color:var(--text-dim); padding:6px 14px; border-top:1px solid var(--border); }
+.perf td { padding:8px 14px; border-top:1px solid var(--border); vertical-align:middle; }
+.perf th.num, .perf td.num { text-align:right; font-family:'Geist Mono',Menlo,monospace; white-space:nowrap; }
+.perf .who { display:flex; align-items:center; gap:8px; font-weight:500; white-space:nowrap; }
+.perf .stack { display:flex; height:8px; border-radius:999px; overflow:hidden; background:var(--border); min-width:160px; }
+.perf .stack span { height:100%; }
+.perf tr.total td { font-weight:600; background:var(--bg-elevated); }
 .agent { display:flex; align-items:center; gap:10px; padding:9px 0; border-top:1px solid var(--border); font-size:12.5px; }
 .agent:first-child { border-top:none; }
 .av { width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; color:#fff; flex:none; background:var(--faint); }
@@ -409,6 +421,10 @@ header {
             <button class="sm-btn ghost small" onclick="openBackfill()" title="Seçili takımın geçmiş done+PR'lı işlerini indeksle">Geçmiş işleri tara</button>
           </div>
         </div>
+      </div>
+      <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
+        <div class="card-head"><span class="h">Sprint performansı · ekip üyeleri</span><span style="flex:1"></span><span class="perf-legend"><i style="background:var(--success)"></i>Tamamlandı<i style="background:var(--warning)"></i>Test / kabul<i style="background:var(--run)"></i>Geliştirme<i style="background:var(--border)"></i>Başlanmadı</span></div>
+        <div id="ovPerf"><div class="board-empty" style="padding:20px 0">Takım ve sprint seçin.</div></div>
       </div>
     </div>
     <aside class="ov-right">
@@ -945,7 +961,7 @@ function renderOverview(jobs){
   const box=document.getElementById('ovJobs');
   if(box)box.innerHTML=rows.length?rows.map(j=>{
     const hot=j.status==='needs_human'||j.status==='needs_info';
-    let desc=j.wi_title||j.repo_name||'';
+    let desc=j.wi_title||j.repo_name||('İş #'+j.id);
     if(j.status==='failed'&&j.current_step)desc=stepLabel(j.current_step)+' adımında hata';
     else if(j.status==='running'&&j.current_step)desc=stepLabel(j.current_step)+(j.wi_title?' · '+j.wi_title:'');
     else if(j.status==='needs_info')desc=(j.current_step?stepLabel(j.current_step)+' — ':'')+'bilgi gerekli';
@@ -956,6 +972,7 @@ function renderOverview(jobs){
     const dur=fmtDurShort(j.started_at,j.finished_at);
     return `<div class="row${hot?' hot':''}" onclick="viewJob(${j.id})"><span class="sd ${j.status}"></span><span class="mono" style="color:var(--text-dim)">#${esc(String(j.work_item_id))}</span><span class="jt${hot?' b':''}">${esc(desc)}${dur?` <span style="color:var(--text-dim)">· ${dur}</span>`:''}</span><span class="chip ${JS_CHIP[j.status]||'dim'}">${Number(j.dry_run)===1?'Dry run':(JS_LABEL[j.status]||j.status)}</span>${act}</div>`;
   }).join(''):'<div class="board-empty" style="padding:24px">Henüz iş yok.</div>';
+  if(typeof items!=='undefined'&&items.length)renderOvPerf();
   refreshHero();
 }
 async function refreshHero(){
@@ -1014,7 +1031,8 @@ function heroStep(stepId){
   openModal(stepId);
 }
 function renderTeam(agents){
-  const box=document.getElementById('teamList');if(!box||!agents)return;
+  const box=document.getElementById('teamList');if(!box)return;
+  if(!agents||!Object.keys(agents).length){agents={};AGENT_ORDER.forEach(k=>{agents[k]={status:'idle'}})}
   const keys=AGENT_ORDER.filter(k=>agents[k]).concat(Object.keys(agents).filter(k=>!AGENT_ORDER.includes(k)));
   box.innerHTML=keys.map(k=>{
     const a=agents[k]||{};const st=String(a.status||'idle').toLowerCase();
@@ -1024,7 +1042,37 @@ function renderTeam(agents){
     return `<div class="agent ${working?'working':done?'done':''}"><div class="av">${esc(AGENT_INI[k]||k.slice(0,2).toUpperCase())}</div><div style="flex:1;min-width:0"><div class="nm">${esc(AGENT_NAME[k]||a.display_name||k)}</div><div class="cur">${esc(cur)}</div></div><span class="sd ${working?'run':done?'completed':'idle'}"></span></div>`;
   }).join('');
 }
+// Durum sınıfları: SO sırasına göre (Resolved ve sonrası tamamlandı; QA/UAT/Testing test-kabul; In Progress..Code Review geliştirme; öncesi başlanmadı)
+const DONE_STATES=['Resolved','Ready for Production','Done','Closed'];
+const TEST_STATES=['QA To Do','QA','Testing','UAT','Preprod Check'];
+const DEV_STATES=['Active','Committed','In Progress','Blocked','Code Review'];
+function stateClass(st){if(DONE_STATES.includes(st))return 'done';if(TEST_STATES.includes(st))return 'test';if(DEV_STATES.includes(st))return 'dev';if(['Canceled','Removed'].includes(st))return 'skip';return 'todo'}
+function renderOvPerf(){
+  const box=document.getElementById('ovPerf');if(!box)return;
+  const p=(document.getElementById('sprintSel')||{}).value||'';
+  if(!p||!items||!items.length){box.innerHTML='<div class="board-empty" style="padding:20px 0">Takım ve sprint seçin.</div>';return}
+  const by={};
+  for(const it of items){
+    if(stateClass(it.state)==='skip')continue;
+    const who=it.assignedTo||'Atanmamış';
+    const r=by[who]||(by[who]={who,n:0,sp:0,spDone:0,spTest:0,spDev:0,spTodo:0,nDone:0,noSp:0,pipe:0,pr:0});
+    const sp=spOf(it);const cls=stateClass(it.state);
+    r.n++;r.sp+=sp;if(!sp)r.noSp++;
+    if(cls==='done'){r.spDone+=sp;r.nDone++}else if(cls==='test')r.spTest+=sp;else if(cls==='dev')r.spDev+=sp;else r.spTodo+=sp;
+    const j=getJobForWi(it.id);if(j){r.pipe++;if(j.pr_url&&!Number(j.dry_run))r.pr++}
+  }
+  const rows=Object.values(by).sort((a,b)=>b.sp-a.sp||b.n-a.n);
+  if(!rows.length){box.innerHTML='<div class="board-empty" style="padding:20px 0">Sprintte atanmış iş yok.</div>';return}
+  const tot=rows.reduce((t,r)=>{for(const k of ['n','sp','spDone','spTest','spDev','spTodo','nDone','noSp','pipe','pr'])t[k]+=r[k];return t},{who:'Takım',n:0,sp:0,spDone:0,spTest:0,spDev:0,spTodo:0,nDone:0,noSp:0,pipe:0,pr:0});
+  const ini=n=>n.split(' ').filter(Boolean).map(w=>w[0]).join('').substring(0,2).toUpperCase()||'?';
+  const bar=r=>{const t=r.sp||1;const w=x=>(x/t*100).toFixed(1)+'%';return r.sp?`<div class="stack" title="Tamamlandı ${fmtSP(r.spDone)} · Test/kabul ${fmtSP(r.spTest)} · Geliştirme ${fmtSP(r.spDev)} · Başlanmadı ${fmtSP(r.spTodo)} SP"><span style="width:${w(r.spDone)};background:var(--success)"></span><span style="width:${w(r.spTest)};background:var(--warning)"></span><span style="width:${w(r.spDev)};background:var(--run)"></span></div>`:'<div class="stack" title="SP girilmemiş"></div>'};
+  const pct=r=>r.sp?Math.round(r.spDone/r.sp*100)+'%':(r.n?Math.round(r.nDone/r.n*100)+'%*':'—');
+  const line=(r,cls='')=>`<tr class="${cls}"><td><div class="who">${cls?'':`<span class="wi-assignee-dot">${esc(ini(r.who))}</span>`}${esc(r.who)}</div></td><td class="num">${r.n}</td><td class="num">${fmtSP(r.sp)}${r.noSp?`<span style="color:var(--faint)" title="${r.noSp} işin SP'si yok"> · ${r.noSp}?</span>`:''}</td><td class="num">${fmtSP(r.spDone)}</td><td style="min-width:180px">${bar(r)}</td><td class="num">${pct(r)}</td><td class="num">${r.pipe}${r.pr?` <span style="color:var(--text-dim)">· ${r.pr} PR</span>`:''}</td></tr>`;
+  box.innerHTML=`<table class="perf"><tr><th>Üye</th><th class="num">İş</th><th class="num">SP</th><th class="num">Tamamlanan SP</th><th>Durum dağılımı (SP)</th><th class="num">Tamamlanma</th><th class="num">Pipeline</th></tr>${rows.map(r=>line(r)).join('')}${rows.length>1?line(tot,'total'):''}</table>`
+    +`<div style="padding:8px 14px 12px;font-size:11px;color:var(--text-dim)">Tamamlanan: ${DONE_STATES.join(', ')}. Yüzde SP üzerinden; SP girilmemişse iş sayısıyla (*). Pipeline: bu sprintte Tempo'nun koştuğu işler.</div>`;
+}
 function renderOvSprint(){
+  renderOvPerf();
   const box=document.getElementById('ovSprint'),title=document.getElementById('ovSprintTitle'),badge=document.getElementById('ovSprintBadge');
   if(!box)return;
   const p=(document.getElementById('sprintSel')||{}).value||'';
@@ -1035,7 +1083,7 @@ function renderOvSprint(){
   const tf=sp?sp.timeFrame:'';
   let left='';if(tf==='current'&&sp.finishDate){const d=Math.ceil((new Date(sp.finishDate)-new Date())/86400000);left=d>0?d+' gün kaldı':'son gün'}
   badge.innerHTML=`<span class="sprint-badge ${tf||'past'}">${left||({current:'Aktif',future:'Gelecek',past:'Geçmiş'}[tf]||'')}</span>`;
-  const done=items.filter(i=>['Done','Closed','Resolved'].includes(i.state)).length;
+  const done=items.filter(i=>DONE_STATES.includes(i.state)).length;
   const withJob=items.filter(i=>getJobForWi(i.id));
   const pr=withJob.filter(i=>{const j=getJobForWi(i.id);return j&&j.pr_url&&!Number(j.dry_run)}).length;
   const n=items.length||1;
@@ -1045,7 +1093,7 @@ function renderOvSprint(){
       <div class="stat"><div class="stat-val">${withJob.length}</div><div class="stat-lbl">pipeline'da</div></div>
     </div>
     <div style="display:flex;flex-direction:column;gap:6px">
-      <div class="prog"><span>Done</span><div class="bar"><div style="width:${Math.round(done/n*100)}%;background:var(--success)"></div></div><span class="mono">${done}</span></div>
+      <div class="prog"><span>Tamamlandı</span><div class="bar"><div style="width:${Math.round(done/n*100)}%;background:var(--success)"></div></div><span class="mono">${done}</span></div>
       <div class="prog"><span>Pipeline</span><div class="bar"><div style="width:${Math.round(withJob.length/n*100)}%"></div></div><span class="mono">${withJob.length}</span></div>
       <div class="prog"><span>PR açık</span><div class="bar"><div style="width:${Math.round(pr/n*100)}%;background:var(--run)"></div></div><span class="mono">${pr}</span></div>
     </div>`;
