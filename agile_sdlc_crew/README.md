@@ -1,6 +1,6 @@
-# Agile SDLC Crew
+# Tempo — Sprintin ritmi
 
-Azure DevOps entegrasyonlu, CrewAI tabanli agentic yazilim gelistirme ekibi.
+Azure DevOps entegrasyonlu, CrewAI tabanlı yapay zekâ Scrum ekibi. (Python paketi: `agile_sdlc_crew`)
 
 Work Item ID girildikten sonra 6 yapay zeka ajaninin olumsuz takimi, repo kesfinden UAT'a kadar
 tam bir Agile SDLC surecini otonom olarak yurutur. Canli dashboard uzerinden ilerleme izlenebilir.

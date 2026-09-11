@@ -15,6 +15,7 @@ Akis:
 import logging
 import re
 
+from agile_sdlc_crew.branding import is_bot_comment
 from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
 from agile_sdlc_crew.tools.local_repo import LocalRepoManager
 from agile_sdlc_crew.pipeline import push_file
@@ -75,7 +76,7 @@ def run_pr_fix(repo_name: str, pr_id: int, work_item_id: str = "") -> dict:
                 continue
             content = comment.get("content", "").strip()
             author = comment.get("author", {}).get("displayName", "")
-            if content and "Agile SDLC Crew" not in content:
+            if content and not is_bot_comment(content):
                 human_content = content
                 break
         if not human_content:
@@ -248,7 +249,7 @@ def run_pr_fix(repo_name: str, pr_id: int, work_item_id: str = "") -> dict:
                         f"**Otomatik duzeltme yapildi.**\n\n"
                         f"Commit: `{commit_msg}`\n\n"
                         f"```diff\n{diff_preview}\n```\n\n"
-                        f"---\n*Agile SDLC Crew - PR Fix*"
+                        f"---\n*Tempo - PR Fix*"
                     )
                     client.resolve_pr_thread(repo_name, pr_id, thread_id)
                     log.info(f"    Thread #{thread_id} yanitlandi ve resolve edildi")
@@ -264,7 +265,7 @@ def run_pr_fix(repo_name: str, pr_id: int, work_item_id: str = "") -> dict:
                 client.reply_to_pr_thread(
                     repo_name, pr_id, thread_id,
                     f"**{pushed} dosyada otomatik duzeltme yapildi.**\n\n"
-                    f"---\n*Agile SDLC Crew - PR Fix*"
+                    f"---\n*Tempo - PR Fix*"
                 )
                 client.resolve_pr_thread(repo_name, pr_id, thread_id)
                 log.info(f"  Genel thread #{thread_id} resolve edildi")
@@ -280,7 +281,7 @@ def run_pr_fix(repo_name: str, pr_id: int, work_item_id: str = "") -> dict:
                 f"## Otomatik Duzeltme Ozeti\n\n"
                 f"**{pushed}** dosya duzeltildi, **{resolved_count}** yorum resolve edildi.\n\n"
                 f"Lutfen degisiklikleri tekrar inceleyin.\n\n"
-                f"---\n*Agile SDLC Crew - PR Fix*"
+                f"---\n*Tempo - PR Fix*"
             )
         except Exception as e:
             log.warning(f"  PR ozet yorum hatasi: {e}")

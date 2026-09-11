@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Agile SDLC Crew - Full 11-step pipeline with 7 agents."""
+"""Tempo - Full 11-step pipeline with 7 agents."""
 
 import json
 import logging

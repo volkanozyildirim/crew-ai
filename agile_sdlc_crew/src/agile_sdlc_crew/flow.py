@@ -1,4 +1,4 @@
-"""Agile SDLC Crew - CrewAI Flow ile 11 adimli pipeline orkestrasyonu.
+"""Tempo - CrewAI Flow ile 11 adimli pipeline orkestrasyonu.
 
 run_pipeline() icindeki monolitik kontrol akisini event-driven Flow yapisina
 donusturur. State yonetimi, HAL/CrewAI dallanmasi ve quality gate'ler
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 from crewai.flow import Flow, and_, listen, or_, router, start
 
 from agile_sdlc_crew import context_budget as _cb
+from agile_sdlc_crew.branding import is_bot_comment
 
 log = logging.getLogger("pipeline")
 
@@ -487,7 +488,7 @@ def _readiness_comment(score, threshold, missing_details, stage: str = "requirem
               "Yukarıdaki detayları iş kalemine (açıklama / kabul kriterleri) ekleyin, "
               "ardından işi dashboard'dan ↻ ile **tekrar kuyruğa** alın. İş silinmedi; "
               "durumu `needs_info`.", "",
-              "---", "*Agile SDLC Crew — Hazırlık Kapısı*"]
+              "---", "*Tempo — Hazırlık Kapısı*"]
     return "\n".join(lines)
 
 
@@ -2023,7 +2024,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"Pipeline guvenlik icin `{step_name}` adiminda durduruldu. "
                     f"Is kaleminin karmasiklik/veri miktarini gozden gecirip tekrar kuyruga ekleyin "
                     f"veya `CREW_MAX_JOB_COST` env'ini artirip yeniden baslatin.\n\n"
-                    f"---\n*Agile SDLC Crew - Budget Guard*"
+                    f"---\n*Tempo - Budget Guard*"
                 )
             except Exception:
                 pass
@@ -3053,7 +3054,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"## 💡 İyileştirme Önerileri (bloklamaz)\n\n"
                 f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
                 f"{_format_issues_md(minor_open)}\n\n"
-                f"*Agile SDLC Crew - Review Suggestions*")
+                f"*Tempo - Review Suggestions*")
             for i in minor_open:
                 i["status"] = "closed"
                 i["note"] = "minor/oneri — yoruma gecti, bloklamiyor"
@@ -3387,7 +3388,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"Pipeline {max_review_retries} düzeltme turu denedi; kalan maddeler "
                 f"ya aynı hâlde tekrarladı (ilerleme yok) ya da düzeltme kapsamı "
                 f"dışında. Kararı size bırakıyor.\n\n"
-                f"---\n*Agile SDLC Crew — insan müdahalesi (job `needs_human`)*"
+                f"---\n*Tempo — insan müdahalesi (job `needs_human`)*"
             )
             _add_wi_comment(self._client, self.state.work_item_id, _diag)
             try:
@@ -3440,7 +3441,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
             + (f"**Kapatılan Maddeler:**\n{closed_summary}\n\n" if structured
                else f"{(self.state.review_text or '')[:2000]}\n\n")
-            + f"*Agile SDLC Crew - Review Retry Onay*"
+            + f"*Tempo - Review Retry Onay*"
         )
 
     # ── Flow Start ───────────────────────────────────
@@ -3810,7 +3811,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             f"## Analiz & Teknik Tasarim\n\n"
             f"**Repo:** {repo_name}\n"
             f"**Degisecek dosyalar:**\n{files_summary}\n\n"
-            f"*Agile SDLC Crew - Planlama tamamlandi*"
+            f"*Tempo - Planlama tamamlandi*"
         )
 
     # ── CrewAI Planning Path ─────────────────────────
@@ -3990,7 +3991,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                             continue
                         content = comment.get("content", "").strip()
                         author = comment.get("author", {}).get("displayName", "")
-                        if content and "Agile SDLC Crew" not in content:
+                        if content and not is_bot_comment(content):
                             file_path = None
                             tc = thread.get("threadContext")
                             if tc:
@@ -4070,7 +4071,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"- Acceptance criteria: conditions for success\n"
                 f"- Technical detail: which repo/module/file is affected, example/reference\n\n"
                 f"After adding the info, you can re-queue the work item.\n\n"
-                f"---\n*Agile SDLC Crew - Insufficiency Check*"
+                f"---\n*Tempo - Insufficiency Check*"
             )
             self._step_fail("requirements_analysis_task", f"INSUFFICIENT: {missing}")
             raise RuntimeError(f"Work item insufficient for development: {missing}")
@@ -5254,7 +5255,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     _add_wi_comment(self._client, self.state.work_item_id,
                         f"## 💡 Kapsam-Dışı İyileştirme Önerileri (Mimar)\n\n"
                         f"WI kapsamına dahil EDİLMEDİ; ayrı iş olarak değerlendirilebilir:\n\n"
-                        f"{_sugg_md}\n\n*Agile SDLC Crew - Architect Suggestions*")
+                        f"{_sugg_md}\n\n*Tempo - Architect Suggestions*")
                     _log(f"  Kapsam-dışı {len(_sugg)} öneri WI'ya yorum olarak iletildi (koda girmedi)")
         except Exception as _se:
             _log(f"  Öneri yorumu hatasi (kritik degil): {_se}")
@@ -5980,7 +5981,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"## 🚨 Sözleşme Kapısı — {len(_contract_failures)} Dosya Push Edilmedi\n\n"
                     f"Aşağıdaki dosyalar repo ile sözleşme uyumsuzluğu nedeniyle "
                     f"push edilmedi (bu sınıfı `php -l` göremez, izole çalışır):\n\n"
-                    f"{_det}\n\n*Agile SDLC Crew — Katman 0 sözleşme kapısı*")
+                    f"{_det}\n\n*Tempo — Katman 0 sözleşme kapısı*")
             except Exception as _e_cg:
                 _log(f"  Sözleşme yorumu hatasi (kritik degil): {_e_cg}")
 
@@ -6033,7 +6034,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"## ❌ PR Oluşturulamadı — Hiçbir Dosya Push Edilemedi\n\n"
                 f"Plan'daki tüm dosya değişiklikleri güvenlik kontrollerinde reddedildi "
                 f"veya hata verdi. Pipeline iptal edildi.\n\n"
-                f"---\n*Agile SDLC Crew*"
+                f"---\n*Tempo*"
             )
             raise RuntimeError("Hicbir dosya push edilemedi, PR olusturulamiyor.")
 
@@ -6055,7 +6056,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"**Push edilemeyen dosyalar:**\n{missing_list}\n\n"
                 f"Yarım PR açmak yerine pipeline iptal edildi. Lütfen işi tekrar deneyin "
                 f"veya iş kalemindeki detayları gözden geçirin.\n\n"
-                f"---\n*Agile SDLC Crew - Plan-Push Eşleşme Kontrolü*"
+                f"---\n*Tempo - Plan-Push Eşleşme Kontrolü*"
             )
             self._step_fail("create_pr_task", f"Push eksik: {len(pushed_files)}/{len(expected_files)}")
             raise RuntimeError(
@@ -6103,7 +6104,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             pr_desc += "\n## Kabul Kriterleri\n\n"
             for ac in plan["acceptance_criteria"]:
                 pr_desc += f"- [ ] {ac}\n"
-        pr_desc += f"\n---\n*Agile SDLC Crew ile otomatik olusturuldu*"
+        pr_desc += f"\n---\n*Tempo ile otomatik olusturuldu*"
 
         # Transient SSL/network hatalari icin retry — Azure DevOps zaman zaman
         # UNEXPECTED_EOF_WHILE_READING firlatabiliyor.
@@ -6213,7 +6214,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         if comment.get("commentType") == "system":
                             continue
                         content = comment.get("content", "").strip()
-                        if content and "Agile SDLC Crew" not in content:
+                        if content and not is_bot_comment(content):
                             fp = None
                             tc = thread.get("threadContext")
                             if tc:
@@ -6251,7 +6252,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                             f"**Duzeltildi.**\n\n"
                             f"Plan: {desc[:200]}\n\n"
                             f"Yeni commit push edildi.\n\n"
-                            f"---\n*Agile SDLC Crew*"
+                            f"---\n*Tempo*"
                         )
                         self._client.resolve_pr_thread(pr_repo, pr_id_old, thread_id)
                         _log(f"  ✅ Thread #{thread_id} ({file_path}): duzeltildi + resolve")
@@ -6262,7 +6263,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                             f"Bu dosya mevcut gelistirme planinda yer almiyor.\n\n"
                             f"Yorum incelendi ancak is kaleminin kapsaminda degil "
                             f"veya farkli bir degisiklik gerektiriyor.\n\n"
-                            f"---\n*Agile SDLC Crew*"
+                            f"---\n*Tempo*"
                         )
                         _log(f"  ℹ️ Thread #{thread_id} ({file_path}): plan disinda, yanit verildi")
                     else:
@@ -6272,7 +6273,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                             pr_repo, pr_id_old, thread_id,
                             f"Geri bildirim dikkate alindi.\n\n"
                             f"Guncellenen dosyalar: {plan_summary}\n\n"
-                            f"---\n*Agile SDLC Crew*"
+                            f"---\n*Tempo*"
                         )
                         self._client.resolve_pr_thread(pr_repo, pr_id_old, thread_id)
                         _log(f"  ✅ Thread #{thread_id} (genel): yanit verildi + resolve")
@@ -6373,7 +6374,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         "kanıtı/emsali doğrulanamadığı için PR'ı bloklamıyor; "
                         "değerlendirmenize bırakılıyor:\n\n"
                         + _format_issues_md(_demoted)
-                        + "\n\n*Agile SDLC Crew — Katman 0 itiraz kapısı*",
+                        + "\n\n*Tempo — Katman 0 itiraz kapısı*",
                     )
                 except Exception as _e_dc:
                     _log(f"  Düşürülen madde yorumu hatası (kritik değil): {_e_dc}")
@@ -6407,7 +6408,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"Reviewer agent {max_review_retries} deneme sonrasında hâlâ değişiklik istiyor.\n\n"
                     f"**Son Değerlendirme:**\n{review_text[:2500]}\n\n"
                     f"Lütfen PR'ı manuel inceleyin.\n\n"
-                    f"---\n*Agile SDLC Crew - Code Review Gate*"
+                    f"---\n*Tempo - Code Review Gate*"
                 )
                 self._step_fail("review_pr_task", f"Reviewer: {max_review_retries} deneme sonrasi RED")
                 raise RuntimeError(f"Reviewer {max_review_retries} deneme sonrasi hala reddediyor")
@@ -6419,7 +6420,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
                 f"**Reviewer Geri Bildirimi:**\n{review_text[:1500]}\n\n"
                 f"Otomatik düzeltme başlatılıyor...\n\n"
-                f"---\n*Agile SDLC Crew - Review Retry*"
+                f"---\n*Tempo - Review Retry*"
             )
             # Tekrar gelistirme: implement → push → review (branch + PR zaten var)
             self._review_retry_loop()
@@ -6431,7 +6432,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             f"## Kod Inceleme\n\n"
             f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
             f"{review_text[:2000]}\n\n"
-            f"*Agile SDLC Crew - Kod Inceleme*"
+            f"*Tempo - Kod Inceleme*"
         )
 
     @listen(step8_code_review)
@@ -6518,7 +6519,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                             f"{poll_timeout}+{grace} saniyede tamamlanmadı (son durum: `{last}`).\n\n"
                             f"Reviewer kodu onayladı ancak **testlerin yeşil olduğu teyit "
                             f"edilmedi** — PR'ı birleştirmeden önce build sonucunu kontrol edin.\n\n"
-                            f"---\n*Agile SDLC Crew - PR Build Gate*")
+                            f"---\n*Tempo - PR Build Gate*")
                     except Exception:
                         pass
                     if self._db and self.state.job_id:
@@ -6536,7 +6537,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _add_wi_comment(self._client, self.state.work_item_id,
                     f"## ✅ PR Test Build Geçti\n\n"
                     f"`{build.get('definition')}` build #{build.get('build_id')} başarılı — testler yeşil.\n\n"
-                    f"---\n*Agile SDLC Crew - PR Build Gate*"
+                    f"---\n*Tempo - PR Build Gate*"
                 )
                 self.state.build_status = "succeeded"
                 self._step_done(step_key, f"Build {build.get('build_id')} succeeded ({build.get('definition')})")
@@ -6555,7 +6556,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"## ❌ PR Test Build Başarısız — {max_retries} Düzeltme Sonrası\n\n"
                     f"`{build.get('definition')}` build #{build.get('build_id')} sonucu: **{result}**\n\n"
                     f"**Hata özeti:**\n```\n{summary[:2000]}\n```\n\n"
-                    f"Testleri manuel inceleyin.\n\n---\n*Agile SDLC Crew - PR Build Gate*"
+                    f"Testleri manuel inceleyin.\n\n---\n*Tempo - PR Build Gate*"
                 )
                 self._step_fail(step_key, f"PR build {max_retries} deneme sonrasi {result}")
                 # 'failed' DEGIL: kod var, PR acik, reviewer onaylamis; yalnizca
@@ -6576,7 +6577,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"## 🔄 PR Test Build Başarısız — Düzeltme (Deneme {attempt}/{max_retries})\n\n"
                 f"`{build.get('definition')}` build #{build.get('build_id')} sonucu: **{result}**\n\n"
                 f"**Hata özeti:**\n```\n{summary[:1500]}\n```\n\n"
-                f"Otomatik düzeltme başlatılıyor...\n\n---\n*Agile SDLC Crew - PR Build Gate*"
+                f"Otomatik düzeltme başlatılıyor...\n\n---\n*Tempo - PR Build Gate*"
             )
             self._fix_failing_build(summary)
             prev_build_id = build.get("build_id")
@@ -6997,7 +6998,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         _add_wi_comment(self._client, self.state.work_item_id,
             f"## Test Planlama\n\n"
             f"{test_text[:2000]}\n\n"
-            f"*Agile SDLC Crew - Test*"
+            f"*Tempo - Test*"
         )
 
     @listen(pr_build_gate)
@@ -7063,7 +7064,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         _add_wi_comment(self._client, self.state.work_item_id,
             f"## UAT Dogrulama\n\n"
             f"{uat_text[:2000]}\n\n"
-            f"*Agile SDLC Crew - UAT*"
+            f"*Tempo - UAT*"
         )
 
     # ── Faz 4: Kapanis ──────────────────────────────
@@ -7169,7 +7170,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             f"{_est_line}"
             f"{completion_text[:3000]}"
             f"{_dod_md}\n\n"
-            f"---\n*Agile SDLC Crew - Pipeline tamamlandi*"
+            f"---\n*Tempo - Pipeline tamamlandi*"
         )
 
         if _dod is not None and not _dod.passed and _dod_enforce:

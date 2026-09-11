@@ -1,4 +1,4 @@
-"""Agile SDLC Crew - Always-on FastAPI server with job queue."""
+"""Tempo - Always-on FastAPI server with job queue."""
 
 import json
 import logging
@@ -64,7 +64,7 @@ def _setup_logging():
 pipeline_log = _setup_logging()
 
 
-app = FastAPI(title="Agile SDLC Crew", version="3.0")
+app = FastAPI(title="Tempo", version="3.0")
 
 WEB_DIR = Path(__file__).parent / "web"
 STATUS_FILE = WEB_DIR / "status.json"
@@ -1965,7 +1965,7 @@ async def startup():
 def main():
     import uvicorn
     print("=" * 60)
-    print("  Agile SDLC Crew - Server v3")
+    print("  Tempo - Server v3")
     print("  Dashboard: http://localhost:8765")
     print("  API:       http://localhost:8765/api/jobs")
     print(f"  Access log : {ACCESS_LOG}")
