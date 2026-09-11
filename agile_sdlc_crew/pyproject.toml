@@ -1,7 +1,7 @@
 [project]
 name = "agile_sdlc_crew"
 version = "0.1.0"
-description = "Azure DevOps entegrasyonlu Agile SDLC ekibi - CrewAI tabanli"
+description = "Tempo — Azure DevOps entegrasyonlu yapay zekâ Scrum ekibi (CrewAI tabanlı). Sprintin ritmi."
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "crewai[tools]>=1.15.20",

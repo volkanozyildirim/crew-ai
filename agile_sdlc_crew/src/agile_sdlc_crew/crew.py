@@ -1,4 +1,4 @@
-"""Agile SDLC Crew - Full pipeline with 7 agents."""
+"""Tempo - Full pipeline with 7 agents."""
 
 import os
 import ssl

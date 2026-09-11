@@ -1,6 +1,6 @@
 # Pipeline Adım Dokümanları
 
-Bu klasör, Agile SDLC Crew pipeline'ının her adımını ayrı ayrı belgeler. Amaç:
+Bu klasör, Tempo pipeline'ının her adımını ayrı ayrı belgeler. Amaç:
 ihtiyaç anında (bir adımı değiştirirken, hata ararken, yeni özellik tasarlarken)
 ilgili adımın ne yaptığını, neyi girdi/çıktı aldığını ve **hangi kararları nasıl
 verdiğini** tek yerden okuyabilmek.
