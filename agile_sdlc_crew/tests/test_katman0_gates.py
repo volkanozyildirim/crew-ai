@@ -2488,9 +2488,17 @@ def test_backlog_refinement():
     check("soru yorumu: S1/AC1 numaralı, imzalı", "S1. Hangi dil?" in qmd and "AC1. AC olmalı" in qmd and "*Tempo — Backlog Refinement*" in qmd)
 
     from agile_sdlc_crew import pipeline_config as _pc
-    check("knob'lar: refinement açık, eşik 70, bayat 30, WRITE ve LLM KAPALI",
-          _pc.get("CREW_BACKLOG_REFINEMENT") is True and _pc.get("CREW_REFINEMENT_MIN_SCORE") == 70
-          and _pc.get("CREW_REFINEMENT_STALE_DAYS") == 30 and _pc.get("CREW_REFINEMENT_WRITE") is False and _pc.get("CREW_REFINEMENT_LLM") is False)
+    # Varsayilan (schema) degerleri sinanir: WRITE/LLM kapali gelir. Calisan kurulumda
+    # insan bunlari yaml'dan acabilir (pipeline_config.get yaml > env > default cozer),
+    # bu yuzden cozulmus deger degil, gonderilen varsayilan kontrol edilir.
+    _dflt = {f["key"]: f["default"] for f in _pc.SCHEMA}
+    check("knob varsayılanları: refinement açık, eşik 70, bayat 30, WRITE ve LLM KAPALI",
+          _dflt["CREW_BACKLOG_REFINEMENT"] is True and _dflt["CREW_REFINEMENT_MIN_SCORE"] == 70
+          and _dflt["CREW_REFINEMENT_STALE_DAYS"] == 30 and _dflt["CREW_REFINEMENT_WRITE"] is False
+          and _dflt["CREW_REFINEMENT_LLM"] is False)
+    check("knob'lar çözümlenebilir (yaml/env override dahil)",
+          isinstance(_pc.get("CREW_REFINEMENT_WRITE"), bool) and isinstance(_pc.get("CREW_REFINEMENT_LLM"), bool)
+          and isinstance(_pc.get("CREW_REFINEMENT_MIN_SCORE"), int))
     root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
     src = (root / "backlog_refinement.py").read_text()
     check("sınırlar: durum/kuyruk yok — set_work_item_state, create_job, push_file geçmez",
