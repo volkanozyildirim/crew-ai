@@ -245,6 +245,30 @@ header {
 .wi-check:checked::after { content:'\2713'; color:var(--accent-ink); font-size:10px; font-weight:700; }
 .board-loading,.board-empty { text-align:center; padding:50px 20px; color:var(--text-dim); font-size:14px; }
 
+/* ── Yaşlandırma: iş kaç gündür bu durumda bekliyor ── */
+.wi-age { display:inline-flex; align-items:center; gap:3px; font-size:10px; font-weight:700; padding:1px 6px; border-radius:6px; flex-shrink:0; font-family:'Geist Mono',Menlo,monospace; background:var(--bg-elevated); color:var(--text-dim); }
+.wi-age.warn { background:var(--human-soft); color:var(--warning); }
+.wi-age.crit { background:var(--fail-soft); color:var(--danger); }
+.wi-card[data-age="warn"] { border-left:3px solid var(--warning); padding-left:10px; }
+.wi-card[data-age="crit"] { border-left:3px solid var(--danger); padding-left:10px; background:linear-gradient(95deg,var(--fail-soft) 0%,var(--bg) 62%); }
+.kanban-column-aging { font-size:11px; font-weight:700; padding:2px 7px; border-radius:10px; background:var(--fail-soft); color:var(--danger); }
+.kanban-column-aging.warn { background:var(--human-soft); color:var(--warning); }
+.ag-stat { cursor:pointer; border-radius:8px; padding:2px 10px; transition:background .15s; }
+.ag-stat:hover { background:var(--bg-elevated); }
+.ag-stat.on { background:var(--fail-soft); }
+/* Genel bakış · takılan işler */
+.stuck-row { display:flex; align-items:center; gap:8px; padding:7px 14px; border-top:1px solid var(--border); font-size:12.5px; cursor:pointer; text-decoration:none; color:inherit; }
+.stuck-row:hover { background:var(--bg-elevated); }
+.stuck-row .t { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.stuck-row .who { font-size:11px; color:var(--text-dim); white-space:nowrap; }
+.stuck-days { font-family:'Geist Mono',Menlo,monospace; font-size:11px; font-weight:700; padding:1px 7px; border-radius:6px; white-space:nowrap; }
+.stuck-days.warn { background:var(--human-soft); color:var(--warning); }
+.stuck-days.crit { background:var(--fail-soft); color:var(--danger); }
+.rf .age { font-family:'Geist Mono',Menlo,monospace; font-weight:700; white-space:nowrap; }
+.rf .age.warn { color:var(--warning); }
+.rf .age.crit { color:var(--danger); }
+.rf .age.ok { color:var(--text-dim); font-weight:500; }
+
 /* ── Pipeline şeridi (WI kartı) ── */
 .wi-seg { display:flex; gap:2px; height:4px; margin-top:8px; }
 .wi-seg span { flex:1; border-radius:2px; background:var(--border); }
@@ -439,6 +463,10 @@ header {
           </div>
         </div>
       </div>
+      <div class="card" id="ovStuckCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head"><span class="h">Takılan işler</span><span id="ovStuckCount" class="chip dim"></span><span style="flex:1"></span><a href="#" onclick="showTab('board');return false" style="font-size:12px;font-weight:600;text-decoration:none">Board sekmesi</a></div>
+        <div id="ovStuck"></div>
+      </div>
       <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
         <div class="card-head"><span class="h">Sprint performansı · ekip üyeleri</span><span style="flex:1"></span><span class="perf-legend"><i style="background:var(--success)"></i>Tamamlandı<i style="background:var(--warning)"></i>Test / kabul<i style="background:var(--run)"></i>Geliştirme<i style="background:var(--border)"></i>Başlanmadı</span></div>
         <div id="ovPerf"><div class="board-empty" style="padding:20px 0">Takım ve sprint seçin.</div></div>
@@ -506,6 +534,7 @@ header {
             <button class="chip dim" data-f="all" onclick="rfSetFilter('all')" style="border:none;cursor:pointer;font-family:inherit">Tümü</button>
             <button class="chip dim" data-f="gap" onclick="rfSetFilter('gap')" style="border:none;cursor:pointer;font-family:inherit">Eksik</button>
             <button class="chip dim" data-f="ready" onclick="rfSetFilter('ready')" style="border:none;cursor:pointer;font-family:inherit">Hazır</button>
+            <button class="chip dim" data-f="stale" onclick="rfSetFilter('stale')" style="border:none;cursor:pointer;font-family:inherit" title="Durumunda eşik süresini aşanlar — en uzun bekleyen üstte">Bekleyen</button>
           </span>
           <span style="flex:1"></span>
           <span id="rfStatus" style="font-size:12px;color:var(--text-dim)"></span>
@@ -1011,21 +1040,25 @@ function renderRefinement(){
     <div class="stat"><div class="stat-val" style="color:var(--success)">${s.ready}</div><div class="stat-lbl">hazır</div></div>
     <div class="stat"><div class="stat-val" style="color:var(--warning)">${s.not_ready}</div><div class="stat-lbl">eksik</div></div>
     <div class="stat"><div class="stat-val">${fmtSP(s.sp_total)}<small> SP</small></div><div class="stat-lbl">${s.sp_missing} işin SP'si yok${s.sp_suggested?' · öneri +'+s.sp_suggested:''}</div></div>
+    ${s.aging&&s.aging.total_flagged?`<div class="stat"><div class="stat-val" style="color:var(--${s.aging.crit?'danger':'warning'})">${s.aging.total_flagged}</div><div class="stat-lbl">bekleyen${s.aging.oldest_days?' · en eski '+s.aging.oldest_days+'g':''}</div></div>`:''}
     <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;align-self:center">${topGaps}</div>
     ${!d.write_enabled?'<span class="chip dim" style="align-self:center" title="CREW_REFINEMENT_WRITE kapalı: yorum/SP/etiket butonları pasif">yazma kapalı</span>':''}${!d.llm_enabled?'<span class="chip dim" style="align-self:center" title="CREW_REFINEMENT_LLM kapalı">soru üretimi kapalı</span>':''}`;
-  const rows=d.rows.filter(r=>_rfFilter==='all'||(_rfFilter==='ready'?r.ready:!r.ready));
+  const rows=d.rows.filter(r=>_rfFilter==='all'||(_rfFilter==='ready'?r.ready:_rfFilter==='stale'?agStuck(r):!r.ready));
+  // "Bekleyen" filtresinde en uzun takilan ustte — 1 yillik is 31 gunlukten once gorunsun.
+  if(_rfFilter==='stale')rows.sort((a,b)=>agRank(b)-agRank(a)||agDays(b)-agDays(a));
   if(!rows.length){body.innerHTML='<div class="board-empty">Bu filtrede iş yok.</div>';return}
   const tm={Bug:{i:'B',c:'bug'},'User Story':{i:'U',c:'userstory'},Task:{i:'T',c:'task'},'Product Backlog Item':{i:'P',c:'userstory'},Improvement:{i:'I',c:'feature'}};
   const wd=d.write_enabled?'':'disabled title="CREW_REFINEMENT_WRITE kapalı"',ld=d.llm_enabled?'':'disabled title="CREW_REFINEMENT_LLM kapalı"';
-  body.innerHTML=`<table class="rf"><tr><th>WI</th><th>İş</th><th>Durum</th><th class="num">Önc.</th><th class="num">SP</th><th>Skor</th><th>Eksikler</th><th style="text-align:right">Eylem</th></tr>`+rows.map(r=>{
+  body.innerHTML=`<table class="rf"><tr><th>WI</th><th>İş</th><th>Durum</th><th class="num" title="İş şu anki durumda kaç gündür bekliyor (aging.py eşikleri)">Bekleme</th><th class="num">Önc.</th><th class="num">SP</th><th>Skor</th><th>Eksikler</th><th style="text-align:right">Eylem</th></tr>`+rows.map(r=>{
     const t=tm[r.type]||{i:'?',c:'task'};
     const gaps=r.gaps.length?r.gaps.map(g=>`<span class="chip ${g.penalty>=25?'fail':g.penalty>=10?'human':'dim'}" title="−${g.penalty}">${esc(g.label)}</span>`).join(''):'<span class="chip ok">Hazır</span>';
     const sp=r.sp?fmtSP(Number(r.sp)):(r.suggest_sp?`<span style="color:var(--text-dim)" title="Öneri (yapısal): ${esc(r.suggest_sp_why||'')}">~${r.suggest_sp}</span>`:'—');
     const q=_rfQ[r.id];
     return `<tr data-id="${r.id}">
       <td class="num"><a href="${esc(r.url||'#')}" target="_blank" style="text-decoration:none">${r.id}</a></td>
-      <td><div class="ttl" style="display:flex;gap:7px;align-items:flex-start"><span class="wi-type-icon ${t.c}" style="margin-top:2px">${t.i}</span><span>${esc(r.title)}</span></div><div class="sub">${esc(r.type)}${r.assignedTo?' · '+esc(r.assignedTo):''}${r.parent_id?' · ebeveyn #'+r.parent_id:''}${r.age_days!=null?' · '+r.age_days+' gün':''}${r.tagged?' · <span class="chip human" style="font-size:10px">needs-refinement</span>':''}</div></td>
+      <td><div class="ttl" style="display:flex;gap:7px;align-items:flex-start"><span class="wi-type-icon ${t.c}" style="margin-top:2px">${t.i}</span><span>${esc(r.title)}</span></div><div class="sub">${esc(r.type)}${r.assignedTo?' · '+esc(r.assignedTo):''}${r.parent_id?' · ebeveyn #'+r.parent_id:''}${r.age_days!=null?' · '+r.age_days+' günlük':''}${r.tagged?' · <span class="chip human" style="font-size:10px">needs-refinement</span>':''}</div></td>
       <td><span class="chip dim">${esc(r.state)}</span></td>
+      <td class="num">${r.aging?`<span class="age ${r.aging.level}" title="${esc(r.aging.text)}">${r.aging.days}g</span>`:'<span class="age ok">—</span>'}</td>
       <td class="num">${r.priority??'—'}</td><td class="num">${sp}</td><td>${rfScoreHtml(r)}</td>
       <td><div class="gaps">${gaps}</div></td>
       <td><div class="acts">
@@ -1033,7 +1066,7 @@ function renderRefinement(){
         <button class="sm-btn ghost" ${wd} onclick="rfAct(${r.id},'comment',this)" title="Eksikleri WI yorumu olarak yaz">Yorum yaz</button>
         ${(!r.sp&&r.suggest_sp)?`<button class="sm-btn ghost" ${wd} onclick="rfAct(${r.id},'sp',this)" title="Önerilen SP'yi boş alana yaz">SP ${r.suggest_sp} yaz</button>`:''}
         <button class="sm-btn ghost" ${wd} onclick="rfAct(${r.id},'${r.tagged?'tag_remove':'tag_add'}',this)" title="needs-refinement etiketi">${r.tagged?'Etiketi kaldır':'Etiketle'}</button>
-      </div></td></tr>`+(q?`<tr class="qrow"><td></td><td colspan="7">${q.summary?`<div class="q"><b>Özet:</b> ${esc(q.summary)}</div>`:''}${(q.questions||[]).map((x,i)=>`<div class="q">S${i+1}. ${esc(x.question||'')}${x.why?` <span style="color:var(--text-dim)">— ${esc(x.why)}</span>`:''}</div>`).join('')}${(q.draft_acceptance_criteria||[]).length?`<div class="q" style="margin-top:6px"><b>Taslak AC:</b></div>`+q.draft_acceptance_criteria.map((a,i)=>`<div class="q">AC${i+1}. ${esc(a)}</div>`).join(''):''}${q.posted?'<div class="q" style="color:var(--success)">WI yorumu olarak yazıldı.</div>':''}${q.job_id?`<div class="q sub">iş #${q.job_id}</div>`:''}</td></tr>`:'');
+      </div></td></tr>`+(q?`<tr class="qrow"><td></td><td colspan="8">${q.summary?`<div class="q"><b>Özet:</b> ${esc(q.summary)}</div>`:''}${(q.questions||[]).map((x,i)=>`<div class="q">S${i+1}. ${esc(x.question||'')}${x.why?` <span style="color:var(--text-dim)">— ${esc(x.why)}</span>`:''}</div>`).join('')}${(q.draft_acceptance_criteria||[]).length?`<div class="q" style="margin-top:6px"><b>Taslak AC:</b></div>`+q.draft_acceptance_criteria.map((a,i)=>`<div class="q">AC${i+1}. ${esc(a)}</div>`).join(''):''}${q.posted?'<div class="q" style="color:var(--success)">WI yorumu olarak yazıldı.</div>':''}${q.job_id?`<div class="q sub">iş #${q.job_id}</div>`:''}</td></tr>`:'');
   }).join('')+'</table>';
 }
 async function rfAct(id,action,btn){
@@ -1198,8 +1231,27 @@ function renderOvPerf(){
   box.innerHTML=`<table class="perf"><tr><th>Üye</th><th class="num">İş</th><th class="num">SP</th><th class="num">Tamamlanan SP</th><th>Durum dağılımı (SP)</th><th class="num">Tamamlanma</th><th class="num">Pipeline</th></tr>${rows.map(r=>line(r)).join('')}${rows.length>1?line(tot,'total'):''}</table>`
     +`<div style="padding:8px 14px 12px;font-size:11px;color:var(--text-dim)">Tamamlanan: ${DONE_STATES.join(', ')}. Yüzde SP üzerinden; SP girilmemişse iş sayısıyla (*). Pipeline: bu sprintte Tempo'nun koştuğu işler.</div>`;
 }
+// Genel bakis · takilan isler: durumunda esik suresini asan isler, en uzun
+// bekleyen ustte. Veri board'dan (items) turer — ayri bir istek atilmaz.
+function renderOvStuck(){
+  const card=document.getElementById('ovStuckCard'),box=document.getElementById('ovStuck'),cnt=document.getElementById('ovStuckCount');
+  if(!card||!box)return;
+  const rows=(items||[]).filter(agStuck).sort((a,b)=>agRank(b)-agRank(a)||agDays(b)-agDays(a));
+  if(!rows.length){card.style.display='none';box.innerHTML='';return}
+  card.style.display='flex';
+  const nCrit=rows.filter(i=>agLvl(i)==='crit').length;
+  if(cnt){cnt.className='chip '+(nCrit?'fail':'human');cnt.textContent=rows.length+' iş'+(nCrit?' · '+nCrit+' kritik':'');}
+  box.innerHTML=rows.slice(0,8).map(it=>{const a=agOf(it);
+    return `<a class="stuck-row" href="${esc(it.url||'#')}" target="_blank" title="${esc(a.text)}">
+      <span class="mono" style="font-size:11px;color:var(--text-dim);flex-shrink:0">#${it.id}</span>
+      <span class="t">${esc(it.title)}</span>
+      <span class="chip dim" style="flex-shrink:0">${esc(it.state)}</span>
+      <span class="who">${esc(it.assignedTo||'—')}</span>
+      <span class="stuck-days ${a.level}">${a.days}g</span></a>`;}).join('')
+    +(rows.length>8?`<div class="stuck-row" style="color:var(--text-dim);cursor:default">+${rows.length-8} iş daha</div>`:'');
+}
 function renderOvSprint(){
-  renderOvPerf();
+  renderOvPerf();renderOvStuck();
   const box=document.getElementById('ovSprint'),title=document.getElementById('ovSprintTitle'),badge=document.getElementById('ovSprintBadge');
   if(!box)return;
   const p=(document.getElementById('sprintSel')||{}).value||'';
@@ -1255,6 +1307,20 @@ function getJobForWi(wiId){return _jobsByWi[String(wiId)]||null}
 
 // ── Agile Board ──
 let teams=[],sprints=[],items=[];
+// ── Yaşlandırma (aging) ──
+// Sunucu her işe `aging` bloğu ekler: {days, level:'ok'|'warn'|'crit', bucket,
+// bucket_label, warn, crit, text}. Eşikler CREW_AGING_* env'lerinden gelir;
+// arayüz eşik HESAPLAMAZ, yalnızca boyar — bkz. aging.py.
+const AG_ICO='<svg viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.4V8l2.4 1.6" stroke-linecap="round"/></svg>';
+let _agOnly=false;
+function agOf(it){return (it&&it.aging)?it.aging:null}
+function agLvl(it){const a=agOf(it);return a?a.level:'ok'}
+function agStuck(it){const l=agLvl(it);return l==='warn'||l==='crit'}
+function agDays(it){const a=agOf(it);return a?a.days:-1}
+function agRank(it){const l=agLvl(it);return l==='crit'?2:l==='warn'?1:0}
+function agBadge(it){const a=agOf(it);if(!a||a.level==='ok')return '';
+  return `<span class="wi-age ${a.level}" title="${esc(a.text)}">${AG_ICO}${a.days}g</span>`}
+function agToggle(){_agOnly=!_agOnly;renderBoardBody()}
 async function loadTeams(){
   const s=document.getElementById('teamSel');s.innerHTML='<option>Yükleniyor...</option>';
   try{const r=await fetch('/api/teams?t='+Date.now());teams=await r.json();if(teams.error)throw new Error(teams.error);
@@ -1298,22 +1364,38 @@ async function loadBoard(){
   info.innerHTML=`${sd} - ${ed} <span class="sprint-badge ${tf}">${{current:'Aktif',future:'Gelecek',past:'Geçmiş'}[tf]||''}</span>`}
   c.innerHTML='<div class="board-loading">Yükleniyor...</div>';
   try{const r=await fetch('/api/board/workitems?iteration_path='+encodeURIComponent(p)+'&t='+Date.now());items=await r.json();if(items.error)throw new Error(items.error);
-  // Summary
+  renderBoardBody();
+  }catch(e){items=[];c.innerHTML=`<div class="board-empty">Hata: ${esc(e.message)}</div>`;sum.style.display='none';renderOvSprint()}
+}
+// Ozet + kanban. Yaslandirma filtresi (agToggle) yeniden fetch etmeden burayi cagirir.
+function renderBoardBody(){
+  const c=document.getElementById('kanban'),sum=document.getElementById('summary');
   const bs={};for(const i of items)bs[i.state]=(bs[i.state]||0)+1;
   const sts=Object.keys(bs).sort((a,b)=>so(a)-so(b));
+  const stuck=items.filter(agStuck),nCrit=items.filter(i=>agLvl(i)==='crit').length;
   // SP toplami. Kapsami da gosteriyoruz (kac isin SP'si var): tahmini
   // girilmemis is toplama 0 katkida bulunur, dolayisiyla ciplak bir toplam
   // "18 isin tamami tahminlenmis" gibi okunur — 12/18 ise oyle degil.
   sum.innerHTML=`<div class="sprint-stat"><div class="sprint-stat-val">${items.length}</div><div class="sprint-stat-lbl">Toplam</div></div>`
     +`<div class="sprint-stat"><div class="sprint-stat-val" style="color:var(--accent-light)">${fmtSP(spSum(items))}</div><div class="sprint-stat-lbl">SP · ${spCount(items)}/${items.length} iş</div></div>`
+    +(stuck.length?`<div class="sprint-stat ag-stat${_agOnly?' on':''}" onclick="agToggle()" title="Durumunda eşik süresini aşan işler${nCrit?' · '+nCrit+' kritik':''}. Tıkla: yalnızca bunları göster.">`
+      +`<div class="sprint-stat-val" style="color:var(--${nCrit?'danger':'warning'})">${stuck.length}</div>`
+      +`<div class="sprint-stat-lbl">Bekleyen${_agOnly?' · filtre açık':''}</div></div>`:'')
     +sts.map(s=>`<div class="sprint-stat"><div class="sprint-stat-val" style="color:${sc(s)}">${bs[s]}</div><div class="sprint-stat-lbl">${esc(s)}</div></div>`).join('');
   sum.style.display='flex';
   renderOvSprint();
-  // Kanban
-  const gr={};for(const i of items){if(!gr[i.state])gr[i.state]=[];gr[i.state].push(i)}
+  // Kanban — kolon icinde takilanlar ustte (kritik → uyari → normal); esit
+  // seviyede Azure'dan gelen oncelik sirasi korunur (JS sort kararlidir).
+  const shown=_agOnly?stuck:items;
+  const gr={};for(const i of shown){if(!gr[i.state])gr[i.state]=[];gr[i.state].push(i)}
+  for(const k in gr)gr[k].sort((a,b)=>agRank(b)-agRank(a));
   const cols=Object.keys(gr).sort((a,b)=>so(a)-so(b));
-  c.innerHTML=`<div class="kanban-board" style="grid-template-columns:repeat(${cols.length},minmax(210px,1fr))">`+cols.map(s=>`<div class="kanban-column"><div class="kanban-column-header" style="border-top-color:${sc(s)}"><span class="kanban-column-title">${esc(s)}</span><span class="kanban-column-meta"><span class="kanban-column-sp">${fmtSP(spSum(gr[s]))} SP</span><span class="kanban-column-count">${gr[s].length}</span></span></div><div class="kanban-column-body">${gr[s].map(wiCard).join('')}</div></div>`).join('')+'</div>';
-  }catch(e){c.innerHTML=`<div class="board-empty">Hata: ${esc(e.message)}</div>`;sum.style.display='none';renderOvSprint()}
+  if(!cols.length){c.innerHTML=`<div class="board-empty">${_agOnly?'Eşik süresini aşan iş yok.':'Bu sprintte iş yok.'}</div>`;return}
+  c.innerHTML=`<div class="kanban-board" style="grid-template-columns:repeat(${cols.length},minmax(210px,1fr))">`+cols.map(s=>{
+    const n=gr[s].filter(agStuck).length,crit=gr[s].some(i=>agLvl(i)==='crit');
+    const pill=n?`<span class="kanban-column-aging${crit?'':' warn'}" title="${n} iş bu durumda eşik süresini aştı">${AG_ICO} ${n}</span>`:'';
+    return `<div class="kanban-column"><div class="kanban-column-header" style="border-top-color:${sc(s)}"><span class="kanban-column-title">${esc(s)}</span><span class="kanban-column-meta">${pill}<span class="kanban-column-sp">${fmtSP(spSum(gr[s]))} SP</span><span class="kanban-column-count">${gr[s].length}</span></span></div><div class="kanban-column-body">${gr[s].map(wiCard).join('')}</div></div>`;
+  }).join('')+'</div>';
 }
 
 const SO=['New','Backlog','To Do','Active','Committed','In Progress','Blocked','Code Review','QA To Do','QA','Testing','UAT','Resolved','Ready for Production','Done','Closed','Canceled','Removed'];
@@ -1344,14 +1426,15 @@ function wiCard(it){
   const ini=it.assignedTo?it.assignedTo.split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase():'?';
   const pl={1:'P1!!',2:'P2!',3:'P3',4:''};
   const tags=it.tags?it.tags.split(';').map(s=>s.trim()).filter(Boolean):[];
-  const q=QS.includes(it.state);
-  return `<div class="wi-card${q?' selectable':''}" ${q?`onclick="togCard(event,${it.id})"`:''}>
+  const q=QS.includes(it.state),al=agLvl(it);
+  return `<div class="wi-card${q?' selectable':''}"${al!=='ok'?` data-age="${al}"`:''} ${q?`onclick="togCard(event,${it.id})"`:''}>
     <div class="wi-card-header">
       ${q?`<input type="checkbox" class="wi-check" data-id="${it.id}" onchange="updSel()"/>`:''}
       <div class="wi-type-icon ${t.c}">${t.i}</div>
       ${it.url?`<a class="wi-id wi-link" href="${esc(it.url)}" target="_blank" onclick="event.stopPropagation()">#${it.id}</a>`:`<span class="wi-id">#${it.id}</span>`}
       <span class="wi-priority" data-p="${it.priority}">${pl[it.priority]||''}</span>
       ${RV.includes(it.state)?`<button class="wi-review-btn" onclick="event.stopPropagation();reviewWi(${it.id})" title="PR inceleme katkısı: WI'a bağlı PR'ı reviewer inceler, bulgular PR ve WI yorumu olur (danışma; kod/durum değişmez)"><svg class="ico" style="width:12px;height:12px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg></button>`:''}
+      ${agBadge(it)}
       ${spOf(it)>0?`<span class="wi-sp">${fmtSP(spOf(it))}</span>`:`<span class="wi-sp none" title="Story point girilmemiş">—</span>`}
     </div>
     <div class="wi-title">${esc(it.title)}</div>
