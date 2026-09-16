@@ -26,6 +26,31 @@ from crewai.flow.input_provider import InputResponse
 from ..utils import wait_for_event_handlers
 
 
+def _listener_is_subscribed() -> bool:
+    """Whether *this listener's own* handlers are currently on the bus.
+
+    Asking "is there any FlowStartedEvent handler?" answers a different
+    question: a test that subscribes to that event for its own reasons - or a
+    fixture ordered before ours - satisfies it without the shared listener
+    being attached. The guard then skips the re-subscribe and every fixture
+    below records nothing, so assertions read ``in []``. Which neighbours a
+    test file gets depends on the xdist worker count and on pytest-randomly's
+    order, so that failure only appears on some machines and some seeds.
+
+    The handlers are the closures built inside ``EventListener.setup_listeners``,
+    so their qualname identifies them unambiguously.
+    """
+    from crewai.events.event_listener import EventListener
+    from crewai.events.event_bus import crewai_event_bus
+    from crewai.events.types.flow_events import FlowStartedEvent
+
+    marker = f"{EventListener.setup_listeners.__qualname__}.<locals>."
+    return any(
+        getattr(handler, "__qualname__", "").startswith(marker)
+        for handler in crewai_event_bus._sync_handlers.get(FlowStartedEvent, frozenset())
+    )
+
+
 def _reregister_listener() -> None:
     """Re-subscribe the global listener to the event bus.
 
@@ -35,14 +60,43 @@ def _reregister_listener() -> None:
     """
     from crewai.events import event_listener as listener_module
     from crewai.events.event_bus import crewai_event_bus
-    from crewai.events.types.flow_events import FlowStartedEvent
 
-    # Only when the bus is empty: subscribing a second time registers a fresh
-    # set of closures, and every handler then fires twice.
-    if crewai_event_bus._sync_handlers.get(FlowStartedEvent):
+    # Only when this listener is absent: subscribing a second time registers a
+    # fresh set of closures, and every handler then fires twice.
+    if _listener_is_subscribed():
         return
 
     listener_module.event_listener.setup_listeners(crewai_event_bus)
+
+
+def test_an_unrelated_subscriber_does_not_hide_the_listener() -> None:
+    """The re-subscribe guard must recognise this listener, not the event.
+
+    Every fixture below is useless without the shared listener attached, and a
+    guard that settles for "somebody listens to FlowStartedEvent" hands back a
+    bus that records nothing - the assertions then read ``in []``. It surfaced
+    as a flake because whether a neighbour holds such a subscription depends on
+    the xdist worker count and pytest-randomly's order.
+    """
+    from crewai.events.event_bus import crewai_event_bus
+    from crewai.events.types.flow_events import FlowStartedEvent
+
+    with crewai_event_bus._rwlock.w_locked():
+        crewai_event_bus._sync_handlers.clear()
+        crewai_event_bus._async_handlers.clear()
+
+    @crewai_event_bus.on(FlowStartedEvent)
+    def _unrelated(_source: object, _event: FlowStartedEvent) -> None:
+        """A subscription of somebody else's, on the event the guard reads."""
+
+    assert not _listener_is_subscribed()
+    _reregister_listener()
+    assert _listener_is_subscribed()
+
+    # And re-entering is still a no-op, so no handler ever fires twice.
+    before = crewai_event_bus._sync_handlers[FlowStartedEvent]
+    _reregister_listener()
+    assert crewai_event_bus._sync_handlers[FlowStartedEvent] == before
 
 
 @pytest.fixture
