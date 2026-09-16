@@ -28,6 +28,7 @@ import re
 from datetime import datetime, timezone
 from html import unescape
 
+from agile_sdlc_crew import aging
 from agile_sdlc_crew.branding import PRODUCT_NAME
 from agile_sdlc_crew.sprint_planning import PROPOSED_FALLBACK, is_proposed
 
@@ -49,6 +50,8 @@ F_REPRO = "Microsoft.VSTS.TCM.ReproSteps"
 F_PRIO = "Microsoft.VSTS.Common.Priority"
 F_TAGS = "System.Tags"
 F_CREATED = "System.CreatedDate"
+F_CHANGED = "System.ChangedDate"
+F_STATE_CHANGE = "Microsoft.VSTS.Common.StateChangeDate"
 F_ASSIGNED = "System.AssignedTo"
 F_ITER = "System.IterationPath"
 F_AREA = "System.AreaPath"
@@ -68,6 +71,7 @@ GAPS = {
     "no_parent": ("Ebeveyn (Story/Feature) yok", 10),
     "short_title": ("Başlık çok kısa", 5),
     "stale": ("Bayat — uzun süredir backlog'da", 5),
+    "very_stale": ("Çok bayat — aylardır kımıldamıyor", 15),
 }
 
 
@@ -225,6 +229,8 @@ def normalize(raw: dict, base_url: str = "") -> dict:
         "acceptance": f.get(F_AC, "") or "",
         "repro": f.get(F_REPRO, "") or "",
         "created": f.get(F_CREATED, "") or "",
+        "changed": f.get(F_CHANGED, "") or "",
+        "state_change": f.get(F_STATE_CHANGE, "") or "",
         "iterationPath": f.get(F_ITER, "") or "",
         "areaPath": f.get(F_AREA, "") or "",
         "parent_id": _parent_id(raw.get("relations")),
@@ -285,8 +291,14 @@ def assess(item: dict, *, min_score: int = 70, stale_days: int = 30, min_desc_ch
     if len((item.get("title") or "").strip()) < MIN_TITLE_CHARS:
         gap("short_title")
     age = _age_days(item.get("created", ""), now)
-    if age is not None and stale_days > 0 and age > stale_days:
-        gap("stale")
+    # Yaslandirma: "kac gundur BU DURUMDA" (olusturma yasindan farkli — sprint'e
+    # tasinip durumu degisen is yeniden taze sayilir). Bayatlik cezasi kademeli:
+    # 1 yildir duran isle 31 gunluk is ayni -5'i almamali.
+    ag = aging.classify(item.get("state", ""), state_change=item.get("state_change"),
+                        changed=item.get("changed"), created=item.get("created"), now=now)
+    stuck = ag["days"] if ag else age
+    if stuck is not None and stale_days > 0 and stuck > stale_days:
+        gap("very_stale" if stuck >= aging.backlog_crit_days() else "stale")
 
     score = max(0, 100 - sum(g["penalty"] for g in gaps))
     suggest_sp, suggest_why = None, ""
@@ -302,6 +314,8 @@ def assess(item: dict, *, min_score: int = 70, stale_days: int = 30, min_desc_ch
         "ac_source": ac_source,
         "desc_chars": len(desc),
         "age_days": age,
+        "state_days": (ag["days"] if ag else None),
+        "aging": ag,
         "gaps": gaps,
         "score": score,
         "ready": score >= min_score,
@@ -326,6 +340,8 @@ def summarize(rows: list[dict]) -> dict:
         "sp_suggested": sum(int(r["suggest_sp"] or 0) for r in rows),
         "gap_counts": gap_counts,
         "gap_labels": {k: v[0] for k, v in GAPS.items()},
+        "aging": aging.summarize(rows),
+        "aging_thresholds": aging.thresholds(),
         "by_type": {t: sum(1 for r in rows if r["type"] == t) for t in sorted({r["type"] for r in rows})},
     }
 

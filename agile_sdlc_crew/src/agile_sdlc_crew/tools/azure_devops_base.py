@@ -823,6 +823,12 @@ class AzureDevOpsClient:
                 "tags": fields.get("System.Tags", ""),
                 "iterationPath": fields.get("System.IterationPath", ""),
                 "areaPath": fields.get("System.AreaPath", ""),
+                # Yaslandirma (aging.py): isin SU ANKI durumda ne kadar
+                # bekledigi StateChangeDate'ten olculur; alan bos gelirse
+                # ChangedDate/CreatedDate yedege duser.
+                "stateChangeDate": fields.get("Microsoft.VSTS.Common.StateChangeDate", ""),
+                "changedDate": fields.get("System.ChangedDate", ""),
+                "createdDate": fields.get("System.CreatedDate", ""),
                 "url": wi_url,
             })
         return result

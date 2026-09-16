@@ -1553,15 +1553,28 @@ async def list_sprints(team: str = ""):
 
 @app.get("/api/board/workitems")
 async def board_work_items(iteration_path: str = ""):
-    """Secilen sprintteki work item'lari dondurur."""
+    """Secilen sprintteki work item'lari dondurur.
+
+    Her is, `aging` blogu ile zenginlestirilir: su anki durumda kac gundur
+    bekledigi ve bunun o durum icin normal olup olmadigi (bkz. aging.py).
+    Esikler sunucuda cozulur; arayuz yalnizca boyar."""
     if not iteration_path.strip():
         return JSONResponse({"error": "iteration_path parametresi gerekli"}, status_code=400)
     try:
+        from agile_sdlc_crew import aging
         client = AzureDevOpsClient()
         items = client.get_iteration_work_items(iteration_path.strip())
+        aging.annotate(items)
         return JSONResponse(items)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/aging/config")
+async def aging_config():
+    """Yaslandirma esikleri (arayuz etiketleri/tooltip'leri icin)."""
+    from agile_sdlc_crew import aging
+    return JSONResponse({"enabled": aging.enabled(), "thresholds": aging.thresholds()})
 
 
 @app.post("/api/backfill/start")
