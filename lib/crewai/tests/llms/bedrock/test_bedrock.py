@@ -140,16 +140,25 @@ def test_bedrock_completion_module_is_imported():
     """
     module_name = "crewai.llms.providers.bedrock.completion"
 
-    if module_name in sys.modules:
-        del sys.modules[module_name]
+    # Dropping the module is what makes the re-import observable, but the fresh
+    # import binds a NEW BedrockCompletion class object. Anything that imported
+    # the old one at collection time - test_bedrock_streaming_tool_args.py does -
+    # then fails isinstance() against instances the factory builds from the new
+    # class, reported as a bare ``assert False``. Whether that bites depends on
+    # which files share this worker, so it shows up as a flake. Put the original
+    # module back so nobody is left holding a stale class.
+    original = sys.modules.pop(module_name, None)
+    try:
+        LLM(model="bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0")
 
-    LLM(model="bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0")
+        assert module_name in sys.modules
+        completion_mod = sys.modules[module_name]
+        assert isinstance(completion_mod, types.ModuleType)
 
-    assert module_name in sys.modules
-    completion_mod = sys.modules[module_name]
-    assert isinstance(completion_mod, types.ModuleType)
-
-    assert hasattr(completion_mod, 'BedrockCompletion')
+        assert hasattr(completion_mod, 'BedrockCompletion')
+    finally:
+        if original is not None:
+            sys.modules[module_name] = original
 
 
 def test_native_bedrock_raises_error_when_initialization_fails():

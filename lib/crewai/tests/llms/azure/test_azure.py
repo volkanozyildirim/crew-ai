@@ -103,16 +103,23 @@ def test_azure_completion_module_is_imported():
     """
     module_name = "crewai.llms.providers.azure.completion"
 
-    if module_name in sys.modules:
-        del sys.modules[module_name]
+    # Dropping the module is what makes the re-import observable, but the fresh
+    # import binds a NEW completion class object, so anything holding the old
+    # one from collection time fails isinstance() against instances the factory
+    # now builds. Which files share this worker decides whether that bites, so
+    # it surfaces as a flake. Put the original module back.
+    original = sys.modules.pop(module_name, None)
+    try:
+        LLM(model="azure/gpt-4")
 
-    LLM(model="azure/gpt-4")
+        assert module_name in sys.modules
+        completion_mod = sys.modules[module_name]
+        assert isinstance(completion_mod, types.ModuleType)
 
-    assert module_name in sys.modules
-    completion_mod = sys.modules[module_name]
-    assert isinstance(completion_mod, types.ModuleType)
-
-    assert hasattr(completion_mod, 'AzureCompletion')
+        assert hasattr(completion_mod, 'AzureCompletion')
+    finally:
+        if original is not None:
+            sys.modules[module_name] = original
 
 
 def test_native_azure_raises_error_when_initialization_fails():
@@ -1331,7 +1338,6 @@ def test_azure_agent_kickoff_structured_output_with_tools():
     assert result.pydantic.result == 42, f"Expected result 42 but got {result.pydantic.result}"
     assert result.pydantic.operation, "Operation should not be empty"
     assert result.pydantic.explanation, "Explanation should not be empty"
-
 
 
 def test_azure_stop_words_not_applied_to_structured_output():
