@@ -48,16 +48,23 @@ def test_gemini_completion_module_is_imported():
     """
     module_name = "crewai.llms.providers.gemini.completion"
 
-    if module_name in sys.modules:
-        del sys.modules[module_name]
+    # Dropping the module is what makes the re-import observable, but the fresh
+    # import binds a NEW completion class object, so anything holding the old
+    # one from collection time fails isinstance() against instances the factory
+    # now builds. Which files share this worker decides whether that bites, so
+    # it surfaces as a flake. Put the original module back.
+    original = sys.modules.pop(module_name, None)
+    try:
+        LLM(model="google/gemini-2.0-flash-001")
 
-    LLM(model="google/gemini-2.0-flash-001")
+        assert module_name in sys.modules
+        completion_mod = sys.modules[module_name]
+        assert isinstance(completion_mod, types.ModuleType)
 
-    assert module_name in sys.modules
-    completion_mod = sys.modules[module_name]
-    assert isinstance(completion_mod, types.ModuleType)
-
-    assert hasattr(completion_mod, 'GeminiCompletion')
+        assert hasattr(completion_mod, 'GeminiCompletion')
+    finally:
+        if original is not None:
+            sys.modules[module_name] = original
 
 
 def test_gemini_lazy_build_reads_env_vars_set_after_construction():
@@ -1018,7 +1025,6 @@ def test_gemini_agent_kickoff_structured_output_with_tools():
     assert result.pydantic.result == 42, f"Expected result 42 but got {result.pydantic.result}"
     assert result.pydantic.operation, "Operation should not be empty"
     assert result.pydantic.explanation, "Explanation should not be empty"
-
 
 
 @pytest.mark.vcr()

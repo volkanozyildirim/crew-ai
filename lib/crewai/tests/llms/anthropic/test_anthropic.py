@@ -44,24 +44,29 @@ def test_anthropic_completion_is_used_when_claude_provider():
     assert llm.model == "claude-3-5-sonnet-20241022"
 
 
-
-
 def test_anthropic_completion_module_is_imported():
     """
     Test that the completion module is properly imported when using Anthropic provider
     """
     module_name = "crewai.llms.providers.anthropic.completion"
 
-    if module_name in sys.modules:
-        del sys.modules[module_name]
+    # Dropping the module is what makes the re-import observable, but the fresh
+    # import binds a NEW completion class object, so anything holding the old
+    # one from collection time fails isinstance() against instances the factory
+    # now builds. Which files share this worker decides whether that bites, so
+    # it surfaces as a flake. Put the original module back.
+    original = sys.modules.pop(module_name, None)
+    try:
+        LLM(model="anthropic/claude-3-5-sonnet-20241022")
 
-    LLM(model="anthropic/claude-3-5-sonnet-20241022")
+        assert module_name in sys.modules
+        completion_mod = sys.modules[module_name]
+        assert isinstance(completion_mod, types.ModuleType)
 
-    assert module_name in sys.modules
-    completion_mod = sys.modules[module_name]
-    assert isinstance(completion_mod, types.ModuleType)
-
-    assert hasattr(completion_mod, 'AnthropicCompletion')
+        assert hasattr(completion_mod, 'AnthropicCompletion')
+    finally:
+        if original is not None:
+            sys.modules[module_name] = original
 
 
 def test_native_anthropic_raises_error_when_initialization_fails():
@@ -1145,8 +1150,6 @@ def test_anthropic_cached_prompt_tokens_with_tools():
     assert usage.prompt_tokens > 0
     assert usage.successful_requests == 2
     assert usage.cached_prompt_tokens > 0
-
-
 
 
 def test_tool_search_true_injects_bm25_and_defer_loading():
