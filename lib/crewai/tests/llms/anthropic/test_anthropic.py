@@ -67,6 +67,13 @@ def test_anthropic_completion_module_is_imported():
     finally:
         if original is not None:
             sys.modules[module_name] = original
+            # Parent package attribute too - the re-import rebound it to the
+            # throwaway copy, and mock.patch("<module>.X") follows that path on
+            # Python < 3.12 while `from <module> import X` follows sys.modules.
+            parent_name, _, leaf = module_name.rpartition(".")
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, leaf, original)
 
 
 def test_native_anthropic_raises_error_when_initialization_fails():
