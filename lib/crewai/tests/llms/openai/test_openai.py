@@ -206,21 +206,38 @@ def test_openai_is_default_provider_without_explicit_llm_set_on_agent():
 
 
 
-def test_openai_completion_module_is_imported(monkeypatch):
+def test_openai_completion_module_is_imported():
     """
     Test that the completion module is properly imported when using OpenAI provider
     """
     module_name = "crewai.llms.providers.openai.completion"
 
-    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    # ``monkeypatch.delitem`` used to do this, and it restores sys.modules - but
+    # only sys.modules. Importing a submodule also rebinds it as an attribute on
+    # its parent package, so the throwaway copy from the re-import below stays
+    # reachable as ``crewai.llms.providers.openai.completion`` while sys.modules
+    # holds the original. The two paths then disagree: mock.patch("<module>.X")
+    # walks the parent's attribute on Python < 3.12 (3.12 moved to
+    # pkgutil.resolve_name) while `from <module> import X` reads sys.modules.
+    # test_azure_responses.py patches OpenAICompletion exactly that way and
+    # _init_responses_delegate imports it the other way, so the patch silently
+    # missed and the delegate was a real OpenAICompletion.
+    original = sys.modules.pop(module_name, None)
+    try:
+        LLM(model="gpt-4o")
 
-    LLM(model="gpt-4o")
+        assert module_name in sys.modules
+        completion_mod = sys.modules[module_name]
+        assert isinstance(completion_mod, types.ModuleType)
 
-    assert module_name in sys.modules
-    completion_mod = sys.modules[module_name]
-    assert isinstance(completion_mod, types.ModuleType)
-
-    assert hasattr(completion_mod, 'OpenAICompletion')
+        assert hasattr(completion_mod, 'OpenAICompletion')
+    finally:
+        if original is not None:
+            sys.modules[module_name] = original
+            parent_name, _, leaf = module_name.rpartition(".")
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, leaf, original)
 
 
 def test_native_openai_raises_error_when_initialization_fails():
