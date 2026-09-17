@@ -159,6 +159,19 @@ def test_bedrock_completion_module_is_imported():
     finally:
         if original is not None:
             sys.modules[module_name] = original
+            # sys.modules alone is not enough. Importing a submodule also rebinds
+            # it as an attribute on its parent package, so the throwaway copy
+            # stays reachable there and the two paths disagree:
+            # `from x.y import Z` reads sys.modules, while mock.patch("x.y.Z")
+            # walks the parent's attribute on Python < 3.12 (only 3.12 switched
+            # to pkgutil.resolve_name). A later patch then lands on one copy
+            # while the factory builds from the other, and the mock is never
+            # called - which is how test_bedrock_environment_variable_credentials
+            # started failing once this test merely restored sys.modules.
+            parent_name, _, leaf = module_name.rpartition(".")
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, leaf, original)
 
 
 def test_native_bedrock_raises_error_when_initialization_fails():
