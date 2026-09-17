@@ -29,7 +29,7 @@ _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "pipeline_config.yam
 
 
 # Knob schemas. UI bu listeden form uretir.
-# type: "bool" | "int" | "float"
+# type: "bool" | "int" | "float" | "str"
 # bool: env'de "1"/"true"/"yes" -> True
 SCHEMA: list[dict] = [
     # ── Pipeline davranis toggle'lari ──
@@ -542,6 +542,13 @@ SCHEMA: list[dict] = [
         "default": 3,
         "min": 1,
         "desc": "Blocked / On Hold / Waiting durumundaki iş için kırmızı eşik.",
+    },
+    {
+        "key": "CREW_REFINEMENT_SPRINT_TYPES",
+        "label": "Refinement Sprint Kapsamı (iş tipleri)",
+        "type": "str",
+        "default": "Task,Bug,Improvement",
+        "desc": "Refinement sekmesi 'Seçili sprint' kapsamındayken HANGİ iş tipleri kontrol edilir (virgülle ayrık). Varsayılan ebeveyn tipleri (User Story / Product Backlog Item) eler: sprintte refine edilen şey çocuk işlerdir ve board'un kendi sorgusu da 'WorkItemType <> User Story' diyor — ikisi aynı kapsamı gösterir. Ebeveyn story'ler 'Tüm backlog' kapsamında kontrol edilmeye devam eder (orada tip filtresi yoktur). Boş bırakılırsa varsayılana döner.",
     },
     {
         "key": "CREW_FRESHEN_ALL_REPOS",

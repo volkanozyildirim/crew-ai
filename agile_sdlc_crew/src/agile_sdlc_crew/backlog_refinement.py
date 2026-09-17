@@ -12,6 +12,10 @@ sorusuna bakmıyordu. Bu modül backlog'daki (Proposed durumundaki) işleri
   * her eksik bir ceza; skor 0-100; eşik `CREW_REFINEMENT_MIN_SCORE`
   * SP yoksa yapısal öneri (`estimation.structural_estimate`, AC sayısından)
 
+Kapsam iki türlü: seçili **sprint** (yalnızca çocuk işler — Task/Bug/Improvement;
+ebeveyn User Story/PBI elenir, `CREW_REFINEMENT_SPRINT_TYPES`) ya da takımın tüm
+**backlog**'u (User Story dahil tüm tipler — story seviyesinde DoR orada ölçülür).
+
 Yazma eylemleri (`CREW_REFINEMENT_WRITE`, kapalı) insan tıklamasıyla, satır
 başına: eksikleri WI yorumu olarak yaz, boşsa SP yaz (insan tahminini asla
 ezmez), `needs-refinement` etiketi ekle/kaldır. LLM adımı
@@ -35,6 +39,11 @@ from agile_sdlc_crew.sprint_planning import PROPOSED_FALLBACK, is_proposed
 log = logging.getLogger("pipeline")
 
 REFINEMENT_TYPES = ("User Story", "Product Backlog Item", "Bug", "Task", "Improvement")
+# Sprint kapsaminda ebeveyn tipleri (User Story / PBI) elenir: sprintte refine
+# edilen sey cocuk islerdir, board'un kendi sorgusu da `WorkItemType <> 'User
+# Story'` diyor. Ebeveyn story'ler sprint'e degil backlog kapsamina aittir -
+# orada DoR'lari hala olculur. `CREW_REFINEMENT_SPRINT_TYPES` ile degistirilir.
+SPRINT_TYPES = ("Task", "Bug", "Improvement")
 NEEDS_TAG = "needs-refinement"
 SIGNATURE = f"*{PRODUCT_NAME} — Backlog Refinement*"
 SPLIT_SP = 8          # bu değerin ÜSTÜ "bölünmeli"
@@ -167,6 +176,23 @@ def _age_days(created: str, now: datetime) -> int | None:
 
 # ── sorgu ──────────────────────────────────────────────────────────────
 
+def scope_types(scope: str) -> tuple[str, ...]:
+    """Kapsamin is tipleri. Sprint: `CREW_REFINEMENT_SPRINT_TYPES` (varsayilan
+    Task/Bug/Improvement). Backlog: tum REFINEMENT_TYPES. Ayar bos/bozuksa
+    varsayilana duser - yanlis yazilmis bir env yuzunden sekme bosalmasin."""
+    if scope != "sprint":
+        return REFINEMENT_TYPES
+    raw = None
+    try:
+        from agile_sdlc_crew import pipeline_config
+        raw = pipeline_config.get("CREW_REFINEMENT_SPRINT_TYPES")
+    except Exception:  # noqa: BLE001 — knob kayitli degil / yaml okunamadi
+        import os
+        raw = os.environ.get("CREW_REFINEMENT_SPRINT_TYPES")
+    names = tuple(t.strip() for t in str(raw or "").split(",") if t.strip())
+    return names or SPRINT_TYPES
+
+
 def proposed_state_names(client, types=REFINEMENT_TYPES) -> list[str]:
     """Tiplerin süreçteki Proposed kategorisindeki durum adları (birleşim). Yoksa ad tabanlı yedek."""
     names: list[str] = []
@@ -196,8 +222,11 @@ def backlog_wiql(*, area_path: str = "", iteration_path: str = "", states: list[
 def fetch_candidates(client, *, team: str = "", iteration_path: str = "", scope: str = "backlog",
                      limit: int = 300) -> tuple[list[dict], dict]:
     """Ham WI listesi (fields + relations) ve sorgu meta'sı. scope: 'sprint' → yalnızca iteration_path;
-    'backlog' → takımın alan yolu altındaki tüm Proposed işler (sprint'e atanmış olanlar dahil)."""
-    states = proposed_state_names(client)
+    'backlog' → takımın alan yolu altındaki tüm Proposed işler (sprint'e atanmış olanlar dahil).
+    Tip seti kapsama göre değişir (bkz. `scope_types`); Proposed durum adları da o
+    tiplerin süreçlerinden okunur, yoksa sprintte kullanılmayan bir durum sorguya girerdi."""
+    types = scope_types(scope)
+    states = proposed_state_names(client, types)
     area = ""
     if scope != "sprint":
         try:
@@ -207,9 +236,10 @@ def fetch_candidates(client, *, team: str = "", iteration_path: str = "", scope:
     ip = iteration_path if scope == "sprint" else ""
     if scope == "sprint" and not ip:
         raise ValueError("Sprint kapsamı için iteration_path gerekli")
-    wiql = backlog_wiql(area_path=area, iteration_path=ip, states=states)
+    wiql = backlog_wiql(area_path=area, iteration_path=ip, states=states, types=types)
     raw = client.query_work_items(wiql, limit=limit)
-    return raw, {"states": states, "area_path": area, "iteration_path": ip, "scope": scope}
+    return raw, {"states": states, "area_path": area, "iteration_path": ip, "scope": scope,
+                 "types": list(types)}
 
 
 def normalize(raw: dict, base_url: str = "") -> dict:

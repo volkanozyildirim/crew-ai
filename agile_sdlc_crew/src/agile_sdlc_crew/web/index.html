@@ -1019,7 +1019,10 @@ async function loadRefinement(){
     const r=await fetch('/api/refinement?scope='+scope+'&team='+encodeURIComponent(team)+'&iteration_path='+encodeURIComponent(iter)+'&t='+Date.now());
     const d=await r.json();
     if(d.error){body.innerHTML='<div class="board-empty" style="color:var(--danger)">'+esc(d.error)+'</div>';st.textContent='';return}
-    _rf=d;_rfQ={};st.textContent=(d.scope==='sprint'?'Sprint':'Backlog')+' · '+d.rows.length+' iş · eşik '+d.min_score;
+    // Sprint kapsami tip filtreli (ebeveyn story'ler elenir) — sessiz filtre
+    // olmasin diye kapsamdaki tipleri yaz.
+    const tip=(d.scope==='sprint'&&(d.types||[]).length)?' · '+d.types.join(', '):'';
+    _rf=d;_rfQ={};st.textContent=(d.scope==='sprint'?'Sprint':'Backlog')+tip+' · '+d.rows.length+' iş · eşik '+d.min_score;
     renderRefinement();renderRefineBadge();
   }catch(e){body.innerHTML='Hata: '+esc(String(e));st.textContent=''}
 }
@@ -2209,6 +2212,12 @@ async function loadPipeline(){
           <input type="checkbox" data-key="${esc(f.key)}" data-type="bool"${checked} onchange="autoSavePipeline(this)" style="accent-color:var(--accent);width:18px;height:18px" />
           <span style="font-size:12px;color:var(--text-dim)">${f.value?'Aktif':'Devre dışı'}</span>
         </label>`;
+      }else if(f.type==='str'){
+        // Metin knob'u (or. virgulle ayrik tip listesi) — sayi alani parseInt'te
+        // NaN verip sessizce kaydetmezdi.
+        inputHtml=`<input type="text" data-key="${esc(f.key)}" data-type="str" value="${esc(String(f.value??''))}"
+          onchange="autoSavePipeline(this)" onblur="autoSavePipeline(this)"
+          style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;width:260px;font-family:'Geist Mono',Menlo,monospace" />`;
       }else{
         const minAttr=('min' in f)?` min="${f.min}"`:'';
         const step=f.type==='float'?'0.1':'1';
@@ -2235,6 +2244,7 @@ function _readPipelineField(field){
   const key=field.dataset.key;
   const type=field.dataset.type;
   if(type==='bool')return {key, value:field.checked};
+  if(type==='str')return {key, value:field.value.trim()};
   const num=type==='float'?parseFloat(field.value):parseInt(field.value);
   if(isNaN(num))return null;
   return {key, value:num};
