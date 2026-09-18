@@ -550,6 +550,14 @@ SCHEMA: list[dict] = [
         "default": "Task,Bug,Improvement",
         "desc": "Refinement sekmesi 'Seçili sprint' kapsamındayken HANGİ iş tipleri kontrol edilir (virgülle ayrık). Varsayılan ebeveyn tipleri (User Story / Product Backlog Item) eler: sprintte refine edilen şey çocuk işlerdir ve board'un kendi sorgusu da 'WorkItemType <> User Story' diyor — ikisi aynı kapsamı gösterir. Ebeveyn story'ler 'Tüm backlog' kapsamında kontrol edilmeye devam eder (orada tip filtresi yoktur). Boş bırakılırsa varsayılana döner.",
     },
+    # ── CrewAI Agent Skills ──
+    {
+        "key": "CREW_AGENT_SKILLS",
+        "label": "Ajan Becerileri (CrewAI Skills)",
+        "type": "bool",
+        "default": True,
+        "desc": "CrewAI'ın native Agent Skills desteğini kullan: `src/agile_sdlc_crew/skills/<ad>/SKILL.md` dizinleri ajanlara `skills=[...]` ile bağlanır. Knowledge'dan farkı kademeli açılım — SKILL.md gövdesi hep yüklü, `references/` altındaki derin içerik ajan ihtiyaç duyunca açılır, böylece PHP reposu incelenirken Go/TS/Python referansları hiç okunmaz (token tasarrufu). Bugün bağlı olan: code_reviewer → `code-review` (kapsam disiplini, dilin güncel kullanımı, SOLID, güvenlik, SonarQube Clean-as-You-Code). Kapatılırsa ajanlar skill'siz çalışır, davranış eski hâline döner.",
+    },
     {
         "key": "CREW_FRESHEN_ALL_REPOS",
         "label": "Tüm Klonları Tazele (paralel fetch)",

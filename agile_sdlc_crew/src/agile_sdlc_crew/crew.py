@@ -59,6 +59,7 @@ from agile_sdlc_crew.dashboard import StatusTracker, TASK_DISPLAY_NAMES  # noqa:
 from agile_sdlc_crew.tools.semantic_search import SemanticCodeSearchTool  # noqa: E402
 from agile_sdlc_crew.tools.find_relevant_repos import FindRelevantReposTool  # noqa: E402
 from agile_sdlc_crew.knowledge import load_knowledge  # noqa: E402
+from agile_sdlc_crew.skills import skill_kwargs  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 
@@ -401,6 +402,10 @@ class AgileSDLCCrew:
                 AzureDevOpsPRReviewTool(),
             ],
             **self._knowledge_kwargs("backend_code_review"),
+            # CrewAI Agent Skills: govde (kapsam disiplini, SOLID, guvenlik,
+            # Sonar "Clean as You Code") hep yuklu; dile ozgu derinlik
+            # references/ altinda, ajan repo dilini gorunce aciyor.
+            **skill_kwargs("code-review"),
         )
 
     # ── Helpers ──────────────────────────────────

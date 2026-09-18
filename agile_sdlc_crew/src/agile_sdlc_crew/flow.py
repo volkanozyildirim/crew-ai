@@ -1150,6 +1150,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"{s.kickoff_text[:_cb.cap('KICKOFF_REVIEW')]}"
                 )
 
+        if step_key == "review_pr_task":
+            skill_ctx = self._review_skill_context()
+            if skill_ctx:
+                tail.append(skill_ctx)
+
         # Kabul kriterleri — BA analizinden sonra belirlenir, pipeline boyunca
         # baglayici tek kaynak: tasarim, gelistirme, inceleme ve UAT buna gore yapilir.
         # test_planning_task DA dahil: QA test planini baglayici kriterleri
@@ -2054,6 +2059,16 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception as e:
             _log(f"  SM Review hatasi: {e}")
             return True, ""
+
+    def _review_skill_context(self) -> str:
+        """Inceleme adimina `code-review` skill'inin dil + Sonar referanslarini ekler.
+        Mantik `skills.review_context` icinde — insan PR incelemesi (pr_review) de
+        ayni yardimciyi cagirir, iki yerde kopya kural kalmasin."""
+        try:
+            from agile_sdlc_crew.skills import review_context
+        except Exception:  # noqa: BLE001
+            return ""
+        return review_context(self.state.repo_name or "")
 
     def _prefetch_pr_changes_context(
         self, max_files: int = 12, per_file: int = 6000, diff_mode: bool = False,
