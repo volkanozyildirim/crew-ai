@@ -137,7 +137,17 @@ def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int = 12, p
     pr_id = pr.get("pullRequestId")
     branch = (pr.get("sourceRefName") or "").replace("refs/heads/", "")
     paths = changed_paths(client.get_pull_request_changes(repo_name, int(pr_id)))
-    parts = [
+    parts = []
+    # Pipeline'daki inceleme adimiyla ayni referanslar: repoya uyan dil dosyasi
+    # + Sonar kurallari. Insan PR'i da ayni olcute gore incelensin.
+    try:
+        from agile_sdlc_crew.skills import review_context
+        skill_ctx = review_context(repo_name)
+    except Exception:  # noqa: BLE001
+        skill_ctx = ""
+    if skill_ctx:
+        parts.append(skill_ctx)
+    parts += [
         f"\n# PR DEĞİŞİKLİKLERİ (PR #{pr_id}, repo {repo_name}, branch {branch} — feature branch içerikleri HAZIR)",
         "⚡ Aşağıdaki dosya içerikleri context'te zaten var. get_pr_changes / browse_repo ÇAĞIRMA — "
         "doğrudan bu içerikleri iş kalemine ve kabul kriterlerine göre incele.",
