@@ -99,22 +99,23 @@ def reference_for(skill_name: str, language: str) -> tuple[str, str]:
     return ref, reference(skill_name, ref)
 
 
-def review_context(repo_name: str) -> str:
-    """`code-review` skill'inin repoya uyan dil referansi + Sonar kurallari.
+def standards_context(repo_name: str) -> str:
+    """`engineering-standards` skill'inin repoya uyan dil referansi + Sonar kurallari.
 
-    Skill'in GOVDESI (kapsam disiplini, SOLID, guvenlik, Sonar politikasi)
-    ajanin sistem prompt'una CrewAI tarafindan zaten giriyor; burada uretilen
-    sey **derinlik**: bes dil referansindan yalnizca repoya uyan biri, arti
-    dilden bagimsiz Sonar kural listesi.
+    Skill'in GOVDESI (dilin guncel kullanimi, SOLID, guvenlik, Sonar
+    politikasi) ajanin sistem prompt'una CrewAI tarafindan zaten giriyor;
+    burada uretilen sey **derinlik**: dort dil referansindan yalnizca repoya
+    uyan biri, arti dilden bagimsiz Sonar kural listesi.
 
     Neden ajan referansi kendi acmiyor: code_reviewer claude_cli uzerinde
     kosuyor ve CrewAI'in Python arac dongusu o surece kopru kuramiyor
     (bkz. CLAUDE.md). Repo dilini `detect_repo_type` ile kesin bildigimiz icin
     dogru referansi enjekte etmek hem daha ucuz hem daha guvenilir.
 
-    Hem pipeline'daki inceleme adimi (flow.step8) hem insan PR incelemesi
-    (pr_review) bunu cagirir. Dil cozulemezse dil referansi eklenmez —
-    yanlis dilin kurallarini vermektense hic vermemek yeglenir.
+    Ayni olcutu ucu de gorur: teknik tasarim, gelistirme ve inceleme adimlari
+    (arti insan PR incelemesi). Hatayi en ucuz yerde — yazarken — yakalamak
+    icin. Dil cozulemezse dil referansi eklenmez: yanlis dilin kurallarini
+    vermektense hic vermemek yeglenir.
     """
     if not enabled():
         return ""
@@ -128,21 +129,21 @@ def review_context(repo_name: str) -> str:
     except Exception:  # noqa: BLE001 — klon yoksa dil bilinmez
         language = "unknown"
 
-    ref_name, ref_body = reference_for("code-review", language)
-    sonar = reference("code-review", "sonarqube")
+    ref_name, ref_body = reference_for("engineering-standards", language)
+    sonar = reference("engineering-standards", "sonarqube")
     if not ref_body and not sonar:
         return ""
 
     parts = []
     if ref_body:
         parts.append(
-            f"\n# Inceleme Referansi — {ref_name} "
+            f"\n# Mühendislik Ölçütü — {ref_name} "
             f"({repo} reposu {language} olarak algilandi)\n{ref_body}"
         )
     else:
-        log.info(f"Review skill: {repo} dili cozulemedi ({language}) — dil referansi eklenmedi")
+        log.info(f"Standards skill: {repo} dili cozulemedi ({language}) — dil referansi eklenmedi")
     if sonar:
-        parts.append(f"\n# Inceleme Referansi — SonarQube\n{sonar}")
+        parts.append(f"\n# Mühendislik Ölçütü — SonarQube\n{sonar}")
     return "\n".join(parts)
 
 

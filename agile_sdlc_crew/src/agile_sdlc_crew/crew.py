@@ -284,6 +284,7 @@ class AgileSDLCCrew:
                 AzureDevOpsListWorkItemsTool(),
             ],
             **self._knowledge_kwargs("agile_facilitation"),
+            **skill_kwargs("agile-facilitation"),
         )
 
     def business_analyst(self) -> Agent:
@@ -299,6 +300,7 @@ class AgileSDLCCrew:
                 AzureDevOpsAddCommentTool(),
             ],
             **self._knowledge_kwargs("requirements_analysis"),
+            **skill_kwargs("requirements-analysis"),
         )
 
     def software_architect(self) -> Agent:
@@ -331,6 +333,7 @@ class AgileSDLCCrew:
             max_iter=max_iter,
             tools=tools,
             **self._knowledge_kwargs("backend_tech_design", "frontend_nextjs"),
+            **skill_kwargs("technical-design", "engineering-standards"),
         )
 
     def qa_engineer(self) -> Agent:
@@ -350,6 +353,7 @@ class AgileSDLCCrew:
             max_iter=8,
             tools=tools,
             **self._knowledge_kwargs("testing_strategy"),
+            **skill_kwargs("test-planning"),
         )
 
     def uat_specialist(self) -> Agent:
@@ -366,6 +370,7 @@ class AgileSDLCCrew:
                 AzureDevOpsPRChangesTool(),
             ],
             **self._knowledge_kwargs("uat_strategy"),
+            **skill_kwargs("uat"),
         )
 
     def senior_developer(self) -> Agent:
@@ -382,6 +387,7 @@ class AgileSDLCCrew:
             max_iter=3,
             tools=[],
             **self._knowledge_kwargs("backend_feature_dev", "frontend_nextjs"),
+            **skill_kwargs("implementation", "engineering-standards"),
         )
 
     def code_reviewer(self) -> Agent:
@@ -402,10 +408,10 @@ class AgileSDLCCrew:
                 AzureDevOpsPRReviewTool(),
             ],
             **self._knowledge_kwargs("backend_code_review"),
-            # CrewAI Agent Skills: govde (kapsam disiplini, SOLID, guvenlik,
-            # Sonar "Clean as You Code") hep yuklu; dile ozgu derinlik
-            # references/ altinda, ajan repo dilini gorunce aciyor.
-            **skill_kwargs("code-review"),
+            # CrewAI Agent Skills: code-review = karar kurallari (ne zaman ret),
+            # engineering-standards = nasil yazilir (dil + SOLID + Sonar).
+            # Govdeler hep yuklu; repoya uyan dil referansini pipeline ekler.
+            **skill_kwargs("code-review", "engineering-standards"),
         )
 
     # ── Helpers ──────────────────────────────────
@@ -437,6 +443,7 @@ class AgileSDLCCrew:
             max_iter=2,
             tools=[],
             **self._knowledge_kwargs("agile_facilitation"),
+            **skill_kwargs("agile-facilitation"),
         )
         ba = Agent(
             config=self._agent_config_with_knowledge("business_analyst", "requirements_analysis"),
@@ -445,6 +452,7 @@ class AgileSDLCCrew:
             max_iter=2,
             tools=[],
             **self._knowledge_kwargs("requirements_analysis"),
+            **skill_kwargs("requirements-analysis"),
         )
         arch = Agent(
             config=self._agent_config_with_knowledge(
@@ -457,6 +465,7 @@ class AgileSDLCCrew:
                 AzureDevOpsBrowseRepoTool(local_repo_mgr=self.local_repo_mgr),
             ],
             **self._knowledge_kwargs("backend_tech_design", "frontend_nextjs"),
+            **skill_kwargs("technical-design", "engineering-standards"),
         )
         dev = Agent(
             config=self._agent_config_with_knowledge(
@@ -473,6 +482,7 @@ class AgileSDLCCrew:
                 AzureDevOpsSearchCodeTool(local_repo_mgr=self.local_repo_mgr),
             ],
             **self._knowledge_kwargs("backend_feature_dev", "frontend_nextjs"),
+            **skill_kwargs("implementation", "engineering-standards"),
         )
         return ba, arch, dev, sm
 
@@ -1093,6 +1103,7 @@ class AgileSDLCCrew:
             max_iter=_pc.get("CREW_ARCHITECT_MAX_ITER"),
             tools=[],
             **self._knowledge_kwargs("backend_tech_design", "frontend_nextjs"),
+            **skill_kwargs("technical-design", "engineering-standards"),
         )
         t1 = self._task("technical_design_task", arch)
         return Crew(
@@ -1150,6 +1161,7 @@ class AgileSDLCCrew:
             max_iter=3,
             tools=[],
             **self._knowledge_kwargs("backend_code_review"),
+            **skill_kwargs("code-review", "engineering-standards"),
         )
         t1 = self._task("review_pr_task", reviewer)
 
@@ -1176,6 +1188,7 @@ class AgileSDLCCrew:
             max_iter=3,
             tools=[],
             **self._knowledge_kwargs("backend_code_review"),
+            **skill_kwargs("code-review", "engineering-standards"),
         )
         t1 = self._task("verify_review_task", reviewer)
 
@@ -1226,6 +1239,7 @@ class AgileSDLCCrew:
             verbose=True,
             max_iter=3,
             tools=[],
+            **skill_kwargs("product-assessment"),
         )
 
     def create_po_crew(self) -> Crew:

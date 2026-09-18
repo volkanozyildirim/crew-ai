@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: PR incelemesi için kapsam disiplini, dilin güncel kullanımı, SOLID, güvenlik ve SonarQube borç kontrolü. Work item'ın istediğinin dışına çıkmadan, PR'ın DOKUNDUĞU satırlarda kalite kapısını uygular. Repo dili PHP, Go, TypeScript/Next.js veya Python olabilir — dile özgü kurallar references/ altındadır.
+description: "PR incelemesinin KARAR kuralları: bir bulgu ne zaman PR'ı reddeder, ne zaman sadece yorumdur. Kapsamı work item ile sınırlı tutar, mevcut borca dokundurtmaz, bulguyu kanıta bağlar. Nasıl yazılacağının ölçütü ayrı bir skill'dedir (engineering-standards)."
 license: proprietary
 compatibility: FLO stack — PHP 8+/Butterfly, Go/Gin, Next.js/React/TS, Python
 metadata:
@@ -44,8 +44,9 @@ bloke ediyor**. Yani buradan geçen bir ihlal orada patlar. Ama kapı yalnızca
 > PR'ın eklediği/değiştirdiği satırlardaki Sonar ihlali → **blocker**.
 > Dokunulmamış satırlardaki ihlal → **görmezden gel**.
 
-Kapının ayrıntısı ve dile göre en sık borç üreten kurallar:
-`references/sonarqube.md`.
+Kapının ayrıntısı ve dile göre en sık borç üreten kurallar
+`engineering-standards` skill'inin `references/sonarqube.md` dosyasındadır;
+pipeline onu bağlama ekler.
 
 Yeni kodun test kapsamı da kapının parçasıdır; testi olmayan yeni mantık için
 `minor` uyarı yaz (blocker değil — test zorunluluğu ayrı bir ayar,
@@ -54,14 +55,9 @@ Yeni kodun test kapsamı da kapının parçasıdır; testi olmayan yeni mantık 
 ## 3. Dilin güncel kullanımı
 
 Kod, o dilin **bugünkü** hâline göre yazılmış olmalı; 2015 kalıbıyla yazılmış
-yeni kod Sonar'da da borç üretir. Repo diline göre ilgili referansı aç:
-
-| Repo | Referans |
-|---|---|
-| PHP (`composer.json`) | `references/php.md` |
-| Go (`go.mod`) | `references/go.md` |
-| Next.js / React / TS (`package.json`) | `references/typescript.md` |
-| Python (`pyproject.toml`) | `references/python.md` |
+yeni kod Sonar'da da borç üretir. Repoya uyan dil referansı (`php`, `go`,
+`typescript`, `python`) pipeline tarafından bağlama eklenir — mimar ve
+geliştirici de aynı referansı gördü, yani ölçüt üçünüzde ortak.
 
 Dil referansı **öneri kaynağıdır**: oradaki bir kalıbın kullanılmaması tek
 başına blocker değildir. Blocker olması için 1. maddedeki üç kapıdan birine
@@ -104,7 +100,7 @@ Sonar'ın `vulnerability` ve `security hotspot` saydığı şeyler burada blocke
 - **SSRF / deserialization** — Kullanıcıdan gelen URL'e istek, güvenilmeyen
   veriden nesne kurma.
 
-Ayrıntı ve dile özgü karşılıkları: `references/sonarqube.md`.
+Ayrıntı ve dile özgü karşılıkları bağlamdaki `sonarqube` referansındadır.
 
 ## 6. Bulgu yazarken
 

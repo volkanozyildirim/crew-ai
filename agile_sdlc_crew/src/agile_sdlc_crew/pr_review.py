@@ -141,8 +141,8 @@ def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int = 12, p
     # Pipeline'daki inceleme adimiyla ayni referanslar: repoya uyan dil dosyasi
     # + Sonar kurallari. Insan PR'i da ayni olcute gore incelensin.
     try:
-        from agile_sdlc_crew.skills import review_context
-        skill_ctx = review_context(repo_name)
+        from agile_sdlc_crew.skills import standards_context
+        skill_ctx = standards_context(repo_name)
     except Exception:  # noqa: BLE001
         skill_ctx = ""
     if skill_ctx:
