@@ -528,8 +528,14 @@ class AzureDevOpsClient:
         content: str,
         file_path: str | None = None,
         line_number: int | None = None,
+        end_line: int | None = None,
     ) -> dict:
-        """PR'a yorum ekler. file_path verilirse dosya uzerinde inline yorum yapar."""
+        """PR'a yorum ekler. file_path verilirse dosya uzerinde inline yorum yapar.
+
+        end_line verilirse yorum bir satir ARALIGINI kapsar. Bu, ```suggestion
+        bloklari icin sarttir: Azure DevOps onerilen kodu thread'in kapsadigi
+        satirlarin YERINE koyar, dolayisiyla aralik degistirilecek satirlarla
+        birebir ortusmezse "Apply changes" yanlis yeri gunceller."""
         url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}/threads"
         params = {"api-version": self.API_VERSION}
         thread: dict = {
@@ -540,7 +546,7 @@ class AzureDevOpsClient:
             thread["threadContext"] = {
                 "filePath": file_path,
                 "rightFileStart": {"line": line_number or 1, "offset": 1},
-                "rightFileEnd": {"line": line_number or 1, "offset": 1},
+                "rightFileEnd": {"line": end_line or line_number or 1, "offset": 1},
             }
         resp = requests.post(
             url, headers=self._headers, json=thread, params=params, timeout=30

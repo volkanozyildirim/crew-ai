@@ -97,9 +97,39 @@ def review_summary_markdown(*, verdict: str, issues: list[dict], pr_id: int, pr_
     return "\n".join(L)
 
 
-def inline_comment_text(issue: dict) -> str:
-    return (f"🤖 **[{issue.get('id')}] {str(issue.get('severity', '')).upper()}** (pipeline inceleme katkısı, danışma)\n\n"
-            f"{issue.get('problem', '')}\n\n**Önerilen düzeltme:** {issue.get('required_fix', '') or '—'}")
+def inline_comment_text(issue: dict, *, suggestion: dict | None = None) -> str:
+    """Satır yorumu. `suggestion` verilirse Azure DevOps'un uygulanabilir
+    ```suggestion bloğu eklenir (PR sahibine "Apply changes" butonu çıkar)."""
+    head = (f"🤖 **[{issue.get('id')}] {str(issue.get('severity', '')).upper()}** "
+            f"(pipeline inceleme katkısı, danışma)\n\n{issue.get('problem', '')}")
+    if suggestion and suggestion.get("code"):
+        return (f"{head}\n\n**Önerilen düzeltme:**\n\n"
+                f"```suggestion\n{suggestion['code']}\n```")
+    return f"{head}\n\n**Önerilen düzeltme:** {issue.get('required_fix', '') or '—'}"
+
+
+def verified_suggestion(issue: dict, file_bodies: dict[str, str]) -> dict:
+    """Suggestion'i ANCAK dosya icerigiyle dogrulanirsa dondur, yoksa {}.
+
+    Suggestion tek tikla commit'lenebiliyor; yanlis satira yazilan bir oneri
+    sessizce kod bozar. Bu yuzden: dosyayi taniyor muyuz, satir araligi dosyanin
+    icinde mi, ve onerilen kod zaten oradaki kodla ayni mi (ayniysa gurultu).
+    Dogrulanamayan oneri dusurulur — yorum duz metne doner, bilgi kaybolmaz.
+    """
+    sug = issue.get("suggestion") or {}
+    code = sug.get("code")
+    if not code:
+        return {}
+    body = file_bodies.get((issue.get("file") or "").lstrip("/"))
+    if body is None:
+        return {}
+    lines = body.splitlines()
+    start, end = sug.get("line_start"), sug.get("line_end")
+    if not (1 <= start <= end <= len(lines)):
+        return {}
+    if "\n".join(lines[start - 1:end]).strip() == code.strip():
+        return {}
+    return sug
 
 
 # ── Azure tarafı ─────────────────────────────────────────────────────────
@@ -133,7 +163,11 @@ def resolve_pr(client, *, work_item_id: str = "", pr_id: int | None = None, repo
     raise LookupError(f"WI #{work_item_id} için aktif ya da tamamlanmış PR bulunamadı (hepsi abandoned)")
 
 
-def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int = 12, per_file: int = 6000) -> tuple[str, list[str]]:
+def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int = 12, per_file: int = 6000,
+                     bodies: dict | None = None) -> tuple[str, list[str]]:
+    """PR baglami + degisen dosya listesi. `bodies` verilirse okunan dosya
+    iceriklerini oraya yazar — suggestion dogrulamasi (verified_suggestion)
+    icin gerekli, cunku oneri gercek satirlarla ortusmek zorunda."""
     pr_id = pr.get("pullRequestId")
     branch = (pr.get("sourceRefName") or "").replace("refs/heads/", "")
     paths = changed_paths(client.get_pull_request_changes(repo_name, int(pr_id)))
@@ -162,6 +196,10 @@ def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int = 12, p
             continue
         if not content or not content.strip():
             continue
+        if bodies is not None:
+            # Suggestion dogrulamasi TAM icerik ister: prompt'a giren metin
+            # kisaltilmis olabilir, satir numaralari kaymasin.
+            bodies[p] = content
         trunc = content[:per_file] + ("\n... (kısaltıldı)" if len(content) > per_file else "")
         parts.append(f"\n## {p}\n```\n{trunc}\n```")
         used.append(p)
@@ -197,7 +235,8 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
         except Exception as e:  # noqa: BLE001
             log.info(f"  WI okunamadı: {e}")
     requirements = wi_requirements_text(wi_fields) if wi_fields else f"# Iş Kalemi\n{pr.get('title', '')}"
-    pr_ctx, files = build_pr_context(client, rname, pr)
+    file_bodies: dict[str, str] = {}
+    pr_ctx, files = build_pr_context(client, rname, pr, bodies=file_bodies)
     ctx = (requirements + "\n\n# İNCELEME KAPSAMI\nBu PR insan tarafından geliştirildi. İncelemen DANIŞMA "
            "niteliğindedir: kodu sen değiştirmeyeceksin; bulgular PR yorumu olarak geliştiriciye gidecek. "
            "Somut, dosya/satır referanslı, uygulanabilir yaz." + pr_ctx)
@@ -228,7 +267,7 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
     issues = _parse_review_issues(text)
     log.info(f"  Karar: {verdict} · {len(issues)} madde · {len(files)} dosya")
 
-    posted = {"pr_summary": False, "inline": 0, "wi": False}
+    posted = {"pr_summary": False, "inline": 0, "wi": False, "suggestions": 0}
     summary = review_summary_markdown(verdict=verdict, issues=issues, pr_id=pid, pr_url=pr_url,
                                       work_item_id=work_item_id or "?", files=len(files),
                                       text_tail="" if issues else text[:2500])
@@ -243,8 +282,18 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
                 fp = it.get("file") or ""
                 fp = fp if fp.startswith("/") else "/" + fp
                 line = int(it.get("line") or 1)
-                client.add_pr_comment(rname, pid, inline_comment_text(it), file_path=fp, line_number=line)
+                # Suggestion yalniz dogrulandiysa yazilir; thread araligi
+                # onerilen kodun YERINI ALACAK satirlarla ortusmeli.
+                sug = verified_suggestion(it, file_bodies)
+                if sug:
+                    line, end = sug["line_start"], sug["line_end"]
+                else:
+                    end = None
+                client.add_pr_comment(rname, pid, inline_comment_text(it, suggestion=sug),
+                                      file_path=fp, line_number=line, end_line=end)
                 posted["inline"] += 1
+                if sug:
+                    posted["suggestions"] = posted.get("suggestions", 0) + 1
             except Exception as e:  # noqa: BLE001
                 log.info(f"  Satır yorumu yazılamadı ({it.get('id')}): {e}")
         if work_item_id:

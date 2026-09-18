@@ -244,6 +244,25 @@ def _parse_review_issues(review_text: str) -> list[dict]:
     except Exception as e:
         _log(f"  REVIEW_ISSUES_JSON parse hatasi: {e}")
         return []
+    def _suggestion(it: dict) -> dict:
+        """{code, line_start, line_end} — reviewer mekanik bir duzeltme verdiyse.
+
+        `code` bos/yoksa suggestion uretilmez (duz metin yoruma duseriz).
+        Satir araligi verilmemisse itirazin kendi satiri kullanilir.
+        """
+        code = it.get("suggested_code")
+        if not isinstance(code, str) or not code.strip():
+            return {}
+        start = it.get("suggested_line_start") or it.get("line")
+        end = it.get("suggested_line_end") or start
+        try:
+            start, end = int(start), int(end)
+        except (TypeError, ValueError):
+            return {}
+        if start < 1 or end < start:
+            return {}
+        return {"code": code.rstrip("\n"), "line_start": start, "line_end": end}
+
     def _loc(v) -> dict:
         """evidence/precedent alt-nesnesi: {file, line, quote}. Yollar SINIRDA
         normalize edilir (her karsilastirma noktasinda degil)."""
@@ -277,6 +296,11 @@ def _parse_review_issues(review_text: str) -> list[dict]:
             "evidence": _loc(it.get("evidence")),
             "precedent": _loc(it.get("precedent")),
             "fix_targets": [_norm_path(str(f)) for f in fix_targets if str(f).strip()],
+            # ── PR suggestion (yalniz mekanik, satir-yerel duzeltmeler) ──
+            # Azure DevOps ```suggestion blogu PR sahibine "Apply changes"
+            # butonu verir; yani bu alan TEK TIKLA commit'lenebilecek kod.
+            # Bos birakilmasi normaldir — yapisal duzeltme koda sigmaz.
+            "suggestion": _suggestion(it),
             "status": "open",
             "note": "",
         })

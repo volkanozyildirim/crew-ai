@@ -114,5 +114,22 @@ Her bulgu için: dosya, satır, severity, sorun, gerekli düzeltme. Ek olarak
   gördüğün dosya değildir; örneğin yeni sınıf hiç çağrılmıyorsa düzeltme
   mevcut çağıranda yapılır.
 
+### Uygulanabilir öneri (suggestion)
+
+Düzeltme **mekanik ve satır-yerel** ise `suggested_code` alanını doldur: tek
+dosyada kısa bir satır aralığının yerine geçecek birebir metin. Bu, PR sahibine
+tek tıkla uygulanan bir buton çıkarır.
+
+Doldur: yeniden adlandırma, eksik null kontrolü, `==` → `===`, ölü kod silme,
+tip ekleme.
+
+**Doldurma**: düzeltme yapısalsa ("çağıranı da güncelle", "servise taşı",
+"test ekle"), birden çok dosyaya yayılıyorsa, ya da insan kararı gerektiriyorsa.
+Yanlış bir öneri sessizce commit'lenir — emin değilsen düz metin yaz.
+
+Pipeline dosyayı yeniden okuyup aralığı doğrular; tutmazsa öneri düşer ve yorum
+düz metne döner. Yani isabetsiz bir öneri sana bulguyu değil, yalnızca öneriyi
+kaybettirir.
+
 Blocker/major yoksa karar ONAY'dır. Emin olmadığın bir şeyi blocker yapma:
 yanlış ret, pipeline'ı gereksiz bir düzeltme turuna sokar ve maliyet yazar.
