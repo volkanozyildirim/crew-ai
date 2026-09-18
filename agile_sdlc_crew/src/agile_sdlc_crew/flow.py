@@ -1153,7 +1153,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Muhendislik olcutu (dil + Sonar): tasarim, gelistirme ve inceleme
         # ayni referansi gorsun — hata en ucuz yerde, yazarken yakalansin.
         if step_key in ("technical_design_task", "implement_change_task", "review_pr_task"):
-            skill_ctx = self._standards_context()
+            # Modul fonksiyonu dogrudan cagrilir, self uzerinden degil:
+            # _build_step_context sahte bir `self` ile de cagrilabiliyor
+            # (tests/test_katman0_gates.py prefix kararliligini boyle olcuyor).
+            try:
+                from agile_sdlc_crew.skills import standards_context
+                skill_ctx = standards_context(s.repo_name or "")
+            except Exception:  # noqa: BLE001 — skill yoksa adim skill'siz kosar
+                skill_ctx = ""
             if skill_ctx:
                 tail.append(skill_ctx)
 
@@ -2061,16 +2068,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception as e:
             _log(f"  SM Review hatasi: {e}")
             return True, ""
-
-    def _standards_context(self) -> str:
-        """`engineering-standards` skill'inin repoya uyan dil + Sonar referansi.
-        Mantik `skills.standards_context` icinde — insan PR incelemesi
-        (pr_review) de ayni yardimciyi cagirir, iki yerde kopya kural kalmasin."""
-        try:
-            from agile_sdlc_crew.skills import standards_context
-        except Exception:  # noqa: BLE001
-            return ""
-        return standards_context(self.state.repo_name or "")
 
     def _prefetch_pr_changes_context(
         self, max_files: int = 12, per_file: int = 6000, diff_mode: bool = False,
