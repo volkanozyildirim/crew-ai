@@ -556,7 +556,7 @@ SCHEMA: list[dict] = [
         "label": "Ajan Becerileri (CrewAI Skills)",
         "type": "bool",
         "default": True,
-        "desc": "CrewAI'ın native Agent Skills desteğini kullan: `src/agile_sdlc_crew/skills/<ad>/SKILL.md` dizinleri ajanlara `skills=[...]` ile bağlanır. Knowledge'dan farkı kademeli açılım — SKILL.md gövdesi hep yüklü, `references/` altındaki derin içerik ajan ihtiyaç duyunca açılır, böylece PHP reposu incelenirken Go/TS/Python referansları hiç okunmaz (token tasarrufu). Bugün bağlı olan: code_reviewer → `code-review` (kapsam disiplini, dilin güncel kullanımı, SOLID, güvenlik, SonarQube Clean-as-You-Code). Kapatılırsa ajanlar skill'siz çalışır, davranış eski hâline döner.",
+        "desc": "CrewAI'ın native Agent Skills desteğini kullan: `src/agile_sdlc_crew/skills/<ad>/SKILL.md` dizinleri ajanlara `skills=[...]` ile bağlanır. Rol başına bir skill (SM, BA, mimar, geliştirici, inceleyici, QA, UAT, PO) artı mimar+geliştirici+inceleyicinin paylaştığı `engineering-standards` (dilin güncel kullanımı, SOLID, güvenlik, SonarQube Clean-as-You-Code). Repoya uyan dil referansı tasarım, geliştirme ve inceleme bağlamına otomatik eklenir — hatayı incelemede değil yazarken yakalamak için. `knowledge/` mekanizmasının yerini ALMAZ, onunla birlikte çalışır. Kapatılırsa ajanlar skill'siz, eski davranışla koşar.",
     },
     {
         "key": "CREW_FRESHEN_ALL_REPOS",

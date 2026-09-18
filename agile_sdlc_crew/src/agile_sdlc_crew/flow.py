@@ -1150,8 +1150,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"{s.kickoff_text[:_cb.cap('KICKOFF_REVIEW')]}"
                 )
 
-        if step_key == "review_pr_task":
-            skill_ctx = self._review_skill_context()
+        # Muhendislik olcutu (dil + Sonar): tasarim, gelistirme ve inceleme
+        # ayni referansi gorsun — hata en ucuz yerde, yazarken yakalansin.
+        if step_key in ("technical_design_task", "implement_change_task", "review_pr_task"):
+            skill_ctx = self._standards_context()
             if skill_ctx:
                 tail.append(skill_ctx)
 
@@ -2060,15 +2062,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  SM Review hatasi: {e}")
             return True, ""
 
-    def _review_skill_context(self) -> str:
-        """Inceleme adimina `code-review` skill'inin dil + Sonar referanslarini ekler.
-        Mantik `skills.review_context` icinde — insan PR incelemesi (pr_review) de
-        ayni yardimciyi cagirir, iki yerde kopya kural kalmasin."""
+    def _standards_context(self) -> str:
+        """`engineering-standards` skill'inin repoya uyan dil + Sonar referansi.
+        Mantik `skills.standards_context` icinde — insan PR incelemesi
+        (pr_review) de ayni yardimciyi cagirir, iki yerde kopya kural kalmasin."""
         try:
-            from agile_sdlc_crew.skills import review_context
+            from agile_sdlc_crew.skills import standards_context
         except Exception:  # noqa: BLE001
             return ""
-        return review_context(self.state.repo_name or "")
+        return standards_context(self.state.repo_name or "")
 
     def _prefetch_pr_changes_context(
         self, max_files: int = 12, per_file: int = 6000, diff_mode: bool = False,
