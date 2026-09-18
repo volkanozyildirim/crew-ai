@@ -1,22 +1,35 @@
 """CrewAI Agent Skills — pipeline ajanlarina baglanan dosya tabanli beceriler.
 
-`knowledge/` ile farki **kademeli acilim** (progressive disclosure): knowledge
-dosyasi agent'in backstory'sine (ya da RAG moduna) butunuyle girer ve her
-cagrida token yazar. Bir skill ise dizindir — `SKILL.md` govdesi yuklenir,
-`references/` altindaki derin icerik ajanin ihtiyac duydugunda actigi dosyalar
-olarak katalogda durur. Boylece "PHP reposu inceliyorum" diyen ajan yalnizca
-`php.md`'yi acar, Go/TS/Python referanslarini hic okumaz.
+`knowledge/` ile ayrim: knowledge = **alan bilgisi** (FLO stack nasil calisir),
+agent'in backstory'sine butunuyle girer. Skill = **karar kurallari** (ne zaman
+ret, neye gore tasarla) arti `references/` altinda talep uzerine acilan
+derinlik. Ikisi birlikte baglidir, biri digerinin yerini almaz.
 
-Yerlesim:
+Yerlesim — rol basina bir skill, arti uc rolun paylastigi olcut:
 
     skills/
-      code-review/
-        SKILL.md              # frontmatter + politika govdesi (hep yuklu)
-        references/*.md       # dile ozgu derinlik (ihtiyac aninda)
+      agile-facilitation/     SM       SKILL.md
+      requirements-analysis/  BA       SKILL.md
+      technical-design/       Mimar    SKILL.md
+      implementation/         Dev      SKILL.md
+      code-review/            Review   SKILL.md
+      test-planning/          QA       SKILL.md
+      uat/                    UAT      SKILL.md
+      product-assessment/     PO       SKILL.md
+      engineering-standards/  ORTAK    SKILL.md + references/*.md
+                                       (mimar + gelistirici + inceleyici)
 
 Kullanim (crew.py):
 
-    Agent(..., **skill_kwargs("code-review"))
+    Agent(..., **skill_kwargs("code-review", "engineering-standards"))
+
+**Referanslari ajan KENDISI acmaz.** Skill RESOURCES seviyesinde baglanir, yani
+govde + `references/` katalogu sistem prompt'una girer; ama ajanlar claude_cli
+uzerinde kosuyor ve CrewAI'in Python arac dongusu o surece kopru kuramiyor
+(bkz. CLAUDE.md). Bunun yerine `standards_context(repo)` repo dilini
+`knowledge.detect_repo_type` ile cozup **yalnizca uyan** dil referansini +
+`sonarqube.md`'yi adim baglamina ekler; flow (tasarim/gelistirme/inceleme) ve
+pr_review ayni yardimciyi cagirir.
 
 Skill bulunamazsa ya da `CREW_AGENT_SKILLS=0` ise bos sozluk doner — ajan
 eskisi gibi calisir, cagiran yeri degistirmek gerekmez.
