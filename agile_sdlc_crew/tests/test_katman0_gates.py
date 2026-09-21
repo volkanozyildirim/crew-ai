@@ -2514,6 +2514,106 @@ def test_backlog_refinement():
     check("dashboard: Refinement sekmesi, kapsam seçimi, eylem onayı", "showTab('refine')" in ui and 'id="rfScope"' in ui
           and "rfAct(" in ui and "confirm(`#${id} için İş Analisti" in ui)
 
+# ── 40. Maliyet analizi — kırılım, bulgu eşikleri, salt-okunurluk ────────
+
+def test_cost_analytics():
+    print("\n[40] Maliyet analizi — adım/model/sınıf kırılımı, bulgu eşikleri, sınırlar")
+    from agile_sdlc_crew import cost_analytics as ca
+
+    def row(job, step, model, usd, agent="a", cr=90_000, cw=10_000, kind="pipeline"):
+        return {"job_id": job, "step_key": step, "agent": agent, "model": model,
+                "provider": "claude_cli", "turns": 2, "tool_calls": 0,
+                "cost_usd": usd, "duration_ms": 60_000,
+                "input_tokens": 1_000, "output_tokens": 500,
+                "cache_read_tokens": cr, "cache_creation_tokens": cw,
+                "created_at": None, "work_item_id": f"WI{job}",
+                "job_status": "completed", "job_kind": kind}
+
+    rows = []
+    # Dört ucuz adım, üç işte birer çağrı → iş başına 1.0 (medyanı aşağı çeker).
+    for s in ("requirements_analysis_task", "discover_repos_task",
+              "uat_task", "completion_report_task"):
+        rows += [row(j, s, "claude-sonnet-5", 0.10) for j in (1, 2, 3)]
+    # Beş ucuz iş daha — ortalamayı düşürüp "ortalamayı katlayan iş" eşiğini sınanabilir kılar.
+    rows += [row(j, "requirements_analysis_task", "claude-sonnet-5", 0.10) for j in range(4, 9)]
+    # Pahalı adım: TEK işte 8 çağrı → iş başına 8.0, uyarı bekleniyor.
+    rows += [row(1, "technical_design_task", "claude-opus-4-8[1m]", 5.0,
+                 agent="software_architect") for _ in range(8)]
+    # Kickoff: tek işte 9 çağrı ama BY_DESIGN_MULTI → uyarı değil bilgi.
+    rows += [row(2, "kickoff_meeting_task", "claude-opus-5", 1.0,
+                 agent="scrum_master") for _ in range(9)]
+
+    a = ca.analyze(rows)
+    t = a["totals"]
+    check("kırılım: toplam $, iş sayısı, iş başına ortalama",
+          abs(t["usd"] - 50.70) < 0.01 and t["jobs"] == 8 and t["calls"] == len(rows),
+          f"{t}")
+    check("adım sıralaması: en pahalı adım başta, pay yüzdesi tutarlı",
+          a["by_step"][0]["key"] == "technical_design_task"
+          and 78 <= a["by_step"][0]["share_pct"] <= 80)
+    check("iş başına çağrı: tek işte 8 çağrı → 8.0 (iş sayısına bölünür, çağrı sayısına değil)",
+          a["by_step"][0]["calls_per_job"] == 8.0)
+
+    check("model sınıfı: sürüm ve [1m] soneki sınıfı değiştirmez",
+          ca._family("claude-opus-4-8[1m]") == "opus"
+          and ca._family("claude-opus-5") == "opus"
+          and ca._family("claude-sonnet-5") == "sonnet"
+          and ca._family("claude-haiku-4-5-20251001") == "haiku"
+          and ca._family("gpt-4o") == ca.UNASSIGNED
+          and ca._family(None) == ca.UNASSIGNED)
+    fam = {m["key"]: m for m in a["by_family"]}
+    check("sınıf kırılımı: opus payı hesaplanır, sonnet ayrı durur",
+          a["by_family"][0]["key"] == "opus" and fam["opus"]["share_pct"] >= 80
+          and "sonnet" in fam)
+
+    titles = [f["title"] for f in ca.findings(a)]
+    lv = {f["title"]: f["level"] for f in ca.findings(a)}
+    check("bulgu: harcama iki adımda yoğunlaşıyor",
+          any(x.startswith("Harcama yoğunlaşması:") and "iki adımda" in x for x in titles), str(titles))
+    warn_step = [x for x in titles if x.startswith("technical_design_task")]
+    check("bulgu: normal adımda yüksek çağrı UYARI",
+          bool(warn_step) and lv[warn_step[0]] == "warn", str(titles))
+    kick = [x for x in titles if x.startswith("kickoff_meeting_task")]
+    check("bulgu: tasarımı gereği çok çağrılı adım uyarı değil BİLGİ",
+          bool(kick) and "tasarım gereği" in kick[0] and lv[kick[0]] == "info", str(titles))
+    check("bulgu: tek model sınıfı yoğunlaşması uyarı verir",
+          any("tek model sınıfında" in x for x in titles), str(titles))
+    check("bulgu: ortalamayı 3 kat aşan iş işaretlenir",
+          any(x.startswith("#1 (WI WI1)") for x in titles), str(titles))
+
+    # Önbellek oranı eşiği iki yönlü sınanır: 9.0 sessiz, 1.5 uyarı.
+    check("önbellek oranı 9.0 → uyarı YOK (eşik 5)",
+          a["token_mix"]["cache_ratio"] == 9.0
+          and not any("Önbellek" in x for x in titles))
+    low = ca.analyze([row(1, "s", "claude-opus-5", 1.0, cr=15_000, cw=10_000)])
+    check("önbellek oranı 1.5 → uyarı VAR",
+          low["token_mix"]["cache_ratio"] == 1.5
+          and any("Önbellek" in f["title"] for f in ca.findings(low)))
+
+    md = ca.render_markdown(a, title="test", fnd=ca.findings(a))
+    check("markdown: dashboard mdToHtml'in beklediği pipe tablo (|---| ayracı)",
+          "| Adım | $ |" in md and "|---|" in md
+          and "## Model sınıfı bazında" in md and "## Adım bazında" in md)
+
+    root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
+    src = (root / "cost_analytics.py").read_text()
+    check("sınırlar: salt okunur — yazan SQL yok, ajan/crew kurulmuyor",
+          not any(k in src.upper() for k in ("INSERT INTO", "DELETE FROM", "UPDATE "))
+          and not any(k in src for k in (".kickoff(", "Crew(", "Agent(", "build_for_agent")))
+    from agile_sdlc_crew import pipeline_config as _pc
+    _dflt = {f["key"]: f["default"] for f in _pc.SCHEMA}
+    check("knob: CREW_COST_ANALYTICS açık (maliyeti sıfır, salt okunur)",
+          _dflt["CREW_COST_ANALYTICS"] is True
+          and isinstance(_pc.get("CREW_COST_ANALYTICS"), bool))
+    srv = (root / "server.py").read_text()
+    check("server: GET /api/costs + knob kapısı",
+          '@app.get("/api/costs")' in srv and "CREW_COST_ANALYTICS" in srv)
+    ui = (root / "web/index.html").read_text()
+    check("dashboard: Maliyet sekmesi, kapsam/tür seçimi, bulgu renklendirme",
+          "showTab('cost')" in ui and 'id="costScope"' in ui
+          and 'id="costKind"' in ui and "loadCosts(" in ui)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2545,7 +2645,8 @@ def main():
               test_type_flow,
               test_type_flow_hooks,
               test_pr_review_contribution,
-              test_backlog_refinement):
+              test_backlog_refinement,
+              test_cost_analytics):
         try:
             t()
         except Exception as e:

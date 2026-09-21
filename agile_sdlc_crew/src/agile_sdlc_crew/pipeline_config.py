@@ -395,6 +395,13 @@ SCHEMA: list[dict] = [
         "default": True,
         "desc": "Board'daki 🔁 Retro butonu ve /api/retro: seçili sprintin (ya da son N günün) pipeline işlerinden deterministik öğrenme raporu — sonuç dağılımı ve nedenleri, kırılan adımlar, review ilk-tur onayı / düzeltme turu, PR build, UAT kabul/red, teslim edilen SP ve SP başına dk/$, tekrar koşan WI'lar, en pahalı işler. Veriye bağlı eşiklerden kılavuz-kuralı önerileri üretir; kurallar yalnızca insan 'Kılavuza ekle' dediğinde kickoff kılavuzuna girer. LLM çağrısı yok, salt okunur.",
     },
+    {
+        "key": "CREW_COST_ANALYTICS",
+        "label": "Maliyet Analizi (dashboard Maliyet sekmesi)",
+        "type": "bool",
+        "default": True,
+        "desc": "Maliyet sekmesi ve /api/costs: llm_calls tablosundan adım / model sınıfı / ajan / iş kırılımı, token dağılımı ve eşiğe bağlı bulgular (harcama yoğunlaşması, iş başına çağrı sayısı yüksek adımlar, önbellek okuma-yazma oranı, ortalamayı katlayan işler). Veri zaten yazılıyor — bu sadece okuyor: LLM çağrısı yok, yazma yok, maliyeti sıfır.",
+    },
     # ── Scrum islevleri — Faz 4: sprint planlama + gunluk ozet ──
     {
         "key": "CREW_SPRINT_PLANNING",

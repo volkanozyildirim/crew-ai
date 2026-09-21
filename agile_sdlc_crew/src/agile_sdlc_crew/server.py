@@ -1723,6 +1723,31 @@ async def sprint_report_download(report_id: str):
 
 # ── Retrospektif (Scrum faz 3; retrospective.py) ──
 
+@app.get("/api/costs")
+async def cost_report(days: int = 0, job_kind: str = ""):
+    """Maliyet analizi: llm_calls'tan adim/model/ajan/is kirilimi + bulgular.
+
+    days=0 tum zaman. job_kind bos ise tum turler (pipeline + pr_review +
+    refinement) birlikte; tur kirilimi yanitta by_kind olarak zaten var.
+    Salt okunur — LLM yok, yazma yok."""
+    from agile_sdlc_crew import cost_analytics as _ca
+    from agile_sdlc_crew import pipeline_config as _pc
+    try:
+        if not _pc.get("CREW_COST_ANALYTICS"):
+            return JSONResponse({"error": "Maliyet analizi kapali (CREW_COST_ANALYTICS)"},
+                                status_code=409)
+        d = max(0, min(int(days or 0), 3650))
+        kind = (job_kind or "").strip() or None
+        rep = await asyncio.to_thread(
+            _ca.build_report,
+            title=(f"son {d} gün" if d else "tüm zaman"),
+            since_days=d or None, job_kind=kind,
+        )
+        return JSONResponse(rep)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/retro")
 async def retrospective_report(days: int = 14, iteration_path: str = ""):
     """Deterministik retrospektif: sprint (iteration_path → o sprintin WI'larinin
