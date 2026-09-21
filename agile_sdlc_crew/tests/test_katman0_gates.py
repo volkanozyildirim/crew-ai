@@ -2582,13 +2582,31 @@ def test_cost_analytics():
           any(x.startswith("#1 (WI WI1)") for x in titles), str(titles))
 
     # Önbellek oranı eşiği iki yönlü sınanır: 9.0 sessiz, 1.5 uyarı.
-    check("önbellek oranı 9.0 → uyarı YOK (eşik 5)",
+    # Oran bulgusu UYARI seviyesinde; onbellek ekonomisi bulgusu ise her zaman
+    # bilgi olarak cikar (token payi != maliyet payi yanilgisini onlemek icin).
+    warn_titles = [f["title"] for f in ca.findings(a) if f["level"] == "warn"]
+    check("önbellek oranı 9.0 → UYARI yok (eşik 5)",
           a["token_mix"]["cache_ratio"] == 9.0
-          and not any("Önbellek" in x for x in titles))
+          and not any("okuma/yazma oranı" in x for x in warn_titles))
     low = ca.analyze([row(1, "s", "claude-opus-5", 1.0, cr=15_000, cw=10_000)])
-    check("önbellek oranı 1.5 → uyarı VAR",
+    low_warn = [f["title"] for f in ca.findings(low) if f["level"] == "warn"]
+    check("önbellek oranı 1.5 → UYARI var",
           low["token_mix"]["cache_ratio"] == 1.5
-          and any("Önbellek" in f["title"] for f in ca.findings(low)))
+          and any("okuma/yazma oranı" in x for x in low_warn))
+
+    # Token payi ile maliyet payi AYRI raporlanmali: okuma token'in cogunu
+    # olusturur ama maliyetin kucuk kismidir; yazma tersi. Bu ayrim olmazsa
+    # rapor okuru yanlis yeri optimize etmeye iter.
+    share = a["token_mix"]["cost_share"]
+    tok = a["token_mix"]
+    tok_total = tok["input"] + tok["cache_read"] + tok["cache_write"]
+    read_tok_pct = 100 * tok["cache_read"] / tok_total
+    check("maliyet payı token payından AYRI hesaplanır (okuma ucuz, yazma pahalı)",
+          read_tok_pct > 80 and share["cache_read"]["max"] < read_tok_pct
+          and share["cache_write"]["max"] > 100 * tok["cache_write"] / tok_total,
+          f"token %{read_tok_pct:.0f} vs maliyet {share['cache_read']}")
+    check("yüksek okuma payı bilgi olarak ÖVÜLÜR, uyarı olarak basılmaz",
+          any(f["level"] == "info" and "maliyetin" in f["title"] for f in ca.findings(a)))
 
     md = ca.render_markdown(a, title="test", fnd=ca.findings(a))
     check("markdown: dashboard mdToHtml'in beklediği pipe tablo (|---| ayracı)",

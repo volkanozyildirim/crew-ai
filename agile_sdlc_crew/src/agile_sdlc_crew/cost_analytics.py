@@ -47,7 +47,23 @@ LOOP_MIN_CALLS = 4.0
 # raporlanır — uyarı olarak değil.
 BY_DESIGN_MULTI = frozenset({"kickoff_meeting_task", "pr_build_gate"})
 
-# Önbellek yazımı okumaya göre bu orandan azsa prefix yeniden kuruluyor demektir.
+# Token sinifi fiyat carpanlari (girdi = 1.0 referans). Model markasindan
+# bagimsiz ORAN olduklari icin model karisimi ne olursa olsun gecerli.
+# Onbellek YAZMA TTL'e gore degisir: 5 dk 1.25x, 1 saat 2.00x — hangisinin
+# kullanildigi `usage.cache_creation` altinda gelir ama llm_calls'ta o kirilim
+# saklanmiyor, o yuzden ikisi de hesaplanip aralik olarak raporlanir.
+PRICE_WEIGHTS = {
+    "input": (1.00, 1.00),
+    "cache_write": (1.25, 2.00),
+    "cache_read": (0.10, 0.10),
+    "output": (5.00, 5.00),
+}
+
+# Onbellek yazimi okumaya gore bu orandan azsa yazma agir basiyor demektir.
+# DIKKAT — dusuk oran "onbellek calismiyor" ANLAMINA GELMEZ. Cok turlu bir
+# `claude -p` oturumunda konusma her turda buyur ve buyuyen kisim bir sonraki
+# tur icin yeniden yazilir; yazma bu akista dogaldir. Oranin degeri, yazmanin
+# maliyette ne kadar yer kapladigini haber vermesi.
 CACHE_RATIO_WARN = 5.0
 
 # Model ailesi payı bu yüzdeyi aşarsa "tek sınıfa bağımlıyız" bulgusu çıkar.
@@ -181,6 +197,27 @@ def _row(key: str, b: dict, total_usd: float) -> dict:
     }
 
 
+def _cost_share(tok_in: int, tok_out: int, cache_r: int, cache_w: int) -> dict:
+    """Her token sinifinin MALIYETTEKI payi (token sayisindaki payi degil).
+
+    Iki senaryo doner cunku onbellek yazma TTL'i (5 dk / 1 saat) llm_calls'ta
+    saklanmiyor: {sinif: {"min": %, "max": %}}. Yuzdeler girdi-esdegeri
+    agirliklar uzerinden, yani model karisimindan bagimsiz.
+    """
+    counts = {"input": tok_in, "cache_write": cache_w,
+              "cache_read": cache_r, "output": tok_out}
+    lo = {k: counts[k] * PRICE_WEIGHTS[k][0] for k in counts}
+    hi = {k: counts[k] * PRICE_WEIGHTS[k][1] for k in counts}
+    slo, shi = sum(lo.values()), sum(hi.values())
+    if not slo or not shi:
+        return {}
+    return {
+        k: {"min": round(min(100 * lo[k] / slo, 100 * hi[k] / shi), 1),
+            "max": round(max(100 * lo[k] / slo, 100 * hi[k] / shi), 1)}
+        for k in counts
+    }
+
+
 def analyze(rows: list[dict]) -> dict:
     """Çağrı satırlarından adım / model / ajan / iş kırılımı ve toplamlar."""
     total_usd = sum(_f(r.get("cost_usd")) for r in rows)
@@ -242,9 +279,13 @@ def analyze(rows: list[dict]) -> dict:
         "token_mix": {
             "input": tok_in, "output": tok_out,
             "cache_read": cache_r, "cache_write": cache_w,
-            # Okuma/yazma oranı: yüksekse prefix iyi tutunuyor, düşükse her
-            # birkaç çağrıda bir önbellek baştan kuruluyor (en pahalı sınıf).
+            # Okuma/yazma oranı: yüksekse yazılan prefix çok kez okunuyor.
             "cache_ratio": round(cache_r / cache_w, 1) if cache_w else None,
+            # Token payı ≠ maliyet payı. Önbellek okuma girdinin ONDA BİRİ
+            # fiyatlanır, yazma ise 1.25–2 KATI; dolayısıyla token sayısına
+            # bakıp optimize etmek yanlış yeri hedefler. Ağırlıklı pay her
+            # sınıfın maliyette gerçekte ne kadar yer kapladığını verir.
+            "cost_share": _cost_share(tok_in, tok_out, cache_r, cache_w),
         },
         "budget_cut": {
             "calls": len(_cut),
@@ -331,15 +372,34 @@ def findings(a: dict) -> list[dict]:
                            f"config/agent_llm_overrides.yaml ile ajan bazında düşürülebilir."),
             })
 
-    # 4) Önbellek verimi
-    ratio = a["token_mix"]["cache_ratio"]
+    # 4) Önbellek ekonomisi. Token payına bakıp karar vermeyin: okuma token'ı
+    #    girdinin onda biri fiyatlanır, yazma 1.25-2 katı. Bu yüzden bulgu
+    #    ağırlıklı pay üzerinden konuşur ve yüksek okuma payını ÖVER — o,
+    #    tekrar gönderimin ucuzlatıldığı anlamına gelir, sorun değil.
+    mix = a["token_mix"]
+    share = mix.get("cost_share") or {}
+    ratio = mix["cache_ratio"]
+    if share:
+        rd, wr = share.get("cache_read", {}), share.get("cache_write", {})
+        tok_read_pct = _pct(mix["cache_read"],
+                            mix["input"] + mix["cache_read"] + mix["cache_write"])
+        out.append({
+            "level": "info",
+            "title": (f"Önbellek okuma token'ların %{tok_read_pct:.0f}'i ama "
+                      f"maliyetin %{rd.get('min', 0):.0f}–%{rd.get('max', 0):.0f}'i"),
+            "detail": (f"Okuma girdinin onda biri fiyatlanır — yüksek okuma payı İYİDİR, "
+                       f"tekrar gönderim ucuzlatılıyor demektir. Asıl ağırlık yazmada: "
+                       f"token'ların %{_pct(mix['cache_write'], mix['input'] + mix['cache_read'] + mix['cache_write']):.0f}'i "
+                       f"ama maliyetin %{wr.get('min', 0):.0f}–%{wr.get('max', 0):.0f}'i."),
+        })
     if ratio is not None and ratio < CACHE_RATIO_WARN:
         out.append({
             "level": "warn",
             "title": f"Önbellek okuma/yazma oranı {ratio:.1f}",
-            "detail": ("Yazma en pahalı token sınıfı; oran düşükse prefix her birkaç "
-                       "çağrıda baştan kuruluyor demektir. Prompt önekinin çağrılar "
-                       "arasında bit-bit aynı kaldığını doğrulayın."),
+            "detail": ("Yazılan her prefix ortalama bu kadar kez okunuyor. Çok turlu "
+                       "oturumlarda konuşma büyüdükçe yeniden yazma DOĞALDIR — bu "
+                       "'önbellek bozuk' demek değil. Oranı yükseltmenin yolu tur "
+                       "sayısını ya da oturum başına biriken içeriği azaltmak."),
         })
 
     # 4b) Bütçe cap'i kesen çağrılar — HARCANDI AMA ÇIKTI YOK.
@@ -451,6 +511,17 @@ def render_markdown(a: dict, *, title: str, fnd: list[dict] | None = None) -> st
               f"- Önbellek yazma: {mix['cache_write']:,}".replace(",", "."),
               f"- Okuma/yazma oranı: {mix['cache_ratio'] if mix['cache_ratio'] is not None else '—'}",
               ""]
+    share = mix.get("cost_share") or {}
+    if share:
+        _ad = {"input": "Girdi", "cache_write": "Önbellek yazma",
+               "cache_read": "Önbellek okuma", "output": "Çıktı"}
+        parts += ["### Maliyet payı (token sayısı değil, ağırlıklı)", "",
+                  "_Önbellek okuma girdinin 0.1 katı, yazma 1.25–2 katı, çıktı 5 katı "
+                  "fiyatlanır — aralık yazma TTL'inden (5 dk / 1 saat) gelir._", ""]
+        for k in ("input", "cache_write", "cache_read", "output"):
+            v = share.get(k) or {}
+            parts.append(f"- {_ad[k]}: %{v.get('min', 0):.0f}–%{v.get('max', 0):.0f}")
+        parts.append("")
 
     top = a["by_job"][:10]
     if top:
