@@ -103,7 +103,7 @@ def collect(*, since_days: int | None = None, job_kind: str | None = None,
         "SELECT l.job_id, l.step_key, l.agent, l.model, l.provider, l.turns, "
         "       l.tool_calls, l.cost_usd, l.duration_ms, l.input_tokens, "
         "       l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens, "
-        "       l.created_at, j.work_item_id, j.status AS job_status, "
+        "       l.created_at, l.stop_reason, j.work_item_id, j.status AS job_status, "
         "       COALESCE(j.job_kind,'pipeline') AS job_kind "
         "FROM llm_calls l LEFT JOIN jobs j ON j.id = l.job_id "
         "WHERE " + " AND ".join(where) + " ORDER BY l.id DESC LIMIT %s"
@@ -224,6 +224,9 @@ def analyze(rows: list[dict]) -> dict:
     cache_r = sum(_i(r.get("cache_read_tokens")) for r in rows)
     cache_w = sum(_i(r.get("cache_creation_tokens")) for r in rows)
     dates = [r["created_at"] for r in rows if r.get("created_at")]
+    # Butce cap'i kesilen cagrilar: harcandi ama cikti dondurmedi (bkz. findings).
+    # stop_reason sutunu yeni — eski satirlarda bos, o yuzden gecmis 0 gorunur.
+    _cut = [r for r in rows if (r.get("stop_reason") or "") == "error_max_budget_usd"]
 
     return {
         "totals": {
@@ -242,6 +245,11 @@ def analyze(rows: list[dict]) -> dict:
             # Okuma/yazma oranı: yüksekse prefix iyi tutunuyor, düşükse her
             # birkaç çağrıda bir önbellek baştan kuruluyor (en pahalı sınıf).
             "cache_ratio": round(cache_r / cache_w, 1) if cache_w else None,
+        },
+        "budget_cut": {
+            "calls": len(_cut),
+            "usd": round(sum(_f(r.get("cost_usd")) for r in _cut), 2),
+            "jobs": len({r.get("job_id") for r in _cut if r.get("job_id")}),
         },
         "by_step": table(by_step),
         "by_model": table(by_model),
@@ -332,6 +340,20 @@ def findings(a: dict) -> list[dict]:
             "detail": ("Yazma en pahalı token sınıfı; oran düşükse prefix her birkaç "
                        "çağrıda baştan kuruluyor demektir. Prompt önekinin çağrılar "
                        "arasında bit-bit aynı kaldığını doğrulayın."),
+        })
+
+    # 4b) Bütçe cap'i kesen çağrılar — HARCANDI AMA ÇIKTI YOK.
+    # `claude --max-budget-usd` sınıra çarpınca is_error=True döner, `result`
+    # boş gelir ve stream'de text bloğu olmadığı için salvage de kurtaramaz.
+    # Bu yüzden ayrı bir bulgu: pahalı adımın maliyeti değil, KAYBI.
+    cut = a.get("budget_cut") or {}
+    if cut.get("calls"):
+        out.append({
+            "level": "warn",
+            "title": f"{cut['calls']} çağrı bütçe cap'inde kesildi — ${cut['usd']:.2f} karşılıksız",
+            "detail": ("CREW_CLI_CALL_MAX_USD sınıra çarptığında çağrı çıktı DÖNDÜRMEZ "
+                       "(salvage da boş) — para harcanır, iş kaybolur. Cap'i yükseltin "
+                       "ya da 0 yapıp turu/prefix'i kısarak maliyeti düşürün."),
         })
 
     # 5) En pahalı iş, ortalamanın kaç katı

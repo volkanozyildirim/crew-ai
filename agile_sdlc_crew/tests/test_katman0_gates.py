@@ -2700,6 +2700,65 @@ def test_cheap_phase_split():
           and all(f"{k}:" in prof for k in CHEAP))
 
 
+# ── 42. Kesif bulgusunun amend turlarinda yeniden kullanimi ──────────────
+
+def test_findings_reuse():
+    print("\n[42] Keşif bulgusu amend turlarına taşınır — repo iki kez taranmaz")
+    root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
+    fl = (root / "flow.py").read_text()
+
+    from agile_sdlc_crew.flow import _FINDINGS_REUSE_MAX
+    check("taşıma sınırı tanımlı ve makul (prompt'u şişirmeyecek kadar)",
+          isinstance(_FINDINGS_REUSE_MAX, int) and 2000 <= _FINDINGS_REUSE_MAX <= 40000,
+          str(_FINDINGS_REUSE_MAX))
+
+    step4 = fl.split("def crew_step4_technical_design")[1].split("\n    def ")[0]
+    check("step4: Faz A bulgusu state'e yazılır",
+          "_architect_findings = findings[:_FINDINGS_REUSE_MAX]" in step4)
+
+    amend = fl.split("def _amend_plan")[1].split("\n    def ")[0]
+    check("amend: bulgu varsa context'e taşınır",
+          "_architect_findings" in amend and "TEKRARLAMA" in amend)
+    # Arac erisimi KAPATILMAMALI: geri bildirim hic kesfedilmemis bir dosyaya
+    # isaret edebilir. Kazanc tekrar taramayi onlemekten gelir, erisimi
+    # kesmekten degil — yoksa amend eksik dosyayi hic bulamaz.
+    check("amend: repo araç erişimi kapatılmadı (yeni dosya gerekebilir)",
+          "set_repo_ctx" in amend)
+
+    # Bulgu yokken (kesif hic kosmadi) amend eskisi gibi davranmali.
+    check("bulgu yoksa context'e blok EKLENMEZ (boş başlık basılmaz)",
+          '_prev = (getattr(self, "_architect_findings", "") or "").strip()' in amend
+          and "if _prev:" in amend)
+
+    # Butce cap'i (CREW_CLI_CALL_MAX_USD → --max-budget-usd) zaten bagliydi ve
+    # ACIK. Probe (2026-09-21): sinira carpinca is_error=True /
+    # subtype=error_max_budget_usd, result BOS, stream'de text blogu yok →
+    # salvage de bos. Para harcanir, is kaybolur. Kesinti en azindan GORUNUR
+    # olmali; yoksa raporda sadece "pahali cagri" gibi durur.
+    cli = (root / "tools/claude_cli_llm.py").read_text()
+    check("bütçe kesintisi yakalanır ve stop_reason olarak taşınır",
+          "error_max_budget_usd" in cli and 'meta["stop_reason"]' in cli
+          and '"stop_reason": str(meta.get("stop_reason") or "")' in cli)
+    dbs = (root / "db.py").read_text()
+    check("stop_reason llm_calls'a yazılır (kolon + INSERT)",
+          '_ensure_column(cur, "llm_calls", "stop_reason"' in dbs
+          and 'rec.get("stop_reason")' in dbs)
+    ca_src = (root / "cost_analytics.py").read_text()
+    check("Maliyet raporu kesilen çağrıları ayrı bulgu olarak gösterir",
+          "budget_cut" in ca_src and "error_max_budget_usd" in ca_src)
+    from agile_sdlc_crew import cost_analytics as _ca
+    _an = _ca.analyze([
+        {"job_id": 1, "step_key": "technical_design_task", "agent": "software_architect",
+         "model": "claude-opus-5", "cost_usd": 1.6, "turns": 20, "input_tokens": 10,
+         "output_tokens": 10, "cache_read_tokens": 10, "cache_creation_tokens": 10,
+         "duration_ms": 1000, "created_at": None, "stop_reason": "error_max_budget_usd",
+         "job_kind": "pipeline", "work_item_id": "1", "job_status": "completed"},
+    ])
+    check("kesilen çağrı bulgusu tetiklenir ve tutarı raporlar",
+          _an["budget_cut"]["calls"] == 1 and _an["budget_cut"]["usd"] == 1.6
+          and any("bütçe cap'inde kesildi" in f["title"] for f in _ca.findings(_an)))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2733,7 +2792,8 @@ def main():
               test_pr_review_contribution,
               test_backlog_refinement,
               test_cost_analytics,
-              test_cheap_phase_split):
+              test_cheap_phase_split,
+              test_findings_reuse):
         try:
             t()
         except Exception as e:
