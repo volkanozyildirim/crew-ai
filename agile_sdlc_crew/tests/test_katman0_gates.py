@@ -2614,6 +2614,92 @@ def test_cost_analytics():
           and 'id="costKind"' in ui and "loadCosts(" in ui)
 
 
+# ── 41. Angarya/karar model ayrimi — ucuz faz sonnet, karar fazi opus ────
+
+def test_cheap_phase_split():
+    print("\n[41] Model ayrimi — angarya fazlari sonnet, karar/teknik noktalar korunur")
+    import os
+    import inspect
+    from agile_sdlc_crew.llm import resolver as R
+
+    CHEAP = ("software_architect_explore", "software_architect_kickoff",
+             "senior_developer_kickoff")
+
+    # 1) Angarya anahtarlari cozulur ve UCUZ modele baglanir (bizim varsayilanimiz,
+    #    agent_defaults katmanindan — dashboard override'i degil, o insanin).
+    specs = {k: R.resolve_spec_with_source(k) for k in CHEAP}
+    check("angarya anahtarlari cozulur ve sonnet'e baglanir",
+          all(s[0]["model"] == "sonnet" and s[0]["provider"] == "claude_cli"
+              for s, in [(v,) for v in specs.values()]),
+          str({k: (v[0]["model"], v[1]) for k, v in specs.items()}))
+
+    # 2) Karar/teknik noktalar angarya anahtarlarindan BAGIMSIZ kalir. Modeli
+    #    sabitlemiyoruz (dashboard'un hakki) — ayri cozulduklerini dogruluyoruz.
+    for judge in ("software_architect", "senior_developer", "code_reviewer"):
+        jspec, _ = R.resolve_spec_with_source(judge)
+        check(f"{judge}: karar/teknik nokta angarya profiline BAGLANMAZ",
+              jspec.get("_profile") not in ("architect_explore_cli", "kickoff_cli"))
+
+    # 3) CREW_USE_LOCAL_LLM angarya fazlarini yerel modele kacirmamali: kesif
+    #    682K'ya varan baglam tariyor, yerel 8B model bunu sessizce bozar.
+    os.environ["CREW_USE_LOCAL_LLM"] = "1"
+    R.reset_cache()
+    try:
+        local_leak = [k for k in CHEAP
+                      if R.resolve_spec_with_source(k)[0]["provider"] == "ollama"]
+    finally:
+        os.environ.pop("CREW_USE_LOCAL_LLM", None)
+        R.reset_cache()
+    check("CREW_USE_LOCAL_LLM angarya fazlarini yerele kacirmaz", not local_leak,
+          str(local_leak))
+
+    # 4) Geri alma tek env ile calismali (kalite bozulursa aninda donus).
+    os.environ["CREW_LLM_PROFILE_SOFTWARE_ARCHITECT_EXPLORE"] = "architect_cli"
+    try:
+        rb, rbsrc = R.resolve_spec_with_source("software_architect_explore")
+    finally:
+        os.environ.pop("CREW_LLM_PROFILE_SOFTWARE_ARCHITECT_EXPLORE", None)
+    check("env ile geri alinabilir (CREW_LLM_PROFILE_… → opus)",
+          rb["model"] == "opus" and rbsrc == "env")
+
+    # 5) Cagri yeri baglantisi: SADECE kesif fazi ucuz anahtari kullanmali.
+    #    _amend_plan ve _architect_emit_json plan YAZAR — onlar karar fazi.
+    root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
+    fl = (root / "flow.py").read_text()
+    import re as _re
+    explore_fn = fl.split("def _architect_explore")[1].split("\n    def ")[0]
+    check("kesif fazi ucuz anahtarla cagrilir",
+          'agent_key="software_architect_explore"' in explore_fn)
+    check("ucuz anahtar flow.py'de SADECE kesif fazinda geciyor",
+          fl.count("software_architect_explore") == explore_fn.count("software_architect_explore"),
+          f"toplam {fl.count('software_architect_explore')}")
+    for fn in ("_amend_plan", "_architect_emit_json"):
+        body = fl.split(f"def {fn}")[1].split("\n    def ")[0]
+        check(f"{fn} (plan yazan faz) ucuz anahtar KULLANMAZ",
+              "software_architect_explore" not in body)
+
+    # 6) Varsayilan parametre karar fazini korur: arguman verilmeyen her cagri
+    #    (amend + emit) eski davranista kalir.
+    from agile_sdlc_crew.crew import AgileSDLCCrew
+    sig = inspect.signature(AgileSDLCCrew.create_analysis_crew_toolless)
+    check("create_analysis_crew_toolless varsayilani software_architect",
+          sig.parameters["agent_key"].default == "software_architect")
+
+    # 7) Kayit: dashboard listesi + model-erisilebilirlik dogrulamasi. Kayit disi
+    #    config sessizce kayar (resolver docstring'indeki aylarca suren hata).
+    srv = (root / "server.py").read_text()
+    check("dashboard: angarya anahtarlari _AGENT_KEYS + _AGENT_DISPLAY'de",
+          all(f'"{k}"' in srv for k in CHEAP)
+          and all(k in srv.split("_AGENT_DISPLAY")[1][:800] for k in CHEAP))
+    res_src = (root / "llm/resolver.py").read_text()
+    check("assert_models_reachable angarya anahtarlarini da dogrular",
+          all(k in res_src.split("def assert_models_reachable")[1] for k in CHEAP))
+    prof = (root / "config/llm_profiles.yaml").read_text()
+    check("llm_profiles: profiller + agent_defaults eslemesi yazili",
+          "architect_explore_cli:" in prof and "kickoff_cli:" in prof
+          and all(f"{k}:" in prof for k in CHEAP))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2646,7 +2732,8 @@ def main():
               test_type_flow_hooks,
               test_pr_review_contribution,
               test_backlog_refinement,
-              test_cost_analytics):
+              test_cost_analytics,
+              test_cheap_phase_split):
         try:
             t()
         except Exception as e:

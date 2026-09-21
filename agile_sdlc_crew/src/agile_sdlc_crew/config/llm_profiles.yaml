@@ -95,6 +95,30 @@ profiles:
     model: sonnet
     max_tokens: 16384
 
+  # ── Angarya fazlari (VARSAYILAN sonnet — karar veren fazlar opus kalir) ──
+  # Olculdu (222 mimar cagrisi / 26 is, technical_design_task $80.60):
+  #   KESIF  29 cagri  %43 para  $1.186/cagri  ort. 682K baglam
+  #   kucuk  137 cagri %42 para  $0.247/cagri
+  #   plan   39 cagri  %15 para  $0.318/cagri
+  # Kesif fazi dosya okur / grep atar / ozetler — muhakeme URETMEZ, plani
+  # _architect_emit_json yazar ve o opus kalir. Ayni mantik kickoff icin: o
+  # adim baglayici teknik artefakt degil, ekibe gosterilen kilavuz uretir.
+  #
+  # DIKKAT — kesif cagrilari ortalama 682K, tepe 1122K baglam kullaniyor
+  # (claude_cli repo'yu --add-dir ile kendi araclariyla tariyor). Sonnet bu
+  # baglami kaldiramazsa kesif kisalir; tasarim buna dayanikli (`_run_streaming`
+  # salvage → biriken metin Faz B'ye tasinr, guardrail kapali, tek deneme).
+  # Geri almak: CREW_LLM_PROFILE_SOFTWARE_ARCHITECT_EXPLORE=architect_cli
+  architect_explore_cli:
+    provider: claude_cli
+    model: sonnet
+    max_tokens: 32768
+
+  kickoff_cli:
+    provider: claude_cli
+    model: sonnet
+    max_tokens: 16384
+
   # ── Anthropic API (direkt) ────────────────────────────────────
   developer_anthropic:
     provider: anthropic
@@ -124,3 +148,10 @@ agent_defaults:
   code_reviewer: reasoning_remote
   scrum_master: scrum_remote
   product_owner: reasoning_remote
+  # Angarya fazlari — agent_llm_overrides.yaml'a BILEREK yazilmadi: oradaki
+  # kayit dashboard'un yonettigi "insan karari" katmani; bunlarin sonnet olmasi
+  # bir tercih degil olculmus varsayilan. Dashboard'dan yine degistirilebilir
+  # (server._AGENT_KEYS'e kayitlilar) — o zaman override katmani devralir.
+  software_architect_explore: architect_explore_cli
+  software_architect_kickoff: kickoff_cli
+  senior_developer_kickoff: kickoff_cli

@@ -458,7 +458,10 @@ class AgileSDLCCrew:
             config=self._agent_config_with_knowledge(
                 "software_architect", "backend_tech_design", "frontend_nextjs"
             ),
-            llm=build_for_agent("software_architect"),
+            # Kickoff baglayici teknik artefakt uretmez — ekibe gosterilen
+            # kilavuz uretir; plani step4'teki mimar yazar ve o opus kalir.
+            # O yuzden ayri anahtar (bkz. llm_profiles.yaml angarya fazlari).
+            llm=build_for_agent("software_architect_kickoff"),
             verbose=True,
             max_iter=3,
             tools=[
@@ -471,7 +474,9 @@ class AgileSDLCCrew:
             config=self._agent_config_with_knowledge(
                 "senior_developer", "backend_feature_dev", "frontend_nextjs"
             ),
-            llm=build_for_agent("senior_developer"),
+            # Kickoff'ta developer kod YAZMAZ, yaklasim tartisir — kodu step6
+            # yazar ve orasi opus kalir.
+            llm=build_for_agent("senior_developer_kickoff"),
             verbose=True,
             max_iter=3,
             tools=[
@@ -1077,7 +1082,7 @@ class AgileSDLCCrew:
             memory=False,
         )
 
-    def create_analysis_crew_toolless(self) -> Crew:
+    def create_analysis_crew_toolless(self, agent_key: str = "software_architect") -> Crew:
         """GERÇEKTEN tool'suz architect — Agent(tools=[]).
 
         Neden kritik: software_architect() agent'ina her zaman browse_repo/
@@ -1092,13 +1097,20 @@ class AgileSDLCCrew:
         Kullanim: (1) Emit fazi — claude_cli set_toolless(True) ile birlikte tam
         tool'suz. (2) Explore fazi — repo erisimi --add-dir (set_repo_ctx) native
         Claude araclariyla saglanir; CrewAI tool'una gerek yok.
-        LLM = architect profili (claude_cli/opus) — vertex'e KAYMASIN."""
+        LLM = architect profili (claude_cli) — vertex'e KAYMASIN.
+
+        agent_key: MODELI secen anahtar; persona/rol her zaman agents.yaml'daki
+        `software_architect`. Iki faz ayni personayi kullanir ama ayni fiyati
+        HAK ETMEZ: kesif dosya okur/grep atar (angarya), plani emit/amend yazar
+        (karar). Kesif "software_architect_explore" ile cagrilir → sonnet;
+        varsayilan anahtar opus'ta kalir. Bkz. llm_profiles.yaml."""
         from agile_sdlc_crew import pipeline_config as _pc
         arch = Agent(
             config=self._agent_config_with_knowledge(
                 "software_architect", "backend_tech_design", "frontend_nextjs"
             ),
-            llm=self.llm_architect,
+            llm=(self.llm_architect if agent_key == "software_architect"
+                 else build_for_agent(agent_key)),
             verbose=True,
             max_iter=_pc.get("CREW_ARCHITECT_MAX_ITER"),
             tools=[],

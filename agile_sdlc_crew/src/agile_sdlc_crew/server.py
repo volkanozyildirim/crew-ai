@@ -882,6 +882,12 @@ async def update_config(config_name: str, request: Request):
 _AGENT_KEYS = [
     "scrum_master", "business_analyst", "software_architect",
     "senior_developer", "code_reviewer", "qa_engineer", "uat_specialist",
+    # Angarya fazlari: ayni personanin karar URETMEYEN fazlari. Ayri anahtar
+    # olmalarinin sebebi model'i bagimsiz secebilmek (varsayilan sonnet,
+    # bkz. llm_profiles.yaml). Burada kayitli olmalari dashboard'dan
+    # degistirilebilmeleri icin — kayit disi config sessizce kayar.
+    "software_architect_explore", "software_architect_kickoff",
+    "senior_developer_kickoff",
 ]
 _AGENT_DISPLAY = {
     "scrum_master": "Scrum Master",
@@ -891,6 +897,9 @@ _AGENT_DISPLAY = {
     "code_reviewer": "Kod İnceleyici",
     "qa_engineer": "QA Mühendisi",
     "uat_specialist": "UAT Uzmanı",
+    "software_architect_explore": "Yazılım Mimarı — repo keşfi",
+    "software_architect_kickoff": "Yazılım Mimarı — kickoff",
+    "senior_developer_kickoff": "Kıdemli Geliştirici — kickoff",
 }
 
 

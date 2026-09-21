@@ -2290,8 +2290,17 @@ class AgileSDLCFlow(Flow[PipelineState]):
         Çağıran repo ctx'ini (set_repo_ctx) önceden kurmuş olmalı. Guardrail
         kapalı → tek deneme (retry storm yok). claude kesilse/cap'e çarpsa bile
         _run_streaming salvage'ı sayesinde biriken keşif metni (okunan gerçek
-        kod, grep sonuçları, akıl yürütme) döner. Bu metin Faz B'ye taşınır."""
-        crew = self._agile_crew.create_analysis_crew_toolless()
+        kod, grep sonuçları, akıl yürütme) döner. Bu metin Faz B'ye taşınır.
+
+        MODEL: bu faz angarya — dosya okur, grep atar, özetler; planı yazan
+        Faz B (_architect_emit_json) değil. O yüzden ayrı bir agent_key ile
+        ucuz modele bağlanır; karar veren fazlar opus'ta kalır. Ölçüm: bu faz
+        29 çağrıda technical_design_task'in %43'ünü yiyordu ($34.40/$80.60,
+        çağrı başına $1.19). Geri alma: CREW_LLM_PROFILE_SOFTWARE_ARCHITECT_
+        EXPLORE=architect_cli."""
+        crew = self._agile_crew.create_analysis_crew_toolless(
+            agent_key="software_architect_explore",
+        )
         try:
             res = crew.kickoff(inputs={
                 "work_item_id": self.state.work_item_id,
