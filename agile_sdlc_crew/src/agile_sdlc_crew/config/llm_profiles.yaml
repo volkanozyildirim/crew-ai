@@ -97,17 +97,23 @@ profiles:
 
   # ── Angarya fazlari (VARSAYILAN sonnet — karar veren fazlar opus kalir) ──
   # Olculdu (222 mimar cagrisi / 26 is, technical_design_task $80.60):
-  #   KESIF  29 cagri  %43 para  $1.186/cagri  ort. 682K baglam
+  #   KESIF  29 cagri  %43 para  $1.186/cagri
   #   kucuk  137 cagri %42 para  $0.247/cagri
   #   plan   39 cagri  %15 para  $0.318/cagri
   # Kesif fazi dosya okur / grep atar / ozetler — muhakeme URETMEZ, plani
   # _architect_emit_json yazar ve o opus kalir. Ayni mantik kickoff icin: o
   # adim baglayici teknik artefakt degil, ekibe gosterilen kilavuz uretir.
   #
-  # DIKKAT — kesif cagrilari ortalama 682K, tepe 1122K baglam kullaniyor
-  # (claude_cli repo'yu --add-dir ile kendi araclariyla tariyor). Sonnet bu
-  # baglami kaldiramazsa kesif kisalir; tasarim buna dayanikli (`_run_streaming`
-  # salvage → biriken metin Faz B'ye tasinr, guardrail kapali, tek deneme).
+  # Kesfin pahali olmasinin sebebi BAGLAM BOYUTU DEGIL, TUR SAYISI. Bir
+  # llm_calls satiri tek istek degil tek `claude -p` oturumu; token'lar tum
+  # turlarin toplami. 29 kesif cagrisinin anatomisi:
+  #   girdi           161K  %0.8
+  #   onbellek YAZMA  1.42M %7.2
+  #   onbellek OKUMA  18.2M %92.0   <- her turda TEKRAR okunan prefix
+  #   450 tur (cagri basina 15.5) → TUR BASINA ~44K, bunun ~40K'si onbellek okuma
+  # Yani gercek istek baglami ~44K; hicbir modelin penceresini zorlamaz. Maliyet
+  # 15.5 turun her birinde ~44K'lik prefix'i yeniden okumaktan geliyor.
+  # Ucuzlatmanin yolu: tur sayisini ya da prefix'i kucultmek.
   # Geri almak: CREW_LLM_PROFILE_SOFTWARE_ARCHITECT_EXPLORE=architect_cli
   architect_explore_cli:
     provider: claude_cli

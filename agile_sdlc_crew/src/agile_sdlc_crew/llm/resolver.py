@@ -82,8 +82,10 @@ def _backwards_compat_profile(agent_key: str) -> str | None:
         return None
     if agent_key in _CHEAP_PHASE_KEYS:
         # Angarya fazlari zaten sonnet; asagidaki genel `use_local` dali bunlari
-        # yerel modele kacirmasin. Kesif fazi 682K'ya varan baglam tariyor,
-        # qwen3:8b gibi bir yerel model bu isi yapamaz — sessizce bozulur.
+        # yerel modele kacirmasin. Sebep baglam boyutu DEGIL (tur basina ~44K,
+        # herkesin kaldiracagi bir sey): kesif ortalama 15.5 tur boyunca
+        # Read/Grep/Glob ile repo geziyor — cok turlu arac kullanimi qwen3:8b
+        # gibi bir yerel modelin zayif oldugu is, sessizce bos kesif doner.
         return None
     if agent_key == "senior_developer":
         if use_local and use_local_dev:
