@@ -1,6 +1,4 @@
 import os
-import sys
-import types
 from unittest.mock import patch, MagicMock
 import pytest
 
@@ -8,6 +6,7 @@ from crewai.llm import LLM
 from crewai.crew import Crew
 from crewai.agent import Agent
 from crewai.task import Task
+from crewai.llms.providers.bedrock import completion as bedrock_completion
 
 
 def _create_bedrock_mocks():
@@ -132,46 +131,6 @@ def test_bedrock_completion_is_used_when_bedrock_provider():
     assert llm.__class__.__name__ == "BedrockCompletion"
     assert llm.provider == "bedrock"
     assert llm.model == "anthropic.claude-3-5-sonnet-20241022-v2:0"
-
-
-def test_bedrock_completion_module_is_imported():
-    """
-    Test that the completion module is properly imported when using Bedrock provider
-    """
-    module_name = "crewai.llms.providers.bedrock.completion"
-
-    # Dropping the module is what makes the re-import observable, but the fresh
-    # import binds a NEW BedrockCompletion class object. Anything that imported
-    # the old one at collection time - test_bedrock_streaming_tool_args.py does -
-    # then fails isinstance() against instances the factory builds from the new
-    # class, reported as a bare ``assert False``. Whether that bites depends on
-    # which files share this worker, so it shows up as a flake. Put the original
-    # module back so nobody is left holding a stale class.
-    original = sys.modules.pop(module_name, None)
-    try:
-        LLM(model="bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0")
-
-        assert module_name in sys.modules
-        completion_mod = sys.modules[module_name]
-        assert isinstance(completion_mod, types.ModuleType)
-
-        assert hasattr(completion_mod, 'BedrockCompletion')
-    finally:
-        if original is not None:
-            sys.modules[module_name] = original
-            # sys.modules alone is not enough. Importing a submodule also rebinds
-            # it as an attribute on its parent package, so the throwaway copy
-            # stays reachable there and the two paths disagree:
-            # `from x.y import Z` reads sys.modules, while mock.patch("x.y.Z")
-            # walks the parent's attribute on Python < 3.12 (only 3.12 switched
-            # to pkgutil.resolve_name). A later patch then lands on one copy
-            # while the factory builds from the other, and the mock is never
-            # called - which is how test_bedrock_environment_variable_credentials
-            # started failing once this test merely restored sys.modules.
-            parent_name, _, leaf = module_name.rpartition(".")
-            parent = sys.modules.get(parent_name)
-            if parent is not None:
-                setattr(parent, leaf, original)
 
 
 def test_native_bedrock_raises_error_when_initialization_fails():
@@ -623,24 +582,32 @@ def test_bedrock_tool_conversion():
     assert "inputSchema" in bedrock_tools[0]["toolSpec"]
 
 
-def test_bedrock_environment_variable_credentials(bedrock_mocks):
-    """
-    Test that AWS credentials are properly loaded from environment
-    """
-    mock_session_class, _ = bedrock_mocks
+def test_bedrock_environment_variable_credentials(monkeypatch):
+    """Pass AWS credentials and region from the environment to boto3."""
+    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
 
-    mock_session_class.reset_mock()
-
-    with patch.dict(os.environ, {
-        "AWS_ACCESS_KEY_ID": "test-access-key-123",
-        "AWS_SECRET_ACCESS_KEY": "test-secret-key-456"
-    }):
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "AWS_ACCESS_KEY_ID": "test-access-key-123",
+                "AWS_SECRET_ACCESS_KEY": "test-secret-key-456",
+                "AWS_DEFAULT_REGION": "eu-west-1",
+            },
+            clear=False,
+        ),
+        patch.object(bedrock_completion, "Session") as mock_session_class,
+    ):
+        mock_session_class.return_value.client.return_value = MagicMock()
         llm = LLM(model="bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0")
 
-        assert mock_session_class.called
-        call_kwargs = mock_session_class.call_args[1] if mock_session_class.call_args else {}
-        assert call_kwargs.get('aws_access_key_id') == "test-access-key-123"
-        assert call_kwargs.get('aws_secret_access_key') == "test-secret-key-456"
+    assert type(llm) is bedrock_completion.BedrockCompletion
+    mock_session_class.assert_called_once_with(
+        aws_access_key_id="test-access-key-123",
+        aws_secret_access_key="test-secret-key-456",
+        aws_session_token=None,
+        region_name="eu-west-1",
+    )
 
 
 def test_bedrock_token_usage_tracking():
