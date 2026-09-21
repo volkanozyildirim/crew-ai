@@ -779,7 +779,7 @@ function jobRow(j){
   const retryable=(j.status==='failed'||j.status==='completed'||j.status==='needs_human'||j.status==='needs_info');
   return `<div class="job-item${j.id===_jid?' sel':''}" data-id="${j.id}" onclick="viewJob(${j.id})">
       <div class="jdot ${j.status}"></div>
-      <span class="jwi">${esc(String(j.work_item_id))}</span>
+      ${wiLink(j.work_item_id,{cls:"jwi",text:String(j.work_item_id)})}
       ${isDry?`<span class="jmeta chip dim" title="Dry-run: lokal, push yok">DRY</span>`:''}
       ${j.job_kind==='pr_review'?`<span class="jmeta chip acc" title="PR inceleme katkısı (danışma) — insan PR'ı">İNCELEME</span>`:''}
       ${j.job_kind==='refinement'?`<span class="jmeta chip dim" title="Backlog refinement: İş Analisti netleştirme soruları (danışma)">REFINEMENT</span>`:''}
@@ -829,7 +829,7 @@ async function refreshDetail(){
 }
 function renderDetail(j){
   const _tk=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+'k':String(n);};
-  document.getElementById('detailTitle').innerHTML=`<span class="chip ${JS_CHIP[j.status]||'dim'}">${esc(JS_LABEL[j.status]||j.status)}</span><span class="mono" style="font-size:12.5px;color:var(--text-dim)">#${esc(String(j.work_item_id))}</span><span style="overflow:hidden;text-overflow:ellipsis">${esc(j.wi_title||j.repo_name||('İş #'+j.id))}</span>${Number(j.dry_run)===1?'<span class="chip dim">Dry run</span>':''}${j.job_kind==='pr_review'?'<span class="chip acc">İNCELEME</span>':''}${j.job_kind==='refinement'?'<span class="chip dim">REFINEMENT</span>':''}`;
+  document.getElementById('detailTitle').innerHTML=`<span class="chip ${JS_CHIP[j.status]||'dim'}">${esc(JS_LABEL[j.status]||j.status)}</span>${wiLink(j.work_item_id,{cls:"mono",style:"font-size:12.5px"})}<span style="overflow:hidden;text-overflow:ellipsis">${esc(j.wi_title||j.repo_name||('İş #'+j.id))}</span>${Number(j.dry_run)===1?'<span class="chip dim">Dry run</span>':''}${j.job_kind==='pr_review'?'<span class="chip acc">İNCELEME</span>':''}${j.job_kind==='refinement'?'<span class="chip dim">REFINEMENT</span>':''}`;
   const kv=(k,v)=>v?`<div class="meta-tag"><span class="k">${k}</span><span>${v}</span></div>`:'';
   let repoBase='';
   if(j.pr_url){const mm=j.pr_url.match(/^(.*?\/_git\/[^\/]+)/);if(mm)repoBase=mm[1];}
@@ -1128,7 +1128,7 @@ function renderOverview(jobs){
       :j.status==='failed'?`<button class="sm-btn ghost small" onclick="event.stopPropagation();retryJob(${j.id})">Tekrar dene</button>`
       :(!Number(j.dry_run)&&j.pr_url)?`<a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()" style="font-size:12px;font-weight:600;text-decoration:none">PR</a>`:'';
     const dur=fmtDurShort(j.started_at,j.finished_at);
-    return `<div class="row${hot?' hot':''}" onclick="viewJob(${j.id})"><span class="sd ${j.status}"></span><span class="mono" style="color:var(--text-dim)">#${esc(String(j.work_item_id))}</span><span class="jt${hot?' b':''}">${esc(desc)}${dur?` <span style="color:var(--text-dim)">· ${dur}</span>`:''}</span><span class="chip ${JS_CHIP[j.status]||'dim'}">${Number(j.dry_run)===1?'Dry run':(JS_LABEL[j.status]||j.status)}</span>${act}</div>`;
+    return `<div class="row${hot?' hot':''}" onclick="viewJob(${j.id})"><span class="sd ${j.status}"></span>${wiLink(j.work_item_id,{cls:"mono"})}<span class="jt${hot?' b':''}">${esc(desc)}${dur?` <span style="color:var(--text-dim)">· ${dur}</span>`:''}</span><span class="chip ${JS_CHIP[j.status]||'dim'}">${Number(j.dry_run)===1?'Dry run':(JS_LABEL[j.status]||j.status)}</span>${act}</div>`;
   }).join(''):'<div class="board-empty" style="padding:24px">Henüz iş yok.</div>';
   if(typeof items!=='undefined'&&items.length)renderOvPerf();
   refreshHero();
@@ -1173,7 +1173,7 @@ function renderHero(j,steps,cost){
   const repo=[j.repo_name,j.branch_name].filter(Boolean).join(' · ');
   hero.innerHTML=`<div class="hero-head">
       <span class="chip ${JS_CHIP[j.status]||'dim'}" style="text-transform:uppercase">${esc(JS_LABEL[j.status]||j.status)}</span>
-      <span class="mono" style="font-size:13px;color:var(--text-dim)">#${esc(String(j.work_item_id))}</span>
+      ${wiLink(j.work_item_id,{cls:"mono",style:"font-size:13px"})}
       <span class="hero-title" title="${esc(j.wi_title||'')}">${esc(j.wi_title||j.repo_name||'')}</span>
       ${j.job_kind==='pr_review'?'<span class="chip acc" title="PR inceleme katkısı (danışma)">İNCELEME</span>':''}${j.job_kind==='refinement'?'<span class="chip dim" title="Backlog refinement — netleştirme soruları">REFINEMENT</span>':''}${Number(j.dry_run)===1?'<span class="chip dim">Dry run</span>':''}
       ${repo?`<span class="hero-meta mono" title="${esc(repo)}">${SVG_PR.replace('width:13px;height:13px','width:14px;height:14px')}${esc(repo.length>48?repo.slice(0,46)+'…':repo)}</span>`:''}
@@ -1283,7 +1283,28 @@ function renderOvSprint(){
   renderRefineBadge();
   if(!_rf||_rf.iteration_path!==p){const sc=document.getElementById('rfScope');if(sc)sc.value='sprint';loadRefinement()}
 }
+// ── WI numarası → Azure DevOps linki ──
+// Board'da WI kartları zaten linkli (Azure `url` alanını veriyor); İşler
+// sekmesinde ise elimizde yalnızca work_item_id var. Tabanı açılışta bir kez
+// çekip tüm WI numaralarını aynı yardımcıdan basıyoruz.
+let _wiBase='';
+async function loadWiBase(){
+  try{const r=await fetch('/api/wi-base-url');if(r.ok)_wiBase=(await r.json()).url||''}catch(e){}
+}
+function wiLink(id,{cls='',text=null,style=''}={}){
+  const label=text!==null?text:('#'+String(id));
+  const st=style?` style="${style}"`:'';
+  if(!_wiBase||!id)return `<span class="${cls}"${st}>${esc(label)}</span>`;
+  // stopPropagation: satırların kendi onclick'i var (viewJob) — link tıklaması
+  // detayı açmasın, Azure'a gitsin.
+  return `<a class="${cls} wi-link"${st} href="${esc(_wiBase)}/${encodeURIComponent(id)}" target="_blank" rel="noopener"
+    onclick="event.stopPropagation()" title="Azure DevOps'ta aç">${esc(label)}</a>`;
+}
+
 document.addEventListener('DOMContentLoaded',()=>{
+  // Taban gelince listeyi bir kez tazele: ilk render taban gelmeden kosarsa
+  // WI numaralari duz metin cikar, sonraki poll'a kadar oyle kalirdi.
+  loadWiBase().then(()=>{try{fetchJobs()}catch(e){}});
   // Retro eski modal id'siyle inline panele taşınır (test/regresyon: openRetro + #retroModal korunur)
   const rm=document.getElementById('retroModal'),pr=document.getElementById('paneRetro');
   if(rm&&pr)pr.appendChild(rm);
@@ -2514,7 +2535,7 @@ async function koLoadList(silent){
         const parent=r.parent_job_id?`<span style="font-size:10px;color:var(--text-dim)" title="Parent">↳#${r.parent_job_id}</span>`:'';
         return `<div onclick="koShowDetail(${r.id})" style="padding:8px 10px;margin-bottom:4px;border-radius:6px;cursor:pointer;${sel};transition:background .12s" onmouseover="if(${r.id}!==_koSelectedId)this.style.background='rgba(255,255,255,0.04)'" onmouseout="if(${r.id}!==_koSelectedId)this.style.background='transparent'">
           <div style="display:flex;justify-content:space-between;gap:8px">
-            <div style="font-weight:600;font-size:12px">#${r.id} <span style="color:var(--text-dim);font-weight:500">· WI #${escHtml(r.work_item_id)}</span> ${approved}${fb}</div>
+            <div style="font-weight:600;font-size:12px">#${r.id} <span style="color:var(--text-dim);font-weight:500">· WI ${wiLink(r.work_item_id,{cls:""})}</span> ${approved}${fb}</div>
             <span style="font-size:10px;padding:2px 6px;border-radius:8px;background:${koStatusColor(r.status)}22;color:${koStatusColor(r.status)};text-transform:uppercase;font-weight:600;letter-spacing:.03em">${r.status}</span>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px">

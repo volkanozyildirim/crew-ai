@@ -1761,6 +1761,15 @@ def _wi_base_url() -> str:
         return ""
 
 
+@app.get("/api/wi-base-url")
+async def wi_base_url():
+    """WI numaralarini linke cevirmek icin temel URL (dashboard acilista bir kez cagirir).
+
+    Tek bir taban donulur, is basina URL degil: `/api/jobs` sicak bir yol ve
+    her satira ayni org/proje onekini koymak payload'i bosuna sisirir."""
+    return JSONResponse({"url": _wi_base_url()})
+
+
 @app.get("/api/sprint-plan")
 async def sprint_plan(iteration_path: str = "", team: str = "",
                       capacity_sp: float | None = None, velocity: int = 1):
