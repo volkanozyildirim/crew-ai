@@ -2777,6 +2777,52 @@ def test_findings_reuse():
           and any("bütçe cap'inde kesildi" in f["title"] for f in _ca.findings(_an)))
 
 
+# ── 43. Prompt onbellek oneki — degisken placeholder EN SONDA ────────────
+
+def test_prompt_prefix_order():
+    print("\n[43] Placeholder sırası — sabit context önce, değişen geri bildirim sonra")
+    import yaml as _yaml
+    root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
+    raw = (root / "config/tasks.yaml").read_text()
+    doc = _yaml.safe_load(raw)
+
+    # Onbellek ONEKTEN eslesir: ilk degisen karakterden sonrasi yeniden yazilir.
+    # Yazma 1.25-2x, okuma 0.1x → degisken metin SONDA olmali. Retry donguleri
+    # (_architect_emit_json, _review_retry_loop) yalnizca feedback string'ini
+    # degistirir; sira bozulursa 2. deneme tum oneki yeniden yazar.
+    offenders = []
+    checked = 0
+    for key, block in doc.items():
+        desc = ((block or {}).get("description") or "")
+        if "{scrum_master_feedback}" not in desc or "{previous_context}" not in desc:
+            continue
+        checked += 1
+        if desc.index("{scrum_master_feedback}") < desc.rindex("{previous_context}"):
+            offenders.append(key)
+    check("değişken {scrum_master_feedback} her görevde sabit {previous_context}'ten SONRA",
+          checked >= 5 and not offenders, f"{checked} görev kontrol edildi, bozuk: {offenders}")
+
+    # Placeholder'lar kaybolmamis olmali (sira degisimi silme olmamali).
+    counts = {p: sum(((b or {}).get("description") or "").count(p) for b in doc.values())
+              for p in ("{work_item_id}", "{previous_context}",
+                        "{scrum_master_feedback}", "{target_repo}")}
+    check("sıra değişimi hiçbir placeholder'ı düşürmedi",
+          counts["{previous_context}"] >= 13 and counts["{scrum_master_feedback}"] == 5
+          and counts["{work_item_id}"] >= 18, str(counts))
+
+    # Gerekce dosyada yazili olmali — yoksa biri "duzenler" ve geri alir.
+    check("sıranın gerekçesi tasks.yaml başlığında yazılı",
+          "PLACEHOLDER ORDER IS A COST DECISION" in raw and "cache write" in raw.lower())
+
+    # Retry dongusu gercekten SADECE feedback'i degistiriyor mu? Degistirdigi
+    # baska bir sey varsa onek yine bozulur ve bu sira ise yaramaz.
+    fl = (root / "flow.py").read_text()
+    emit = fl.split("def _architect_emit_json")[1].split("\n    def ")[0]
+    check("emit retry'ı yalnızca scrum_master_feedback'i değiştirir (emit_ctx sabit)",
+          "fb_note = (" in emit and 'previous_context": emit_ctx' in emit
+          and emit.count("emit_ctx =") <= 2, "emit_ctx döngü içinde yeniden kurulmamalı")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2811,7 +2857,8 @@ def main():
               test_backlog_refinement,
               test_cost_analytics,
               test_cheap_phase_split,
-              test_findings_reuse):
+              test_findings_reuse,
+              test_prompt_prefix_order):
         try:
             t()
         except Exception as e:
