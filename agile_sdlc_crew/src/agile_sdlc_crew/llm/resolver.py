@@ -55,6 +55,16 @@ def _bool_env(key: str, default: str = "") -> bool:
     return os.environ.get(key, default).lower() in ("1", "true", "yes")
 
 
+# Muhakeme uretmeyen "angarya" fazlari: repo kesfi ve kickoff tartismasi.
+# Ayri agent_key olmalarinin sebebi, ayni ajanin karar veren fazindan (plan
+# yazimi / kod yazimi) BAGIMSIZ model secebilmek — bkz. llm_profiles.yaml.
+_CHEAP_PHASE_KEYS = frozenset({
+    "software_architect_explore",
+    "software_architect_kickoff",
+    "senior_developer_kickoff",
+})
+
+
 def _backwards_compat_profile(agent_key: str) -> str | None:
     """Eski env-flag mantigini profile ismine cevirir.
 
@@ -69,6 +79,13 @@ def _backwards_compat_profile(agent_key: str) -> str | None:
     if agent_key == "software_architect":
         # Architect tarihsel olarak hep premium — degistirmek isteyen
         # llm_profile ile veya CREW_LLM_PROFILE_SOFTWARE_ARCHITECT ile yapsin.
+        return None
+    if agent_key in _CHEAP_PHASE_KEYS:
+        # Angarya fazlari zaten sonnet; asagidaki genel `use_local` dali bunlari
+        # yerel modele kacirmasin. Sebep baglam boyutu DEGIL (tur basina ~44K,
+        # herkesin kaldiracagi bir sey): kesif ortalama 15.5 tur boyunca
+        # Read/Grep/Glob ile repo geziyor — cok turlu arac kullanimi qwen3:8b
+        # gibi bir yerel modelin zayif oldugu is, sessizce bos kesif doner.
         return None
     if agent_key == "senior_developer":
         if use_local and use_local_dev:
@@ -300,6 +317,12 @@ def assert_models_reachable(agent_keys: list | None = None) -> list:
     keys = agent_keys or [
         "software_architect", "senior_developer", "code_reviewer",
         "business_analyst", "qa_engineer", "uat_specialist", "scrum_master",
+        # Angarya fazlari da dogrulansin: bunlar ayni personanin ucuz modele
+        # bagli fazlari, sessizce opus'a donerlerse tasarrufun tamami kaybolur
+        # ve kimse fark etmez. Model basina TEK cagri yapildigi icin sonnet
+        # zaten listede oldugundan bu satirlar EK MALIYET getirmez.
+        "software_architect_explore", "software_architect_kickoff",
+        "senior_developer_kickoff",
     ]
     # Ayni modele birden fazla agent baglanmis olabilir — model basina TEK cagri.
     wanted: dict = {}

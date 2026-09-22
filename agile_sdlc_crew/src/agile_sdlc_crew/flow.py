@@ -941,6 +941,12 @@ class _SpikeStop(_KickoffOnlyStop):
 # WI/gereksinim metnindeki, bizim KENDI JSON semamizdan gelen meta adlar —
 # her WI'da aynilar, grep sinyali degil gurultu. Modul seviyesinde: pydantic
 # Flow sinifinda alt-cizgili sinif niteligi PrivateAttr'a donusuyor.
+# Faz A kesif ciktisindan amend turlarina TASINACAK azami karakter.
+# Kesif ciktilari olculdu: 8-18K token (~30-70K karakter). Tamamini tasimak
+# amend prompt'unu sisirir ve her turda yeniden okunur (maliyet = tur x prefix);
+# bastaki dilim dosya/yol bulgularini tasir, kuyrugu genelde tekrar ve ozet.
+_FINDINGS_REUSE_MAX = 12000
+
 _GREP_STOPWORDS = frozenset({
     "acceptance_criteria", "functional_requirements", "technical_requirements",
     "open_questions", "out_of_scope", "work_item_id", "requirement_ids",
@@ -1066,6 +1072,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
     _envelope: Any = PrivateAttr(default=None)
     # Teknik tasarimda Faz A kesfi gerekti mi — zarf sinyali.
     _needed_explore: bool = PrivateAttr(default=False)
+    # Faz A kesif ciktisi. Amend turlari AYNI repo'yu AYNI commit'te yeniden
+    # taramasin diye saklanir — olculdu: 6 isde 2-3 kesif kosmus, fazladan
+    # kesifler technical_design_task'in %15'i ($11.78/$80.60).
+    _architect_findings: str = PrivateAttr(default="")
     # ── Helper Methods (dekoratorsuz) ────────────────
 
     def _forward_text(self, kind: str, full_text: str, cap: int) -> str:
@@ -2221,6 +2231,18 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception:
             cur_json = str(cur_plan)[:8000]
         ctx = self._build_step_context("technical_design_task")
+        # Faz A zaten kostuysa bulgularini TASI. Olculdu: 6 is repoyu 2-3 kez
+        # taramis, fazladan kesifler adimin %15'i ($11.78/$80.60, kesif basina
+        # ~$1.19). Repo ayni, commit ayni — ikinci taramanin bulacagi yeni bir
+        # sey yok. Arac erisimi KAPATILMIYOR (geri bildirim keşfedilmemiş bir
+        # dosyaya isaret edebilir); model sifirdan degil, bilerek basliyor.
+        _prev = (getattr(self, "_architect_findings", "") or "").strip()
+        if _prev:
+            ctx += (
+                "\n\n# REPO KEŞİF BULGULARI (Faz A — bu turda TEKRARLAMA)\n"
+                "Aşağıdakiler bu repoda zaten tarandı. Yalnızca burada OLMAYAN "
+                "bir şeye ihtiyacın varsa hedefli arama yap.\n" + _prev
+            )
         ctx += (
             f"\n\n# MEVCUT PLAN (DÜZELTİLECEK)\n```json\n{cur_json}\n```"
             f"\n\n# GERİ BİLDİRİM — bu eksiklik/hataları TAM gider\n{(feedback or '')[:3000]}"
@@ -2290,8 +2312,17 @@ class AgileSDLCFlow(Flow[PipelineState]):
         Çağıran repo ctx'ini (set_repo_ctx) önceden kurmuş olmalı. Guardrail
         kapalı → tek deneme (retry storm yok). claude kesilse/cap'e çarpsa bile
         _run_streaming salvage'ı sayesinde biriken keşif metni (okunan gerçek
-        kod, grep sonuçları, akıl yürütme) döner. Bu metin Faz B'ye taşınır."""
-        crew = self._agile_crew.create_analysis_crew_toolless()
+        kod, grep sonuçları, akıl yürütme) döner. Bu metin Faz B'ye taşınır.
+
+        MODEL: bu faz angarya — dosya okur, grep atar, özetler; planı yazan
+        Faz B (_architect_emit_json) değil. O yüzden ayrı bir agent_key ile
+        ucuz modele bağlanır; karar veren fazlar opus'ta kalır. Ölçüm: bu faz
+        29 çağrıda technical_design_task'in %43'ünü yiyordu ($34.40/$80.60,
+        çağrı başına $1.19). Geri alma: CREW_LLM_PROFILE_SOFTWARE_ARCHITECT_
+        EXPLORE=architect_cli."""
+        crew = self._agile_crew.create_analysis_crew_toolless(
+            agent_key="software_architect_explore",
+        )
         try:
             res = crew.kickoff(inputs={
                 "work_item_id": self.state.work_item_id,
@@ -5225,6 +5256,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         r"\s*(INSUFFICIENT|YETERSIZ)\b", findings, _re_rd.IGNORECASE):
                     self._architect_refusal = findings[:3000]
                     _log("  Faz A: mimar yetersizlik teşhisi verdi — hazırlık kapısı (aşama 2) değerlendirecek")
+                # Keşfi sakla: amend turları aynı repoyu aynı commit'te yeniden
+                # taramak yerine bu bulgularla başlasın (bkz. _amend_plan).
+                if isinstance(findings, str) and findings.strip():
+                    self._architect_findings = findings[:_FINDINGS_REUSE_MAX]
                 _cli.clear_repo_ctx()
                 plan, raw_output, _ = self._architect_emit_json(
                     ctx, prefetch_repo, findings=findings, label="technical_design_task",

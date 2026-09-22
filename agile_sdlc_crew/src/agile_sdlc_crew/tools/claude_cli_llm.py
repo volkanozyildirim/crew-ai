@@ -172,6 +172,7 @@ def _emit_call_record(model: str, meta: dict) -> None:
             "output_tokens": int(meta.get("output_tokens") or 0),
             "cache_read_tokens": int(meta.get("cache_read_tokens") or 0),
             "cache_creation_tokens": int(meta.get("cache_creation_tokens") or 0),
+            "stop_reason": str(meta.get("stop_reason") or ""),
         })
     except Exception:
         pass
@@ -235,7 +236,23 @@ def _log_stream_event(ev: dict, text_parts: list, meta: dict | None = None) -> s
         return None
     if t == "result":
         if ev.get("is_error"):
-            log.warning(f"  ⚠️ claude hata: {str(ev.get('result', ''))[:160]}")
+            # subtype'i SAKLA: butce cap'i vurdugunda `result` BOS geliyor, yani
+            # asagidaki genel satir bos bir uyari basiyor ve kesinti gorunmez
+            # oluyor. Olculdu (probe, 2026-09-21): --max-budget-usd vurunca
+            # is_error=True / subtype=error_max_budget_usd, result="" ve stream'de
+            # hic text blogu olmadigi icin _run_streaming salvage'i da bos donuyor
+            # → para harcanir, is KAYBOLUR. Cap ayrica asilir (0.04 cap → $0.078).
+            sub = str(ev.get("subtype") or "").strip()
+            if sub:
+                meta["stop_reason"] = sub
+            if sub == "error_max_budget_usd":
+                log.warning(
+                    "  💸 BÜTÇE CAP'İ KESTİ (CREW_CLI_CALL_MAX_USD): çağrı "
+                    f"${ev.get('total_cost_usd')} harcadı ve ÇIKTI DÖNMEDİ. "
+                    "Keşif bulgusu kayıp — cap'i yükseltin ya da kapatın (0)."
+                )
+            else:
+                log.warning(f"  ⚠️ claude hata: {str(ev.get('result', ''))[:160]} [{sub}]")
         dur = int(ev.get("duration_ms", 0) or 0)
         turns = ev.get("num_turns", "?")
         cost = ev.get("total_cost_usd")

@@ -418,6 +418,7 @@ header {
     <button class="tab" data-tab="jobs" onclick="showTab('jobs')">İşler <span class="badge" id="tabJobsBadge"></span></button>
     <button class="tab" data-tab="retro" onclick="showTab('retro')">Retro</button>
     <button class="tab" data-tab="refine" onclick="showTab('refine')">Refinement <span class="badge" id="tabRefineBadge"></span></button>
+    <button class="tab" data-tab="cost" onclick="showTab('cost')">Maliyet</button>
   </nav>
   <div class="header-right">
     <div class="crumb">
@@ -519,6 +520,34 @@ header {
 
   <!-- Retro -->
   <section class="pane" id="paneRetro"></section>
+
+  <!-- Maliyet analizi -->
+  <section class="pane" id="paneCost">
+    <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
+      <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:10px">
+          <span style="font-size:15px;font-weight:600">Maliyet Analizi</span>
+          <select class="sprint-select" id="costScope" onchange="loadCosts()" style="height:28px;font-weight:500">
+            <option value="0">Tüm zaman</option>
+            <option value="90">Son 90 gün</option>
+            <option value="30">Son 30 gün</option>
+            <option value="7">Son 7 gün</option>
+          </select>
+          <select class="sprint-select" id="costKind" onchange="loadCosts()" style="height:28px;font-weight:500" title="İş türü — pr_review ve refinement işleri de LLM harcıyor">
+            <option value="">Tüm iş türleri</option>
+            <option value="pipeline">Yalnız pipeline</option>
+            <option value="pr_review">Yalnız PR review</option>
+            <option value="refinement">Yalnız refinement</option>
+          </select>
+          <span style="flex:1"></span>
+          <span id="costStatus" style="font-size:12px;color:var(--text-dim)"></span>
+          <button class="sm-btn ghost small" onclick="loadCosts()">Yenile</button>
+        </div>
+        <div id="costFindings" style="display:none;flex-direction:column;gap:6px;padding:0 14px 12px"></div>
+        <div id="costBody" style="padding:0 14px 14px"><div class="board-empty">Yükleniyor…</div></div>
+      </div>
+    </div>
+  </section>
 
   <!-- Backlog refinement (Scrum faz 6) -->
   <section class="pane" id="paneRefine">
@@ -1005,6 +1034,40 @@ function showTab(name){
   try{localStorage.setItem('tempo_tab',name)}catch(e){}
   if(name==='retro'&&typeof openRetro==='function')openRetro();
   if(name==='refine'&&typeof loadRefinement==='function'&&!_rf)loadRefinement();
+  if(name==='cost'&&typeof loadCosts==='function'&&!_cost)loadCosts();
+}
+
+// ── Maliyet analizi (salt okunur; /api/costs) ──
+// Tablolar sunucudaki markdown'dan gelir (mdToHtml) — esikler ve bicimleme
+// tek yerde, Python tarafinda. UI yalnizca bulgulari renklendirir.
+let _cost=null;
+async function loadCosts(){
+  const days=(document.getElementById('costScope')||{}).value||'0';
+  const kind=(document.getElementById('costKind')||{}).value||'';
+  const body=document.getElementById('costBody'),st=document.getElementById('costStatus'),
+        fnd=document.getElementById('costFindings');
+  st.textContent='Hesaplanıyor…';
+  try{
+    const r=await fetch('/api/costs?days='+encodeURIComponent(days)+'&job_kind='+encodeURIComponent(kind)+'&t='+Date.now());
+    const d=await r.json();
+    if(d.error){body.innerHTML='<div class="board-empty" style="color:var(--danger)">'+esc(d.error)+'</div>';st.textContent='';fnd.style.display='none';return}
+    _cost=d;
+    const t=d.totals||{};
+    st.textContent='$'+(t.usd||0).toFixed(2)+' · '+(t.calls||0)+' çağrı · '+(t.jobs||0)+' iş';
+    const fs=d.findings||[];
+    if(fs.length){
+      fnd.style.display='flex';
+      fnd.innerHTML=fs.map(f=>{
+        const warn=f.level==='warn';
+        return '<div style="display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:1.5;'
+          +'border-left:3px solid '+(warn?'var(--danger)':'var(--accent)')+';padding:4px 0 4px 10px">'
+          +'<div><b>'+esc(f.title)+'</b><div style="color:var(--text-dim)">'+esc(f.detail)+'</div></div></div>';
+      }).join('');
+    }else{fnd.style.display='none'}
+    // Bulgular yukarida ayri render edildi; markdown'dan o bolumu cikar.
+    const md=(d.markdown||'').replace(/## Bulgular[\s\S]*?(?=\n## )/,'');
+    body.innerHTML=mdToHtml(md);
+  }catch(e){body.innerHTML='<div class="board-empty">Hata: '+esc(String(e))+'</div>';st.textContent=''}
 }
 // ── Backlog refinement (Scrum faz 6) ──
 let _rf=null,_rfFilter='all',_rfQ={};

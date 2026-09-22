@@ -5,6 +5,20 @@
 # All system instructions and agent output are in English.
 # Decision tokens (APPROVE/IMPROVE/INSUFFICIENT/CHANGES_REQUIRED/PASS/FAIL)
 # are pipeline-critical — Python regex depends on them.
+#
+# PLACEHOLDER ORDER IS A COST DECISION — do not "tidy" it.
+# Prompt caching matches on a PREFIX: everything after the first changed
+# character has to be written to cache again, and a cache write costs 1.25-2x
+# an input token while a cache read costs 0.1x. So the stable part must come
+# FIRST and anything that changes between attempts LAST.
+#   {previous_context}       large, constant for the whole step  -> goes first
+#   {scrum_master_feedback}  carries the per-attempt retry note  -> goes last
+# Retry loops (_architect_emit_json, _review_retry_loop) rewrite only the
+# feedback string, so with this order attempt 2 re-reads the prefix instead of
+# rewriting it. Measured before the fix (137 Faz-B calls, technical_design_task):
+# ~39.6K tokens sent per call for ~520 tokens back, and 79% of the $33.80 was
+# cache WRITE — 20.4K written vs 14.8K read per call, i.e. the prefix diverged
+# partway through. Putting the changing string last is what closes that gap.
 # ══════════════════════════════════════════════════════════════
 
 kickoff_sm_open_task:
@@ -324,10 +338,10 @@ requirements_analysis_task:
 
     Complete the analysis in every case — work with whatever info is available.
 
-    {scrum_master_feedback}
-
     PREVIOUS STEP OUTPUTS:
     {previous_context}
+
+    {scrum_master_feedback}
   expected_output: >
     Return ONLY valid JSON. NO free text outside the JSON.
 
@@ -494,10 +508,10 @@ technical_design_task:
         unfilled token will be rejected by validation and dropped from
         the PR.
 
-    {scrum_master_feedback}
-
     PREVIOUS STEP OUTPUTS:
     {previous_context}
+
+    {scrum_master_feedback}
   expected_output: >
     Return your output STRICTLY in the JSON format below.
     NO EXPLANATION outside the JSON.
@@ -780,10 +794,10 @@ review_pr_task:
     4. Use "add_pr_comment" to comment the result on the PR
     5. Also comment on the work item ({work_item_id})
 
-    {scrum_master_feedback}
-
     PREVIOUS STEP OUTPUTS:
     {previous_context}
+
+    {scrum_master_feedback}
   expected_output: >
     ## PR Review Result
 
@@ -934,10 +948,10 @@ test_planning_task:
     - Integration test scenarios
     - Unit test code where possible
 
-    {scrum_master_feedback}
-
     PREVIOUS STEP OUTPUTS:
     {previous_context}
+
+    {scrum_master_feedback}
   expected_output: >
     Test plan: list of test scenarios, edge cases, suggested unit test code.
   agent: qa_engineer
@@ -965,10 +979,10 @@ uat_task:
     For each acceptance criterion give PASS or FAIL.
     For FAIL, explain what's missing.
 
-    {scrum_master_feedback}
-
     PREVIOUS STEP OUTPUTS:
     {previous_context}
+
+    {scrum_master_feedback}
   expected_output: >
     ## UAT Report
 

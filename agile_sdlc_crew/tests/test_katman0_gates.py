@@ -2514,6 +2514,315 @@ def test_backlog_refinement():
     check("dashboard: Refinement sekmesi, kapsam seçimi, eylem onayı", "showTab('refine')" in ui and 'id="rfScope"' in ui
           and "rfAct(" in ui and "confirm(`#${id} için İş Analisti" in ui)
 
+# ── 40. Maliyet analizi — kırılım, bulgu eşikleri, salt-okunurluk ────────
+
+def test_cost_analytics():
+    print("\n[40] Maliyet analizi — adım/model/sınıf kırılımı, bulgu eşikleri, sınırlar")
+    from agile_sdlc_crew import cost_analytics as ca
+
+    def row(job, step, model, usd, agent="a", cr=90_000, cw=10_000, kind="pipeline"):
+        return {"job_id": job, "step_key": step, "agent": agent, "model": model,
+                "provider": "claude_cli", "turns": 2, "tool_calls": 0,
+                "cost_usd": usd, "duration_ms": 60_000,
+                "input_tokens": 1_000, "output_tokens": 500,
+                "cache_read_tokens": cr, "cache_creation_tokens": cw,
+                "created_at": None, "work_item_id": f"WI{job}",
+                "job_status": "completed", "job_kind": kind}
+
+    rows = []
+    # Dört ucuz adım, üç işte birer çağrı → iş başına 1.0 (medyanı aşağı çeker).
+    for s in ("requirements_analysis_task", "discover_repos_task",
+              "uat_task", "completion_report_task"):
+        rows += [row(j, s, "claude-sonnet-5", 0.10) for j in (1, 2, 3)]
+    # Beş ucuz iş daha — ortalamayı düşürüp "ortalamayı katlayan iş" eşiğini sınanabilir kılar.
+    rows += [row(j, "requirements_analysis_task", "claude-sonnet-5", 0.10) for j in range(4, 9)]
+    # Pahalı adım: TEK işte 8 çağrı → iş başına 8.0, uyarı bekleniyor.
+    rows += [row(1, "technical_design_task", "claude-opus-4-8[1m]", 5.0,
+                 agent="software_architect") for _ in range(8)]
+    # Kickoff: tek işte 9 çağrı ama BY_DESIGN_MULTI → uyarı değil bilgi.
+    rows += [row(2, "kickoff_meeting_task", "claude-opus-5", 1.0,
+                 agent="scrum_master") for _ in range(9)]
+
+    a = ca.analyze(rows)
+    t = a["totals"]
+    check("kırılım: toplam $, iş sayısı, iş başına ortalama",
+          abs(t["usd"] - 50.70) < 0.01 and t["jobs"] == 8 and t["calls"] == len(rows),
+          f"{t}")
+    check("adım sıralaması: en pahalı adım başta, pay yüzdesi tutarlı",
+          a["by_step"][0]["key"] == "technical_design_task"
+          and 78 <= a["by_step"][0]["share_pct"] <= 80)
+    check("iş başına çağrı: tek işte 8 çağrı → 8.0 (iş sayısına bölünür, çağrı sayısına değil)",
+          a["by_step"][0]["calls_per_job"] == 8.0)
+
+    check("model sınıfı: sürüm ve [1m] soneki sınıfı değiştirmez",
+          ca._family("claude-opus-4-8[1m]") == "opus"
+          and ca._family("claude-opus-5") == "opus"
+          and ca._family("claude-sonnet-5") == "sonnet"
+          and ca._family("claude-haiku-4-5-20251001") == "haiku"
+          and ca._family("gpt-4o") == ca.UNASSIGNED
+          and ca._family(None) == ca.UNASSIGNED)
+    fam = {m["key"]: m for m in a["by_family"]}
+    check("sınıf kırılımı: opus payı hesaplanır, sonnet ayrı durur",
+          a["by_family"][0]["key"] == "opus" and fam["opus"]["share_pct"] >= 80
+          and "sonnet" in fam)
+
+    titles = [f["title"] for f in ca.findings(a)]
+    lv = {f["title"]: f["level"] for f in ca.findings(a)}
+    check("bulgu: harcama iki adımda yoğunlaşıyor",
+          any(x.startswith("Harcama yoğunlaşması:") and "iki adımda" in x for x in titles), str(titles))
+    warn_step = [x for x in titles if x.startswith("technical_design_task")]
+    check("bulgu: normal adımda yüksek çağrı UYARI",
+          bool(warn_step) and lv[warn_step[0]] == "warn", str(titles))
+    kick = [x for x in titles if x.startswith("kickoff_meeting_task")]
+    check("bulgu: tasarımı gereği çok çağrılı adım uyarı değil BİLGİ",
+          bool(kick) and "tasarım gereği" in kick[0] and lv[kick[0]] == "info", str(titles))
+    check("bulgu: tek model sınıfı yoğunlaşması uyarı verir",
+          any("tek model sınıfında" in x for x in titles), str(titles))
+    check("bulgu: ortalamayı 3 kat aşan iş işaretlenir",
+          any(x.startswith("#1 (WI WI1)") for x in titles), str(titles))
+
+    # Önbellek oranı eşiği iki yönlü sınanır: 9.0 sessiz, 1.5 uyarı.
+    # Oran bulgusu UYARI seviyesinde; onbellek ekonomisi bulgusu ise her zaman
+    # bilgi olarak cikar (token payi != maliyet payi yanilgisini onlemek icin).
+    warn_titles = [f["title"] for f in ca.findings(a) if f["level"] == "warn"]
+    check("önbellek oranı 9.0 → UYARI yok (eşik 5)",
+          a["token_mix"]["cache_ratio"] == 9.0
+          and not any("okuma/yazma oranı" in x for x in warn_titles))
+    low = ca.analyze([row(1, "s", "claude-opus-5", 1.0, cr=15_000, cw=10_000)])
+    low_warn = [f["title"] for f in ca.findings(low) if f["level"] == "warn"]
+    check("önbellek oranı 1.5 → UYARI var",
+          low["token_mix"]["cache_ratio"] == 1.5
+          and any("okuma/yazma oranı" in x for x in low_warn))
+
+    # Token payi ile maliyet payi AYRI raporlanmali: okuma token'in cogunu
+    # olusturur ama maliyetin kucuk kismidir; yazma tersi. Bu ayrim olmazsa
+    # rapor okuru yanlis yeri optimize etmeye iter.
+    share = a["token_mix"]["cost_share"]
+    tok = a["token_mix"]
+    tok_total = tok["input"] + tok["cache_read"] + tok["cache_write"]
+    read_tok_pct = 100 * tok["cache_read"] / tok_total
+    check("maliyet payı token payından AYRI hesaplanır (okuma ucuz, yazma pahalı)",
+          read_tok_pct > 80 and share["cache_read"]["max"] < read_tok_pct
+          and share["cache_write"]["max"] > 100 * tok["cache_write"] / tok_total,
+          f"token %{read_tok_pct:.0f} vs maliyet {share['cache_read']}")
+    check("yüksek okuma payı bilgi olarak ÖVÜLÜR, uyarı olarak basılmaz",
+          any(f["level"] == "info" and "maliyetin" in f["title"] for f in ca.findings(a)))
+
+    md = ca.render_markdown(a, title="test", fnd=ca.findings(a))
+    check("markdown: dashboard mdToHtml'in beklediği pipe tablo (|---| ayracı)",
+          "| Adım | $ |" in md and "|---|" in md
+          and "## Model sınıfı bazında" in md and "## Adım bazında" in md)
+
+    root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
+    src = (root / "cost_analytics.py").read_text()
+    check("sınırlar: salt okunur — yazan SQL yok, ajan/crew kurulmuyor",
+          not any(k in src.upper() for k in ("INSERT INTO", "DELETE FROM", "UPDATE "))
+          and not any(k in src for k in (".kickoff(", "Crew(", "Agent(", "build_for_agent")))
+    from agile_sdlc_crew import pipeline_config as _pc
+    _dflt = {f["key"]: f["default"] for f in _pc.SCHEMA}
+    check("knob: CREW_COST_ANALYTICS açık (maliyeti sıfır, salt okunur)",
+          _dflt["CREW_COST_ANALYTICS"] is True
+          and isinstance(_pc.get("CREW_COST_ANALYTICS"), bool))
+    srv = (root / "server.py").read_text()
+    check("server: GET /api/costs + knob kapısı",
+          '@app.get("/api/costs")' in srv and "CREW_COST_ANALYTICS" in srv)
+    ui = (root / "web/index.html").read_text()
+    check("dashboard: Maliyet sekmesi, kapsam/tür seçimi, bulgu renklendirme",
+          "showTab('cost')" in ui and 'id="costScope"' in ui
+          and 'id="costKind"' in ui and "loadCosts(" in ui)
+
+
+# ── 41. Angarya/karar model ayrimi — ucuz faz sonnet, karar fazi opus ────
+
+def test_cheap_phase_split():
+    print("\n[41] Model ayrimi — angarya fazlari sonnet, karar/teknik noktalar korunur")
+    import os
+    import inspect
+    from agile_sdlc_crew.llm import resolver as R
+
+    CHEAP = ("software_architect_explore", "software_architect_kickoff",
+             "senior_developer_kickoff")
+
+    # 1) Angarya anahtarlari cozulur ve UCUZ modele baglanir (bizim varsayilanimiz,
+    #    agent_defaults katmanindan — dashboard override'i degil, o insanin).
+    specs = {k: R.resolve_spec_with_source(k) for k in CHEAP}
+    check("angarya anahtarlari cozulur ve sonnet'e baglanir",
+          all(s[0]["model"] == "sonnet" and s[0]["provider"] == "claude_cli"
+              for s, in [(v,) for v in specs.values()]),
+          str({k: (v[0]["model"], v[1]) for k, v in specs.items()}))
+
+    # 2) Karar/teknik noktalar angarya anahtarlarindan BAGIMSIZ kalir. Modeli
+    #    sabitlemiyoruz (dashboard'un hakki) — ayri cozulduklerini dogruluyoruz.
+    for judge in ("software_architect", "senior_developer", "code_reviewer"):
+        jspec, _ = R.resolve_spec_with_source(judge)
+        check(f"{judge}: karar/teknik nokta angarya profiline BAGLANMAZ",
+              jspec.get("_profile") not in ("architect_explore_cli", "kickoff_cli"))
+
+    # 3) CREW_USE_LOCAL_LLM angarya fazlarini yerel modele kacirmamali: kesif
+    #    682K'ya varan baglam tariyor, yerel 8B model bunu sessizce bozar.
+    os.environ["CREW_USE_LOCAL_LLM"] = "1"
+    R.reset_cache()
+    try:
+        local_leak = [k for k in CHEAP
+                      if R.resolve_spec_with_source(k)[0]["provider"] == "ollama"]
+    finally:
+        os.environ.pop("CREW_USE_LOCAL_LLM", None)
+        R.reset_cache()
+    check("CREW_USE_LOCAL_LLM angarya fazlarini yerele kacirmaz", not local_leak,
+          str(local_leak))
+
+    # 4) Geri alma tek env ile calismali (kalite bozulursa aninda donus).
+    os.environ["CREW_LLM_PROFILE_SOFTWARE_ARCHITECT_EXPLORE"] = "architect_cli"
+    try:
+        rb, rbsrc = R.resolve_spec_with_source("software_architect_explore")
+    finally:
+        os.environ.pop("CREW_LLM_PROFILE_SOFTWARE_ARCHITECT_EXPLORE", None)
+    check("env ile geri alinabilir (CREW_LLM_PROFILE_… → opus)",
+          rb["model"] == "opus" and rbsrc == "env")
+
+    # 5) Cagri yeri baglantisi: SADECE kesif fazi ucuz anahtari kullanmali.
+    #    _amend_plan ve _architect_emit_json plan YAZAR — onlar karar fazi.
+    root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
+    fl = (root / "flow.py").read_text()
+    import re as _re
+    explore_fn = fl.split("def _architect_explore")[1].split("\n    def ")[0]
+    check("kesif fazi ucuz anahtarla cagrilir",
+          'agent_key="software_architect_explore"' in explore_fn)
+    check("ucuz anahtar flow.py'de SADECE kesif fazinda geciyor",
+          fl.count("software_architect_explore") == explore_fn.count("software_architect_explore"),
+          f"toplam {fl.count('software_architect_explore')}")
+    for fn in ("_amend_plan", "_architect_emit_json"):
+        body = fl.split(f"def {fn}")[1].split("\n    def ")[0]
+        check(f"{fn} (plan yazan faz) ucuz anahtar KULLANMAZ",
+              "software_architect_explore" not in body)
+
+    # 6) Varsayilan parametre karar fazini korur: arguman verilmeyen her cagri
+    #    (amend + emit) eski davranista kalir.
+    from agile_sdlc_crew.crew import AgileSDLCCrew
+    sig = inspect.signature(AgileSDLCCrew.create_analysis_crew_toolless)
+    check("create_analysis_crew_toolless varsayilani software_architect",
+          sig.parameters["agent_key"].default == "software_architect")
+
+    # 7) Kayit: dashboard listesi + model-erisilebilirlik dogrulamasi. Kayit disi
+    #    config sessizce kayar (resolver docstring'indeki aylarca suren hata).
+    srv = (root / "server.py").read_text()
+    check("dashboard: angarya anahtarlari _AGENT_KEYS + _AGENT_DISPLAY'de",
+          all(f'"{k}"' in srv for k in CHEAP)
+          and all(k in srv.split("_AGENT_DISPLAY")[1][:800] for k in CHEAP))
+    res_src = (root / "llm/resolver.py").read_text()
+    check("assert_models_reachable angarya anahtarlarini da dogrular",
+          all(k in res_src.split("def assert_models_reachable")[1] for k in CHEAP))
+    prof = (root / "config/llm_profiles.yaml").read_text()
+    check("llm_profiles: profiller + agent_defaults eslemesi yazili",
+          "architect_explore_cli:" in prof and "kickoff_cli:" in prof
+          and all(f"{k}:" in prof for k in CHEAP))
+
+
+# ── 42. Kesif bulgusunun amend turlarinda yeniden kullanimi ──────────────
+
+def test_findings_reuse():
+    print("\n[42] Keşif bulgusu amend turlarına taşınır — repo iki kez taranmaz")
+    root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
+    fl = (root / "flow.py").read_text()
+
+    from agile_sdlc_crew.flow import _FINDINGS_REUSE_MAX
+    check("taşıma sınırı tanımlı ve makul (prompt'u şişirmeyecek kadar)",
+          isinstance(_FINDINGS_REUSE_MAX, int) and 2000 <= _FINDINGS_REUSE_MAX <= 40000,
+          str(_FINDINGS_REUSE_MAX))
+
+    step4 = fl.split("def crew_step4_technical_design")[1].split("\n    def ")[0]
+    check("step4: Faz A bulgusu state'e yazılır",
+          "_architect_findings = findings[:_FINDINGS_REUSE_MAX]" in step4)
+
+    amend = fl.split("def _amend_plan")[1].split("\n    def ")[0]
+    check("amend: bulgu varsa context'e taşınır",
+          "_architect_findings" in amend and "TEKRARLAMA" in amend)
+    # Arac erisimi KAPATILMAMALI: geri bildirim hic kesfedilmemis bir dosyaya
+    # isaret edebilir. Kazanc tekrar taramayi onlemekten gelir, erisimi
+    # kesmekten degil — yoksa amend eksik dosyayi hic bulamaz.
+    check("amend: repo araç erişimi kapatılmadı (yeni dosya gerekebilir)",
+          "set_repo_ctx" in amend)
+
+    # Bulgu yokken (kesif hic kosmadi) amend eskisi gibi davranmali.
+    check("bulgu yoksa context'e blok EKLENMEZ (boş başlık basılmaz)",
+          '_prev = (getattr(self, "_architect_findings", "") or "").strip()' in amend
+          and "if _prev:" in amend)
+
+    # Butce cap'i (CREW_CLI_CALL_MAX_USD → --max-budget-usd) zaten bagliydi ve
+    # ACIK. Probe (2026-09-21): sinira carpinca is_error=True /
+    # subtype=error_max_budget_usd, result BOS, stream'de text blogu yok →
+    # salvage de bos. Para harcanir, is kaybolur. Kesinti en azindan GORUNUR
+    # olmali; yoksa raporda sadece "pahali cagri" gibi durur.
+    cli = (root / "tools/claude_cli_llm.py").read_text()
+    check("bütçe kesintisi yakalanır ve stop_reason olarak taşınır",
+          "error_max_budget_usd" in cli and 'meta["stop_reason"]' in cli
+          and '"stop_reason": str(meta.get("stop_reason") or "")' in cli)
+    dbs = (root / "db.py").read_text()
+    check("stop_reason llm_calls'a yazılır (kolon + INSERT)",
+          '_ensure_column(cur, "llm_calls", "stop_reason"' in dbs
+          and 'rec.get("stop_reason")' in dbs)
+    ca_src = (root / "cost_analytics.py").read_text()
+    check("Maliyet raporu kesilen çağrıları ayrı bulgu olarak gösterir",
+          "budget_cut" in ca_src and "error_max_budget_usd" in ca_src)
+    from agile_sdlc_crew import cost_analytics as _ca
+    _an = _ca.analyze([
+        {"job_id": 1, "step_key": "technical_design_task", "agent": "software_architect",
+         "model": "claude-opus-5", "cost_usd": 1.6, "turns": 20, "input_tokens": 10,
+         "output_tokens": 10, "cache_read_tokens": 10, "cache_creation_tokens": 10,
+         "duration_ms": 1000, "created_at": None, "stop_reason": "error_max_budget_usd",
+         "job_kind": "pipeline", "work_item_id": "1", "job_status": "completed"},
+    ])
+    check("kesilen çağrı bulgusu tetiklenir ve tutarı raporlar",
+          _an["budget_cut"]["calls"] == 1 and _an["budget_cut"]["usd"] == 1.6
+          and any("bütçe cap'inde kesildi" in f["title"] for f in _ca.findings(_an)))
+
+
+# ── 43. Prompt onbellek oneki — degisken placeholder EN SONDA ────────────
+
+def test_prompt_prefix_order():
+    print("\n[43] Placeholder sırası — sabit context önce, değişen geri bildirim sonra")
+    import yaml as _yaml
+    root = Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew"
+    raw = (root / "config/tasks.yaml").read_text()
+    doc = _yaml.safe_load(raw)
+
+    # Onbellek ONEKTEN eslesir: ilk degisen karakterden sonrasi yeniden yazilir.
+    # Yazma 1.25-2x, okuma 0.1x → degisken metin SONDA olmali. Retry donguleri
+    # (_architect_emit_json, _review_retry_loop) yalnizca feedback string'ini
+    # degistirir; sira bozulursa 2. deneme tum oneki yeniden yazar.
+    offenders = []
+    checked = 0
+    for key, block in doc.items():
+        desc = ((block or {}).get("description") or "")
+        if "{scrum_master_feedback}" not in desc or "{previous_context}" not in desc:
+            continue
+        checked += 1
+        if desc.index("{scrum_master_feedback}") < desc.rindex("{previous_context}"):
+            offenders.append(key)
+    check("değişken {scrum_master_feedback} her görevde sabit {previous_context}'ten SONRA",
+          checked >= 5 and not offenders, f"{checked} görev kontrol edildi, bozuk: {offenders}")
+
+    # Placeholder'lar kaybolmamis olmali (sira degisimi silme olmamali).
+    counts = {p: sum(((b or {}).get("description") or "").count(p) for b in doc.values())
+              for p in ("{work_item_id}", "{previous_context}",
+                        "{scrum_master_feedback}", "{target_repo}")}
+    check("sıra değişimi hiçbir placeholder'ı düşürmedi",
+          counts["{previous_context}"] >= 13 and counts["{scrum_master_feedback}"] == 5
+          and counts["{work_item_id}"] >= 18, str(counts))
+
+    # Gerekce dosyada yazili olmali — yoksa biri "duzenler" ve geri alir.
+    check("sıranın gerekçesi tasks.yaml başlığında yazılı",
+          "PLACEHOLDER ORDER IS A COST DECISION" in raw and "cache write" in raw.lower())
+
+    # Retry dongusu gercekten SADECE feedback'i degistiriyor mu? Degistirdigi
+    # baska bir sey varsa onek yine bozulur ve bu sira ise yaramaz.
+    fl = (root / "flow.py").read_text()
+    emit = fl.split("def _architect_emit_json")[1].split("\n    def ")[0]
+    check("emit retry'ı yalnızca scrum_master_feedback'i değiştirir (emit_ctx sabit)",
+          "fb_note = (" in emit and 'previous_context": emit_ctx' in emit
+          and emit.count("emit_ctx =") <= 2, "emit_ctx döngü içinde yeniden kurulmamalı")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -2545,7 +2854,11 @@ def main():
               test_type_flow,
               test_type_flow_hooks,
               test_pr_review_contribution,
-              test_backlog_refinement):
+              test_backlog_refinement,
+              test_cost_analytics,
+              test_cheap_phase_split,
+              test_findings_reuse,
+              test_prompt_prefix_order):
         try:
             t()
         except Exception as e:

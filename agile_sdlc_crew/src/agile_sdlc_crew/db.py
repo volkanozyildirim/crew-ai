@@ -153,6 +153,9 @@ def init_db():
         _ensure_column(cur, "job_steps", "tool_calls", "INT DEFAULT 0")
         _ensure_column(cur, "job_steps", "turns", "INT DEFAULT 0")
         # Token muhasebesi (claude -p result.usage'dan)
+        # Cagrinin nasil bittigi. Bos = normal; 'error_max_budget_usd' =
+        # CREW_CLI_CALL_MAX_USD cap'i kesti → para harcandi, cikti KAYIP.
+        _ensure_column(cur, "llm_calls", "stop_reason", "VARCHAR(40) NOT NULL DEFAULT ''")
         _ensure_column(cur, "jobs", "total_input_tokens", "BIGINT DEFAULT 0")
         _ensure_column(cur, "jobs", "total_output_tokens", "BIGINT DEFAULT 0")
         for _c in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"):
@@ -473,12 +476,17 @@ def record_llm_call(rec: dict) -> None:
             cur.execute(
                 "INSERT INTO llm_calls "
                 "(job_id, step_key, agent, model, provider, turns, tool_calls, cost_usd, "
-                "duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, "
+                "stop_reason) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (job_id, step_key, (rec.get("agent") or "")[:50],
                  (rec.get("model") or "")[:60], (rec.get("provider") or "")[:30],
                  turns, tools, cost, int(rec.get("duration_ms") or 0),
-                 itok, otok, cread, ccreate),
+                 itok, otok, cread, ccreate,
+                 # Cagri neden bitti. Bos = normal. 'error_max_budget_usd' =
+                 # CREW_CLI_CALL_MAX_USD kesti; o cagri PARA HARCADI ama CIKTI
+                 # DONMEDI (salvage da bos), yani kayip. Kaydedilmezse gorunmez.
+                 (rec.get("stop_reason") or "")[:40]),
             )
             if job_id:
                 cur.execute(
