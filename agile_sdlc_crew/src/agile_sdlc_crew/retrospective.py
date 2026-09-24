@@ -21,6 +21,7 @@ Kaynaklar ve okuma biçimi:
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import re
 from collections import Counter, defaultdict
@@ -31,6 +32,7 @@ log = logging.getLogger("pipeline")
 TERMINAL = ("completed", "failed", "needs_human", "needs_info")
 
 _RE_RETRY = re.compile(r"(\d+)\s+düzeltme turu", re.IGNORECASE)
+_RE_STATS = re.compile(r"REVIEW_STATS:\s*(\{.*?\})\s*$", re.S | re.M)
 _RE_READINESS = re.compile(r"hazırlık skoru\s+(\d+)\s*/\s*100", re.IGNORECASE)
 
 
@@ -135,7 +137,9 @@ def analyze(jobs: list[dict]) -> dict:
     status_c = Counter(j.get("status") for j in jobs)
     outcome_c = Counter(classify_outcome(j.get("status", ""), j.get("error_message")) for j in jobs)
     step_fail_c: Counter = Counter()
-    review = {"jobs": 0, "first_pass": 0, "retries_total": 0, "changes_required": 0, "needs_human": 0}
+    review = {"jobs": 0, "first_pass": 0, "retries_total": 0, "changes_required": 0, "needs_human": 0,
+              "issues": 0, "blocking": 0, "dropped": 0, "drop_reasons": Counter(), "anchor_moved": 0,
+              "anchor_cleared": 0, "stats_jobs": 0}
     build = Counter()
     uat = Counter()
     readiness_scores: list[int] = []
@@ -178,6 +182,22 @@ def analyze(jobs: list[dict]) -> dict:
                 m = _RE_RETRY.search(out)
                 r = int(m.group(1)) if m else 0
                 review["retries_total"] += r
+                # REVIEW_STATS damgasi (flow._review_stats_line): turlarin NEDEN
+                # uzadigini gosteren tek makine-okunur iz. Yoksa eski isler —
+                # sessizce atlanir, sayac bozulmaz.
+                ms = _RE_STATS.search(out)
+                if ms:
+                    try:
+                        st = _json.loads(ms.group(1))
+                        review["stats_jobs"] += 1
+                        for key in ("issues", "blocking", "dropped"):
+                            review[key] += int(st.get(key) or 0)
+                        review["anchor_moved"] += int(st.get("anchor_moved") or 0)
+                        review["anchor_cleared"] += int(st.get("anchor_cleared") or 0)
+                        for rk, rc in (st.get("drop_reasons") or {}).items():
+                            review["drop_reasons"][rk] += int(rc)
+                    except Exception:
+                        pass
                 head = out[:400].upper()
                 if "NEEDS_HUMAN" in head or "İNSAN MÜDAHALESİ" in out[:200]:
                     review["needs_human"] += 1
@@ -344,6 +364,15 @@ def render_markdown(a: dict, *, title: str, rules: list[dict] | None = None,
         L.append(f"- **Review:** {rv['jobs']} iş incelendi; ilk turda onay {rv.get('first_pass', 0)}, "
                  f"toplam düzeltme turu {rv.get('retries_total', 0)}, kapanmayan madde (needs_human) {rv.get('needs_human', 0)}, "
                  f"RED ile biten {rv.get('changes_required', 0)}.")
+        if rv.get("stats_jobs"):
+            _dr = rv.get("drop_reasons") or {}
+            _top = ", ".join(f"{k} ({v})" for k, v in sorted(_dr.items(), key=lambda kv: -kv[1])[:3])
+            L.append(f"- **İtiraz kapısı ({rv['stats_jobs']} işte ölçüldü):** {rv.get('issues', 0)} madde → "
+                     f"{rv.get('blocking', 0)} bloklayıcı, {rv.get('dropped', 0)} düşürüldü"
+                     + (f" — en sık: {_top}" if _top else "") + ".")
+            if rv.get("anchor_moved") or rv.get("anchor_cleared"):
+                L.append(f"- **Satır çapalama:** {rv['anchor_moved']} madde yanlış satırdan doğru satıra "
+                         f"oturtuldu, {rv['anchor_cleared']} maddenin alıntısı dosyada bulunamadı.")
     else:
         L.append("- **Review:** bu pencerede review çıktısı yok.")
     b = a.get("build", {})

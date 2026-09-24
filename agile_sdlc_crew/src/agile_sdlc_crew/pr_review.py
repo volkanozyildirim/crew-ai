@@ -17,6 +17,7 @@ Sınırlar — bilinçli:
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from html import unescape
@@ -26,6 +27,28 @@ log = logging.getLogger("pipeline")
 _PR_LINK_RE = re.compile(r"PullRequestId/[^%]+%2f([^%]+)%2f(\d+)", re.IGNORECASE)
 INLINE_SEVERITIES = ("blocker", "major")
 MAX_INLINE_COMMENTS = 8
+FOCUS_CONTEXT_LINES = 25   # degisen satirin etrafinda birakilan baglam
+# Context'e enjekte edilen "  42| kod" onekini alintidan sokup atmak icin.
+_LINENO_PREFIX_RE = re.compile(r"^\s*\d+\s*\|\s?")
+
+
+def _key(path: str) -> str:
+    """Dosya yolunu karsilastirilabilir hale getirir (flow._norm_path ile ayni kural)."""
+    return (path or "").strip().replace("\\", "/").lstrip("/")
+
+
+def _norm_ws(s: str) -> str:
+    """Bosluklari tek bosluga indirger — LLM alintilari girintiyi sadik tasimiyor."""
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def body_index(file_bodies: dict[str, str]) -> dict[str, str]:
+    """Dosya govdelerini yol-normalize edilmis anahtarla indeksler.
+
+    `changed_paths` '/app/X.php' dondururken `_parse_review_issues` yollari
+    `_norm_path` ile 'app/X.php'e cevirir; duz sozluk aramasi bu yuzden HIC
+    tutmuyordu — suggestion dogrulamasi her seferinde sessizce dusuyordu."""
+    return {_key(k): v for k, v in (file_bodies or {}).items()}
 
 
 # ── Saf yardımcılar ──────────────────────────────────────────────────────
@@ -86,7 +109,11 @@ def review_summary_markdown(*, verdict: str, issues: list[dict], pr_id: int, pr_
         L += ["| # | Önem | Dosya | Sorun | Gerekli düzeltme |", "|---|---|---|---|---|"]
         for it in issues[:20]:
             loc = it.get("file", "") + (f":{it['line']}" if it.get("line") else "")
-            L.append(f"| {it.get('id')} | {it.get('severity')} | `{loc}` | {it.get('problem', '')[:160]} | {it.get('required_fix', '')[:160]} |")
+            sev = it.get("severity")
+            if it.get("anchor") == "absence":
+                sev = f"{sev} · eksik"
+                loc += " *(satır referansı: eksik olanın ait olduğu yer)*"
+            L.append(f"| {it.get('id')} | {sev} | `{loc}` | {it.get('problem', '')[:160]} | {it.get('required_fix', '')[:160]} |")
         L.append("")
     elif verdict == "APPROVE":
         L += ["Bloklayan ya da önemli madde bulunmadı.", ""]
@@ -100,12 +127,120 @@ def review_summary_markdown(*, verdict: str, issues: list[dict], pr_id: int, pr_
 def inline_comment_text(issue: dict, *, suggestion: dict | None = None) -> str:
     """Satır yorumu. `suggestion` verilirse Azure DevOps'un uygulanabilir
     ```suggestion bloğu eklenir (PR sahibine "Apply changes" butonu çıkar)."""
-    head = (f"🤖 **[{issue.get('id')}] {str(issue.get('severity', '')).upper()}** "
-            f"(pipeline inceleme katkısı, danışma)\n\n{issue.get('problem', '')}")
-    if suggestion and suggestion.get("code"):
-        return (f"{head}\n\n**Önerilen düzeltme:**\n\n"
-                f"```suggestion\n{suggestion['code']}\n```")
+    absent = issue.get("anchor") == "absence"
+    head = (f"🤖 **[{issue.get('id')}] {str(issue.get('severity', '')).upper()}"
+            f"{' — EKSİK' if absent else ''}** (pipeline inceleme katkısı, danışma)\n\n"
+            + ("_Bu satırdaki kodda hata yok — eksik olan şey buraya ait._\n\n" if absent else "")
+            + f"{issue.get('problem', '')}")
+    if suggestion and suggestion.get("code") is not None:
+        # Bos blok = "bu satirlari sil" (Azure DevOps'un Apply'i bunu destekler).
+        _c = suggestion["code"]
+        _label = "**Önerilen düzeltme** (bu satırları siler):" if not _c.strip() else "**Önerilen düzeltme:**"
+        return f"{head}\n\n{_label}\n\n```suggestion\n{_c}\n```"
     return f"{head}\n\n**Önerilen düzeltme:** {issue.get('required_fix', '') or '—'}"
+
+
+def _numbered(lines: list[str], start: int = 1) -> list[str]:
+    return [f"{i:>4}| {ln}" for i, ln in enumerate(lines, start)]
+
+
+def focused_source(new_body: str, old_body: str | None = None, *,
+                   per_file: int, context: int = FOCUS_CONTEXT_LINES) -> str:
+    """Dosyayi satir numarali metne cevirir; sigmiyorsa DEGISEN yerleri secer.
+
+    Onceki davranis dosyanin ilk `per_file` karakterini aliyordu. OrderLine.php
+    (121 KB / 3098 satir) reviewer'a %5 olarak gitti: PR'in asil dokundugu metot
+    context'e HIC girmedi, ajan da iki maddeyi `line: 0` diye isaretledi (job
+    #208). Bir PR incelemesinde onemli olan dosyanin bas tarafi degil, DEGISEN
+    tarafi — bu yuzden base surumle diff alinip degisen araliklarin etrafi
+    pencerelenir. Atlanan yerler `... N satir atlandi` diye isaretlenir ki ajan
+    gormedigi kod hakkinda madde acmasin.
+
+    Satir numaralari HER ZAMAN gercek dosyadaki numaradir (pencere ofseti degil)
+    — `anchor_issue_lines` ham govdeye bakar, ikisi ayni sayiyi gormeli.
+    Base yoksa (yeni dosya / okunamadi) bas taraf kirpilir: eski davranis.
+    """
+    lines = new_body.splitlines()
+    if len(new_body) <= per_file:
+        return "\n".join(_numbered(lines))
+
+    changed: list[tuple[int, int]] = []
+    if old_body:
+        sm = difflib.SequenceMatcher(None, old_body.splitlines(), lines, autojunk=False)
+        changed = [(j1 + 1, j2) for tag, _i1, _i2, j1, j2 in sm.get_opcodes() if tag != "equal" and j2 > j1]
+    if not changed:
+        head = new_body[:per_file]
+        n = len(head.splitlines())
+        return "\n".join(_numbered(head.splitlines())
+                          + [f"    | ... (kısaltıldı — {max(0, len(lines) - n)} satır daha var, "
+                             f"context'e girmedi; buradan sonrası hakkında madde açma)"])
+
+    for ctx in (context, context // 2, 5, 2):
+        wins: list[list[int]] = []
+        for a, b in changed:
+            lo, hi = max(1, a - ctx), min(len(lines), b + ctx)
+            if wins and lo <= wins[-1][1] + 1:
+                wins[-1][1] = max(wins[-1][1], hi)
+            else:
+                wins.append([lo, hi])
+        out, prev = [], 0
+        for lo, hi in wins:
+            if lo > prev + 1:
+                out.append(f"    | ... ({lo - prev - 1} satır atlandı — değişmedi, context'e alınmadı)")
+            out += _numbered(lines[lo - 1:hi], lo)
+            prev = hi
+        if prev < len(lines):
+            out.append(f"    | ... ({len(lines) - prev} satır atlandı — değişmedi, context'e alınmadı)")
+        text = "\n".join(out)
+        if len(text) <= per_file or ctx == 2:
+            return text
+    return text  # pragma: no cover
+
+
+def anchor_issue_lines(issues: list[dict], file_bodies: dict[str, str]) -> dict:
+    """Maddenin `line` degerini evidence.quote'un dosyadaki GERCEK satirina oturtur.
+
+    Reviewer'a dosya icerigi veriliyor ama satir numarasini kendisi sayiyor.
+    Job #208 (PR #43642): R1 "86" yerine 95, R2 "98" yerine 106 dedi — +9/+8
+    kayma. Alintilar ikisinde de HARFI HARFINE dogruydu: yani numara tahmin,
+    kanit gercek. O yuzden numarayi Python yeniden hesaplar — Katman 0, LLM
+    cagrisi yok, sadece elimizdeki dosya govdesi.
+
+    Alinti dosyada bulunamazsa numara SIFIRLANIR. Yanlis ama kesin gorunen bir
+    satir, numarasiz maddeden daha zararli: ozet tablosu okuru yanlis koda
+    yollar, satir yorumu yanlis satira dusrer.
+
+    Donen sozluk: {anchored, moved, cleared, kept} — log icin.
+    """
+    idx = body_index(file_bodies)
+    stats = {"anchored": 0, "moved": 0, "cleared": 0, "kept": 0}
+    for it in issues or []:
+        ev = it.get("evidence") or {}
+        first = next((ln for ln in (ev.get("quote") or "").splitlines() if ln.strip()), "")
+        needle = _norm_ws(_LINENO_PREFIX_RE.sub("", first))
+        body = idx.get(_key(it.get("file")))
+        try:
+            old_line = int(it.get("line") or 0)
+        except (TypeError, ValueError):
+            old_line = 0
+        if not needle or body is None:
+            stats["kept"] += 1          # dogrulayacak kanit ya da govde yok
+            continue
+        hits = [n for n, ln in enumerate(body.splitlines(), 1) if needle in _norm_ws(ln)]
+        if not hits:
+            it["line"] = 0
+            if ev:
+                ev["line"] = 0
+            stats["cleared"] += 1
+            continue
+        best = min(hits, key=lambda n: abs(n - old_line)) if old_line else hits[0]
+        it["line"] = best
+        ev["line"] = best
+        it["evidence"] = ev
+        stats["anchored"] += 1
+        if best != old_line:
+            stats["moved"] += 1
+    return stats
 
 
 def verified_suggestion(issue: dict, file_bodies: dict[str, str]) -> dict:
@@ -118,9 +253,9 @@ def verified_suggestion(issue: dict, file_bodies: dict[str, str]) -> dict:
     """
     sug = issue.get("suggestion") or {}
     code = sug.get("code")
-    if not code:
-        return {}
-    body = file_bodies.get((issue.get("file") or "").lstrip("/"))
+    if code is None:
+        return {}   # alan yok → oneri yok ("" ise SILME onerisidir, gecerli)
+    body = body_index(file_bodies).get(_key(issue.get("file")))
     if body is None:
         return {}
     lines = body.splitlines()
@@ -170,6 +305,7 @@ def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int = 12, p
     icin gerekli, cunku oneri gercek satirlarla ortusmek zorunda."""
     pr_id = pr.get("pullRequestId")
     branch = (pr.get("sourceRefName") or "").replace("refs/heads/", "")
+    base = (pr.get("targetRefName") or "").replace("refs/heads/", "")
     paths = changed_paths(client.get_pull_request_changes(repo_name, int(pr_id)))
     parts = []
     # Pipeline'daki inceleme adimiyla ayni referanslar: repoya uyan dil dosyasi
@@ -185,6 +321,9 @@ def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int = 12, p
         f"\n# PR DEĞİŞİKLİKLERİ (PR #{pr_id}, repo {repo_name}, branch {branch} — feature branch içerikleri HAZIR)",
         "⚡ Aşağıdaki dosya içerikleri context'te zaten var. get_pr_changes / browse_repo ÇAĞIRMA — "
         "doğrudan bu içerikleri iş kalemine ve kabul kriterlerine göre incele.",
+        "📍 Her satırın başındaki `NN| ` DOSYANIN PARÇASI DEĞİL, satır numarasıdır. Bir maddede "
+        "`line` verirken bu numarayı kullan; `evidence.quote` ve `suggested_code` yazarken ise "
+        "`NN| ` önekini ATMA — sadece kodun kendisini yaz.",
         f"PR başlığı: {pr.get('title', '')}",
         f"PR açıklaması: {_plain(pr.get('description', '') or '')[:1500] or '—'}",
     ]
@@ -200,8 +339,17 @@ def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int = 12, p
             # Suggestion dogrulamasi TAM icerik ister: prompt'a giren metin
             # kisaltilmis olabilir, satir numaralari kaymasin.
             bodies[p] = content
-        trunc = content[:per_file] + ("\n... (kısaltıldı)" if len(content) > per_file else "")
-        parts.append(f"\n## {p}\n```\n{trunc}\n```")
+        # Satir numarasi ONEKLE: reviewer aksi halde numarayi kendisi sayiyor ve
+        # kaydiriyor (job #208'de +8/+9). Govde `bodies`e HAM yazilir — numara
+        # yalniz prompt metnindedir, anchor/suggestion dogrulamasi ham metne bakar.
+        # Sigmayan dosyada bas taraf degil DEGISEN taraf secilir (focused_source).
+        old_body = None
+        if len(content) > per_file and base:
+            try:
+                old_body = client.get_file_content(repo_name, p, base)
+            except Exception:  # noqa: BLE001 — yeni dosya: base'te yok, kirpmaya duseriz
+                old_body = None
+        parts.append(f"\n## {p}\n```\n{focused_source(content, old_body, per_file=per_file)}\n```")
         used.append(p)
     if len(paths) > max_files:
         parts.append(f"\n(+{len(paths) - max_files} dosya daha değişti; context'e alınmadı)")
@@ -265,7 +413,11 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
     text = (result.raw or "") if result else ""
     verdict = "APPROVE" if _review_approved(text) else ("CHANGES_REQUIRED" if _review_rejected(text) else "UNKNOWN")
     issues = _parse_review_issues(text)
+    anch = anchor_issue_lines(issues, file_bodies)
     log.info(f"  Karar: {verdict} · {len(issues)} madde · {len(files)} dosya")
+    if anch["moved"] or anch["cleared"]:
+        log.info(f"  Satır düzeltme: {anch['moved']} madde doğru satıra oturtuldu, "
+                 f"{anch['cleared']} maddenin alıntısı dosyada bulunamadı (numara düşürüldü)")
 
     posted = {"pr_summary": False, "inline": 0, "wi": False, "suggestions": 0}
     summary = review_summary_markdown(verdict=verdict, issues=issues, pr_id=pid, pr_url=pr_url,
@@ -277,14 +429,28 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
             posted["pr_summary"] = True
         except Exception as e:  # noqa: BLE001
             log.warning(f"  PR özet yorumu yazılamadı: {e}")
-        for it in [i for i in issues if i.get("severity") in INLINE_SEVERITIES][:MAX_INLINE_COMMENTS]:
+        # Satir yorumu: blocker/major HER ZAMAN, arti DOGRULANMIS ONERISI olan
+        # her madde — onemi ne olursa olsun.
+        #
+        # Neden: mekanik ve satir-lokal duzeltmeler (olu kod silme, eksik log,
+        # atomik olmayan artirim) tanimi geregi `minor` siniflanir — bloklamazlar.
+        # Eski filtre yalnizca blocker/major'i satira yaziyordu, yani ONERI
+        # TASIYAN maddeler tam da hic yazilmayanlardi. Job #211'de olculdu:
+        # reviewer R5 icin gecerli bir SILME onerisi uretti (Product.php
+        # 1843-1873, kullanilmayan @deprecated metot), dogrulamadan da gecti,
+        # ama minor oldugu icin PR'a hic dusmedi → sayac yine 0. Tek tiklik bir
+        # duzeltme, ozet tablosunda bir satir olmaktan daha degerli.
+        _sugs = {id(i): verified_suggestion(i, file_bodies) for i in issues}
+        _inline = [i for i in issues
+                   if i.get("severity") in INLINE_SEVERITIES or _sugs.get(id(i))]
+        for it in _inline[:MAX_INLINE_COMMENTS]:
             try:
                 fp = it.get("file") or ""
                 fp = fp if fp.startswith("/") else "/" + fp
                 line = int(it.get("line") or 1)
                 # Suggestion yalniz dogrulandiysa yazilir; thread araligi
                 # onerilen kodun YERINI ALACAK satirlarla ortusmeli.
-                sug = verified_suggestion(it, file_bodies)
+                sug = _sugs.get(id(it)) or {}
                 if sug:
                     line, end = sug["line_start"], sug["line_end"]
                 else:
