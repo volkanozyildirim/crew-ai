@@ -465,11 +465,37 @@ def claude_cli_completion(
         cmd.extend(["--add-dir", d])
     if allowed_tools:
         cmd.extend(["--allowedTools", allowed_tools])
+    # ── Prompt oneki: kullanilmayan arac semalarini gonderme ──────────────
+    # Her `claude -p` cagrisinin onunde sabit bir [system prompt + arac semasi]
+    # blogu var ve bu blok cache'e YAZILIYOR. Olculdu (ayni onemsiz prompt,
+    # iki kez kosturulup kararli hale getirildi):
+    #     tum araclar + MCP ............ 33,031 token
+    #     --disallowedTools ............ 22,602   (-10,429)
+    #     --strict-mcp-config .......... 30,304   ( -2,727)
+    #     ikisi birlikte ............... 19,875   (-13,156, %40)
+    # 617 cagrinin 464'u (%75) hic arac kullanmadi; o cagrilarda bu sema
+    # tamamen bosa giden yazim. Ikisi de env ile geri alinabilir.
+
+    # MCP sunuculari kullanicinin kisisel eklentileri (playwright, vercel,
+    # telegram...); pipeline'in hicbir ajani cagirmiyor ve projede .mcp.json
+    # yok. Repo kesfi native Read/Grep/Glob kullanir, MCP'den etkilenmez —
+    # yani bu bayrak arac KULLANAN cagrilarda da guvenli.
+    if os.environ.get("CREW_CLI_STRICT_MCP", "1") != "0":
+        cmd.append("--strict-mcp-config")
+
     # Tool'suz (emit) mod: --add-dir YOK ama claude'un varsayilan Bash/Read'i
     # home'a (~/.crew_repos) erisip repoyu yine okuyabiliyor. --disallowedTools
     # ile kesif/dosya araclarini kapat → model context'ten cevap uretmek
     # zorunda (architect emit fazi). Sadece repo-tool'u OLMAYAN cagrilarda.
-    if _get_toolless() and not add_dirs:
+    #
+    # OTOMATIK: --add-dir verilmemisse claude'un dosya araclarinin bakabilecegi
+    # tek yer BIZIM proje dizinimiz — incelenen repo DEGIL. Yani o cagrilarda
+    # araclar hem faydasiz hem yanlis kaynaga isaret ediyor (reviewer, hakkinda
+    # karar verdigi repo yerine pipeline'in kendi kaynagini okuyabilir).
+    # Semalarini da gondermenin bir karsiligi yok. CREW_CLI_AUTO_TOOLLESS=0
+    # ile eski davranisa donulur.
+    _auto_toolless = os.environ.get("CREW_CLI_AUTO_TOOLLESS", "1") != "0"
+    if not add_dirs and (_get_toolless() or _auto_toolless):
         cmd.extend(["--disallowedTools", _TOOLLESS_DENY])
     # Repo-tool'lu cagrilar (architect/implement) otonom derin kesife dalip
     # 27-tur/$1.6 gibi sisebiliyor. Cagri-basi $ cap ile sinirla (hard limit;
