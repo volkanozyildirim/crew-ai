@@ -94,28 +94,70 @@ _acct_ctx = threading.local()
 # 'gecerli is' surec-genel tutulabilir; thread-local yalnizca paralel adimlarda
 # (step9/step10) kendi bagini set eden thread icin ince ayar olarak kalir.
 _acct_global = {"job_id": None, "step_key": "", "agent": ""}
+# AKTIF baglamlarin kaydi: {setter thread ident -> (sira, ctx, thread)}.
+# Neden gerekli: yukaridaki "worker kuyrugu seri" varsayimi `pr_review` icin
+# GECERSIZ — o is kuyruktan gecmiyor, sunucuda kendi thread'inde kosuyor, yani
+# iki review ayni anda calisabiliyor. Tek slotlu _acct_global'de once biten isin
+# clear_call_context()'i digerinin bagini da siliyordu:
+#   14:56:20 job 213 basla → global=213
+#   14:56:25 job 214 basla → global=214
+#   14:57:07 214 bitti → kayit(214) ✓, clear → global=None
+#   14:57:07 213 bitti → thread-local bos, global None → llm_calls.job_id NULL
+# Gercekten oldu: job 213'un $0.61'i sahipsiz bir satira yazildi, is basina
+# maliyet ozeti ve retro onu hic gormedi. Kayitla birlikte clear yalnizca KENDI
+# girisini dusuruyor, genel yedek kalan aktif baglamlarin en yenisine donuyor.
+_acct_active: dict = {}
+_acct_seq = 0
+_acct_lock = threading.Lock()
 _call_sink = None
 
 
+def _acct_refresh_locked() -> None:
+    """Olmus thread'lerin kaydini at; genel yedegi kalanlarin EN YENISINE cek."""
+    for k in [k for k, (_s, _c, t) in _acct_active.items() if not t.is_alive()]:
+        _acct_active.pop(k, None)
+    if _acct_active:
+        _seq, ctx, _t = max(_acct_active.values(), key=lambda v: v[0])
+        _acct_global.update(ctx)
+    else:
+        _acct_global.update(job_id=None, step_key="", agent="")
+
+
 def set_call_context(job_id=None, step_key: str = "", agent: str = "") -> None:
+    global _acct_seq
     _acct_ctx.job_id = job_id
     _acct_ctx.step_key = step_key or ""
     _acct_ctx.agent = agent or ""
-    _acct_global.update(job_id=job_id, step_key=step_key or "", agent=agent or "")
+    ctx = {"job_id": job_id, "step_key": step_key or "", "agent": agent or ""}
+    th = threading.current_thread()
+    with _acct_lock:
+        _acct_seq += 1
+        _acct_active[th.ident] = (_acct_seq, ctx, th)
+        _acct_global.update(ctx)
 
 
 def clear_call_context() -> None:
     _acct_ctx.job_id = None
     _acct_ctx.step_key = ""
     _acct_ctx.agent = ""
-    _acct_global.update(job_id=None, step_key="", agent="")
+    with _acct_lock:
+        _acct_active.pop(threading.current_thread().ident, None)
+        _acct_refresh_locked()
 
 
 def set_call_agent(agent: str) -> None:
     """Sadece agent alanini guncelle (job_id/step_key korunur). Kickoff gibi
     cok-personali adimlarda her persona icin ayri atif yapmaya yarar."""
     _acct_ctx.agent = agent or ""
-    _acct_global["agent"] = agent or ""
+    th = threading.current_thread()
+    with _acct_lock:
+        rec = _acct_active.get(th.ident)
+        if rec:
+            rec[1]["agent"] = agent or ""
+        if _acct_global.get("job_id") == (rec[1]["job_id"] if rec else object()):
+            _acct_global["agent"] = agent or ""
+        elif not _acct_active:
+            _acct_global["agent"] = agent or ""
 
 
 def _get_call_context() -> tuple:
