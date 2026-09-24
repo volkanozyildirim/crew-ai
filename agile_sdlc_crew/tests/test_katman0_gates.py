@@ -1422,6 +1422,39 @@ def test_call_context_cross_thread():
     t3 = threading.Thread(target=_w3); t3.start(); t3.join()
     check("clear sonrası başka thread de boş görür", got3["ctx"][0] is None, f"{got3}")
 
+    # EŞZAMANLI İŞ (job #213/#214 regresyonu): pr_review kuyruktan geçmiyor,
+    # kendi thread'inde koşuyor → iki review aynı anda olabiliyor. Önce biten
+    # işin clear'ı, hâlâ koşan işin bağını da siliyordu; onun LLM kaydı
+    # job_id=NULL düşüyordu ($0.61 sahipsiz kaldı).
+    ev_a_set, ev_b_done, ev_a_read = threading.Event(), threading.Event(), threading.Event()
+    res = {}
+
+    def _job_a():                     # uzun süren iş (job 213 gibi)
+        cli.set_call_context(213, "review_pr_task", "code_reviewer")
+        ev_a_set.set()
+        ev_b_done.wait(5)             # B bitip clear çağırana kadar bekle
+        # A'nın LLM çağrısı CrewAI worker thread'inde koşar → thread-local BOŞ
+        t = threading.Thread(target=lambda: res.update(a=cli._get_call_context()))
+        t.start(); t.join()
+        ev_a_read.set()
+        cli.clear_call_context()
+
+    def _job_b():                     # kısa süren iş (job 214 gibi)
+        ev_a_set.wait(5)
+        cli.set_call_context(214, "review_pr_task", "code_reviewer")
+        t = threading.Thread(target=lambda: res.update(b=cli._get_call_context()))
+        t.start(); t.join()
+        cli.clear_call_context()      # ← eskiden A'nın bağını da siliyordu
+        ev_b_done.set()
+
+    ta, tb = threading.Thread(target=_job_a), threading.Thread(target=_job_b)
+    ta.start(); tb.start(); ta.join(6); tb.join(6)
+    check("eşzamanlı: B'nin kaydı B'ye yazılır", res.get("b", (None,))[0] == 214, str(res))
+    check("eşzamanlı: B bitse de A'nın kaydı SAHİPSİZ kalmaz (job_id NULL değil)",
+          res.get("a", (None,))[0] == 213, str(res))
+    check("iki iş de bitince genel yedek boşalır", cli._get_call_context()[0] is None)
+    check("ölü thread'in bağı kayıtta kalmaz", not cli._acct_active, str(cli._acct_active))
+
     # WI yorumu: _md_to_html '###' ve '|' tablo bilmez — yorum bunları kullanmamalı
     c = _readiness_comment(48, 60, [{"topic": "T", "why_needed": "W", "question": "Q?"}],
                            stage="requirements", penalties=["AC alanı boş (−15)"])
