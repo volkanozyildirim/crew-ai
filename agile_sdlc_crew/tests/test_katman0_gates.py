@@ -2392,10 +2392,196 @@ def test_pr_review_contribution():
     check("özet: APPROVE + madde yok → 'bulunmadı'", "bulunmadı" in prv.review_summary_markdown(
         verdict="APPROVE", issues=[], pr_id=1, pr_url="u", work_item_id="1", files=1))
     check("satır yorumu: id, önem, düzeltme", "[R1] BLOCKER" in prv.inline_comment_text(issues[0]) and "guard ekle" in prv.inline_comment_text(issues[0]))
+
+    # Satır numarası yeniden oturtma (job #208 / PR #43642 regresyonu):
+    # reviewer dosyayı okuyor ama satırı KENDİSİ sayıyordu; R1 86 yerine 95,
+    # R2 98 yerine 106 dedi. Alıntılar doğruydu → numara alıntıdan hesaplanır.
+    body = "<?php\n\nclass X\n{\n    public function f()\n    {\n        $a = 1;\n        return ceil($t / 10);\n    }\n}\n"
+    anc = [{"id": "R1", "file": "app/X.php", "line": 15,
+            "evidence": {"file": "app/X.php", "line": 15, "quote": "return ceil($t / 10);"}},
+           {"id": "R2", "file": "app/X.php", "line": 0,
+            "evidence": {"file": "app/X.php", "line": 0, "quote": "   7|         $a = 1;"}},
+           {"id": "R3", "file": "app/X.php", "line": 4,
+            "evidence": {"file": "app/X.php", "line": 4, "quote": "$this->uydurma();"}},
+           {"id": "R4", "file": "app/Yok.php", "line": 9, "evidence": {}}]
+    st = prv.anchor_issue_lines(anc, {"/app/X.php": body})
+    check("satır: yanlış numara alıntıdan düzeltilir (15→8)", anc[0]["line"] == 8 and anc[0]["evidence"]["line"] == 8, str(anc[0]["line"]))
+    check("satır: line 0 da oturtulur, 'NN| ' öneki alıntıdan atılır (→7)", anc[1]["line"] == 7, str(anc[1]["line"]))
+    check("satır: alıntı dosyada yoksa numara DÜŞÜRÜLÜR (yanlış satır yazmaktansa numarasız)", anc[2]["line"] == 0)
+    check("satır: gövdesi/kanıtı olmayan madde dokunulmadan kalır", anc[3]["line"] == 9)
+    check("satır: istatistik", st == {"anchored": 2, "moved": 2, "cleared": 1, "kept": 1}, str(st))
+    check("yol anahtarı: '/app/X.php' gövdesi 'app/X.php' maddesiyle eşleşir (suggestion sessizce düşmesin)",
+          prv.body_index({"/app/X.php": "a"}) == {"app/X.php": "a"})
+    check("suggestion: baştaki slash farkına rağmen doğrulanır",
+          prv.verified_suggestion({"file": "app/X.php", "suggestion": {"code": "        $a = 2;", "line_start": 7, "line_end": 7}},
+                                  {"/app/X.php": body}).get("code") == "        $a = 2;")
+    # Büyük dosyada BAŞ taraf değil DEĞİŞEN taraf context'e girer (job #208:
+    # OrderLine.php 3098 satır → ilk %5'i gitti, PR'ın dokunduğu metot şansa kaldı).
+    big_old = "\n".join(f"satir {i}" for i in range(1, 401))
+    big_new = "\n".join(("DEGISTI" if i in (350, 351) else f"satir {i}") for i in range(1, 401))
+    foc = prv.focused_source(big_new, big_old, per_file=1000, context=3)
+    shown = {int(l.split("|", 1)[0]) for l in foc.splitlines() if not l.startswith("    |")}
+    check("odak: değişen satırlar (350-351) pencerede, baş taraf değil",
+          {350, 351} <= shown and 1 not in shown and shown == set(range(347, 355)), str(sorted(shown))[:80])
+    check("odak: satır numaraları GERÇEK dosya numarası (pencere ofseti değil)", "\n 350| DEGISTI" in foc)
+    check("odak: atlanan bölge işaretli (görülmeyen kod hakkında madde açılmasın)",
+          "satır atlandı" in foc and "346 satır atlandı" in foc, foc.splitlines()[0])
+    check("odak: dosya sığıyorsa tamamı verilir", prv.focused_source(big_new, big_old, per_file=99_000).count("\n") == 399)
+    nobase = prv.focused_source(big_new, None, per_file=300)
+    check("odak: base yoksa baş kırpma + 'devamı yok' uyarısı (eski davranış)",
+          nobase.startswith("   1| satir 1") and "context'e girmedi" in nobase)
+    from agile_sdlc_crew.flow import _parse_review_issues as _pri
+    # EKSİKLİK itirazının doğal bir satırı yoktur (job #211/R1: "cachedContent
+    # yok" itirazı `$body = [` satırına düştü → okuyucu alakasız kod gördü).
+    _abs = {"id": "R1", "severity": "major", "anchor": "absence", "file": "app/X.php", "line": 134,
+            "problem": "İstek gövdesinde cachedContent yok.", "required_fix": "Ekleyin."}
+    _txt_abs = prv.inline_comment_text(_abs)
+    check("eksiklik: yorum başlığı 'EKSİK' der ve satırın konum olduğunu söyler",
+          "MAJOR — EKSİK" in _txt_abs and "Bu satırdaki kodda hata yok" in _txt_abs, _txt_abs[:60])
+    check("kusur (defect): ek açıklama YOK, eski davranış",
+          "EKSİK" not in prv.inline_comment_text({**_abs, "anchor": "defect"}))
+    _md_abs = prv.review_summary_markdown(verdict="CHANGES_REQUIRED", issues=[_abs], pr_id=1, pr_url="u",
+                                          work_item_id="1", files=1)
+    check("eksiklik: özet tablosunda da işaretli", "major · eksik" in _md_abs and "ait olduğu yer" in _md_abs)
+    _pa = _pri('REVIEW_ISSUES_JSON:\n```json\n{"issues": ['
+               '{"file":"a.php","line":1,"severity":"major","problem":"p","required_fix":"f","anchor":"absence"},'
+               '{"file":"b.php","line":1,"severity":"major","problem":"p","required_fix":"f"},'
+               '{"file":"c.php","line":1,"severity":"major","problem":"p","required_fix":"f","anchor":"SAÇMA"}]}\n```')
+    check("parse: anchor absence/defect taşınır, bilinmeyen değer defect'e düşer",
+          [x["anchor"] for x in _pa] == ["absence", "defect", "defect"], str([x["anchor"] for x in _pa]))
+    _t2 = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/config/tasks.yaml").read_text()
+    check("talimat: anchor alanı tanımlı ve eksiklik kuralı yazılı",
+          '- "anchor": "defect" (default) or "absence"' in _t2 and "no line of its own" in _t2)
+
+    # SİLME önerisi (job #210/R4: "metodu tamamen sil"). Boş `suggested_code`
+    # eskiden "öneri yok" sayılıyordu → talimatın kendi saydığı geçerli vaka
+    # ("deleting dead code") yapısal olarak üretilemiyordu.
+    dosya = "a\nb\nc\nd\ne\n"
+    sil = {"file": "app/X.php", "suggestion": {"code": "", "line_start": 2, "line_end": 3}}
+    check("silme: boş kod + açık aralık → öneri ÜRETİLİR",
+          prv.verified_suggestion(sil, {"/app/X.php": dosya}).get("line_start") == 2)
+    check("silme: yorum metni boş ```suggestion bloğu ve 'siler' etiketi taşır",
+          "```suggestion\n\n```" in prv.inline_comment_text({"id": "R4", "severity": "major", "problem": "ölü kod"},
+                                                            suggestion={"code": "", "line_start": 2, "line_end": 3})
+          and "siler" in prv.inline_comment_text({"id": "R4", "severity": "major", "problem": "ölü kod"},
+                                                 suggestion={"code": "", "line_start": 2, "line_end": 3}))
+    check("öneri yok: alan hiç verilmemişse (None) öneri üretilmez",
+          prv.verified_suggestion({"file": "app/X.php", "suggestion": {"line_start": 2, "line_end": 3}},
+                                  {"/app/X.php": dosya}) == {})
+    check("silme: dosya dışı aralık reddedilir", prv.verified_suggestion(
+          {"file": "app/X.php", "suggestion": {"code": "", "line_start": 4, "line_end": 99}}, {"/app/X.php": dosya}) == {})
+    from agile_sdlc_crew.flow import _parse_review_issues as _pri
+    _blk = ('REVIEW_ISSUES_JSON:\n```json\n{"issues": ['
+            '{"file":"a.php","line":5,"severity":"major","problem":"ölü kod","required_fix":"sil",'
+            '"suggested_code":"","suggested_line_start":3,"suggested_line_end":9},'
+            '{"file":"b.php","line":5,"severity":"major","problem":"x","required_fix":"y","suggested_code":""}'
+            ']}\n```')
+    _iss = _pri(_blk)
+    check("parse: boş kod + AÇIK aralık → silme önerisi taşınır",
+          _iss[0]["suggestion"] == {"code": "", "line_start": 3, "line_end": 9}, str(_iss[0].get("suggestion")))
+    check("parse: boş kod ama aralık YOK → yok sayılır (kazara silme olmasın)",
+          not _iss[1].get("suggestion"), str(_iss[1].get("suggestion")))
+    _tasks = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/config/tasks.yaml").read_text()
+    _rv2 = _tasks.split("review_pr_task:")[1].split("\n  agent:")[0]
+    check("talimat: öneri artık 'usually ABSENT' değil, mekanik vakada BEKLENİYOR",
+          "usually ABSENT" not in _rv2 and "fill these\n      WHENEVER" in _rv2)
+    check("talimat: silme vakası açıkça tanımlı", "DELETION:" in _rv2 and 'EMPTY string' in _rv2)
+
+    ctx_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
+    check("context: dosyalar satır numarası önekiyle veriliyor", '{i:>4}| {ln}' in ctx_src)
+    check("context: sığmayan dosyada base sürüm çekilip diff pencerelenir",
+          "focused_source(content, old_body" in ctx_src and 'pr.get("targetRefName")' in ctx_src)
+
+    # Pipeline'ın KENDİ review adımı (step8 / _review_retry_loop) da aynı odağı
+    # kullanmalı: tek turlu çağrılarda kullanıcı mesajı cache-write fiyatından
+    # yazılıp bir daha okunmuyor (probe 2026-09-24), yani her KB doğrudan para.
+    flow_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("step8: tam dosya dalı da focused_source kullanıyor (baş kırpma yok)",
+          "_focused_source(content, base_body" in flow_src and "content[:per_file]" not in flow_src.split("if not diff_mode:")[1][:900])
+    check("step8: NN| önekinin dosyanın parçası olmadığı ajana söyleniyor",
+          flow_src.count("DOSYANIN PARÇASI DEĞİL") >= 1 and "N satır atlandı" in flow_src)
+    # NN| öneki context'e girdiği için kanıt doğrulaması onu SOYMALI; yoksa
+    # sağlam bir madde "kanıtsız" diye düşer (en pahalı hata: bir retry turu).
+    class _FakeFlow:
+        state = SimpleNamespace(repo_name="r", branch_name="b")
+        _repo_mgr = None
+        class _C:
+            def get_file_content(self, repo, f, ref):
+                return "<?php\n\nclass X\n{\n    public function f()\n    {\n        return ceil($t / 10);\n    }\n}\n"
+        _client = _C()
+    vl = AgileSDLCFlow._verify_issue_loc
+    ff = _FakeFlow()
+    check("kanıt: düz alıntı doğrulanır",
+          vl(ff, {"file": "app/X.php", "quote": "return ceil($t / 10);"}) is True)
+    check("kanıt: 'NN| ' önekli alıntı da doğrulanır (önek soyulur)",
+          vl(ff, {"file": "app/X.php", "quote": "   7|         return ceil($t / 10);"}) is True)
+    check("kanıt: uydurma alıntı yine REDDEDİLİR (soyma kapıyı açmadı)",
+          vl(ff, {"file": "app/X.php", "quote": "   7| $this->uydurma();"}) is False)
+    check("kanıt: sadece numaradan ibaret alıntı → dosya var sayılır, kanıt iddiası yok",
+          vl(ff, {"file": "app/X.php", "quote": "  42| "}) is True)
+
+    # discover_repos: aday özetleri. Çağrı başına 36.9K yazım / 7.6K okuma
+    # (sistemin en kötü oranı, adımın %85'i cache write) — tek turlu çağrıda
+    # yazılan bir daha okunmadığı için her karakter para.
+    from agile_sdlc_crew.flow import _repo_summary_slice, _wi_keywords, _compress_list_line
+    summ = ("# orkestra\n## Ozet\n- **Dil**: PHP\n\n## README\n" + ("uzun readme metni. " * 200) +
+            "\n## Domain Bilesenleri\n- **Model**: Order, OrderLine\n"
+            "## DB Tablolari & Migrationlar\n- **Tablolar**: " +
+            ", ".join(f"tablo_{i:03d}" for i in range(400)) + "\n"
+            "## Ust Seviye Dizinler\n- app/\n")
+    SEC = ("Ozet", "Domain Bilesenleri", "DB Tablolari")
+    kw = _wi_keywords("WI: tablo_399 tablosuna yeni alan eklenecek, order_line ile ilişkili")
+    check("anahtar kelime: WI metninden snake_case/camelCase çıkarılır", "tablo_399" in kw and "order_line" in kw, str(kw[:5]))
+    out = _repo_summary_slice(summ, 2500, SEC, keywords=kw)
+    check("özet: README ve dizin ağacı karara girmez (atılır)", "uzun readme" not in out and "Ust Seviye" not in out)
+    check("özet: karar kuralının andığı bölümler durur", "Domain Bilesenleri" in out and "Tablolar" in out)
+    check("özet: listenin SONUNDAKİ eşleşen tablo kurtarılır (düz kırpma atardı)",
+          "tablo_399" in out and "tablo_399" not in _repo_summary_slice(summ, 2500, SEC), out[:90])
+    check("özet: listelenmeyen tablo sayısı belirtilir (model 'liste tam' sanmasın)", "tane daha, listelenmedi" in out)
+    check("özet: cap'e uyar", len(out) <= 2600, str(len(out)))
+    check("liste sıkıştırma: kısa satıra dokunulmaz",
+          _compress_list_line("- **Model**: Order, OrderLine", {"order"}) == "- **Model**: Order, OrderLine")
+    check("liste sıkıştırma: eşleşme yoksa baş taraf + sayı",
+          "tane daha" in _compress_list_line("- **T**: " + ", ".join(f"x_{i:04d}" for i in range(300)), {"yok_boyle"}))
+    flow_src2 = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("discover_repos: kanıtlı/geçmişli repo TAM özet alır, gerisi kısa",
+          "strong.add" in flow_src2 and "keywords=_kw_dr" in flow_src2 and "CREW_DISCOVER_COMPACT" in flow_src2)
+
+    # Review turlarının NEDEN uzadığı ölçülebilir olmalı: iş başına 5.7 reviewer
+    # çağrısı ($66.49 / 24 iş) ve en yüksek c.write ortalaması (31.9K) burada.
+    check("step8: satır çapalama pipeline review'ında da çalışıyor",
+          "anchor_issue_lines as _anchor" in flow_src2 and "_pr_file_bodies" in flow_src2)
+    check("step8: itiraz kapısı sonuçları REVIEW_STATS damgasına yazılıyor",
+          "_review_stats_line" in flow_src2 and "drop_reasons" in flow_src2
+          and 'review_text[:3000] + self._review_stats_line()' in flow_src2)
+    from agile_sdlc_crew import retrospective as _retro
+    _out = ("REVIEW_DECISION: APPROVE\n2 düzeltme turu\nREVIEW_STATS: "
+            + json.dumps({"issues": 5, "blocking": 2, "dropped": 3, "rounds": 3,
+                          "drop_reasons": {"minor/öneri": 2, "kanıt doğrulanamadı": 1},
+                          "anchor_moved": 4, "anchor_cleared": 1}))
+    _m = _retro._RE_STATS.search(_out)
+    check("retro: REVIEW_STATS damgası çıktının sonundan parse edilir",
+          bool(_m) and json.loads(_m.group(1))["blocking"] == 2)
+    check("retro: damga yoksa (eski işler) sessizce atlanır, sayaç bozulmaz",
+          _retro._RE_STATS.search("REVIEW_DECISION: APPROVE\n1 düzeltme turu") is None)
+    tasks_y = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/config/tasks.yaml").read_text()
+    rv = tasks_y.split("review_pr_task:")[1].split("\n  agent:")[0]
+    check("review_pr_task: problem/required_fix TÜRKÇE yazılacak kuralı var",
+          '"required_fix" values in the JSON MUST be written in TURKISH' in rv)
+    check("review_pr_task: satırı sayma, NN| önekini oku kuralı var", "do\n      NOT count lines yourself" in rv)
     src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
     check("sınırlar: push/oy/durum yok — modülde push_file, set_work_item_state, reviewers/vote API'si geçmez",
           "push_file" not in src and "set_work_item_state" not in src and "/reviewers" not in src and '"vote"' not in src)
     check("yalnızca blocker/major satır yorumu, en çok 8", prv.INLINE_SEVERITIES == ("blocker", "major") and prv.MAX_INLINE_COMMENTS == 8)
+    # ...AMA doğrulanmış önerisi olan madde önemine bakılmaksızın satıra yazılır.
+    # Job #211: mekanik düzeltmeler tanımı gereği `minor` — eski filtre tam da
+    # ÖNERİ TAŞIYAN maddeleri eliyordu (R5 silme önerisi üretildi, doğrulandı,
+    # PR'a hiç düşmedi → sayaç yine 0).
+    _prv_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
+    check("satır yorumu: doğrulanmış önerisi olan minor da yazılır",
+          'i.get("severity") in INLINE_SEVERITIES or _sugs.get(id(i))' in _prv_src)
+    check("satır yorumu: öneri madde başına BİR kez doğrulanır (çift I/O yok)",
+          "_sugs = {id(i): verified_suggestion(i, file_bodies) for i in issues}" in _prv_src)
     for name, mod in (("retrospective", "retrospective"), ("sprint_planning", "sprint_planning"), ("daily", "daily")):
         s = (Path(__file__).resolve().parent.parent / f"src/agile_sdlc_crew/{mod}.py").read_text()
         check(f"{name}: pipeline dışı işler (pr_review) filtrelenir", "job_kind" in s)
@@ -2450,10 +2636,25 @@ def test_backlog_refinement():
     check("Bug: repro varsa eksik yok", not r["gaps"])
     r = br.assess(item(title="[Spike] Redis TTL araştırması", type="Task", acceptance="", description="<p>" + "Redis TTL davranışı nasıl? " * 6 + "</p>", sp=None), now=now)
     check("Spike: AC aranmaz, soru var; SP önerisi yok", "no_ac" not in [g["code"] for g in r["gaps"]] and r["kind"] == "spike" and r["suggest_sp"] is None, str(r["gaps"]))
-    r = br.assess(item(description="", sp=13, priority=None, title="Kısa", created=(now - timedelta(days=45)).isoformat()), now=now)
+    # Bayatlık KADEMELİ (kritik eşik aging'den okunur — env ile değişebilir):
+    # eşiğin altı 'stale' −5, eşikte/üstü 'very_stale' −15. Eşik değerini
+    # sabitlemiyoruz; sabitlersek CREW_AGING_BACKLOG_CRIT_DAYS ayarı testi kırar.
+    from agile_sdlc_crew import aging as _ag
+    crit = _ag.backlog_crit_days()
+    base_gaps = ["no_description", "too_big", "no_priority", "short_title"]
+    stale_item = dict(description="", sp=13, priority=None, title="Kısa")
+    r = br.assess(item(**stale_item, created=(now - timedelta(days=crit - 1)).isoformat()), now=now)
     codes = [g["code"] for g in r["gaps"]]
     check("açıklama yok −30, SP>8 −10, öncelik −5, başlık −5, bayat −5 → 45",
-          codes == ["no_description", "too_big", "no_priority", "short_title", "stale"] and r["score"] == 45, f"{codes} {r['score']}")
+          codes == base_gaps + ["stale"] and r["score"] == 45, f"{codes} {r['score']}")
+    r = br.assess(item(**stale_item, created=(now - timedelta(days=crit)).isoformat()), now=now)
+    codes = [g["code"] for g in r["gaps"]]
+    check(f"kritik eşikte ({crit}g) bayatlık −5 değil −15 → 35 (1 yıllık işle 31 günlük iş aynı cezayı almasın)",
+          codes == base_gaps + ["very_stale"] and r["score"] == 35, f"{codes} {r['score']}")
+    r = br.assess(item(**stale_item, created=(now - timedelta(days=crit + 400)).isoformat(),
+                       state_change=(now - timedelta(days=2)).isoformat()), now=now)
+    check("bayatlık OLUŞMA yaşını değil DURUMDA GEÇEN süreyi ölçer (sprint'e taşınan iş tazelenir)",
+          [g["code"] for g in r["gaps"]] == base_gaps and r["score"] == 50, str(r["gaps"]))
     r = br.assess(item(description="<p>Kısa bir açıklama burada.</p>"), now=now, min_desc_chars=100)
     check("kısa açıklama (20 ≤ n < eşik) −15", [g["code"] for g in r["gaps"]] == ["short_description"] and r["score"] == 85)
     check("eşik parametrik: 85 ≥ 70 hazır, 85 < 90 eksik", br.assess(item(description="<p>Kısa bir açıklama burada.</p>"), now=now)["ready"]

@@ -247,11 +247,21 @@ def _parse_review_issues(review_text: str) -> list[dict]:
     def _suggestion(it: dict) -> dict:
         """{code, line_start, line_end} — reviewer mekanik bir duzeltme verdiyse.
 
-        `code` bos/yoksa suggestion uretilmez (duz metin yoruma duseriz).
+        Alan YOKSA suggestion uretilmez (duz metin yoruma duseriz). Alan VAR ama
+        BOS ise bu bir SILME onerisidir — talimatin kendi saydigi gecerli
+        vakalardan biri ("deleting dead code"), job #210/R4 tam buydu: "metodu
+        tamamen sil". Eski kod bos string'i "oneri yok" sayiyordu, yani silme
+        onerisi hic uretilemiyordu.
+
+        Silmede satir araligi ACIKCA verilmis olmali: kazara bos gelen bir
+        `suggested_code`, itirazin kendi satirindan turetilen bir aralikla
+        birleserek yanlislikla kod sildirebilir.
         Satir araligi verilmemisse itirazin kendi satiri kullanilir.
         """
         code = it.get("suggested_code")
-        if not isinstance(code, str) or not code.strip():
+        if not isinstance(code, str):
+            return {}
+        if not code.strip() and not (it.get("suggested_line_start") and it.get("suggested_line_end")):
             return {}
         start = it.get("suggested_line_start") or it.get("line")
         end = it.get("suggested_line_end") or start
@@ -291,6 +301,13 @@ def _parse_review_issues(review_text: str) -> list[dict]:
             "severity": (str(it.get("severity") or "major")).strip().lower(),
             "problem": str(it.get("problem", "")).strip(),
             "required_fix": str(it.get("required_fix", "")).strip(),
+            # Itirazin TURU: "defect" = bu satirdaki kod yanlis. "absence" = bu
+            # satirda hata YOK, eksik olan sey buraya ait. Ikisi ayni sekilde
+            # sunulamaz: eksiklik itirazinin dogal bir satiri yoktur, model en
+            # yakin yapisal satiri (`$body = [`, `return [`) secmek zorunda
+            # kaliyor ve okuyucu alakasiz bir kod blogu goruyor (job #211/R1:
+            # "cachedContent yok" itirazi `$body = [` satirina dustu).
+            "anchor": ("absence" if str(it.get("anchor", "")).strip().lower() == "absence" else "defect"),
             # ── Kapi taksonomisi alanlari (bkz. specs/2026-07-27-...) ──
             "requirement_ids": [str(r).strip().upper() for r in req_ids if str(r).strip()],
             "evidence": _loc(it.get("evidence")),
@@ -660,6 +677,98 @@ def _norm_path(p: str) -> str:
     duzeltilmiyor, her madde gereksizce plan-level sayilip architect'e gidiyordu.
     Buyuk/kucuk harf DONUSTURULMEZ: repo yollari case-sensitive."""
     return (p or "").strip().replace("\\", "/").lstrip("/")
+
+
+def _wi_keywords(text: str, limit: int = 40) -> list[str]:
+    """WI metnindeki tanimlayici benzeri token'lar (tablo/model/alan adlari).
+
+    `_grep_symbol_evidence` ile ayni desen; burada grep yok, yalniz ozet
+    filtreleme icin kullanilir."""
+    import re as _re_kw
+    out, seen = [], set()
+    for pat, ln in ((r'\b([a-z][a-z0-9]+(?:_[a-z0-9]+){1,5})\b', 8),
+                    (r'\b([A-Za-z][a-z0-9]+(?:[A-Z][a-z0-9]+){1,4})\b', 6)):
+        for m in _re_kw.finditer(pat, text or ""):
+            w = m.group(1)
+            if len(w) >= ln and w.lower() not in seen:
+                seen.add(w.lower())
+                out.append(w.lower())
+    return out[:limit]
+
+
+def _compress_list_line(line: str, kw: set[str], keep_n: int = 20, min_len: int = 400) -> str:
+    """'- **Tablolar**: a, b, c, ... (500 ad)' gibi satirlari WI ile ESLESENlere indirger.
+
+    REPO_SUMMARY'de tablo/model listeleri TEK satirda duruyor (orkestra'da ~10K
+    karakter). Satir bazli filtre bu satiri ya tamamen alir ya atar; alirsa
+    cap'e takilip ortasindan kesilir ve aranan tablo yine kaybolur. Model'in
+    karar icin ihtiyaci olan sey listenin TAMAMI degil, "WI'nin bahsettigi
+    tablo BU repoda var mi" bilgisi — o yuzden eslesenler basa alinip gerisi
+    sayiya indirilir. Kisa satirlar ve liste olmayanlar aynen gecer.
+    """
+    if len(line) < min_len or line.count(",") < 5:
+        return line
+    pre, sep, rest = line.partition(": ")
+    if not sep:
+        pre, rest = "", line
+    items = [i.strip() for i in rest.split(",") if i.strip()]
+    hit = [i for i in items if any(k in i.lower() for k in kw)]
+    shown = hit[:keep_n] or items[:keep_n]
+    tag = " (WI ile eslesen)" if hit else ""
+    more = len(items) - len(shown)
+    return (f"{pre}{sep}" if sep else "") + ", ".join(shown) + tag + (
+        f"  … (+{more} tane daha, listelenmedi)" if more > 0 else "")
+
+
+def _repo_summary_slice(summary: str, cap: int, sections: tuple[str, ...] | None = None,
+                        keywords: tuple[str, ...] | list[str] = ()) -> str:
+    """REPO_SUMMARY.md'den karar icin gereken bolumleri kes.
+
+    `discover_repos_task` her aday icin ~10K karakterlik ozeti prompt'a
+    doldurup 25 adayla ~150KB'ye ciksiyordu: cagri basina 36.9K token YAZIM,
+    7.6K okuma (sistemin en kotu orani) ve adimin maliyetinin %85'i cache
+    write. Tek turlu cagrida kullanici mesaji cache-write fiyatindan yazilip
+    bir daha OKUNMUYOR (probe 2026-09-24), yani her karakter dogrudan para.
+
+    Iki asamali kesim:
+      1. `sections` — yalnizca karar kuralinin ADIYLA andigi bolumler kalir
+         (Domain Bilesenleri = Model listesi, DB Tablolari & Migrationlar),
+         arti kimlik icin Ozet. README ve dizin agaci bu karara girmiyor.
+      2. `keywords` — cap'e sigmiyorsa WI'da gecen tanimlayiciyla ESLESEN
+         satirlar ONE alinir. Duz bastan kirpma tam da karar veren satiri
+         atabilir: orkestra'nin tablo listesi 20K ve aranan tablo sonda
+         olabilir — yanlis repo secimi bir isin tamamini curutur (KN-15/17).
+    """
+    if not summary:
+        return ""
+    if not sections:
+        return summary[:cap]
+    head, keep, cur = [], [], None
+    for line in summary.split("\n"):
+        if line.startswith("## "):
+            cur = line[3:].strip()
+        elif line.startswith("# ") and cur is None:
+            head.append(line)
+            continue
+        if cur is None:
+            continue
+        if any(cur.lower().startswith(w.lower()) for w in sections):
+            keep.append(line)
+    if not keep:
+        return summary[:cap]
+    body = "\n".join(head + keep).strip()
+    if len(body) <= cap or not keywords:
+        return body[:cap]
+    kw = {k.lower() for k in keywords if k}
+    keep = [_compress_list_line(l, kw) for l in keep]
+    body = "\n".join(head + keep).strip()
+    if len(body) <= cap:
+        return body
+    # Hala sigmiyor: eslesen satirlar ONE, gerisi arkaya.
+    hit = [l for l in keep if l.strip() and any(k in l.lower() for k in kw)]
+    rest = [l for l in keep if l not in hit]
+    txt = "\n".join(head + hit + rest).strip()
+    return txt[:cap] + ("\n... (kısaltıldı)" if len(txt) > cap else "")
 
 
 def _paths_in_text(text: str) -> set[str]:
@@ -1065,6 +1174,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
     # Per-item review retry sayaci (teshis amacli — global CREW_REVIEW_MAX_RETRIES
     # kararini ETKILEMEZ, sadece "hangi madde kac turdur acik" gostermek icin).
     _review_item_attempts: dict = PrivateAttr(default_factory=dict)
+    _pr_file_bodies: dict = PrivateAttr(default_factory=dict)
+    _review_stats: dict = PrivateAttr(default_factory=dict)
     # Onceki turun acik id kumesi — ilerleme kontrolu (ayni kume tekrar gelirse
     # CREW_REVIEW_MAX_RETRIES dolmadan erken durdur).
     _review_prev_open_ids: Any = PrivateAttr(default=None)
@@ -1766,6 +1877,32 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         # Aday'lar icin tam summary'leri toplayalim (architect'in karar
         # vermesi icin model + tablo + migration listesi onemli)
+        # ── Kademeli derinlik ────────────────────────────────────────────
+        # TAM ozet yalnizca GERCEK adaylara: birebir kod kaniti olan ya da
+        # benzer gecmis islerde cikan repolar. Gerisine karar kuralinin adiyla
+        # andigi bolumler (Ozet + Domain Bilesenleri + DB Tablolari). Boylece
+        # kanit nerede ise derinlik orada; geri kalan aday listesi ucuzluyor.
+        import os as _os_dr
+        from agile_sdlc_crew import pipeline_config as _pc_dr
+        def _knob(name, default):
+            try:
+                v = _pc_dr.get(name)
+                return int(v) if v not in (None, "") else default
+            except Exception:
+                return default
+        full_cap = _knob("CREW_DISCOVER_FULL_CHARS", 10000)
+        compact_cap = _knob("CREW_DISCOVER_COMPACT_CHARS", 2500)
+        compact_on = str(_os_dr.environ.get("CREW_DISCOVER_COMPACT", "1")) != "0"
+        _kw_dr = _wi_keywords(
+            f"{self.state.requirements_text} {self.state.wi_title or ''}")
+        strong = set()
+        for r, e in (evidence or {}).items():
+            if e.get("exclusive") or e.get("symbols"):
+                strong.add(r)
+        for h in (repo_history or [])[:3]:
+            if h.get("repo"):
+                strong.add(h["repo"])
+
         adaylar = []
         for rname in candidate_repos:
             s = self._repo_mgr.get_repo_summary(rname)
@@ -1778,7 +1915,20 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 if line.startswith("## Ust Seviye Dizinler"):
                     break
                 short_lines.append(line)
-            adaylar.append((rname, "\n".join(short_lines).strip()))
+            body = "\n".join(short_lines).strip()
+            if compact_on and rname not in strong:
+                body = _repo_summary_slice(
+                    body, compact_cap,
+                    ("Ozet", "Domain Bilesenleri", "DB Tablolari"),
+                    keywords=_kw_dr,
+                )
+            else:
+                body = body[:full_cap]
+            adaylar.append((rname, body))
+        if compact_on:
+            _log(f"  Aday derinligi: {len(strong & set(candidate_repos))} tam / "
+                 f"{len(adaylar) - len(strong & set(candidate_repos))} ozet "
+                 f"(toplam {sum(len(b) for _, b in adaylar):,} char)")
 
         if not adaylar:
             self._step_done("discover_repos_task", "Atlandı — summary'ler bos")
@@ -1793,7 +1943,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             # Her aday icin ~10K char — buyuk monolithlerde (orkestra ~14KB)
             # tablo + model listesi cikti, LLM'in kanıt görmesi icin gerekli.
             # 20 aday × 10K = ~200KB; Claude Sonnet/Opus icin sorunsuz.
-            prompt_user += f"\n=================== {name} ===================\n{summary[:10000]}\n"
+            prompt_user += f"\n=================== {name} ===================\n{summary}\n"
 
         # Birebir kod kaniti — isim benzerliginden GUCLU sinyal.
         evidence_block = ""
@@ -2119,6 +2269,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         degisen bloklari icerir: hem kucuk hem tam isabetli. Diff BOS cikarsa bu
         da bilgidir — duzeltme gercekten uygulanmamis demektir."""
         import difflib as _difflib
+        from agile_sdlc_crew.pr_review import focused_source as _focused_source
         repo = self.state.repo_name
         branch = self.state.branch_name
         if not repo or not branch:
@@ -2173,15 +2324,39 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 "⚡ Aşağıdaki dosya içerikleri context'te zaten var. get_pr_changes / browse_repo "
                 "ÇAĞIRMA — doğrudan bu içerikleri WI gereksinimlerine ve kabul kriterlerine göre incele. "
                 "Sadece context'te OLMAYAN bir dosyaya ihtiyaç duyarsan tool kullan.",
+                "📍 Satır başındaki `NN| ` DOSYANIN PARÇASI DEĞİL, satır numarasıdır. Bir maddede "
+                "`line` verirken bu numarayı kullan, sayma; `evidence.quote` / `suggested_code` "
+                "yazarken `NN| ` önekini ATMA — sadece kodun kendisini yaz. `... N satır atlandı` "
+                "yazan yerler değişmemiş bölgelerdir, context'te yoklar: oraları hakkında madde açma.",
             ]
         n = 0
         for fp in files[:max_files]:
             content = _head(fp)
             if not content or not content.strip():
                 continue
+            # HAM govde sakla: satir capalama ve kanit dogrulamasi prompt
+            # metnine degil gercek dosyaya bakmali (prompt'ta NN| oneki var).
+            try:
+                self._pr_file_bodies[fp] = content
+            except Exception:
+                pass
             if not diff_mode:
-                trunc = content[:per_file] + ("\n... (kısaltıldı)" if len(content) > per_file else "")
-                parts.append(f"\n## {fp}\n```\n{trunc}\n```")
+                # Bas kirpma DEGIL, DEGISEN yerin etrafi (pr_review.focused_source).
+                # Eski davranis dosyayi bastan kesiyordu: buyuk dosyada PR'in
+                # dokundugu blok context'e girmiyordu ve reviewer satir numarasini
+                # kendisi sayip kaydiriyordu (job #208: +8/+9). Satir numarasi
+                # onekli verilir; olculen: %58-62 daha kucuk context, degisen
+                # kodun tamami GARANTI gorunur.
+                base_body = None
+                if len(content) > per_file and base_ref:
+                    try:
+                        base_body = self._client.get_file_content(repo, fp, base_ref)
+                    except Exception:  # noqa: BLE001 — yeni dosya: base'te yok
+                        base_body = None
+                parts.append(
+                    f"\n## {fp}\n```\n"
+                    f"{_focused_source(content, base_body, per_file=per_file)}\n```"
+                )
                 n += 1
                 continue
             # ── diff_mode: base ile karsilastir ──
@@ -2809,6 +2984,24 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  Tazelik kontrolü hatası (atlanıyor): {e}")
             return False
 
+    def _review_stats_line(self) -> str:
+        """Adim ciktisina eklenen tek satirlik olcum damgasi.
+
+        `review_pr_task` is basina 5.7 reviewer cagrisi yapiyor ($66.49 / 24 is,
+        adimlar icinde en yuksek c.write ortalamasi: 31.9K). Turlarin NEDEN
+        uzadigi (kac madde dusuruldu, hangi sebeple, kac satir capalandi) su an
+        hicbir yerde kalmiyor — log donuyor, `job_steps.output` yalniz duz metin.
+        Olcum olmadan buradaki her kisaltma tahmin olur; bu satir retrospektifin
+        ve maliyet analizinin okuyabilecegi tek makine-okunur iz."""
+        st = dict(self._review_stats or {})
+        if not st:
+            return ""
+        st["rounds"] = int(getattr(self, "_review_attempt", 0)) + 1
+        try:
+            return "\nREVIEW_STATS: " + _json.dumps(st, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return ""
+
     def _verify_issue_loc(self, loc: dict) -> bool:
         """Review itirazinin gosterdigi {file, line, quote} gercekten var mi?
 
@@ -2849,6 +3042,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
         quote = (loc.get("quote") or "").strip()
         if not quote:
             return True  # dosya var, alinti iddiasi yok
+
+        # Context artik dosyalari "  42| kod" diye satir numarasi onekiyle
+        # veriyor (bkz. _prefetch_pr_changes_context). Reviewer oneki alintiya
+        # da yazarsa kanit dosyada BULUNAMAZ ve saglam bir madde "kanitsiz"
+        # diye dusurulur — bu yuzden onek alintidan soyulur. Yalniz ALINTIDAN:
+        # dosya iceriginde gercek bir "42| " dizisi varsa ona dokunmayiz.
+        quote = _re_vl.sub(r"(?m)^\s*\d+\s*\|\s?", "", quote).strip()
+        if not quote:
+            return True
 
         def _norm(s: str) -> str:
             return _re_vl.sub(r"\s+", " ", s).strip().lower()
@@ -3504,7 +3706,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             + f"Son review metni (düzeltme öncesi):\n{(self.state.review_text or remaining_summary or '')[:1800]}"
         )
         self.state.review_text = _approval
-        self._step_done("review_pr_task", _approval[:3000])
+        self._step_done("review_pr_task", _approval[:3000] + self._review_stats_line())
         _add_wi_comment(self._client, self.state.work_item_id,
             f"## ✅ Kod İnceleme (Düzeltme Sonrası Onay)\n\n"
             f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
@@ -6403,6 +6605,20 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew import pipeline_config as _pc_sr
         if _pc_sr.get("CREW_STRUCTURED_REVIEW"):
             self.state.review_issues = _parse_review_issues(review_text)
+            # Satir numarasini KANITTAN yeniden hesapla: reviewer'a numarali
+            # context veriyoruz ama yine de sayabiliyor (job #208: +8/+9 kayma).
+            # Yanlis satir hem WI yorumunu yaniltiyor hem duzeltmeyi yanlis
+            # yere yolluyor — ikisi de bir retry turu demek.
+            try:
+                from agile_sdlc_crew.pr_review import anchor_issue_lines as _anchor
+                _st = _anchor(self.state.review_issues, self._pr_file_bodies)
+                self._review_stats.update(
+                    {f"anchor_{k}": v for k, v in _st.items()})
+                if _st["moved"] or _st["cleared"]:
+                    _log(f"  Satır düzeltme: {_st['moved']} madde doğru satıra oturtuldu, "
+                         f"{_st['cleared']} maddenin alıntısı dosyada yok (numara düşürüldü)")
+            except Exception as _e_anc:  # noqa: BLE001
+                _log(f"  Satır çapalama atlandı: {_e_anc}")
         else:
             self.state.review_issues = []
 
@@ -6427,6 +6643,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
             )
             _log(f"  🔎 İtiraz kapısı: {len(_blocking)} bloklayıcı, "
                  f"{len(_demoted)} düşürüldü (gereksinim id kümesi: {len(_valid_ids)})")
+            _reasons: dict = {}
+            for _d in _demoted:
+                _r = str(_d.get("demote_reason", "?")).split(" (")[0]
+                _reasons[_r] = _reasons.get(_r, 0) + 1
+            self._review_stats.update({
+                "issues": len(self.state.review_issues),
+                "blocking": len(_blocking), "dropped": len(_demoted),
+                "drop_reasons": _reasons,
+            })
             # Dusurulenler kaybolmaz: bloklamaz ama PR'a yorum olarak gider.
             for _d in _demoted:
                 _d["status"] = "closed"
@@ -6499,7 +6724,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._review_retry_loop()
             return  # review_retry_loop icerisinde step_done cagirilir
 
-        self._step_done("review_pr_task", review_text[:3000])
+        self._step_done("review_pr_task", review_text[:3000] + self._review_stats_line())
         _log(f"  Kod inceleme tamamlandi")
         _add_wi_comment(self._client, self.state.work_item_id,
             f"## Kod Inceleme\n\n"

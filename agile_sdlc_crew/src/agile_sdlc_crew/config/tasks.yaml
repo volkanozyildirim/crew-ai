@@ -831,6 +831,7 @@ review_pr_task:
       "file": "path/to/file.ext",
       "line": 42,
       "severity": "blocker",
+      "anchor": "defect",
       "problem": "...",
       "required_fix": "...",
       "requirement_ids": ["AC1", "FR2"],
@@ -846,6 +847,15 @@ review_pr_task:
     field — the pipeline assigns ids. Verdict is CHANGES_REQUIRED only if at least
     one blocker/major issue exists.)
 
+    LANGUAGE — the narrative sections above (Acceptance Criteria Check, Business
+    Alignment, Code Quality, Unrelated Changes, Summary) and the "problem" /
+    "required_fix" values in the JSON MUST be written in TURKISH: they are posted
+    verbatim as PR and work item comments that a Turkish-speaking developer reads.
+    Keep in English only the machine-read tokens and the field names themselves:
+    the "Verdict:" word, MET/UNMET, severity values, REVIEW_ISSUES_JSON, the JSON
+    keys and REVIEW_DECISION. Code identifiers, file paths and quotes stay as they
+    are in the source.
+
     FIELD RULES — the pipeline verifies these mechanically. An issue that fails
     verification does NOT block the PR; it is posted as a non-blocking comment.
     So fill them accurately or your objection will be ignored:
@@ -854,28 +864,52 @@ review_pr_task:
       violates. Use ONLY ids that actually exist in the requirements. An issue
       with no requirement id is treated as a preference, not a defect. Do NOT
       invent ids to make an issue block.
+    - "line" / "evidence.line": the line number in the file. When the context
+      shows files with an `NN| ` prefix, that NN is the line number — read it, do
+      NOT count lines yourself (counting drifts by several lines and sends the
+      reader to the wrong code). The `NN| ` prefix is NOT part of the file: never
+      include it in "quote" or "suggested_code".
+    - "anchor": "defect" (default) or "absence". Use "defect" when the quoted line
+      is ITSELF wrong — a bug, a dead method, a silent catch, a wrong order. Use
+      "absence" when your objection is that something is MISSING and therefore has
+      no line of its own: a requirement not implemented, a field never read, a
+      check never performed. For "absence", quote the nearest line where the
+      missing thing BELONGS (the request body it should be added to, the return
+      array it should appear in) — the pipeline then labels the comment so the
+      reader knows that line is a location, not a defect. Getting this wrong makes
+      a correct finding look like it was posted on unrelated code.
     - "evidence": REQUIRED. The exact file/line/quote showing the problem. The
-      pipeline reads the file and checks the quote is really there. Copy the
-      source text verbatim — do not paraphrase.
+      pipeline reads the file and checks the quote is really there, and re-anchors
+      "line" to wherever that quote actually sits — so an exact quote fixes a
+      wrong line number, while a paraphrase loses the line number entirely. Copy
+      the source text verbatim — do not paraphrase.
     - "precedent": REQUIRED ONLY IF you claim the code violates a project
       convention ("should use X", "the standard here is Y"). Point at an
       existing place in the repo that demonstrates that convention. The
       pipeline verifies it. If you cannot find such a place, the convention
       does not exist — drop the objection.
-    - "suggested_code" / "suggested_line_start" / "suggested_line_end": OPTIONAL and
-      usually ABSENT. Fill them ONLY when the fix is mechanical and line-local —
-      something you can express as the literal replacement text for a short line
-      range in ONE file (rename, missing null check, `==` → `===`, deleting dead
-      code, adding a type hint). The reviewer UI turns this into a one-click
-      "Apply changes" button, so a wrong suggestion gets committed silently.
-      Leave it out when the fix is structural ("also update the caller", "move
-      this to a service", "add a test"), spans files, or needs a human decision.
-      When present: `suggested_code` is the FULL replacement for
-      lines [start..end] of "file" (correct indentation, no diff markers, no
-      fences), and the range must cover exactly the lines being replaced. The
-      pipeline re-reads the file and drops the suggestion if the range does not
-      line up — a dropped suggestion falls back to prose, so an inaccurate one
-      costs you the suggestion, not the finding.
+    - "suggested_code" / "suggested_line_start" / "suggested_line_end": fill these
+      WHENEVER the fix is mechanical and line-local — something expressible as the
+      literal replacement text for a short line range in ONE file. Typical cases,
+      all of which you SHOULD suggest: a rename, a missing null check, `==` → `===`,
+      deleting dead code, adding a type hint, a wrong constant. The reviewer UI
+      turns it into a one-click "Apply changes" button, which is the difference
+      between a comment the developer must re-type and a fix they accept in a
+      second. Being accurate costs you nothing extra: the pipeline re-reads the
+      file and silently drops a suggestion whose range does not line up, and the
+      finding survives as prose — so an inaccurate suggestion costs you the
+      suggestion, never the finding.
+      DELETION: to propose removing lines, set `suggested_code` to an EMPTY string
+      ("") and give the exact `suggested_line_start`/`suggested_line_end` of the
+      block to delete (for a method, include its docblock). An empty string with
+      no explicit range is ignored.
+      Leave all three OUT when the fix is structural ("also update the caller",
+      "move this to a service", "add a test"), spans files, or needs a human
+      decision — there a suggestion would be wrong, not merely incomplete.
+      When present: `suggested_code` is the FULL replacement for lines
+      [start..end] of "file" (correct indentation, no diff markers, no fences, no
+      `NN| ` line-number prefixes), and the range must cover exactly the lines
+      being replaced.
     - "fix_targets": which file(s) must actually change to close this issue.
       This is often NOT the file where you observed the problem. Example: if a
       new class is never called, the fix belongs in the existing caller, so
