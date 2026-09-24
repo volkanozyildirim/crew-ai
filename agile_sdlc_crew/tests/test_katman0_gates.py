@@ -2595,6 +2595,58 @@ def test_pr_review_contribution():
 
 # ── 39. Backlog refinement — Definition of Ready skoru, sorgu, eylemler, sınırlar ─
 
+def test_cli_prompt_overhead():
+    print("\n[45] claude -p prompt öneki — kullanılmayan araç şemaları gönderilmesin")
+    import os as _os_cpo
+    from agile_sdlc_crew.tools import claude_cli_llm as _cli
+
+    seen = {}
+
+    def _fake(cmd, env, timeout_s, meta=None, idle_s=0):
+        seen["cmd"] = list(cmd)
+        if meta is not None:
+            meta.update({"turns": 1, "cost_usd": 0.0})
+        return "OK"
+
+    _orig = _cli._run_streaming
+    _cli._run_streaming = _fake
+    _saved = {k: _os_cpo.environ.get(k) for k in ("CREW_CLI_STRICT_MCP", "CREW_CLI_AUTO_TOOLLESS")}
+    try:
+        # (a) repo aracı YOK → şemalar gönderilmesin
+        _cli.clear_repo_ctx(); _cli.set_toolless(False)
+        _os_cpo.environ.pop("CREW_CLI_STRICT_MCP", None); _os_cpo.environ.pop("CREW_CLI_AUTO_TOOLLESS", None)
+        _cli.claude_cli_completion("x", model="sonnet", system="s")
+        c = seen["cmd"]
+        check("--add-dir yokken MCP sunucuları atlanır", "--strict-mcp-config" in c, " ".join(c[-6:]))
+        check("--add-dir yokken dosya/exec araçları kapatılır (şema da gitmez)",
+              "--disallowedTools" in c and _cli._TOOLLESS_DENY in c)
+        # (b) repo aracı VAR → araçlar korunur, yalnız MCP atlanır
+        _cli.set_repo_ctx(["/tmp/repo"], "Read,Grep,Glob,LS")
+        _cli.claude_cli_completion("x", model="sonnet", system="s")
+        c = seen["cmd"]
+        check("--add-dir varken keşif araçları KORUNUR (auto-toolless tetiklenmez)",
+              "--add-dir" in c and "--allowedTools" in c and "--disallowedTools" not in c, " ".join(c[-8:]))
+        check("--add-dir varken de MCP atlanır (keşif native araçları kullanır)", "--strict-mcp-config" in c)
+        _cli.clear_repo_ctx()
+        # (c) env ile geri alınabilir
+        _os_cpo.environ["CREW_CLI_STRICT_MCP"] = "0"; _os_cpo.environ["CREW_CLI_AUTO_TOOLLESS"] = "0"
+        _cli.claude_cli_completion("x", model="sonnet", system="s")
+        c = seen["cmd"]
+        check("geri alma: iki env=0 → eski davranış (bayrak yok)",
+              "--strict-mcp-config" not in c and "--disallowedTools" not in c)
+        # (d) açık set_toolless env'den bağımsız çalışır
+        _cli.set_toolless(True)
+        _cli.claude_cli_completion("x", model="sonnet", system="s")
+        check("açık set_toolless(True), CREW_CLI_AUTO_TOOLLESS=0 iken de araçları kapatır",
+              "--disallowedTools" in seen["cmd"])
+        _cli.set_toolless(False)
+    finally:
+        _cli._run_streaming = _orig
+        for k, v in _saved.items():
+            if v is None: _os_cpo.environ.pop(k, None)
+            else: _os_cpo.environ[k] = v
+
+
 def test_backlog_refinement():
     print("\n[39] Backlog refinement — DoR skoru, WIQL, SP önerisi, yorum/etiket, soru parse, knob'lar")
     from datetime import datetime, timezone, timedelta
@@ -3059,7 +3111,8 @@ def main():
               test_cost_analytics,
               test_cheap_phase_split,
               test_findings_reuse,
-              test_prompt_prefix_order):
+              test_prompt_prefix_order,
+              test_cli_prompt_overhead):
         try:
             t()
         except Exception as e:
