@@ -2628,6 +2628,56 @@ def test_pr_review_contribution():
 
 # ── 39. Backlog refinement — Definition of Ready skoru, sorgu, eylemler, sınırlar ─
 
+def test_wi_comments_context():
+    print("\n[46] WI yorumları — insan yönlendirmesi context'e girsin")
+    from agile_sdlc_crew.flow import wi_comments_block, AgileSDLCFlow
+    from agile_sdlc_crew import pipeline_config as _pc_wc
+
+    cms = [  # API en yeniyi ÖNCE döndürür
+        {"tarih": "2026-09-24T07:39", "yazar": "Hasan S", "metin": "Stage testleri ok"},
+        {"tarih": "2026-09-22T13:44", "yazar": "Büşra A", "metin": "@Osman&nbsp;ÇEVİK dahil edebiliriz"},
+        {"tarih": "2026-09-22T13:38", "yazar": "Osman Ç", "metin": "<div>Dalli için de geçerli mi?</div>"},
+        {"tarih": "2026-09-09T11:56", "yazar": "Volkan Ö",
+         "metin": "ℹ️ Hazırlık Skoru 5/100\n\n---\n*Tempo — Hazırlık Kapısı*"},
+        {"tarih": "2026-09-08T10:00", "yazar": "X", "metin": "   "},
+    ]
+    blk, n = wi_comments_block(cms, cap=4000)
+    check("bot yorumu ayıklanır (kendi sorumuzu cevap sanmayalım)", "Hazırlık Skoru" not in blk)
+    check("boş yorum atlanır", blk.count("- [") == 3, blk)
+    check("KRONOLOJİK sıra (kapsam kararı sorunun ardından gelmeli)",
+          blk.index("Dalli için de geçerli mi") < blk.index("dahil edebiliriz"), blk[:200])
+    check("HTML ve &nbsp; temizlenir", "<div>" not in blk and "&nbsp;" not in blk)
+    check("uzunluk döner (hazırlık kapısının içerik sayacına eklenir)",
+          n > 50 and n == sum(len(l) for l in blk.split("\n") if l.startswith("- [")), str(n))
+    check("başlık ajana 'gereksinim kaynağı say' der", "gereksinim kaynağı say" in blk)
+    blk2, _ = wi_comments_block(cms, cap=60)
+    check("cap aşılınca kalan sayısı belirtilir", "yorum daha, yer kalmadı" in blk2, blk2[-120:])
+    check("yorum yoksa boş döner", wi_comments_block([]) == ("", 0)
+          and wi_comments_block([{"metin": "*Tempo — bot*"}]) == ("", 0))
+
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("step1: yorumlar ctx'e VE içerik uzunluğuna eklenir",
+          "wi_content_length += _blen" in src and "self.state.wi_comments_text = _blk" in src)
+    check("knob'a bağlı (CREW_WI_COMMENTS)", '_pc_wc.get("CREW_WI_COMMENTS")' in src)
+    check("pipeline_config'de kayıtlı, varsayılan açık", _pc_wc.get("CREW_WI_COMMENTS") is True)
+
+    # Önek kararlılığı: yorumlar is-degismezi → parts'a girer, tail'e DEĞİL
+    st = SimpleNamespace(work_item_id="1", requirements_text="", kickoff_text="", acceptance_criteria=[],
+                         plan=None, branch_name="", all_pushes=[], pr_id="", pr_url="", repo_name="",
+                         review_text="", test_text="", uat_text="", flow_kind="", po_text="",
+                         wi_comments_text="\n\n# İŞ KALEMİ YORUMLARI (insan — kronolojik)\n- [t] a: b")
+    fake = SimpleNamespace(state=st, _vector_store=None, _forward_text=lambda k, t, c: t[:c])
+    a = AgileSDLCFlow._build_step_context(fake, "technical_design_task")
+    b = AgileSDLCFlow._build_step_context(fake, "review_pr_task")
+    check("yorumlar karar veren adımlara gider", "İŞ KALEMİ YORUMLARI" in a and "İŞ KALEMİ YORUMLARI" in b)
+    check("BA adımına tekrar enjekte edilmez (ctx'te zaten var)",
+          "İŞ KALEMİ YORUMLARI" not in AgileSDLCFlow._build_step_context(fake, "requirements_analysis_task"))
+    import os as _os_pfx
+    pre = len(_os_pfx.path.commonprefix([a, b]))
+    check("ortak önek yorumları KAPSAR (parts'ta, prefix bozulmuyor)",
+          pre > a.index("İŞ KALEMİ YORUMLARI"), f"ortak {pre}")
+
+
 def test_cli_prompt_overhead():
     print("\n[45] claude -p prompt öneki — kullanılmayan araç şemaları gönderilmesin")
     import os as _os_cpo
@@ -3145,7 +3195,8 @@ def main():
               test_cheap_phase_split,
               test_findings_reuse,
               test_prompt_prefix_order,
-              test_cli_prompt_overhead):
+              test_cli_prompt_overhead,
+              test_wi_comments_context):
         try:
             t()
         except Exception as e:
