@@ -308,6 +308,13 @@ SCHEMA: list[dict] = [
         "desc": "Sözleşme kapısı bir dosyayı reddettiğinde dosyayı sessizce atlamak yerine developer'a TEK düzeltme çağrısı yap (kapının somut bulgusuyla: satır, metot, parametre sayısı). Job #186'da bulgu yalnızca WI yorumuna yazıldı, dosya atlandı, 1/2 push → %70 eşiği → iş $4.89'da öldü; ~$0.3'lük tek çağrı kurtarırdı. Yalnızca kapı reddettiğinde ve tek kez koşar, bütçe zarfına dahildir. Kapalıysa eski davranış (atla, WI'ya yaz).",
     },
     {
+        "key": "CREW_WI_COMMENTS",
+        "label": "WI Yorumlarını Oku (insan yönlendirmesi)",
+        "type": "bool",
+        "default": True,
+        "desc": "Pipeline WI'ı bugüne kadar yalnızca alanlardan okuyordu (Başlık/Açıklama/Kabul Kriterleri); yorumlar Azure'da AYRI bir endpoint ve hiç çağrılmıyordu. Oysa ekip eksikleri çoğunlukla yorumda cevaplıyor. Ölçüldü: WI #73061 hazırlık kapısından 5/100 ile döndü, ardından 11 insan yorumu tam da eksik kriterleri yazdı ('noktanın lokasyonu shipment_cod_allowed'da değilse kapıda ödeme gösterilmeyecek', 'evet, tüm kargolar için geçerli'), iş 10 gün sonra yeniden koşturuldu ve YİNE 5/100 verdi; WI #73732'de çalışan bir curl komutu ve 'Dalli'yi de dahil edebiliriz' kapsam kararı aynı şekilde görülmedi. Açıkken bot olmayan yorumlar kronolojik olarak BA context'ine ve karar veren adımlara (kickoff, teknik tasarım, implement, review, test, UAT) girer; hazırlık kapısının içerik uzunluğuna da sayılır. Kapatmak eski davranışa döner.",
+    },
+    {
         "key": "CREW_READINESS_GATE",
         "label": "Hazırlık Kapısı (WI detay yeterliliği)",
         "type": "bool",

@@ -771,6 +771,57 @@ def _repo_summary_slice(summary: str, cap: int, sections: tuple[str, ...] | None
     return txt[:cap] + ("\n... (kısaltıldı)" if len(txt) > cap else "")
 
 
+def wi_comments_block(comments: list[dict], cap: int = 4000) -> tuple[str, int]:
+    """WI'daki INSAN yorumlarindan context blogu. Doner: (blok, duz_metin_uzunlugu).
+
+    Neden gerekli: pipeline WI'i yalniz `fields`ten okuyordu (Title/Description/
+    AcceptanceCriteria). Yorumlar Azure'da AYRI bir endpoint ve flow oraya hic
+    gitmiyordu — oysa ekip eksikleri yorumda cevapliyor. Olculen (2026-09-28):
+    WI #73061 hazirlik kapisindan 5/100 ile dondu, ardindan 11 insan yorumu
+    tam da eksik kriterleri yazdi ("noktanin lokasyonu shipment_cod_allowed'da
+    degilse kapida odeme gosterilmeyecek", "evet tum kargolar icin gecerli"),
+    is 10 gun sonra yeniden kosturuldu ve YINE 5/100 verdi. WI #73732'de
+    calisan bir curl komutu ve kapsam karari ("Dalli'yi de dahil edebiliriz")
+    ayni sekilde gorulmedi. Yani `needs_info` dongusu kapanmiyordu.
+
+    Kronolojik sira korunur: kapsam kararlari birbirinin uzerine biniyor
+    ("... gecerli mi?" → "evet, tum kargolar icin"), ters cevrilirse anlam
+    kayboluyor. Bot yorumlari `is_bot_comment` ile ayiklanir — kendi sordugumuz
+    sorulari kendi cevabimiz sanmayalim.
+    """
+    import re as _re_wc
+    rows = []
+    for c in comments or []:
+        body = (c or {}).get("metin") or (c or {}).get("text") or ""
+        if not body or is_bot_comment(body):
+            continue
+        txt = _re_wc.sub(r"<[^>]+>", " ", body)
+        txt = txt.replace("&nbsp;", " ").replace("&#128522;", "")
+        txt = _re_wc.sub(r"\s+", " ", txt).strip()
+        if not txt:
+            continue
+        rows.append((str((c or {}).get("tarih", ""))[:16], str((c or {}).get("yazar", "") or "?"), txt))
+    if not rows:
+        return "", 0
+    rows.reverse()   # API en yeniyi once dondurur → kronolojiye cevir
+    lines, total = [], 0
+    for tarih, yazar, txt in rows:
+        line = f"- [{tarih}] {yazar}: {txt}"
+        if total + len(line) > cap:
+            lines.append(f"- … ({len(rows) - len(lines)} yorum daha, yer kalmadı)")
+            break
+        lines.append(line)
+        total += len(line)
+    block = (
+        "\n\n# İŞ KALEMİ YORUMLARI (insan — kronolojik)\n"
+        "Bunlar ekibin WI üzerinde yazdığı yorumlar. Açıklama/kabul kriteri alanında "
+        "OLMAYAN bilgi burada olabilir: eksik detayın cevabı, kapsam kararı, örnek "
+        "istek/endpoint, test sonucu. Bunları da gereksinim kaynağı say.\n"
+        + "\n".join(lines)
+    )
+    return block, total
+
+
 def _paths_in_text(text: str) -> set[str]:
     """Metinde gecen dosya-yolu benzeri token'lari cikarir.
 
@@ -1103,6 +1154,7 @@ class PipelineState(BaseModel):
     # Set from DB row (jobs.dry_run) or env CREW_DRY_RUN in initialize().
     dry_run: bool = False
     requirements_text: str = ""
+    wi_comments_text: str = ""   # WI'daki INSAN yorumlari (bot ayiklanmis)
     repo_name: str = ""
     plan: dict = Field(default_factory=dict)
     known_repos: list[str] = Field(default_factory=list)
@@ -1404,6 +1456,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     parts.append("\n" + _g)
             except Exception:
                 pass
+        # WI yorumlari is-degismezi (bir kez cekilir, her adimda AYNI byte'lar) →
+        # parts'a girer, onek kararliligini bozmaz. Yonlendirme cogu zaman burada:
+        # "su tabloyu kullan", "Dalli'yi de dahil et", ornek endpoint/curl.
+        if s.wi_comments_text and step_key in (
+            "kickoff_meeting_task", "technical_design_task", "implement_change_task",
+            "review_pr_task", "test_planning_task", "uat_task",
+        ):
+            parts.append(s.wi_comments_text)
         if s.po_text and step_key not in ("requirements_analysis_task", "po_assessment_task"):
             parts.append(f"\n# PO Değerlendirmesi (Product Owner — danışma niteliğinde)\n{s.po_text[:2500]}")
 
@@ -4135,6 +4195,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # WI icerigini Python'da oku ve context'e ekle — agent tool
         # cagirmak zorunda kalmasin (local LLM'ler tool'u duzgun cagiramayabiliyor)
         wi_content_length = 0
+        from agile_sdlc_crew import pipeline_config as _pc_wc
         wi_ac_plain = ""
         wi_title_raw = ""
         wi_desc_clean = ""
@@ -4166,6 +4227,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 f"## Aciklama\n{wi_desc_clean}\n\n"
                 f"## Kabul Kriterleri\n{wi_ac_plain or '(Tanimsiz — description iceriginden cikarilmali)'}\n"
             )
+            # WI YORUMLARI: ekip eksikleri cogu zaman alanlara degil yoruma
+            # yaziyor. Hazirlik kapisi BA ciktisina bakiyor, BA da yalniz bu
+            # ctx'i goruyor → yorumlar girmezse cevabi verilmis bir WI sonsuza
+            # kadar needs_info'da kaliyor (WI #73061/#73732'de gercekten oldu).
+            if _pc_wc.get("CREW_WI_COMMENTS"):
+                try:
+                    _cm = self._client.get_work_item_comments(int(self.state.work_item_id))
+                    _blk, _blen = wi_comments_block(_cm, cap=_cb.cap("WI_COMMENTS"))
+                    if _blk:
+                        ctx += _blk
+                        self.state.wi_comments_text = _blk
+                        wi_content_length += _blen   # kapiya da sayilsin
+                        _log(f"  💬 WI yorumlari: {_blen} karakter insan yorumu context'e eklendi")
+                except Exception as _e_wc:
+                    _log(f"  WI yorumlari okunamadi (atlaniyor): {_e_wc}")
         except Exception as e:
             _log(f"  WI icerik olcumu hatasi: {e}")
 
