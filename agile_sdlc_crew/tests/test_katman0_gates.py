@@ -2643,6 +2643,28 @@ def test_wi_comments_context():
     ]
     blk, n = wi_comments_block(cms, cap=4000)
     check("bot yorumu ayıklanır (kendi sorumuzu cevap sanmayalım)", "Hazırlık Skoru" not in blk)
+
+    # Azure yorumu markdown alıp HTML döndürüyor: yazdığımız *Tempo — X*
+    # dışarıya <em>Tempo — X</em> olarak geliyor, YILDIZLAR KAYBOLUYOR.
+    # Marker '*Tempo' yıldızlı olduğu için rebrand'den beri kendi WI/PR
+    # yorumlarımızın hiçbiri tanınmıyordu (yalnız eski 'Agile SDLC Crew'
+    # düz ad olduğu için tutuyordu). WI yorumlarını gereksinim kaynağı
+    # yapınca bu bir DÖNGÜ oldu: kapının kendi "şu detaylar eksik" yorumu
+    # insan yorumu sayılıp bir sonraki değerlendirmeye girdi (WI #73061'de
+    # 1868 karakter kendi metnimiz insan kümesine eklendi).
+    from agile_sdlc_crew.branding import is_bot_comment as _ibc
+    _rendered = ("<p>Bu iş kalemi yeterince detaylı değil.</p>\n<br>\n<hr>\n"
+                 "<p><em>Tempo — Hazırlık Kapısı</em></p>")
+    check("HTML'e dönüşmüş imza (yıldızsız) bot olarak tanınır", _ibc(_rendered) is True, _rendered[-60:])
+    check("markdown imza (yıldızlı) hâlâ tanınır", _ibc("...\n\n*Tempo — Kod İnceleme*") is True)
+    check("eski ad (Agile SDLC Crew) hâlâ tanınır", _ibc("<p><em>Agile SDLC Crew — Hazırlık Kapısı</em></p>") is True)
+    check("insan yorumu bot sanılmaz", _ibc("@Büşra AYVAZ evet, tüm kargolar için bu geçerli.") is False)
+    check("metnin ORTASINDA geçen 'Tempo —' imza sayılmaz (yanlış pozitif yok)",
+          _ibc("Tempo — bu araç " + ("çok uzun bir insan yorumu. " * 40)) is False)
+    _cms_r = [{"tarih": "t", "yazar": "bot", "metin": _rendered},
+              {"tarih": "t", "yazar": "A", "metin": "gerçek cevap"}]
+    _b, _ = wi_comments_block(_cms_r)
+    check("blok: HTML imzalı bot yorumu da ayıklanır", "Hazırlık Kapısı" not in _b and "gerçek cevap" in _b)
     check("boş yorum atlanır", blk.count("- [") == 3, blk)
     check("KRONOLOJİK sıra (kapsam kararı sorunun ardından gelmeli)",
           blk.index("Dalli için de geçerli mi") < blk.index("dahil edebiliriz"), blk[:200])
