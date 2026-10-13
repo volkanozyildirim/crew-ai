@@ -89,14 +89,19 @@ CREATE TABLE IF NOT EXISTS quality_items (
   **dizi anahtarı adı korunur** (`Undefined array key "host"` ≠ `"password"`).
 - Uygulamalar arası birleşir: `content::page` hatası 6 storefront'ta aynıysa tek grup, kanıtta
   6 uygulama listelenir.
+- **Undefined-key ailesi:** aynı repo + action'daki `Undefined array key/index/offset/variable/property`
+  grupları **tek Task'ta** birleşir (parmak izleri anahtar başına ayrı kalır — dedup anahtar
+  düzeyinde çalışır). ≤3 anahtar 1 SP, >3 anahtar 2 SP. Farklı action'lardaki anahtarlar
+  (ör. `Index::index "host"` ile `Api/Order::integrationCancel "password"`) ayrı Task'tır.
 - Parmak izi: `nr:<repo>:<action>:<sınıf>:<normalize mesaj>` (en fazla 512 karakter; aşarsa
   sonu sha1 ile kısaltılır).
 
 ## Skor
 
-- **Sonar:** `ağırlık × (1 + log2(adet))`. Ağırlık: Vulnerability+Blocker 20,
-  Vulnerability+Critical 10, Bug+Blocker 8, Bug+Critical 4. Log, adet baskınlığını kırar
-  (300 CSS uyarısı tek güvenlik açığını geçmesin).
+- **Sonar:** `ağırlık × (1 + log10(adet))`. Ağırlık: Vulnerability+Blocker 20,
+  Vulnerability+Critical 10, Bug+Blocker 8, Bug+Critical 4. Log10, adet baskınlığını kırar
+  (300 maddelik Bug+Critical = 4 × 3.48 = 13.9 < tek Vulnerability+Blocker 20; log2 ile 36.9
+  olup geçerdi). Paket skoru = paketteki en yüksek birim skoru (toplam değil).
 - **New Relic:** `hata_sayısı (lookback) × etkilenen_uygulama_sayısı`; eşitlikte en yüksek
   error rate önde. `CREW_QUALITY_NR_MIN_ERRORS` (100) altı elenir.
 
@@ -104,7 +109,7 @@ CREATE TABLE IF NOT EXISTS quality_items (
 
 | Durum | SP | Not |
 |---|---|---|
-| NR `Undefined array key/index/offset/variable` (E_WARNING/E_NOTICE), tek action | 1 | Aynı action'da >3 farklı anahtar → 2 |
+| NR `Undefined array key/index/offset/variable/property` (E_WARNING/E_NOTICE) — action başına tek Task | 1 | Aynı action'da >3 farklı anahtar → 2 |
 | NR `TypeError`, `ValueError`, `ArgumentCountError`, uygulama exception'ları | 3 | |
 | NR altyapı kökenli (timeout, connection refused, deadlock, cURL/PDO bağlantı, Redis/Mongo bağlantı) | 3 | **needs_human** |
 | Sonar birim: ≤5 madde 1, ≤20 madde 2, >20 madde 3 | 1–3 | Paket toplamı ≤3 |
@@ -115,7 +120,8 @@ Sınıflandırma `rank.py`'de regex tablosu olarak durur; bilinmeyen sınıf →
 ## Seçim ("10 SP al")
 
 1. **Ele:** açık WI'a bağlı parmak izleri (aşağıda Dedup); eşlenemeyen uygulama/proje;
-   `[Prod]` olmayan NR uygulamaları; `AZURE_DEVOPS_REPO_PROJECTS` dışındaki Sonar projeleri
+   prod olmayan NR uygulamaları (prod = adı `[Prod]`/`[Production]`/`[GCP-Prod]` ile başlar **ya da**
+   FLODevOps `production` dalından eşlenmiştir — `Marketplace API`, `Kurumsal Flo` gibi); `AZURE_DEVOPS_REPO_PROJECTS` dışındaki Sonar projeleri
    (FloxoPLM vb.); yerelde klonu olmayan repolar (pipeline çalışamaz). Hepsi `skipped`'a sebebiyle.
 2. Skora göre sırala; açgözlü doldur — sığmayan atlanır, sıradaki daha küçük denenir.
    Toplam bütçeyi asla aşmaz.
@@ -125,13 +131,17 @@ Sınıflandırma `rank.py`'de regex tablosu olarak durur; bilinmeyen sınıf →
 
 ## Dedup
 
-- Aynı parmak izi, `quality_items`'ta **açık** (durumu `DONE_STATES` ya da Canceled olmayan) bir
-  WI'a bağlıysa seçilmez. WI durumu alım anında Azure'dan toplu okunur.
-- Kapanmış bir WI'ın parmak izi kapanış tarihinden **sonra** hâlâ kaynakta görünüyorsa yeniden
-  seçilebilir; yeni Task açıklamasına "Tekrarladı — önceki: #<eski WI>" satırı eklenir.
-- Yedek: Task açıklamasının sonunda gizli işaret `<!-- tempo-fp: <parmak izi> -->` ve etiket
-  `tempo-quality`. `quality_items` boşsa (yeni kurulum / DB kaybı) dedup, iterasyondaki
-  `tempo-quality` etiketli WI'ların açıklamasından işaretleri okuyarak çalışır.
+- **Kaynak board'dur:** her alımda `tempo-quality` etiketli Task'lar WIQL ile okunur, açıklamalarındaki
+  `tempo-fp:` satırlarından parmak izi → (WI, durum, kapanış tarihi) dizini kurulur. `quality_items`
+  geçmiş/dashboard kaydıdır, dedup kararı ona bağlı değildir (DB kaybı dedup'ı bozmaz).
+- Durum kuralı:
+  - **Done / Closed / Completed** → kapanıştan `CREW_QUALITY_REOPEN_GRACE_DAYS` (3) gün sonra hâlâ
+    görülüyorsa (NR: `last_seen`; Sonar: madde hâlâ açık) **yeniden** seçilebilir; yeni Task
+    açıklamasına "Tekrarladı — önceki: #<eski WI>" eklenir.
+  - **Canceled / Removed / Rejected** → kalıcı bastırma: bir insan "yapılmayacak" dedi, asla yeniden açılmaz.
+  - Diğer her durum (**Resolved, Ready for Production** dahil — düzeltme henüz canlıda değil) → açık sayılır, seçilmez.
+- İşaret görünür bir satırdır (`<p><small>tempo-fp: …</small></p>`), HTML yorumu değil: Azure
+  Description HTML'ini sanitize eder, yorumun korunacağı garanti değil.
 
 ## Akış
 
@@ -179,7 +189,7 @@ Kuyruk mevcut tek worker'la seri boşalır; ayrı bir zamanlayıcı yok.
     korunur"; Sonar → "Listelenen maddeler Sonar'da kapanır, yeni madde eklenmez"
   - **Kaynak:** New Relic Errors Inbox / NRQL linki ya da Sonar issues linki
   - needs_human ise: **Neden insan:** "Secret rotasyonu gerekir" / "Altyapı kökenli hata"
-  - `<!-- tempo-fp: … -->` (her parmak izi için bir satır)
+  - `tempo-fp: …` (her parmak izi için bir küçük satır)
 
 **Gizlilik:** Sonar `secrets:*` için madde metnindeki değer **asla** WI'a yazılmaz — yalnızca
 dosya:satır ve kural adı. NR mesajlarında token/parola benzeri değerler (`Bearer …`, `Basic …`,
@@ -215,6 +225,7 @@ Maliyet: her Task bir pipeline işi; iş başına `CREW_MAX_JOB_COST` zaten geç
 | `CREW_QUALITY_SONAR_PACK_FILES` | int | 5 | |
 | `CREW_QUALITY_HUMAN_SHARE` | float | 0.3 | needs_human SP payı tavanı |
 | `CREW_QUALITY_MAX_TASKS` | int | 8 | |
+| `CREW_QUALITY_REOPEN_GRACE_DAYS` | int | 3 | Kapanmış işin hatası bu süreden sonra hâlâ görülürse yeniden açılır |
 
 ## Test
 
@@ -227,8 +238,8 @@ Maliyet: her Task bir pipeline işi; iş başına `CREW_MAX_JOB_COST` zaten geç
 - SP tablosu: `Undefined array key` → 1, >3 anahtar → 2, `TypeError` → 3, altyapı → 3+needs_human,
   `secrets:*` → 1+needs_human.
 - Bütçe: toplam ≤ sp; needs_human payı ≤ %30; `MAX_TASKS` sınırı; boş seçim → WI yok.
-- Dedup: açık WI'lı parmak izi elenir; kapanış sonrası tekrar eden geri gelir; `tempo-fp`
-  işaretinden geri okuma.
+- Dedup: açık WI'lı parmak izi elenir; Ready for Production'daki elenir; Canceled kalıcı bastırılır;
+  kapanış + 3 gün sonrası tekrar eden geri gelir; `tempo-fp` satırından geri okuma.
 - app_map: örnek `JenkinsfileBuild` + `Dockerfile` metinlerinden eşleme, `${website}` şablonu,
   override önceliği.
 - Gizlilik: `secrets:*` değeri ve `Bearer …` açıklamaya girmez.
