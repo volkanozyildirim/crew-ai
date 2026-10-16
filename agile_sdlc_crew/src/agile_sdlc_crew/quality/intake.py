@@ -1,0 +1,300 @@
+"""Kalite işi alımı — orkestratör.
+
+  gather (ağ) → build_candidates (saf: repo filtresi, eşik, dedup, birleştirme/paket)
+  → rank.select_budget → [take] story bul/aç → child Task'lar → kuyruk → quality_items
+
+Seçimde LLM yok. take() tam otonomdur (kullanıcı kararı): onay listesi yok;
+yanlış tıklamaya karşı tek koruma CREW_QUALITY_INTAKE anahtarı ve bütçe/Task
+tavanlarıdır. Aynı anda tek alım (_LOCK) — ikisi aynı parmak izini açmasın.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Callable, NamedTuple
+
+from agile_sdlc_crew import pipeline_config
+from agile_sdlc_crew.quality import app_map, dedup, newrelic, rank, render, sonar
+from agile_sdlc_crew.quality.model import Finding, Group
+
+log = logging.getLogger("pipeline")
+
+SOURCES = ("newrelic", "sonar")
+_LOCK = threading.Lock()
+_DONE = {"done", "closed", "completed", "removed", "canceled", "cancelled"}
+
+
+class Busy(RuntimeError):
+    """Başka bir kalite alımı sürüyor."""
+
+
+class NoSprint(RuntimeError):
+    """Takımın aktif sprinti yok ve story_id verilmedi."""
+
+
+class Deps(NamedTuple):
+    gather: Callable
+    board: Callable
+    repo_ok: Callable
+    queue: Callable
+    record: Callable
+    now: Callable
+    cfg: Callable
+
+
+def load_cfg() -> dict:
+    g = pipeline_config.get
+    return {
+        "nr_days": int(g("CREW_QUALITY_NR_LOOKBACK_DAYS") or 7),
+        "nr_min_errors": int(g("CREW_QUALITY_NR_MIN_ERRORS") or 100),
+        "pack_sp": int(g("CREW_QUALITY_SONAR_PACK_SP") or 3),
+        "pack_files": int(g("CREW_QUALITY_SONAR_PACK_FILES") or 5),
+        "human_share": float(g("CREW_QUALITY_HUMAN_SHARE") if g("CREW_QUALITY_HUMAN_SHARE") is not None else 0.3),
+        "max_tasks": int(g("CREW_QUALITY_MAX_TASKS") or 8),
+        "grace_days": int(g("CREW_QUALITY_REOPEN_GRACE_DAYS") if g("CREW_QUALITY_REOPEN_GRACE_DAYS") is not None else 3),
+        "sonar_url": sonar.base_url(),
+    }
+
+
+def repo_is_local(repo: str, base: Path | None = None) -> bool:
+    """Pipeline yalnızca ~/.crew_repos altında klonu olan repoda çalışabilir."""
+    base = base or Path(os.environ.get("CREW_REPOS_DIR", "~/.crew_repos")).expanduser()
+    if not repo or not base.is_dir():
+        return False
+    if (base / repo).is_dir():
+        return True
+    low = repo.lower()
+    return any(p.is_dir() and p.name.lower() == low for p in base.iterdir())
+
+
+def gather(source: str, client, cfg: dict) -> tuple[list[Finding], list[dict]]:
+    skipped: list[dict] = []
+    if source == "newrelic":
+        mapping = app_map.load_map(client)
+        found = newrelic.fetch(cfg["nr_days"],
+                               is_prod=lambda a: newrelic.is_prod_name(a) or a.lower() in mapping)
+        out: list[Finding] = []
+        unmapped: Counter = Counter()
+        for f in found:
+            repo = app_map.resolve(f.app, mapping)
+            if not repo:
+                unmapped[f.app] += f.count
+                continue
+            f.repo = repo
+            out.append(f)
+        skipped += [{"app": a, "reason": "eşlenemedi", "count": n} for a, n in unmapped.most_common()]
+        return out, skipped
+    issues, rules = sonar.fetch_issues()
+    found = sonar.issues_to_findings(issues, rules, base_url=cfg["sonar_url"])
+    projects = list(getattr(client, "repo_projects", []) or [])
+    out = [f for f in found if sonar.in_scope(f.project, projects)]
+    skipped += [{"project": p, "reason": "kapsam dışı proje"}
+                for p in sorted({f.project for f in found if not sonar.in_scope(f.project, projects)})]
+    return out, skipped
+
+
+def build_candidates(source: str, findings: list[Finding], *, board_index: dict, now: float,
+                     repo_ok: Callable, cfg: dict) -> tuple[list[Group], list[dict]]:
+    skipped: list[dict] = []
+    kept: list[Finding] = []
+    missing: set[str] = set()
+    for f in findings:
+        if repo_ok(f.repo):
+            kept.append(f)
+        elif f.repo not in missing:
+            missing.add(f.repo)
+            skipped.append({"repo": f.repo, "reason": "repo yerelde yok"})
+    if source == "newrelic":
+        units = []
+        for u in rank.nr_units(kept):
+            if u.total < cfg["nr_min_errors"]:
+                skipped.append({"fingerprint": u.fingerprints[0],
+                                "reason": f"eşik altı (<{cfg['nr_min_errors']})"})
+            else:
+                units.append(u)
+    else:
+        units = rank.sonar_units(kept)
+    live: list[Group] = []
+    for u in units:
+        fp = u.fingerprints[0]
+        v, prev = dedup.verdict(board_index.get(fp), last_seen=u.last_seen, now=now,
+                                grace_days=cfg["grace_days"])
+        if v == "blocked":
+            skipped.append({"fingerprint": fp, "reason": f"açık WI #{prev}"})
+            continue
+        if v == "suppressed":
+            skipped.append({"fingerprint": fp, "reason": f"iptal edilmiş WI #{prev}"})
+            continue
+        if v == "recurring":
+            u.recurring_of = prev
+        live.append(u)
+    if source == "newrelic":
+        groups = rank.merge_undefined(live)
+    else:
+        groups = rank.pack_sonar(live, pack_sp=cfg["pack_sp"], pack_files=cfg["pack_files"])
+    return groups, skipped
+
+
+def default_deps() -> Deps:
+    from agile_sdlc_crew import db
+    return Deps(
+        gather=gather,
+        board=lambda client: dedup.index_board(dedup.fetch_board(client)),
+        repo_ok=repo_is_local,
+        queue=lambda wid, title: db.create_job(str(wid), False, wi_title=title[:200]),
+        record=db.record_quality_item,
+        now=time.time,
+        cfg=load_cfg,
+    )
+
+
+def _row(g: Group) -> dict:
+    return {"id": None, "title": render.task_title(g), "repo": g.repo, "sp": g.sp,
+            "score": round(g.score, 2), "needs_human": g.needs_human, "fingerprints": g.fingerprints,
+            "job_id": None}
+
+
+def _plan(client, source: str, sp: int, deps: Deps) -> tuple[list[Group], dict, dict]:
+    if source not in SOURCES:
+        raise ValueError(f"Geçersiz kaynak: {source}")
+    cfg = deps.cfg()
+    findings, skipped = deps.gather(source, client, cfg)
+    groups, sk2 = build_candidates(source, findings, board_index=deps.board(client), now=deps.now(),
+                                   repo_ok=deps.repo_ok, cfg=cfg)
+    skipped += sk2
+    picked = rank.select_budget(groups, int(sp), human_share=cfg["human_share"], max_tasks=cfg["max_tasks"])
+    result = {
+        "source": source, "budget_sp": int(sp), "total_sp": sum(g.sp for g in picked),
+        "candidates": len(groups), "tasks": [_row(g) for g in picked], "skipped": skipped[:50],
+        "skipped_counts": dict(Counter(s["reason"] if not s["reason"].startswith(("açık WI", "iptal"))
+                                       else s["reason"].split(" #")[0] for s in skipped)),
+        "story": None,
+    }
+    if not picked:
+        result["message"] = "Bütçeye uyan aday yok."
+    return picked, result, cfg
+
+
+def preview(client, source: str, sp: int, *, team: str = "", deps: Deps | None = None) -> dict:
+    _picked, result, _cfg = _plan(client, source, sp, deps or default_deps())
+    return result
+
+
+def _wi_url(client, wid: int) -> str:
+    return f"{client.org_url}/{client.project}/_workitems/edit/{wid}"
+
+
+def resolve_story(client, source: str, story_id: int | None, team: str) -> dict:
+    if story_id:
+        f = (client.get_work_item(int(story_id)) or {}).get("fields") or {}
+        if f.get("System.WorkItemType") != "User Story":
+            raise ValueError(f"#{story_id} bir User Story değil ({f.get('System.WorkItemType') or '?'})")
+        if (f.get("System.State") or "").lower() in _DONE:
+            raise ValueError(f"#{story_id} kapalı ({f.get('System.State')})")
+        return {"id": int(story_id), "area": f.get("System.AreaPath", ""),
+                "iteration": f.get("System.IterationPath", ""), "sp": float(f.get("Custom.StoryPoints") or 0),
+                "created": False}
+    cur = next((i for i in client.list_iterations(team)
+                if ((i.get("attributes") or {}).get("timeFrame") or "").lower() == "current"), None)
+    if not cur:
+        raise NoSprint("Takımın aktif sprinti yok — story_id verin")
+    ipath = cur.get("path") or ""
+    esc = ipath.replace("'", "''")
+    found = client.query_work_items(
+        "SELECT [System.Id] FROM WorkItems WHERE [System.WorkItemType] = 'User Story' "
+        f"AND [System.IterationPath] = '{esc}' AND [System.Tags] CONTAINS '{render.TAG}' "
+        f"AND [System.Tags] CONTAINS '{render.src_tag(source)}' "
+        "AND [System.State] NOT IN ('Done', 'Closed', 'Removed', 'Canceled') ORDER BY [System.Id] DESC",
+        limit=1)
+    if found:
+        f = found[0].get("fields") or {}
+        return {"id": int(found[0]["id"]), "area": f.get("System.AreaPath", ""),
+                "iteration": f.get("System.IterationPath", ipath),
+                "sp": float(f.get("Custom.StoryPoints") or 0), "created": False}
+    area = client.get_team_area_path(team) or ""
+    fields = {"System.Title": render.story_title(source, cur.get("name") or ipath),
+              "System.Description": render.story_description(source),
+              "System.Tags": f"{render.TAG}; {render.src_tag(source)}",
+              "System.IterationPath": ipath}
+    if area:
+        fields["System.AreaPath"] = area
+    wi = client.create_work_item("User Story", fields)
+    wf = wi.get("fields") or {}
+    return {"id": int(wi["id"]), "area": area or wf.get("System.AreaPath", ""), "iteration": ipath,
+            "sp": 0.0, "created": True}
+
+
+def _assignee(client) -> str:
+    try:
+        return (client.get_authenticated_user() or {}).get("uniqueName", "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def take(client, source: str, sp: int, *, story_id: int | None = None, team: str = "",
+         deps: Deps | None = None) -> dict:
+    from agile_sdlc_crew import estimation
+    deps = deps or default_deps()
+    if not _LOCK.acquire(blocking=False):
+        raise Busy("Başka bir kalite alımı sürüyor")
+    try:
+        picked, result, cfg = _plan(client, source, sp, deps)
+        if not picked:
+            return result
+        story = resolve_story(client, source, story_id, team)
+        result["story"] = {"id": story["id"], "url": _wi_url(client, story["id"]), "created": story["created"]}
+        me = _assignee(client)
+        rows = []
+        added = 0
+        for g in picked:
+            row = _row(g)
+            fields = {"System.Title": row["title"],
+                      "System.Description": render.task_description(g, sonar_url=cfg["sonar_url"],
+                                                                    nr_days=cfg["nr_days"]),
+                      "System.Tags": render.task_tags(g),
+                      "System.IterationPath": story["iteration"]}
+            if story["area"]:
+                fields["System.AreaPath"] = story["area"]
+            if me:
+                fields["System.AssignedTo"] = me
+            try:
+                wid = int(client.create_work_item("Task", fields, parent_id=story["id"])["id"])
+            except Exception as e:  # noqa: BLE001
+                row["error"] = f"Task açılamadı: {e}"
+                rows.append(row)
+                continue
+            row["id"] = wid
+            added += g.sp
+            estimation.write_story_points(client, str(wid), g.sp, logger=log.info)
+            if not g.needs_human:
+                try:
+                    row["job_id"] = deps.queue(wid, row["title"])
+                except Exception as e:  # noqa: BLE001
+                    row["error"] = f"kuyruğa alınamadı: {e}"
+            for fp in g.fingerprints:
+                try:
+                    deps.record(fingerprint=fp, source=source, repo=g.repo, story_id=story["id"], wi_id=wid,
+                                job_id=row["job_id"], sp=g.sp, score=g.score, needs_human=g.needs_human)
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"⚠️ Kalite: quality_items yazılamadı ({fp[:60]}): {e}")
+            rows.append(row)
+        if added:
+            estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
+        result["tasks"] = rows
+        result["total_sp"] = added
+        log.info(f"🧹 Kalite alımı ({source}): story #{story['id']} · {len(rows)} Task · {added} SP")
+        return result
+    finally:
+        _LOCK.release()
+
+
+def unmapped(client, source: str = "newrelic") -> dict:
+    """Eşlenemeyen NR uygulamaları / kapsam dışı Sonar projeleri (yazma yok)."""
+    deps = default_deps()
+    _f, skipped = deps.gather(source, client, deps.cfg())
+    return {"source": source, "items": skipped}

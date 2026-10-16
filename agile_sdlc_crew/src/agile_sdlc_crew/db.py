@@ -76,6 +76,22 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     INDEX idx_job (job_id),
     INDEX idx_job_agent (job_id, agent)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS quality_items (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    fingerprint VARCHAR(512) NOT NULL,
+    source ENUM('sonar','newrelic') NOT NULL,
+    repo VARCHAR(128) DEFAULT '',
+    story_id INT NULL,
+    wi_id INT NULL,
+    job_id INT NULL,
+    sp DECIMAL(4,1) DEFAULT 0,
+    score DOUBLE DEFAULT 0,
+    needs_human TINYINT(1) DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_fp (fingerprint(191)),
+    INDEX idx_wi (wi_id)
+) ENGINE=InnoDB;
 """
 
 STEP_DEFINITIONS = [
@@ -456,6 +472,29 @@ def clear_cached_step_output(step_key: str, work_item_id: str) -> int:
             (step_key, work_item_id),
         )
         return cur.rowcount
+
+
+def record_quality_item(*, fingerprint: str, source: str, repo: str, story_id: int | None,
+                        wi_id: int | None, job_id: int | None, sp: float, score: float,
+                        needs_human: bool) -> None:
+    """Kalite alımının geçmiş kaydı (dashboard). Dedup buna DEĞİL board'a bakar."""
+    with get_conn() as conn:
+        conn.cursor().execute(
+            "INSERT INTO quality_items (fingerprint, source, repo, story_id, wi_id, job_id, sp, score, "
+            "needs_human) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (fingerprint[:512], source, repo[:128], story_id, wi_id, job_id, sp, score, int(bool(needs_human))))
+
+
+def list_quality_items(limit: int = 30) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, fingerprint, source, repo, story_id, wi_id, job_id, sp, score, needs_human, "
+                    "created_at FROM quality_items ORDER BY id DESC LIMIT %s", (int(limit),))
+        rows = cur.fetchall() or []
+    for r in rows:
+        r["sp"] = float(r.get("sp") or 0)
+        r["created_at"] = str(r.get("created_at") or "")
+    return rows
 
 
 def record_llm_call(rec: dict) -> None:

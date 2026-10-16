@@ -3509,6 +3509,147 @@ def test_quality_sources():
     check("NR kimlik bilgisi yoksa QualitySourceError", ok)
 
 
+def test_quality_intake():
+    print("\n[Q8] Kalite alımı — orkestratör (sahte Azure/DB)")
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake, rank
+    from agile_sdlc_crew.quality.model import Finding
+    keys = ("CREW_QUALITY_INTAKE", "CREW_SONAR_URL", "NEW_RELIC_REGION", "CREW_QUALITY_NR_LOOKBACK_DAYS",
+            "CREW_QUALITY_NR_MIN_ERRORS", "CREW_QUALITY_SONAR_PACK_SP", "CREW_QUALITY_SONAR_PACK_FILES",
+            "CREW_QUALITY_HUMAN_SHARE", "CREW_QUALITY_MAX_TASKS", "CREW_QUALITY_REOPEN_GRACE_DAYS")
+    check("knob'lar kayıtlı, ana anahtar varsayılan kapalı",
+          all(k in pc._SCHEMA_BY_KEY for k in keys) and pc._SCHEMA_BY_KEY["CREW_QUALITY_INTAKE"]["default"] is False)
+    cfg = {"nr_days": 7, "nr_min_errors": 100, "pack_sp": 3, "pack_files": 5, "human_share": 0.3,
+           "max_tasks": 8, "grace_days": 3, "sonar_url": "https://sonar.x"}
+
+    def nf(app, key, cnt, action="Index::index", repo="webservice", cls="E_WARNING", msg=None):
+        return Finding(source="newrelic", repo=repo, app=app, action=action, err_class=cls,
+                       message=msg or f'Undefined array key "{key}"', count=cnt, last_seen=1e9)
+
+    findings = [nf("[Prod] a", "host", 645000), nf("[Prod] b", "password", 900, action="Api/Order::create", repo="channel"),
+                nf("[Prod] a", "low", 50), nf("[Prod] c", "x", 5000, repo="sites")]
+    board = {rank.nr_fingerprint("channel", "Api/Order::create", "E_WARNING", 'Undefined array key "password"'):
+             {"wi": 9, "state": "Active", "closed_at": 0}}
+    groups, skipped = intake.build_candidates("newrelic", findings, board_index=board, now=2e9,
+                                              repo_ok=lambda r: r != "sites", cfg=cfg)
+    reasons = " | ".join(s["reason"] for s in skipped)
+    check("eşik altı, açık WI ve yerelde olmayan repo elenir",
+          [g.repo for g in groups] == ["webservice"] and len(groups[0].fingerprints) == 1
+          and "yerelde" in reasons and "#9" in reasons and "eşik" in reasons, reasons)
+
+    class FakeClient:
+        org_url, project, repo_projects = "https://dev.azure.com/o", "P", ["EcomBackend"]
+
+        def __init__(self):
+            self.created, self.updates, self.stories = [], [], []
+            self.iters = [{"name": "Sprint 42", "path": "P\\Sprint 42", "attributes": {"timeFrame": "current"}}]
+
+        def list_iterations(self, team=""):
+            return self.iters
+
+        def query_work_items(self, wiql, limit=0):
+            return self.stories
+
+        def get_team_area_path(self, team=""):
+            return "P\\Team"
+
+        def get_authenticated_user(self):
+            return {"uniqueName": "me@flo.com.tr"}
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append((type_name, fields, parent_id))
+            return {"id": 1000 + len(self.created) - 1, "fields": fields}
+
+        def update_work_item(self, wid, ops):
+            self.updates.append((wid, ops))
+            return {}
+
+        def get_work_item(self, wid):
+            return {"id": wid, "fields": {"System.WorkItemType": "Bug", "System.State": "Active"}}
+
+    queued, recorded = [], []
+    deps = intake.Deps(
+        gather=lambda source, client, cfg_: (list(findings), [{"app": "[Prod] ?", "reason": "eşlenemedi"}]),
+        board=lambda client: {}, repo_ok=lambda r: True,
+        queue=lambda wid, title: (queued.append(wid), 500 + len(queued))[1],
+        record=lambda **kw: recorded.append(kw), now=lambda: 2e9, cfg=lambda: cfg)
+    c = FakeClient()
+    res = intake.take(c, "newrelic", 10, team="Team", deps=deps)
+    story = c.created[0]
+    check("story yoksa aktif sprintte açılır (başlık, etiket, iterasyon, area)",
+          story[0] == "User Story" and story[1]["System.Title"] == "Kalite: New Relic hataları — Sprint 42"
+          and "tempo-src-newrelic" in story[1]["System.Tags"] and story[1]["System.IterationPath"] == "P\\Sprint 42"
+          and story[1]["System.AreaPath"] == "P\\Team")
+    tasks = [x for x in c.created if x[0] == "Task"]
+    check("Task'lar story'nin child'ı; area/iteration story'den; atama PAT sahibi",
+          tasks and all(t[2] == 1000 and t[1]["System.IterationPath"] == "P\\Sprint 42"
+                        and t[1]["System.AreaPath"] == "P\\Team"
+                        and t[1]["System.AssignedTo"] == "me@flo.com.tr" for t in tasks))
+    check("her Task kuyruğa alınır ve parmak izi başına kaydedilir",
+          len(queued) == len(tasks) and res["tasks"][0]["job_id"] == 501 and len(recorded) >= len(tasks))
+    check("toplam SP bütçeyi aşmaz; eşlenemeyen raporlanır",
+          res["total_sp"] <= 10 and any(s.get("reason") == "eşlenemedi" for s in res["skipped"]))
+    check("story SP = açılan Task'ların toplamı",
+          any(w == 1000 and ops[0]["path"] == "/fields/Custom.StoryPoints" and ops[0]["value"] == res["total_sp"]
+              for w, ops in c.updates))
+
+    c2 = FakeClient()
+    c2.stories = [{"id": 77, "fields": {"System.AreaPath": "P\\A", "System.IterationPath": "P\\Sprint 42",
+                                        "Custom.StoryPoints": 2}}]
+    res2 = intake.take(c2, "newrelic", 10, deps=deps)
+    check("sprintte bu kaynağın story'si varsa onu kullanır; SP üstüne eklenir",
+          c2.created and all(x[0] == "Task" and x[2] == 77 for x in c2.created)
+          and any(w == 77 and ops[0]["value"] == 2 + res2["total_sp"] for w, ops in c2.updates))
+
+    hum = [nf("[Prod] a", "", 99999, action="X::y", cls="PDOException",
+              msg="SQLSTATE[HY000] [2002] Connection refused")]
+    c3 = FakeClient()
+    q0 = len(queued)
+    res3 = intake.take(c3, "newrelic", 10, deps=deps._replace(gather=lambda s, cl, cf: (hum + findings, [])))
+    h = [t for t in res3["tasks"] if t["needs_human"]]
+    check("needs_human Task açılır, kuyruğa alınmaz, needs-human etiketi taşır",
+          len(h) == 1 and h[0]["job_id"] is None and len(queued) - q0 == len(res3["tasks"]) - 1
+          and any("needs-human" in x[1].get("System.Tags", "") for x in c3.created if x[0] == "Task"))
+
+    c4 = FakeClient()
+    res4 = intake.take(c4, "newrelic", 10, deps=deps._replace(gather=lambda s, cl, cf: ([], [])))
+    check("aday yoksa hiçbir WI (story dahil) açılmaz", c4.created == [] and res4["story"] is None
+          and res4["tasks"] == [] and res4.get("message"))
+    c5 = FakeClient()
+    c5.iters = []
+    try:
+        intake.take(c5, "newrelic", 10, deps=deps)
+        ok = False
+    except intake.NoSprint:
+        ok = True
+    check("aktif sprint yok ve story_id yok → NoSprint, WI açılmaz", ok and c5.created == [])
+    c6 = FakeClient()
+    try:
+        intake.take(c6, "newrelic", 10, story_id=5, deps=deps)
+        ok = False
+    except ValueError:
+        ok = True
+    check("story_id User Story değilse ValueError, WI açılmaz", ok and c6.created == [])
+    intake._LOCK.acquire()
+    try:
+        try:
+            intake.take(FakeClient(), "newrelic", 10, deps=deps)
+            ok = False
+        except intake.Busy:
+            ok = True
+    finally:
+        intake._LOCK.release()
+    check("eşzamanlı ikinci alım → Busy", ok)
+    pv = intake.preview(FakeClient(), "newrelic", 10, deps=deps)
+    check("preview yazmaz ama aynı seçimi döner", pv["total_sp"] == res["total_sp"] and pv["story"] is None)
+    try:
+        from agile_sdlc_crew import db
+        db.init_db()
+        check("quality_items tablosu oluşur ve okunur", isinstance(db.list_quality_items(limit=1), list))
+    except Exception as e:  # noqa: BLE001
+        skip("quality_items tablosu", f"DB erişilemedi: {e}")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3553,7 +3694,8 @@ def main():
               test_quality_render,
               test_quality_dedup,
               test_quality_app_map,
-              test_quality_sources):
+              test_quality_sources,
+              test_quality_intake):
         try:
             t()
         except Exception as e:
