@@ -7077,7 +7077,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
         diske yaz: dev in-place düzenlerse doğru tabanın üstüne kurulsun.
         Tur sonunda _restore_worktree_file ile geri alınır."""
         try:
+            repo_dir = (self._repo_mgr.base_dir / repo_name).resolve()
             p = self._repo_mgr.base_dir / repo_name / file_path.lstrip("/")
+            # Yol plan/review'dan (LLM) ve repodan gelir: symlink ya da '../'
+            # ile klon dışına yazılmasın.
+            if p.is_symlink() or not p.resolve().is_relative_to(repo_dir):
+                _log(f"    ⚠️ Diske hazırlık atlandı (symlink / repo dışı yol): {file_path}")
+                return
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
             staged = getattr(self, "_staged_worktree", None)

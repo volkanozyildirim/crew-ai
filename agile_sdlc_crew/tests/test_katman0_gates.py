@@ -4069,6 +4069,19 @@ def test_worktree_staging():
         out2 = fake._prefer_worktree_edit("webservice", "/app/Order.php", "", branch_v)
         check("dev'in in-place düzenlemesi branch üstüne kurulur (önceki düzeltme korunur)",
               "?? null" in out2 and "düzeltildi" in out2)
+    with tempfile.TemporaryDirectory() as td2:
+        base = Path(td2)
+        repo2 = base / "r"
+        (repo2 / "app").mkdir(parents=True)
+        outside = base / "outside.txt"
+        outside.write_text("orijinal", encoding="utf-8")
+        (repo2 / "app" / "link.php").symlink_to(outside)
+        fk = types.SimpleNamespace(_repo_mgr=types.SimpleNamespace(base_dir=base))
+        fk._stage_worktree_file = types.MethodType(F._stage_worktree_file, fk)
+        fk._stage_worktree_file("r", "/app/link.php", "EZILDI")
+        fk._stage_worktree_file("r", "/../outside.txt", "EZILDI")
+        check("hazırlık yazımı symlink'i izlemez, repo dışına (../) yazmaz",
+              outside.read_text(encoding="utf-8") == "orijinal")
     src = inspect.getsource(F)
     check("review tekrarı ve build-fix turları diski PR branch'ine hazırlar",
           src.count("self._stage_worktree_file(") >= 2)
