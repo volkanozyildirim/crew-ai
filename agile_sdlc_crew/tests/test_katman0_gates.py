@@ -3818,6 +3818,14 @@ def test_quality_review_fixes():
     r2 = intake.take(c2, "newrelic", 5, deps=deps)
     check("tipte AC alanı yoksa (400) alansız açılır",
           any(ty == "Task" for ty, _ in c2.created) and r2["tasks"][0]["id"] and not r2["tasks"][0].get("error"))
+    cf = deps.cfg()
+    cf["task_fields"] = {"Custom.ARGEType": "Geliştirme - GE"}
+    c3 = AzC()
+    intake.take(c3, "newrelic", 5, deps=deps._replace(cfg=lambda: cf))
+    t3 = next(f for ty, f in c3.created if ty == "Task")
+    check("org'un zorunlu Task alanları (quality_task_fields.yaml) Task'a yazılır",
+          t3.get("Custom.ARGEType") == "Geliştirme - GE"
+          and intake.load_cfg()["task_fields"].get("Custom.ARGEType") == "Geliştirme - GE")
 
 
 def main():

@@ -25,6 +25,7 @@ from agile_sdlc_crew.quality.model import Finding, Group
 log = logging.getLogger("pipeline")
 
 SOURCES = ("newrelic", "sonar")
+TASK_FIELDS_PATH = Path(__file__).resolve().parent.parent / "config" / "quality_task_fields.yaml"
 _LOCK = threading.Lock()
 _DONE = {"done", "closed", "completed", "removed", "canceled", "cancelled"}
 
@@ -58,7 +59,18 @@ def load_cfg() -> dict:
         "max_tasks": int(g("CREW_QUALITY_MAX_TASKS") or 8),
         "grace_days": int(g("CREW_QUALITY_REOPEN_GRACE_DAYS") if g("CREW_QUALITY_REOPEN_GRACE_DAYS") is not None else 3),
         "sonar_url": sonar.base_url(),
+        "task_fields": load_task_fields(),
     }
+
+
+def load_task_fields(path: Path = TASK_FIELDS_PATH) -> dict:
+    """Org'un Task tipindeki zorunlu özel alanları (ör. Custom.ARGEType)."""
+    import yaml
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    return {str(k): v for k, v in data.items()} if isinstance(data, dict) else {}
 
 
 def repo_is_local(repo: str, base: Path | None = None) -> bool:
@@ -278,6 +290,8 @@ def take(client, source: str, sp: int, *, story_id: int | None = None, team: str
             if me:
                 fields["System.AssignedTo"] = me
             fields[AC_FIELD] = render.acceptance_criteria(g)
+            for k, v in (cfg.get("task_fields") or {}).items():
+                fields.setdefault(k, v)
             try:
                 wid = _create_task(client, fields, story["id"])
             except Exception as e:  # noqa: BLE001
