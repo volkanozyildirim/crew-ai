@@ -3193,6 +3193,8 @@ def test_quality_rank_nr():
           n("Order 12345 not found") == n("Order 98 not found") == "Order <n> not found"
           and n('Product "550e8400-e29b-41d4-a716-446655440000" missing') == 'Product "<v>" missing'
           and n("Undefined array key 7") == "Undefined array key <n>")
+    check("mesajdaki iç işaretçi karakteri çökertmez, sahte eşleşme üretmez",
+          n("a \ue000x b") == "a x b" and n('"k" \ue000\ue100') == '"k"')
     check("action: WebTransaction öneki atılır, controller StudlyCase",
           rank.action_of("WebTransaction/Action/api::order::integrationCancel") == "Api/Order::integrationCancel"
           and rank.action_of("WebTransaction/Custom/index::index") == "Index::index"

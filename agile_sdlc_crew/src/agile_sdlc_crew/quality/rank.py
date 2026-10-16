@@ -69,7 +69,8 @@ def normalize_message(msg: str) -> str:
         kept.append(f"{q}{inner}{q}")
         return "\ue000" + chr(0xE100 + len(kept) - 1)
 
-    s = _QUOTED.sub(stash, (msg or "").strip())
+    # İşaretçi aralığı girdiden atılır; yoksa dış mesajdaki U+E000 geri yüklemeyi bozar.
+    s = _QUOTED.sub(stash, re.sub("[\ue000-\uf8ff]", "", msg or "").strip())
     for rx, rep in _DYNAMIC:
         s = rx.sub(rep, s)
     s = re.sub("\ue000(.)", lambda m: kept[ord(m.group(1)) - 0xE100], s)
