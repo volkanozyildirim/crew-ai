@@ -210,8 +210,14 @@ def expected_behavior(g: Group) -> list[str]:
              "çıkarılmış bir başlangıç noktasıdır, kapsam kilidi değildir: hata action'ın çağırdığı "
              "bir yardımcı, servis ya da şablonda oluşuyorsa orası düzeltilir. Kapsam bu hatanın "
              "giderilmesiyle sınırlıdır.")
-    verify = ("Doğrulama: düzeltilen durum için birim testi; deploy sonrası Kaynak (NRQL) sorgusunda "
-              "bu hata için yeni kayıt görülmez.")
+    # #232: test bütün prepareOrderDetailData'yı eksik sahte siparişle çağırdı; her
+    # CI turu bir sonraki eksik anahtarı gösterdi ("telephone" → "web" → …), test
+    # mock'lansın diye private metotlar protected yapıldı. Test dar tutulur.
+    verify = ("Doğrulama: yalnız değişen satırın davranışını kilitleyen küçük bir birim testi "
+              "(ör. anahtar yokken uyarı üretilmemesi). Test, büyük bir metodu sahte veriyle baştan sona "
+              "çağırmaz; test yazabilmek için üretim kodunda private/final metotların görünürlüğü "
+              "değiştirilmez. Dar bir test mümkün değilse test eklenmez, PR açıklamasında belirtilir. "
+              "Deploy sonrası Kaynak (NRQL) sorgusunda bu hata için yeni kayıt görülmez.")
     if is_undefined_key(g):
         first = ("Anahtar/indeks yoksa kod hata üretmeden devam eder: okuma <code>isset()</code> / "
                  "<code>??</code> ile korunur ve mevcut kodun o alan yokken anlamlı olan varsayılanı "

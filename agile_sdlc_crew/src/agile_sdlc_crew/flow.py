@@ -477,6 +477,15 @@ def _is_quality_wi(tags: str) -> bool:
     return "tempo-quality" in {t.strip().lower() for t in (tags or "").split(";")}
 
 
+QUALITY_BUILD_FIX_RULE = (
+    "\n\nQUALITY TASK RULE: if the failing test is one this PR added, make that test SMALLER — "
+    "assert only the behaviour of the changed line (e.g. no warning when the key is missing) "
+    "instead of feeding a large method a fuller fake payload. Do not change the visibility "
+    "of production methods (private/final) to make a test pass; revert such changes if this PR "
+    "made them. If no narrow test is possible, delete the test this PR added."
+)
+
+
 def quality_lean_overrides() -> dict:
     """Kalite işleri için iş kapsamlı model seçimi (CREW_QUALITY_LEAN_MODELS).
     Reviewer ve geliştirici bilerek yok: review tek kalite kapısı, kod Opus'ta."""
@@ -7285,6 +7294,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"kodu/testleri hatayı giderecek şekilde düzelt; mevcut davranışı koru, "
                     f"değişen davranış için test ekle/güncelle.\n```\n{failure_summary[:2500]}\n```"
                 )
+                if _is_quality_wi(self.state.wi_tags):
+                    ctx += QUALITY_BUILD_FIX_RULE
                 code_crew = self._agile_crew.create_code_crew()
                 code_result = code_crew.kickoff(inputs={
                     "work_item_id": self.state.work_item_id,

@@ -3859,6 +3859,8 @@ def test_quality_readiness():
           "Beklenen davranış" in und and "isset" in und and "birim testi" in und and "gerçekten" in und)
     check("olası yer kapsam kilidi değil, başlangıç noktası (#225: mimar kilit sandı)",
           "başlangıç noktası" in und and "yardımcı" in und)
+    check("test kapsamı dar: yalnız değişen satır, büyük metot sahte veriyle çağrılmaz, görünürlük değişmez (#232)",
+          "yalnız değişen satır" in und and "baştan sona" in und and "görünürlüğü değiştirilmez" in und)
     check("null erişimi: null koruması", "Beklenen davranış" in nul and "null" in nul.split("Beklenen davranış")[1])
     check("genel hata: kök neden, hatayı yutmak çözüm değil", "Beklenen davranış" in gen and "yutmak" in gen)
     ac = render.acceptance_block(g('Undefined array key "host"'))
@@ -4044,6 +4046,8 @@ def test_quality_lean():
     res_branch = s1[s1.index("cached_ba = self._try_resume_step"):s1.index('self._resume_step("requirements_analysis_task", cached_ba)')]
     check("requirements resume edilse de WI bağlamı (etiket → kalite ayarları) kurulur (#232: atlanmıştı)",
           "self._wi_begin(" in res_branch)
+    check("kalite işinde build-fix testi daraltır, üretim görünürlüğünü değiştirmez",
+          "QUALITY_BUILD_FIX_RULE" in src and "do not change the visibility" in src.lower())
     check("run_pipeline flow'u iş kapsamında koşturur", "job_llm_scope()" in inspect.getsource(_main.run_pipeline))
 
 
