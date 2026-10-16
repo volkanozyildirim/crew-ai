@@ -3181,6 +3181,53 @@ def test_prompt_prefix_order():
           and emit.count("emit_ctx =") <= 2, "emit_ctx döngü içinde yeniden kurulmamalı")
 
 
+def test_quality_rank_nr():
+    print("\n[Q1] Kalite alımı — NR normalizasyon, birleşme, SP")
+    from agile_sdlc_crew.quality import rank
+    from agile_sdlc_crew.quality.model import Finding
+    n = rank.normalize_message
+    check("dizi anahtarı adı korunur",
+          n('Undefined array key "host"') == 'Undefined array key "host"'
+          and n('Undefined array key "host"') != n('Undefined array key "password"'))
+    check("sayı/uuid/ID-benzeri tırnak içi maskelenir",
+          n("Order 12345 not found") == n("Order 98 not found") == "Order <n> not found"
+          and n('Product "550e8400-e29b-41d4-a716-446655440000" missing') == 'Product "<v>" missing'
+          and n("Undefined array key 7") == "Undefined array key <n>")
+    check("action: WebTransaction öneki atılır, controller StudlyCase",
+          rank.action_of("WebTransaction/Action/api::order::integrationCancel") == "Api/Order::integrationCancel"
+          and rank.action_of("WebTransaction/Custom/index::index") == "Index::index"
+          and rank.action_of("WebTransaction/Action/web-hook::trigger") == "WebHook::trigger")
+    fp1 = rank.nr_fingerprint("webservice", "A::b", "E_WARNING", "x" * 900)
+    check("parmak izi 512'de kesilir ve kararlıdır",
+          len(fp1) == 512 and fp1 == rank.nr_fingerprint("webservice", "A::b", "E_WARNING", "x" * 900))
+
+    def nf(app, msg, cnt, action="Content::page", cls="E_WARNING", repo="webservice"):
+        return Finding(source="newrelic", repo=repo, app=app, action=action, err_class=cls,
+                       message=msg, count=cnt, last_seen=2000.0, error_rate=0.01)
+
+    sites = [f"[Prod] site{i}.ru" for i in range(6)]
+    units = rank.nr_units([nf(s, 'Undefined array key "value"', 100) for s in sites])
+    check("6 uygulamadaki aynı hata → tek birim, 6 uygulama, skor = adet × uygulama, 1 SP",
+          len(units) == 1 and len(units[0].apps) == 6 and units[0].score == 600 * 6 and units[0].sp == 1)
+    u2 = rank.nr_units([nf("[Prod] a", "Order 1 failed", 5, cls="TypeError"),
+                        nf("[Prod] a", "Order 2 failed", 7, cls="TypeError")])
+    check("ID farkı aynı birime düşer; TypeError → 3 SP",
+          len(u2) == 1 and u2[0].total == 12 and u2[0].sp == 3 and not u2[0].needs_human)
+    infra = rank.nr_units([nf("[Prod] a", "cURL error 28: Operation timed out after 5000 ms", 50,
+                              cls="GuzzleHttp\\Exception\\ConnectException")])
+    check("altyapı hatası → 3 SP + needs_human", infra[0].sp == 3 and infra[0].needs_human)
+    fam = rank.nr_units([nf("[Prod] a", f'Undefined array key "{c}"', 10, action="Api/Order::create")
+                         for c in "abcde"]
+                        + [nf("[Prod] a", 'Undefined array key "host"', 10, action="Index::index")])
+    merged = rank.merge_undefined(fam)
+    big = [g for g in merged if g.findings[0].action == "Api/Order::create"]
+    check("aynı action'daki 5 tanımsız anahtar → tek Task, 5 parmak izi, 2 SP; başka action ayrı",
+          len(merged) == 2 and len(big) == 1 and len(big[0].fingerprints) == 5 and big[0].sp == 2)
+    three = rank.merge_undefined(rank.nr_units(
+        [nf("[Prod] a", f"Undefined index: {c}", 10, action="X::y", cls="E_NOTICE") for c in ("ka", "kb", "kc")]))
+    check("≤3 anahtar → 1 SP", len(three) == 1 and three[0].sp == 1 and len(three[0].fingerprints) == 3)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3218,7 +3265,8 @@ def main():
               test_findings_reuse,
               test_prompt_prefix_order,
               test_cli_prompt_overhead,
-              test_wi_comments_context):
+              test_wi_comments_context,
+              test_quality_rank_nr):
         try:
             t()
         except Exception as e:
