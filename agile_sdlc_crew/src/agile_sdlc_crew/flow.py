@@ -4223,6 +4223,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
             # (3 retry/$18) yerine config (1 retry/$10) gecerli oldu ve verify'in
             # buldugu tek regresyon icin 2. tur hakki kalmadi.
             self._apply_envelope("requirements")
+            # Resume yolunda da WI bağlamı kurulsun: etiketler (tempo-quality →
+            # yalın akış / ucuz modeller), tip akışı, yaşam döngüsü. #232'de
+            # requirements resume edildi, _wi_begin hiç çağrılmadı → kalite işi
+            # normal iş gibi Opus'la koştu.
+            self._wi_begin()
             self._resume_step("requirements_analysis_task", cached_ba)
             return
 

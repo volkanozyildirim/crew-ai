@@ -4040,6 +4040,10 @@ def test_quality_lean():
     src = inspect.getsource(_flow)
     check("discover / test planlama / UAT kalite işinde atlanır",
           src.count("Atlandı — kalite işi") >= 3 and "_quality_lean_flow()" in src)
+    s1 = inspect.getsource(_flow.AgileSDLCFlow.crew_step1_requirements)
+    res_branch = s1[s1.index("cached_ba = self._try_resume_step"):s1.index('self._resume_step("requirements_analysis_task", cached_ba)')]
+    check("requirements resume edilse de WI bağlamı (etiket → kalite ayarları) kurulur (#232: atlanmıştı)",
+          "self._wi_begin(" in res_branch)
     check("run_pipeline flow'u iş kapsamında koşturur", "job_llm_scope()" in inspect.getsource(_main.run_pipeline))
 
 
