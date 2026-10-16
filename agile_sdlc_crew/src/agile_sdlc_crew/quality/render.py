@@ -12,7 +12,7 @@ import re
 from datetime import datetime, timezone
 
 from agile_sdlc_crew.quality.model import Group
-from agile_sdlc_crew.quality.rank import defang
+from agile_sdlc_crew.quality.rank import defang, is_undefined_key
 
 TAG = "tempo-quality"
 HUMAN_TAG = "needs-human"
@@ -141,6 +141,7 @@ def _nr_body(g: Group, nr_days: int) -> list[str]:
                       f"AND error.class = '{cls}' FACET error.message, transactionName "
                       f"SINCE {int(nr_days)} days ago")
                  + "</pre>")
+    parts.append(_behavior_html(g))
     parts.append(f"<p><b>Kabul kriteri:</b> {acceptance_criteria(g)}</p>")
     return parts
 
@@ -170,8 +171,52 @@ def _sonar_body(g: Group, sonar_url: str) -> list[str]:
             url = (f"{sonar_url}/project/issues?id={proj}&rules={f0.rule}"
                    "&issueStatuses=OPEN,CONFIRMED")
             parts.append(f'<p><b>Kaynak:</b> <a href="{html.escape(url)}">{html.escape(proj)}</a></p>')
+    parts.append(_behavior_html(g))
     parts.append(f"<p><b>Kabul kriteri:</b> {acceptance_criteria(g)}</p>")
     return parts
+
+
+_NULLISH = re.compile(r"on null|of type null|null given|passing null|on value of type null", re.I)
+
+
+def expected_behavior(g: Group) -> list[str]:
+    """Hata türüne göre varsayılan karar seti. Hazırlık kapısının sorduğu
+    'eksik anahtarda ne olmalı / hangi dosya / nasıl doğrulanır' soruları
+    kalite işlerinde hep aynı cevaba sahip — her seferinde insana sormak
+    yerine burada sabitlenir."""
+    if g.source == "sonar":
+        if g.findings and g.findings[0].rule.startswith("secrets:"):
+            return ["Secret değeri koddan kaldırılır, ortam değişkeni / gizli yönetiminden okunur.",
+                    "Eski değer geçersiz kılınır (rotate) — bu adım insan işidir."]
+        return ["Kuralın önerdiği düzeltme uygulanır; dış davranış (yanıt, kaydedilen veri) değişmez.",
+                "Yalnızca listelenen dosya ve satırlara dokunulur; ilgisiz yeniden düzenleme yapılmaz.",
+                "Doğrulama: değişen mantık için birim testi; Sonar'da maddeler kapanır."]
+    f0 = g.findings[0]
+    where = ("'Olası yer' listesindeki dosyalardan hatanın gerçekten üretildiği action düzeltilir; "
+             "hata ikisinde de oluşuyorsa ikisi de.")
+    verify = ("Doğrulama: düzeltilen durum için birim testi; deploy sonrası Kaynak (NRQL) sorgusunda "
+              "bu hata için yeni kayıt görülmez.")
+    if is_undefined_key(g):
+        first = ("Anahtar/indeks yoksa kod hata üretmeden devam eder: okuma <code>isset()</code> / "
+                 "<code>??</code> ile korunur ve mevcut kodun o alan yokken anlamlı olan varsayılanı "
+                 "(null, boş dizi/metin, atlanan adım) kullanılır. Anahtar varken davranış değişmez.")
+    elif _NULLISH.search(f0.message):
+        first = ("Değer null olabildiğinde erişim öncesi null kontrolü yapılır; null durumunda akış "
+                 "mevcut kodun bu durumda anlamlı olan yolundan devam eder. Değer doluyken davranış değişmez.")
+    else:
+        first = ("Hatanın kök nedeni koddan bulunup giderilir; başarılı istekteki yanıt biçimi ve "
+                 "davranış değişmez. Hatayı try/catch ile yutmak ya da log seviyesini düşürmek çözüm sayılmaz.")
+    return [first, where, verify]
+
+
+def _behavior_html(g: Group) -> str:
+    return "<p><b>Beklenen davranış:</b></p><ul>" + "".join(f"<li>{x}</li>" for x in expected_behavior(g)) + "</ul>"
+
+
+def acceptance_block(g: Group) -> str:
+    """AcceptanceCriteria alanı: beklenen davranış + kabul cümlesi (BA bu alanı okur)."""
+    items = expected_behavior(g) + [acceptance_criteria(g)]
+    return "<ul>" + "".join(f"<li>{x}</li>" for x in items) + "</ul>"
 
 
 def acceptance_criteria(g: Group) -> str:

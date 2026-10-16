@@ -289,7 +289,7 @@ def take(client, source: str, sp: int, *, story_id: int | None = None, team: str
                 fields["System.AreaPath"] = story["area"]
             if me:
                 fields["System.AssignedTo"] = me
-            fields[AC_FIELD] = render.acceptance_criteria(g)
+            fields[AC_FIELD] = render.acceptance_block(g)
             for k, v in (cfg.get("task_fields") or {}).items():
                 fields.setdefault(k, v)
             try:

@@ -473,6 +473,18 @@ def _parse_readiness(requirements_text: str):
             "open_questions": len(oq) if isinstance(oq, list) else 0}
 
 
+def _quality_skips_readiness(tags: str) -> bool:
+    """Kalite alımının açtığı işler (etiket tempo-quality) hazırlık kapısının 1.
+    aşamasından muaf: kanıt üretim logundan gelir, beklenen davranış açıklamada
+    sabittir; BA'nın sorduğu 'hangi dizi / hangi dosya' soruları kodu okuyan
+    sonraki adımların işidir. Canlı ölçüm: 3 iş 30-43/100 ile needs_info'ya düştü.
+    Mimarın keşif kapısı (aşama 2) ve review/build kapıları yerinde kalır."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    if not _pc.get("CREW_QUALITY_SKIP_READINESS"):
+        return False
+    return "tempo-quality" in {t.strip().lower() for t in (tags or "").split(";")}
+
+
 def _readiness_score(readiness, ac_empty: bool, open_questions: int) -> tuple:
     """BA skoru + deterministik cezalar (yalnizca ASAGI): AC alani bos -15,
     her acik soru -3 (en cok -15). 0..100'e kirpilir.
@@ -4451,7 +4463,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Adim _step_fail ile kapanir: WI duzenlendikten sonraki kosu bu
         # analizi resume ETMEMELI.
         from agile_sdlc_crew import pipeline_config as _pc_rd
-        if _pc_rd.get("CREW_READINESS_GATE"):
+        if _pc_rd.get("CREW_READINESS_GATE") and _quality_skips_readiness(self.state.wi_tags):
+            _log("  📋 Hazırlık kapısı: kalite işi (tempo-quality) — 1. aşama atlandı")
+        elif _pc_rd.get("CREW_READINESS_GATE"):
             _rd = _parse_readiness(requirements_text)
             _rd_min = int(_pc_rd.get("CREW_READINESS_MIN_SCORE") or 60)
             _rd_score, _rd_pen = _readiness_score(

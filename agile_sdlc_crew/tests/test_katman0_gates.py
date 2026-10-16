@@ -3828,6 +3828,41 @@ def test_quality_review_fixes():
           and intake.load_cfg()["task_fields"].get("Custom.ARGEType") == "Geliştirme - GE")
 
 
+def test_quality_readiness():
+    print("\n[Q11] Kalite alımı — beklenen davranış bloğu + hazırlık kapısı muafiyeti")
+    import inspect
+    from agile_sdlc_crew import flow as _flow
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import rank, render
+    from agile_sdlc_crew.quality.model import Finding
+
+    def g(msg, cls="E_WARNING"):
+        return rank.nr_units([Finding(source="newrelic", repo="webservice", app="[Prod] a", action="Index::index",
+                                      err_class=cls, message=msg, count=500, last_seen=1.0)])[0]
+    und = render.task_description(g('Undefined array key "host"'))
+    nul = render.task_description(g("Trying to access array offset on value of type null"))
+    gen = render.task_description(g("Call to undefined method Foo::bar()", cls="Error"))
+    check("tanımsız anahtar: beklenen davranış (isset/??, akış korunur, hangi dosya, doğrulama)",
+          "Beklenen davranış" in und and "isset" in und and "birim testi" in und and "gerçekten" in und)
+    check("null erişimi: null koruması", "Beklenen davranış" in nul and "null" in nul.split("Beklenen davranış")[1])
+    check("genel hata: kök neden, hatayı yutmak çözüm değil", "Beklenen davranış" in gen and "yutmak" in gen)
+    ac = render.acceptance_block(g('Undefined array key "host"'))
+    check("AC alanı beklenen davranışı da taşır", "isset" in ac and "Kabul kriteri" not in ac and "bir daha" in ac)
+    check("tempo-quality etiketli iş hazırlık kapısından muaf (varsayılan açık)",
+          _flow._quality_skips_readiness("tempo-quality; tempo-src-newrelic")
+          and not _flow._quality_skips_readiness("needs-refinement")
+          and not _flow._quality_skips_readiness(""))
+    orig = pc.get
+    pc.get = lambda k: False if k == "CREW_QUALITY_SKIP_READINESS" else orig(k)
+    try:
+        check("muafiyet kapatılabilir", not _flow._quality_skips_readiness("tempo-quality"))
+    finally:
+        pc.get = orig
+    src = inspect.getsource(_flow)
+    check("hazırlık kapısı muafiyeti kullanıyor",
+          "_quality_skips_readiness(self.state.wi_tags)" in src)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3875,7 +3910,8 @@ def main():
               test_quality_sources,
               test_quality_intake,
               test_quality_endpoints,
-              test_quality_review_fixes):
+              test_quality_review_fixes,
+              test_quality_readiness):
         try:
             t()
         except Exception as e:

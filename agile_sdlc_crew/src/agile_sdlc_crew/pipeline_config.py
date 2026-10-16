@@ -472,6 +472,13 @@ SCHEMA: list[dict] = [
         "desc": "Her Task bir pipeline işi demek — maliyet tavanı.",
     },
     {
+        "key": "CREW_QUALITY_SKIP_READINESS",
+        "label": "Kalite · hazırlık kapısı muafiyeti",
+        "type": "bool",
+        "default": True,
+        "desc": "tempo-quality etiketli işler BA hazırlık kapısını (1. aşama) atlar: kanıt üretim logundan gelir, beklenen davranış Task açıklamasında ve Acceptance Criteria alanında sabittir. Kapalıyken ilk canlı alımın 3 işi de 30-43/100 ile needs_info'ya düştü. Mimarın keşif kapısı, review ve build kapıları etkilenmez. Yalnızca kalite alımının açtığı işleri etkiler.",
+    },
+    {
         "key": "CREW_QUALITY_REOPEN_GRACE_DAYS",
         "label": "Kalite · yeniden açma bekleme (gün)",
         "type": "int",
