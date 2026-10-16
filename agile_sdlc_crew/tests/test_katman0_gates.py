@@ -3564,7 +3564,11 @@ def test_quality_intake():
 
         def __init__(self):
             self.created, self.updates, self.stories = [], [], []
-            self.iters = [{"name": "Sprint 42", "path": "P\\Sprint 42", "attributes": {"timeFrame": "current"}}]
+            self.iters = [{"name": "Sprint 42", "path": "P\\Sprint 42", "attributes": {"timeFrame": "current"}},
+                          {"name": "Sprint 44", "path": "P\\Sprint 44",
+                           "attributes": {"timeFrame": "future", "startDate": "2026-11-02T00:00:00Z"}},
+                          {"name": "Sprint 43", "path": "P\\Sprint 43",
+                           "attributes": {"timeFrame": "future", "startDate": "2026-10-19T00:00:00Z"}}]
 
         def list_iterations(self, team=""):
             return self.iters
@@ -3598,13 +3602,13 @@ def test_quality_intake():
     c = FakeClient()
     res = intake.take(c, "newrelic", 10, team="Team", deps=deps)
     story = c.created[0]
-    check("story yoksa aktif sprintte açılır (başlık, etiket, iterasyon, area)",
-          story[0] == "User Story" and story[1]["System.Title"] == "Kalite: New Relic hataları — Sprint 42"
-          and "tempo-src-newrelic" in story[1]["System.Tags"] and story[1]["System.IterationPath"] == "P\\Sprint 42"
+    check("story yoksa SONRAKİ sprintte açılır, aktif sprinte dokunulmaz (başlık, etiket, iterasyon, area)",
+          story[0] == "User Story" and story[1]["System.Title"] == "Kalite: New Relic hataları — Sprint 43"
+          and "tempo-src-newrelic" in story[1]["System.Tags"] and story[1]["System.IterationPath"] == "P\\Sprint 43"
           and story[1]["System.AreaPath"] == "P\\Team")
     tasks = [x for x in c.created if x[0] == "Task"]
     check("Task'lar story'nin child'ı; area/iteration story'den; atama PAT sahibi",
-          tasks and all(t[2] == 1000 and t[1]["System.IterationPath"] == "P\\Sprint 42"
+          tasks and all(t[2] == 1000 and t[1]["System.IterationPath"] == "P\\Sprint 43"
                         and t[1]["System.AreaPath"] == "P\\Team"
                         and t[1]["System.AssignedTo"] == "me@flo.com.tr" for t in tasks))
     check("her Task kuyruğa alınır ve parmak izi başına kaydedilir",
@@ -3616,7 +3620,7 @@ def test_quality_intake():
               for w, ops in c.updates))
 
     c2 = FakeClient()
-    c2.stories = [{"id": 77, "fields": {"System.AreaPath": "P\\A", "System.IterationPath": "P\\Sprint 42",
+    c2.stories = [{"id": 77, "fields": {"System.AreaPath": "P\\A", "System.IterationPath": "P\\Sprint 43",
                                         "Custom.StoryPoints": 2}}]
     res2 = intake.take(c2, "newrelic", 10, deps=deps)
     check("sprintte bu kaynağın story'si varsa onu kullanır; SP üstüne eklenir",
@@ -3644,7 +3648,15 @@ def test_quality_intake():
         ok = False
     except intake.NoSprint:
         ok = True
-    check("aktif sprint yok ve story_id yok → NoSprint, WI açılmaz", ok and c5.created == [])
+    check("hedef sprint yok ve story_id yok → NoSprint, WI açılmaz", ok and c5.created == [])
+    c7 = FakeClient()
+    cfg_cur = dict(cfg, target_sprint="current")
+    intake.take(c7, "newrelic", 10, deps=deps._replace(cfg=lambda: cfg_cur))
+    check("CREW_QUALITY_TARGET_SPRINT=current → aktif sprint",
+          c7.created and c7.created[0][1]["System.IterationPath"] == "P\\Sprint 42")
+    check("hedef sprint knob'u kayıtlı, varsayılan next",
+          pc._SCHEMA_BY_KEY.get("CREW_QUALITY_TARGET_SPRINT", {}).get("default") == "next"
+          and intake.load_cfg()["target_sprint"] == "next")
     c6 = FakeClient()
     try:
         intake.take(c6, "newrelic", 10, story_id=5, deps=deps)
@@ -3782,7 +3794,8 @@ def test_quality_review_fixes():
             self.reject_ac, self.created = reject_ac, []
 
         def list_iterations(self, team=""):
-            return [{"name": "S1", "path": "P\\S1", "attributes": {"timeFrame": "current"}}]
+            return [{"name": "S1", "path": "P\\S1", "attributes": {"timeFrame": "current"}},
+                    {"name": "S2", "path": "P\\S2", "attributes": {"timeFrame": "future", "startDate": "2026-10-19"}}]
 
         def query_work_items(self, wiql, limit=0):
             return []

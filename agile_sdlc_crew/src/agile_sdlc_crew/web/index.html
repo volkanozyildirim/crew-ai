@@ -472,7 +472,7 @@ header {
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
           <select class="sprint-select" id="qSource" title="Kaynak"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
           <input class="sprint-select" id="qSp" type="number" min="1" max="40" value="10" style="width:64px" title="SP bütçesi">
-          <input class="sprint-select" id="qStory" type="number" placeholder="Story ID (ops.)" style="width:130px" title="Boşsa takımın aktif sprintinde story bulunur/açılır">
+          <input class="sprint-select" id="qStory" type="number" placeholder="Story ID (ops.)" style="width:130px" title="Boşsa takımın sonraki sprintinde story bulunur/açılır (aktif sprinte dokunulmaz)">
           <button class="sm-btn ghost small" onclick="qualityRun(false)">Önizle</button>
           <button class="sm-btn small" onclick="qualityRun(true)">Al</button>
         </div>

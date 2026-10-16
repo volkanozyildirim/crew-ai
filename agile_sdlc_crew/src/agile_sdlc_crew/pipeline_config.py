@@ -479,6 +479,13 @@ SCHEMA: list[dict] = [
         "desc": "tempo-quality etiketli işler BA hazırlık kapısını (1. aşama) atlar: kanıt üretim logundan gelir, beklenen davranış Task açıklamasında ve Acceptance Criteria alanında sabittir. Kapalıyken ilk canlı alımın 3 işi de 30-43/100 ile needs_info'ya düştü. Mimarın keşif kapısı, review ve build kapıları etkilenmez. Yalnızca kalite alımının açtığı işleri etkiler.",
     },
     {
+        "key": "CREW_QUALITY_TARGET_SPRINT",
+        "label": "Kalite · hedef sprint",
+        "type": "str",
+        "default": "next",
+        "desc": "Kalite alımının story + Task'ları hangi sprintte açılır: next (varsayılan) = takımın bir sonraki sprinti, aktif sprinte dokunulmaz; isteyen işi elle aktif sprinte çeker. current = aktif sprint. story_id verilirse o story'nin sprinti kullanılır.",
+    },
+    {
         "key": "CREW_QUALITY_REOPEN_GRACE_DAYS",
         "label": "Kalite · yeniden açma bekleme (gün)",
         "type": "int",

@@ -35,7 +35,7 @@ class Busy(RuntimeError):
 
 
 class NoSprint(RuntimeError):
-    """Takımın aktif sprinti yok ve story_id verilmedi."""
+    """Takımın hedef (sonraki ya da aktif) sprinti yok ve story_id verilmedi."""
 
 
 class Deps(NamedTuple):
@@ -60,6 +60,7 @@ def load_cfg() -> dict:
         "grace_days": int(g("CREW_QUALITY_REOPEN_GRACE_DAYS") if g("CREW_QUALITY_REOPEN_GRACE_DAYS") is not None else 3),
         "sonar_url": sonar.base_url(),
         "task_fields": load_task_fields(),
+        "target_sprint": str(g("CREW_QUALITY_TARGET_SPRINT") or "next").strip().lower(),
     }
 
 
@@ -201,7 +202,18 @@ def _wi_url(client, wid: int) -> str:
     return f"{client.org_url}/{client.project}/_workitems/edit/{wid}"
 
 
-def resolve_story(client, source: str, story_id: int | None, team: str) -> dict:
+def target_iteration(iterations: list[dict], target: str = "next") -> dict | None:
+    """'next': başlangıcı en erken gelecek sprint (aktif sprinte dokunulmaz;
+    isteyen işi elle aktif sprinte çeker). 'current': aktif sprint."""
+    def tf(i):
+        return ((i.get("attributes") or {}).get("timeFrame") or "").lower()
+    if target == "current":
+        return next((i for i in iterations if tf(i) == "current"), None)
+    future = [i for i in iterations if tf(i) == "future"]
+    return min(future, key=lambda i: (i.get("attributes") or {}).get("startDate") or "9999", default=None)
+
+
+def resolve_story(client, source: str, story_id: int | None, team: str, target: str = "next") -> dict:
     if story_id:
         f = (client.get_work_item(int(story_id)) or {}).get("fields") or {}
         if f.get("System.WorkItemType") != "User Story":
@@ -211,10 +223,9 @@ def resolve_story(client, source: str, story_id: int | None, team: str) -> dict:
         return {"id": int(story_id), "area": f.get("System.AreaPath", ""),
                 "iteration": f.get("System.IterationPath", ""), "sp": float(f.get("Custom.StoryPoints") or 0),
                 "created": False}
-    cur = next((i for i in client.list_iterations(team)
-                if ((i.get("attributes") or {}).get("timeFrame") or "").lower() == "current"), None)
+    cur = target_iteration(client.list_iterations(team), target)
     if not cur:
-        raise NoSprint("Takımın aktif sprinti yok — story_id verin")
+        raise NoSprint("Takımın " + ("aktif" if target == "current" else "sonraki") + " sprinti yok — story_id verin")
     ipath = cur.get("path") or ""
     esc = ipath.replace("'", "''")
     found = client.query_work_items(
@@ -273,7 +284,7 @@ def take(client, source: str, sp: int, *, story_id: int | None = None, team: str
         picked, result, cfg = _plan(client, source, sp, deps)
         if not picked:
             return result
-        story = resolve_story(client, source, story_id, team)
+        story = resolve_story(client, source, story_id, team, cfg.get("target_sprint") or "next")
         result["story"] = {"id": story["id"], "url": _wi_url(client, story["id"]), "created": story["created"]}
         me = _assignee(client)
         rows = []
