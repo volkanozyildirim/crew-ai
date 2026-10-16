@@ -3929,6 +3929,74 @@ def test_repo_ctx_cross_thread():
         _cli.clear_repo_ctx()
         _cli.set_toolless(False)
 
+def test_windowed_edit():
+    print("\n[47] Büyük dosyada pencereli düzenleme — 'sonuna ekle' yok (#229: Order.php 352KB)")
+    import shutil
+    import subprocess as _sp
+    import inspect
+    from agile_sdlc_crew import edit_window as ew
+    from agile_sdlc_crew import flow as _flow
+    from agile_sdlc_crew.main import _lint_issue_lines
+    lines = [f"    $x{i} = $data['k{i}'];" for i in range(1, 801)]
+    lines[399] = "        'telephone' => Utils::getTelephoneFormat($order['billing']['telephone']),"
+    content = "<?php\nclass A {\n" + "\n".join(lines) + "\n}\n"
+    cur = "'telephone' => Utils::getTelephoneFormat($order['billing']['telephone']),"
+    new = "'telephone' => Utils::getTelephoneFormat($order['billing']['telephone'] ?? null),"
+    anchor = ew.find_anchor(content, "        " + cur + "  // eski yorum")
+    check("anchor: plan alıntısı birebir değilse de doğru satır bulunur", anchor and anchor[0] == 402, str(anchor))
+    check("anchor: metot adından", ew.find_anchor("a\nb\n  public function newOrderDetailAction($id)\n{", "function newOrderDetailAction()") [0] == 3)
+    check("anchor: mimarın verdiği satır öncelikli", ew.find_anchor(content, "yok", hint_line=10)[0] == 10)
+    check("anchor: bulunamazsa None", ew.find_anchor(content, "tamamen alakasız bir şey 123") is None)
+    asked = {}
+
+    def ask_ok(window_text, start, end):
+        asked.update(text=window_text, start=start, end=end)
+        body = [ln.split("| ", 1)[1] for ln in window_text.splitlines()]
+        return "```php\n" + "\n".join(b.replace(cur, new) for b in body) + "\n```"
+    out, info = ew.apply_windowed(content, cur, new, ask_ok, radius=50)
+    check("yalnız ±50 satırlık numaralı pencere sorulur",
+          asked["start"] == 352 and asked["end"] == 452 and asked["text"].splitlines()[0].startswith("  352| "), info)
+    check("pencere yerine oturur, dosyanın geri kalanı aynen kalır",
+          out is not None and new in out and out.count("\n") == content.count("\n")
+          and out.replace(new, cur) == content)
+    snippet, _ = ew.apply_windowed(content, cur, new, lambda w, s, e: "```php\n" + new + "\n```", radius=50)
+    check("model yalnız değişen satırı döndürürse (pencereyi silerdi) reddedilir", snippet is None)
+    prose, _ = ew.apply_windowed(content, cur, new, lambda w, s, e: "(1) satır 3678: telephone okuması korunmalı", radius=50)
+    check("model kod yerine açıklama döndürürse reddedilir", prose is None)
+    num, _ = ew.apply_windowed(content, cur, new, lambda w, s, e: "\n".join(
+        ln.replace(cur, new) for ln in w.splitlines()), radius=50)
+    check("model satır numaralarını bıraksa da temizlenir", num is not None and "| " not in num.splitlines()[400])
+    from agile_sdlc_crew.quality import rank as _rk, render as _rd
+    from agile_sdlc_crew.quality.model import Finding as _F
+    exc = _rk.nr_units([_F(source="newrelic", repo="webservice", app="[Prod] a", action="Api/V1/Basket::shoppingCartCount",
+                           err_class="Exception", count=500, last_seen=1.0,
+                           message="Uncaught exception 'Exception' with message 'cURL Error' in "
+                                   "/var/www/app/app/Model/V1/Florchestra.php:820")])[0]
+    d_exc = _rd.task_description(exc)
+    check("exception mesajındaki dosya:satır Task açıklamasına 'Hata yeri' olarak girer",
+          "Hata yeri" in d_exc and "app/Model/V1/Florchestra.php:820" in d_exc
+          and _rd.exception_location("x in /var/www/app/app/A.php:12") == ("app/A.php", 12)
+          and _rd.exception_location('Undefined array key "id"') is None)
+    src = inspect.getsource(_flow)
+    check("implement'te 'sonuna ekle' geri dönüşü yok, pencereli düzenleme kullanılıyor",
+          "append stratejisine dusuluyor" not in src and "apply_windowed(" in src)
+    out_txt = ("PHP Deprecated:  Non-canonical cast (double) is deprecated in /tmp/x.php on line 12\n"
+               "Deprecated: Non-canonical cast (double) is deprecated in /tmp/x.php on line 13\n"
+               "PHP Parse error:  syntax error, unexpected identifier \"satır\" in /tmp/x.php on line 9001\n"
+               "Errors parsing /tmp/x.php")
+    iss = _lint_issue_lines(out_txt)
+    check("linter çıktısında Deprecated gürültüsü atılır, gerçek hata görünür",
+          iss and "Parse error" in iss[0] and not any("Deprecated" in i for i in iss), str(iss))
+    if shutil.which("php"):
+        from agile_sdlc_crew.main import _lint_with_native
+        ok = _lint_with_native("<?php\n$a = (double) '1.5';\n", "php")
+        bad = _lint_with_native("<?php\n$a = (double) '1.5';\n(1) satır 3678: açıklama\n", "php")
+        check("php -l: eski cast uyarısı geçer, gerçek sözdizimi hatası düşer (ve mesajı Parse error)",
+              ok["valid"] and not bad["valid"] and "Parse error" in bad["issues"][0], str(bad))
+    else:
+        skip("php -l", "php yok")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3978,7 +4046,8 @@ def main():
               test_quality_endpoints,
               test_quality_review_fixes,
               test_quality_readiness,
-              test_repo_ctx_cross_thread):
+              test_repo_ctx_cross_thread,
+              test_windowed_edit):
         try:
             t()
         except Exception as e:

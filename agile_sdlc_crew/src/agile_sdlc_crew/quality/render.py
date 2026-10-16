@@ -59,6 +59,16 @@ def mask_secrets(text: str) -> str:
     return _LONG.sub(lambda m: "***" if _secretish(m.group(0)) else m.group(0), s)
 
 
+_EXC_LOC = re.compile(r" in (?:/var/www/(?:app|html)/)?/?((?:[\w.-]+/)*[\w.-]+\.php):(\d+)\b")
+
+
+def exception_location(message: str) -> tuple[str, int] | None:
+    """Exception mesajındaki 'in /var/www/app/<yol>:<satır>' → (repo-göreli yol, satır).
+    Uyarılarda (E_WARNING) New Relic dosya/satır vermiyor; exception'larda mesajda var."""
+    m = _EXC_LOC.search(message or "")
+    return (m.group(1), int(m.group(2))) if m else None
+
+
 def file_hints(action: str) -> list[str]:
     """Butterfly kuralı: 'Api/Order::integrationCancel' → Controller dosyası + metodu."""
     if "::" not in (action or ""):
@@ -131,6 +141,10 @@ def _nr_body(g: Group, nr_days: int) -> list[str]:
                 uris.append(u)
     if uris:
         parts.append("<p><b>Örnek istekler:</b> " + ", ".join(f"<code>{_e(u)}</code>" for u in uris[:3]) + "</p>")
+    loc = next((x for x in (exception_location(f.message) for f in g.findings) if x), None)
+    if loc:
+        parts.append(f"<p><b>Hata yeri:</b> <code>{_e(f'{loc[0]}:{loc[1]}')}</code> (New Relic mesajından; "
+                     "düzeltmeye bu satırın çevresinden başlayın)</p>")
     hints = file_hints(g.findings[0].action)
     if hints:
         parts.append("<p><b>Olası yer:</b></p><ul>" + "".join(f"<li><code>{_e(h)}</code></li>" for h in hints) + "</ul>")

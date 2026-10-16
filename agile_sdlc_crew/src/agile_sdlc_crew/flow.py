@@ -6113,55 +6113,63 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 from agile_sdlc_crew.main import _try_direct_edit
                 cur_lines = len(current_code.strip().splitlines())
                 new_lines = len(new_code.strip().splitlines())
-                # Guvenlik: current_code >> new_code ise buyuk kod kaybi riski, append'e yonlendir
-                if cur_lines > 20 and new_lines < cur_lines * 0.3:
-                    _log(f"    Guvenlik: current_code ({cur_lines} satir) >> new_code ({new_lines} satir), append yapiliyor")
-                    final_content = full_content.rstrip() + "\n\n" + new_code + "\n"
-                else:
+                # Buyuk current_code + kucuk new_code → duz replace kod kaybettirir;
+                # o durumda dogrudan pencereli duzenlemeye gec.
+                replaced = None
+                if not (cur_lines > 20 and new_lines < cur_lines * 0.3):
                     replaced = _try_direct_edit(full_content, current_code, new_code)
-                    if replaced is not None:
-                        final_content = replaced
-                        _log(f"    ✅ Direkt replace basarili (LLM cagrilmadi)")
-                    else:
-                        # Match edilemedi — LLM'e "SADECE YENI BLOK" sor (tam dosya degil)
-                        # Kucuk local modeller (Qwen 7B) tam dosya basaramiyor,
-                        # ama blok uretmek dogal. Python tarafi replace'i yapar.
-                        _log(f"    Direct-edit (4 katman fuzzy) match edilemedi, LLM'den blok isteniyor")
+                if replaced is not None:
+                    final_content = replaced
+                    _log(f"    ✅ Direkt replace basarili (LLM cagrilmadi)")
+                else:
+                    # Pencereli duzenleme (edit_window): degisikligin yeri bulunur,
+                    # ±50 satir numarali verilir, gelistirici yalniz pencerenin yeni
+                    # halini dondurur. ESKI YOL blok oturmazsa dosyanin SONUNA
+                    # ekliyordu — #229'da 352KB Order.php'nin sonuna satir tarifi
+                    # eklendi, dosya kirildi. Pencere oturmazsa dosya DEGISMEZ.
+                    from agile_sdlc_crew.edit_window import apply_windowed
+                    _log(f"    Direct-edit oturmadi — pencereli duzenleme (±50 satir)")
+
+                    def _ask_window(window_text, w_start, w_end, _fp=file_path, _desc=description,
+                                    _new=new_code, _target=agent_target_file):
                         code_crew = self._agile_crew.create_code_crew()
-                        # Blok modu: sadece current_code → new_code degisimi
-                        # previous_context MINIMAL — context length asilmasin
-                        code_result = code_crew.kickoff(inputs={
+                        res = code_crew.kickoff(inputs={
                             "work_item_id": self.state.work_item_id,
                             "target_repo": repo_name,
-                            "target_file": agent_target_file,
+                            "target_file": _target,
                             "change_description": (
-                                f"{description}\n\n"
-                                f"⚠️ CIKTIN: SADECE YENI KOD BLOGU olmali, TAM DOSYA DEGIL.\n"
-                                f"- Asagidaki current_code bloğunun YERINE gelecek yeni kodu yaz.\n"
-                                f"- Dosyanin geri kalanini (import'lar, diger fonksiyonlar vb.) "
-                                f"tekrar yazma — Python tarafi geri kalanini koruyacak.\n"
-                                f"- Aciklama/yorum yazma, sadece degisecek blok."
+                                f"{_desc}\n\n"
+                                f"WINDOWED EDIT. `current_code` below is lines {w_start}-{w_end} of "
+                                f"{_fp}, each prefixed with 'NNNN| ' (the prefix is NOT part of the file). "
+                                f"Apply the change to these lines and return the COMPLETE new version of "
+                                f"lines {w_start}-{w_end} — every line, unchanged ones included — in ONE "
+                                f"fenced code block, WITHOUT the 'NNNN| ' prefixes. Do not edit the file "
+                                f"on disk, do not describe the change, no prose outside the code block."
                             ),
-                            "current_code": current_code[:4000],
-                            "new_code": new_code[:4000],
+                            "current_code": window_text,
+                            "new_code": _new[:4000],
                             "previous_context": f"# PLAN\n{plan_summary}",
                         })
-                        self._track_and_check_budget(code_result, f"implement:{file_path}")
-                        dev_block = _extract_dev_output(code_result)
-                        if not dev_block.strip():
-                            _log(f"    Developer bos icerik dondurdu, atlaniyor")
-                            continue
-                        _log(f"    Developer blok: {len(dev_block)} karakter")
-                        # Python tarafi: current_code'u dev_block ile fuzzy-replace et
-                        replaced2 = _try_direct_edit(full_content, current_code, dev_block)
-                        if replaced2 is not None:
-                            final_content = replaced2
-                            _log(f"    ✅ Developer blok + Python fuzzy-replace basarili")
+                        self._track_and_check_budget(res, f"implement-window:{_fp}")
+                        return _extract_dev_output(res)
+
+                    _hint = change.get("line") or change.get("line_start")
+                    try:
+                        _hint = int(_hint) if _hint else None
+                    except (TypeError, ValueError):
+                        _hint = None
+                    windowed, _w_info = apply_windowed(full_content, current_code, new_code,
+                                                       _ask_window, hint_line=_hint)
+                    if windowed is not None:
+                        final_content = windowed
+                        _log(f"    ✅ Pencereli duzenleme: {_w_info}")
+                    else:
+                        _disk = self._prefer_worktree_edit(repo_name, file_path, full_content, full_content)
+                        if _disk != full_content:
+                            final_content = _disk
                         else:
-                            # Developer blok bile match edilemedi — son care: plan'in new_code'u
-                            # ile append yap (dosyanin sonuna eklenir, kaybetmektense)
-                            _log(f"    ⚠️ Blok match edilemedi, append stratejisine dusuluyor")
-                            final_content = full_content.rstrip() + "\n\n" + dev_block + "\n"
+                            _log(f"    ❌ Duzenleme oturmadi ({_w_info}) — dosya DEGISTIRILMEDI, push yok")
+                            continue
 
             elif full_content and new_code:
                 # current_code yok — append (add scenario)
