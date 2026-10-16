@@ -8,6 +8,7 @@ Saf fonksiyonlar: ağa çıkmaz, LLM yok. Sıra: birim (parmak izi başına Grou
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 
 from agile_sdlc_crew.quality.model import Finding, Group
@@ -143,4 +144,75 @@ def merge_undefined(units: list[Group]) -> list[Group]:
         m.score = sum(x.score for x in gs)
         m.recurring_of = next((x.recurring_of for x in gs if x.recurring_of), None)
         out.append(m)
+    return out
+
+
+# ── Sonar ────────────────────────────────────────────────────────────────
+
+SONAR_WEIGHT = {
+    ("VULNERABILITY", "BLOCKER"): 20,
+    ("VULNERABILITY", "CRITICAL"): 10,
+    ("BUG", "BLOCKER"): 8,
+    ("BUG", "CRITICAL"): 4,
+}
+
+
+def sonar_fingerprint(repo: str, file: str, rule: str) -> str:
+    return cap_fingerprint(f"sonar:{repo}:{file}:{rule}")
+
+
+def sonar_unit_sp(count: int) -> int:
+    return 1 if count <= 5 else 2 if count <= 20 else 3
+
+
+def sonar_units(findings: list[Finding]) -> list[Group]:
+    """repo + dosya + kural başına bir Group. Skor = ağırlık × (1 + log10(adet)):
+    log10, 300 CSS uyarısının tek güvenlik açığını geçmesini engeller."""
+    by: dict[str, Group] = {}
+    for f in findings:
+        fp = sonar_fingerprint(f.repo, f.file, f.rule)
+        g = by.get(fp)
+        if g is None:
+            name = f.file.rsplit("/", 1)[-1] or f.project
+            g = by[fp] = Group(source="sonar", repo=f.repo, title=f"{f.rule_name or f.rule} — {name}",
+                               fingerprints=[fp], findings=[])
+        g.findings.append(f)
+    for g in by.values():
+        w = max(SONAR_WEIGHT.get((f.itype.upper(), f.severity.upper()), 1) for f in g.findings)
+        g.score = w * (1 + math.log10(max(1, g.total)))
+        if g.findings[0].rule.startswith("secrets:"):
+            g.sp, g.needs_human = 1, True
+            g.human_reason = "Secret rotasyonu gerekir — koddan silmek yetmez"
+        else:
+            g.sp = sonar_unit_sp(g.total)
+    return list(by.values())
+
+
+def pack_sonar(units: list[Group], pack_sp: int = 3, pack_files: int = 5) -> list[Group]:
+    """Aynı repo + kural birimlerini ≤pack_sp SP ve ≤pack_files dosyalık Task'larda topla.
+    Paket skoru = en yüksek birim skoru (toplam değil — adet baskınlığı geri gelmesin)."""
+    buckets: dict[tuple[str, str, bool], list[Group]] = {}
+    for u in units:
+        buckets.setdefault((u.repo, u.findings[0].rule, u.needs_human), []).append(u)
+    out: list[Group] = []
+    for (repo, _rule, _human), us in buckets.items():
+        us.sort(key=lambda x: (-x.score, x.fingerprints[0]))
+        cur: Group | None = None
+        for u in us:
+            if (cur is not None and cur.sp + u.sp <= pack_sp
+                    and len(cur.files) + len(u.files) <= pack_files):
+                cur.fingerprints += u.fingerprints
+                cur.findings += u.findings
+                cur.sp += u.sp
+                cur.score = max(cur.score, u.score)
+                cur.recurring_of = cur.recurring_of or u.recurring_of
+                continue
+            cur = Group(source="sonar", repo=repo, title=u.title, fingerprints=list(u.fingerprints),
+                        findings=list(u.findings), score=u.score, sp=u.sp, needs_human=u.needs_human,
+                        human_reason=u.human_reason, recurring_of=u.recurring_of)
+            out.append(cur)
+    for g in out:
+        n = len(g.files)
+        if n > 1:
+            g.title = f"{g.title} (+{n - 1} dosya)"
     return out

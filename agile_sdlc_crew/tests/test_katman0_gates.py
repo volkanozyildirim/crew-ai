@@ -3228,6 +3228,40 @@ def test_quality_rank_nr():
     check("≤3 anahtar → 1 SP", len(three) == 1 and three[0].sp == 1 and len(three[0].fingerprints) == 3)
 
 
+def test_quality_rank_sonar():
+    print("\n[Q2] Kalite alımı — Sonar birim, skor, paketleme")
+    from agile_sdlc_crew.quality import rank
+    from agile_sdlc_crew.quality.model import Finding
+
+    def sf(file, rule="css:S4657", sev="CRITICAL", typ="BUG", repo="webservice", line=1):
+        return Finding(source="sonar", repo=repo, project=f"EcomBackend:{repo}", file=file, rule=rule,
+                       rule_name=rule, severity=sev, itype=typ, lines=[line])
+
+    css = [sf("themes/a.css", line=i) for i in range(300)]
+    vuln = [sf("app/Login.php", rule="php:S2076", sev="BLOCKER", typ="VULNERABILITY")]
+    units = rank.sonar_units(css + vuln)
+    by = {u.findings[0].rule: u for u in units}
+    check("aynı dosya+kural → tek birim (300 madde)", len(units) == 2 and by["css:S4657"].total == 300)
+    check("tek Vulnerability+Blocker, 300 maddelik Bug+Critical'ı geçer",
+          by["php:S2076"].score > by["css:S4657"].score,
+          f"{by['php:S2076'].score} vs {by['css:S4657'].score}")
+    check("SP: 1 madde → 1, 300 madde → 3", by["php:S2076"].sp == 1 and by["css:S4657"].sp == 3)
+    check("SP sınırları ≤5→1, ≤20→2, >20→3", [rank.sonar_unit_sp(n) for n in (5, 6, 20, 21)] == [1, 2, 2, 3])
+    sec = rank.sonar_units([sf("config/app.php", rule="secrets:S6703", sev="BLOCKER", typ="VULNERABILITY")])[0]
+    check("secrets:* → 1 SP + needs_human", sec.sp == 1 and sec.needs_human and "rotasyon" in sec.human_reason)
+    twelve = rank.sonar_units([sf(f"themes/t{i}.css") for i in range(12)])
+    packs = rank.pack_sonar(twelve, pack_sp=3, pack_files=5)
+    check("12 dosya × 1 SP, paket ≤3 SP → 4 paket × 3 dosya",
+          len(packs) == 4 and all(p.sp == 3 and len(p.files) == 3 for p in packs))
+    packs5 = rank.pack_sonar(twelve, pack_sp=99, pack_files=5)
+    check("dosya sınırı 5 → 5+5+2", sorted(len(p.files) for p in packs5) == [2, 5, 5])
+    check("paket başlığı +N dosya, parmak izi birim başına",
+          "(+4 dosya)" in max(packs5, key=lambda p: len(p.files)).title
+          and sum(len(p.fingerprints) for p in packs5) == 12)
+    mixed = rank.pack_sonar(rank.sonar_units([sf("a.css"), sf("b.php", rule="php:S1")]))
+    check("farklı kural aynı pakete girmez", len(mixed) == 2)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3266,7 +3300,8 @@ def main():
               test_prompt_prefix_order,
               test_cli_prompt_overhead,
               test_wi_comments_context,
-              test_quality_rank_nr):
+              test_quality_rank_nr,
+              test_quality_rank_sonar):
         try:
             t()
         except Exception as e:
