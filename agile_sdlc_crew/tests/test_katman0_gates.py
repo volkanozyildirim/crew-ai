@@ -3362,6 +3362,74 @@ def test_quality_dedup():
     check("hiç yok → new", v("zzz") == ("new", None))
 
 
+def test_quality_app_map():
+    print("\n[Q6] Kalite alımı — NR uygulama → repo eşlemesi (FLODevOps)")
+    import inspect
+    import yaml
+    from agile_sdlc_crew.quality import app_map
+    from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+    check("Azure istemcisi başka projedeki repoyu okuyabilir (project parametresi)",
+          "project" in inspect.signature(AzureDevOpsClient.get_file_content).parameters
+          and "project" in inspect.signature(AzureDevOpsClient.get_items_in_path).parameters)
+    jf_tr = 'String gitOriginApp = "git@ssh.dev.azure.com:v3/flotechnology/ecombackend/webservice"\n'
+    df_tr = ("ARG website=tr-stocks.flo.com.tr\n"
+             "&& sed -ie 's/[ ;]*newrelic.appname[[:space:]]=.*/newrelic.appname=\"[Prod] tr-stocks.flo.com.tr\"/' "
+             "$(php-config --ini-dir)/newrelic.ini \\\n")
+    e = app_map.parse_build_dir(jf_tr, df_tr)
+    check("literal appname + gitOriginApp",
+          e == {"project": "ecombackend", "repo": "webservice", "apps": ["[Prod] tr-stocks.flo.com.tr"]}, str(e))
+    jf_web = ('String gitOriginApp = "git@ssh.dev.azure.com:v3/flotechnology/ecombackend/webservice"\n'
+              "   flokz       : [website: 'flo.com.kz', themePath: 'flo-kz'],\n"
+              "   floma       : [website: 'flo.co.ma', themePath: 'flo-ma'],\n"
+              '   newrelic_app_name = "[Prod] ${website}"\n'
+              "   sh \"docker build --build-arg newrelic_app_name='${newrelic_app_name}' .\"\n")
+    df_web = ("ARG website\nARG newrelic_app_name\n"
+              '&& sed -ie "s/[ ;]*newrelic.appname[[:space:]]=.*/newrelic.appname=\\"${newrelic_app_name}\\"/" x\n')
+    e2 = app_map.parse_build_dir(jf_web, df_web)
+    check("${website} şablonu her siteye açılır, ${newrelic_app_name} yok sayılır",
+          e2 and e2["apps"] == ["[Prod] flo.com.kz", "[Prod] flo.co.ma"], str(e2))
+    check("gitOriginApp yoksa None", app_map.parse_build_dir("", df_tr) is None)
+
+    calls = {"n": 0}
+
+    class FakeClient:
+        def get_items_in_path(self, repo, path, branch=None, recursion_level="oneLevel", project=None):
+            calls["n"] += 1
+            assert project == "FLODevOps" and branch == "production"
+            if repo != "global":
+                return []
+            return [{"path": "/build", "isFolder": True}, {"path": "/build/trstock", "isFolder": True},
+                    {"path": "/build/.DS_Store", "isFolder": False}]
+
+        def get_file_content(self, repo, path, branch=None, project=None):
+            return {"/build/trstock/JenkinsfileBuild": jf_tr, "/build/trstock/Dockerfile": df_tr}[path]
+
+    class Broken(FakeClient):
+        def get_items_in_path(self, *a, **k):
+            raise RuntimeError("401")
+
+    with tempfile.TemporaryDirectory() as td:
+        cache, ovr = Path(td) / "map.yaml", Path(td) / "ovr.yaml"
+        ovr.write_text(yaml.safe_dump({"[Prod] Stock Api": "stock-api"}), encoding="utf-8")
+        m = app_map.load_map(FakeClient(), cache_path=cache, overrides_path=ovr)
+        check("FLODevOps'tan kurulur, büyük/küçük harf duyarsız, override eklenir",
+              app_map.resolve("[PROD] TR-STOCKS.FLO.COM.TR", m) == "webservice"
+              and app_map.resolve("[Prod] Stock Api", m) == "stock-api" and app_map.resolve("yok", m) == "")
+        n = calls["n"]
+        app_map.load_map(FakeClient(), cache_path=cache, overrides_path=ovr)
+        check("taze önbellek varken FLODevOps tekrar okunmaz", calls["n"] == n)
+        m2 = app_map.load_map(Broken(), cache_path=cache, overrides_path=ovr, force=True)
+        check("FLODevOps okunamazsa eski önbellek kullanılır",
+              app_map.resolve("[Prod] tr-stocks.flo.com.tr", m2) == "webservice")
+        cache.unlink()
+        try:
+            app_map.load_map(Broken(), cache_path=cache, overrides_path=ovr)
+            ok = False
+        except app_map.QualitySourceError:
+            ok = True
+        check("önbellek de yoksa QualitySourceError", ok)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3404,7 +3472,8 @@ def main():
               test_quality_rank_sonar,
               test_quality_select,
               test_quality_render,
-              test_quality_dedup):
+              test_quality_dedup,
+              test_quality_app_map):
         try:
             t()
         except Exception as e:

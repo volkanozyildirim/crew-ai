@@ -258,9 +258,11 @@ class AzureDevOpsClient:
         path: str = "/",
         branch: str | None = None,
         recursion_level: str = "oneLevel",
+        project: str | None = None,
     ) -> list[dict]:
-        """Bir repoda belirtilen dizindeki dosya/klasorleri listeler."""
-        url = f"{self._repo_api_url(repo_id_or_name)}/items"
+        """Bir repoda belirtilen dizindeki dosya/klasorleri listeler.
+        project: repo AZURE_DEVOPS_REPO_PROJECTS disindaysa (ör. FLODevOps)."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/items"
         params: dict = {
             "scopePath": path,
             "recursionLevel": recursion_level,
@@ -283,9 +285,10 @@ class AzureDevOpsClient:
         repo_id_or_name: str,
         file_path: str,
         branch: str | None = None,
+        project: str | None = None,
     ) -> str:
         """Bir repodaki dosyanin icerigini (text) dondurur."""
-        url = f"{self._repo_api_url(repo_id_or_name)}/items"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/items"
         params: dict = {
             "path": file_path,
             "includeContent": "true",

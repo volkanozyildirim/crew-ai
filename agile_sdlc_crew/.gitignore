@@ -29,3 +29,6 @@ sprint_report_team.*
 sprint_report_icons/
 sprint_reports/
 *.pptx
+
+# Kalite alımı: FLODevOps'tan kurulan NR → repo önbelleği (her 24 saatte yeniden kurulur)
+src/agile_sdlc_crew/config/quality_app_map.yaml

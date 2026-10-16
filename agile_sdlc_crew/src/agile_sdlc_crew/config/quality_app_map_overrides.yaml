@@ -1,0 +1,4 @@
+# New Relic uygulama adı → repo. FLODevOps build dosyalarından çıkarılamayan
+# eşlemeler buraya yazılır; otomatik eşlemeyi her zaman ezer.
+# Örnek: "[Prod] Stock Api" Dockerfile'da appname olarak geçmiyor.
+"[Prod] Stock Api": stock-api
