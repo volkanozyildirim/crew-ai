@@ -192,8 +192,10 @@ def expected_behavior(g: Group) -> list[str]:
                 "Yalnızca listelenen dosya ve satırlara dokunulur; ilgisiz yeniden düzenleme yapılmaz.",
                 "Doğrulama: değişen mantık için birim testi; Sonar'da maddeler kapanır."]
     f0 = g.findings[0]
-    where = ("'Olası yer' listesindeki dosyalardan hatanın gerçekten üretildiği action düzeltilir; "
-             "hata ikisinde de oluşuyorsa ikisi de.")
+    where = ("Hatanın gerçekten üretildiği yer düzeltilir. 'Olası yer' New Relic işlem adından "
+             "çıkarılmış bir başlangıç noktasıdır, kapsam kilidi değildir: hata action'ın çağırdığı "
+             "bir yardımcı, servis ya da şablonda oluşuyorsa orası düzeltilir. Kapsam bu hatanın "
+             "giderilmesiyle sınırlıdır.")
     verify = ("Doğrulama: düzeltilen durum için birim testi; deploy sonrası Kaynak (NRQL) sorgusunda "
               "bu hata için yeni kayıt görülmez.")
     if is_undefined_key(g):
