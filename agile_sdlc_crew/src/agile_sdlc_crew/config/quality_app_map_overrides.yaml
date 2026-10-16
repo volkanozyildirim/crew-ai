@@ -2,3 +2,14 @@
 # eşlemeler buraya yazılır; otomatik eşlemeyi her zaman ezer.
 # Örnek: "[Prod] Stock Api" Dockerfile'da appname olarak geçmiyor.
 "[Prod] Stock Api": stock-api
+
+# anatolia/build/websites: website = "${brand}.com.tr", newrelic_app_name = "[PROD] ${website}",
+# gitOriginApp = ecombackend/webservice. Marka listesi Jenkins job parametresinde (dosyada
+# değil), bu yüzden otomatik eşleme kuramaz — TR marka siteleri elle:
+"[PROD] flo.com.tr": webservice
+"[PROD] lumberjack.com.tr": webservice
+"[PROD] reebok.com.tr": webservice
+"[PROD] instreet.com.tr": webservice
+"[PROD] kinetix.com.tr": webservice
+"[PROD] ninewest.com.tr": webservice
+"[PROD] butigo.com.tr": webservice
