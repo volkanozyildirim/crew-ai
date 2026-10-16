@@ -236,6 +236,21 @@ def _assignee(client) -> str:
         return ""
 
 
+AC_FIELD = "Microsoft.VSTS.Common.AcceptanceCriteria"
+
+
+def _create_task(client, fields: dict, parent_id: int) -> int:
+    """AC alanı tipte yoksa Azure 400 döner → alansız tekrar dene (kabul kriteri açıklamada da var)."""
+    try:
+        return int(client.create_work_item("Task", fields, parent_id=parent_id)["id"])
+    except Exception as e:  # noqa: BLE001
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        if code != 400 and "400" not in str(e):
+            raise
+        rest = {k: v for k, v in fields.items() if k != AC_FIELD}
+        return int(client.create_work_item("Task", rest, parent_id=parent_id)["id"])
+
+
 def take(client, source: str, sp: int, *, story_id: int | None = None, team: str = "",
          deps: Deps | None = None) -> dict:
     from agile_sdlc_crew import estimation
@@ -262,8 +277,9 @@ def take(client, source: str, sp: int, *, story_id: int | None = None, team: str
                 fields["System.AreaPath"] = story["area"]
             if me:
                 fields["System.AssignedTo"] = me
+            fields[AC_FIELD] = render.acceptance_criteria(g)
             try:
-                wid = int(client.create_work_item("Task", fields, parent_id=story["id"])["id"])
+                wid = _create_task(client, fields, story["id"])
             except Exception as e:  # noqa: BLE001
                 row["error"] = f"Task açılamadı: {e}"
                 rows.append(row)

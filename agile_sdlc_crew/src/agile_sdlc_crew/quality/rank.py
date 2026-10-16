@@ -92,9 +92,18 @@ def nr_fingerprint(repo: str, action: str, err_class: str, norm: str) -> str:
 _UNDEF = re.compile(r"^Undefined (?:array key|index|offset|variable|property)\b", re.I)
 _WARN_CLASSES = {"E_WARNING", "E_NOTICE", "E_USER_WARNING", "E_USER_NOTICE"}
 _INFRA = re.compile(
-    r"timed? ?out|timeout|connection (?:refused|reset|timed)|could not connect|"
+    r"\btimed out\b|(?<![\w$])timeout(?!\w)|connection (?:refused|reset|timed)|could not connect|"
     r"server has gone away|deadlock|curl error|name or service not known|"
     r"no route to host|too many connections|getaddrinfo", re.I)
+_INFRA_CLASS = re.compile(r"Connect(?:ion)?Exception$", re.I)
+# Altyapı sözcükleri kimlik adlarında da geçer ("timeout" anahtarı, $timeout,
+# getTimeout()); bunlar kod hatasıdır. Eşleşmeden önce tırnak içi, $değişken,
+# camelCase/snake_case ve çağrı adları metinden çıkarılır.
+_IDENTS = re.compile(r"\"[^\"]*\"|'[^']*'|\$\w+|\b\w*[a-z][A-Z]\w*\b|\b\w+_\w+\b|\b\w+\(\)")
+
+
+def _is_infra(f: Finding) -> bool:
+    return bool(_INFRA_CLASS.search(f.err_class) or _INFRA.search(_IDENTS.sub(" ", f.message)))
 
 
 def is_undefined_key(g: Group) -> bool:
@@ -104,11 +113,11 @@ def is_undefined_key(g: Group) -> bool:
 
 def _size_nr(g: Group) -> None:
     f = g.findings[0]
-    if _INFRA.search(f.message) or _INFRA.search(f.err_class):
+    if is_undefined_key(g):
+        g.sp = 1
+    elif _is_infra(f):
         g.sp, g.needs_human = 3, True
         g.human_reason = "Altyapı kökenli hata — kod değişikliğiyle çözülmeyebilir"
-    elif is_undefined_key(g):
-        g.sp = 1
     else:
         g.sp = 3
 

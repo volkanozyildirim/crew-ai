@@ -3701,6 +3701,121 @@ def test_quality_endpoints():
           and "function loadQuality" in html and "loadQuality();" in html)
 
 
+def test_quality_review_fixes():
+    print("\n[Q10] Kalite alımı — son inceleme düzeltmeleri")
+    import requests as _rq
+    import yaml
+    from agile_sdlc_crew.quality import app_map, intake, rank, render
+    from agile_sdlc_crew.quality.model import Finding
+
+    def one(msg, cls="E_WARNING"):
+        return rank.nr_units([Finding(source="newrelic", repo="r", app="[Prod] a", action="A::b",
+                                      err_class=cls, message=msg, count=500, last_seen=1.0)])[0]
+    code_bugs = [("Undefined array key \"timeout\"", "E_WARNING"),
+                 ("Undefined array key \"connect_timeout\"", "E_WARNING"),
+                 ("Undefined property: stdClass::$timeOut", "E_WARNING"),
+                 ("Call to a member function getTimeout() on null", "Error"),
+                 ("Argument #1 ($timeout) must be of type int, string given", "TypeError")]
+    wrong = [m for m, c in code_bugs if one(m, c).needs_human]
+    check("kimlik adındaki timeout altyapı sayılmaz (kod hatası, kuyruğa girer)", not wrong, str(wrong))
+    check("tanımsız 'timeout' anahtarı 1 SP", one('Undefined array key "timeout"').sp == 1)
+    infra = [("cURL error 28: Operation timed out after 5000 ms", "GuzzleHttp\\Exception\\ConnectException"),
+             ("SQLSTATE[HY000] [2002] Connection refused", "PDOException"),
+             ("SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded", "PDOException"),
+             ("MySQL server has gone away", "PDOException")]
+    missed = [m for m, c in infra if not one(m, c).needs_human]
+    check("gerçek altyapı hataları hâlâ needs_human", not missed, str(missed))
+
+    m = render.mask_secrets
+    leaks = [s for s, secret in (("https://user:hunter22@api.x.com/v1", "hunter22"),
+                                 ("redis://:p4ssw0rd@10.0.0.5:6379", "p4ssw0rd"),
+                                 ("redis://:pw9x@redis:6379", "pw9x"),
+                                 ("pass=Secret1", "Secret1"), ("pwd hunter2", "hunter2"),
+                                 ("client_secret: abcXYZ", "abcXYZ"))
+             if secret in m(s)]
+    check("URL userinfo ve kısa anahtar parolaları maskelenir", not leaks, str(leaks))
+    check("bypass=1 gibi kelime içi eşleşme maskelenmez", m("bypass=1") == "bypass=1")
+
+    jf = 'String gitOriginApp = "git@ssh.dev.azure.com:v3/o/ecombackend/webservice"\n'
+    df = 'newrelic.appname="[Prod] a.com"\n'
+
+    def http_err(code):
+        r = _rq.Response()
+        r.status_code = code
+        return _rq.HTTPError(str(code), response=r)
+
+    class Dev:
+        def __init__(self, fail=None, dirs=("x",)):
+            self.fail, self.dirs = fail, dirs
+
+        def get_items_in_path(self, repo, path, branch=None, recursion_level="oneLevel", project=None):
+            return [{"path": f"/build/{d}", "isFolder": True} for d in self.dirs] if repo == "global" else []
+
+        def get_file_content(self, repo, path, branch=None, project=None):
+            if self.fail:
+                raise http_err(self.fail)
+            if path.endswith("/Dockerfile") and "/y/" in path:
+                raise http_err(404)
+            return jf if path.endswith("JenkinsfileBuild") else df
+
+    with tempfile.TemporaryDirectory() as td:
+        cache, ovr = Path(td) / "m.yaml", Path(td) / "o.yaml"
+        ovr.write_text("{}", encoding="utf-8")
+        mp = app_map.load_map(Dev(dirs=("x", "y")), cache_path=cache, overrides_path=ovr)
+        check("404 (dosya yok) sessizce atlanır", app_map.resolve("[Prod] a.com", mp) == "webservice")
+        m2 = app_map.load_map(Dev(fail=503), cache_path=cache, overrides_path=ovr, force=True)
+        kept = (yaml.safe_load(cache.read_text(encoding="utf-8")) or {}).get("apps") or {}
+        check("FLODevOps 5xx → eski önbellek korunur ve kullanılır",
+              app_map.resolve("[Prod] a.com", m2) == "webservice" and "[Prod] a.com" in kept)
+        m3 = app_map.load_map(Dev(dirs=()), cache_path=cache, overrides_path=ovr, force=True)
+        check("boş/çok küçülmüş eşleme önbelleği ezmez",
+              app_map.resolve("[Prod] a.com", m3) == "webservice")
+
+    class AzC:
+        org_url, project, repo_projects = "https://dev.azure.com/o", "P", []
+
+        def __init__(self, reject_ac=False):
+            self.reject_ac, self.created = reject_ac, []
+
+        def list_iterations(self, team=""):
+            return [{"name": "S1", "path": "P\\S1", "attributes": {"timeFrame": "current"}}]
+
+        def query_work_items(self, wiql, limit=0):
+            return []
+
+        def get_team_area_path(self, team=""):
+            return "P\\T"
+
+        def get_authenticated_user(self):
+            return {}
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            if type_name == "Task" and self.reject_ac and "Microsoft.VSTS.Common.AcceptanceCriteria" in fields:
+                raise http_err(400)
+            self.created.append((type_name, dict(fields)))
+            return {"id": 100 + len(self.created), "fields": fields}
+
+        def update_work_item(self, wid, ops):
+            return {}
+
+    fs = [Finding(source="newrelic", repo="webservice", app="[Prod] a", action="A::b", err_class="TypeError",
+                  message="boom", count=500, last_seen=1.0)]
+    deps = intake.Deps(gather=lambda s, c, cf: (list(fs), []), board=lambda c: {}, repo_ok=lambda r: True,
+                       queue=lambda w, t: 1, record=lambda **k: None, now=lambda: 2.0,
+                       cfg=lambda: {"nr_days": 7, "nr_min_errors": 100, "pack_sp": 3, "pack_files": 5,
+                                    "human_share": 0.3, "max_tasks": 8, "grace_days": 3, "sonar_url": ""})
+    c = AzC()
+    intake.take(c, "newrelic", 5, deps=deps)
+    task = next(f for ty, f in c.created if ty == "Task")
+    check("Task'a Acceptance Criteria alanı yazılır (hazırlık kapısı −15 yemesin)",
+          "Kabul kriteri" in task.get("Microsoft.VSTS.Common.AcceptanceCriteria", "")
+          or "Bu action" in task.get("Microsoft.VSTS.Common.AcceptanceCriteria", ""))
+    c2 = AzC(reject_ac=True)
+    r2 = intake.take(c2, "newrelic", 5, deps=deps)
+    check("tipte AC alanı yoksa (400) alansız açılır",
+          any(ty == "Task" for ty, _ in c2.created) and r2["tasks"][0]["id"] and not r2["tasks"][0].get("error"))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3747,7 +3862,8 @@ def main():
               test_quality_app_map,
               test_quality_sources,
               test_quality_intake,
-              test_quality_endpoints):
+              test_quality_endpoints,
+              test_quality_review_fixes):
         try:
             t()
         except Exception as e:

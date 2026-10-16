@@ -56,10 +56,14 @@ def parse_build_dir(jenkinsfile: str, dockerfile: str) -> dict | None:
 
 
 def _read(client, devrepo: str, path: str) -> str:
+    """Yalnızca 404 (servis dizininde dosya yok) boş döner; 401/429/5xx/zaman aşımı
+    yükselir — yoksa kesinti "eşleme yok" gibi görünür ve önbelleği ezerdi."""
     try:
         return client.get_file_content(devrepo, path, branch=DEVOPS_BRANCH, project=DEVOPS_PROJECT) or ""
-    except Exception:  # noqa: BLE001 — servis dizininde dosya olmayabilir (404)
-        return ""
+    except Exception as e:  # noqa: BLE001
+        if getattr(getattr(e, "response", None), "status_code", None) == 404:
+            return ""
+        raise
 
 
 def build_map(client) -> dict[str, dict]:
@@ -98,7 +102,11 @@ def load_map(client=None, *, max_age_h: int = 24, force: bool = False,
             if client is None:
                 from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
                 client = AzureDevOpsClient()
-            apps = build_map(client)
+            built = build_map(client)
+            if not built or (apps and len(built) < len(apps) // 2):
+                raise QualitySourceError(
+                    f"FLODevOps eşlemesi şüpheli küçük ({len(built)} uygulama, önbellekte {len(apps)})")
+            apps = built
             cache_path.write_text(yaml.safe_dump({"built_at": time.time(), "apps": apps},
                                                  allow_unicode=True, sort_keys=True), encoding="utf-8")
         except Exception as e:  # noqa: BLE001

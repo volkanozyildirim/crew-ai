@@ -33,8 +33,12 @@ def task_tags(g: Group) -> str:
 
 _AUTH = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}", re.I)
 _KV = re.compile(
-    r"((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)[\"']?\s*[=:]\s*[\"']?)"
+    r"((?<![A-Za-z])(?:password|passwd|pwd|pass|secret|client_secret|token|auth|credentials?|"
+    r"api[_-]?key|access[_-]?key)[\"']?\s*[=:]\s*[\"']?)"
     r"[^\s&\"',;]+", re.I)
+# "pwd hunter2" — ayraçsız; yalnızca değer rakam/simge içeriyorsa (düz cümleyi bozmasın)
+_KV_SPACE = re.compile(r"((?<![A-Za-z])(?:password|passwd|pwd|pass)\s+)(?=\S*[\d!@#$%^&*])[^\s&\"',;]+", re.I)
+_USERINFO = re.compile(r"(\b[a-z][\w+.-]*://)[^/\s@]*@", re.I)
 _LONG = re.compile(r"[A-Za-z0-9+/=_-]{20,}")
 _SNAKE = re.compile(r"[a-z]+(?:_[a-z0-9]+)+")
 
@@ -47,7 +51,9 @@ def _secretish(tok: str) -> bool:
 
 def mask_secrets(text: str) -> str:
     s = _AUTH.sub(lambda m: f"{m.group(1)} ***", text or "")
+    s = _USERINFO.sub(lambda m: m.group(1) + "***@", s)
     s = _KV.sub(lambda m: m.group(1) + "***", s)
+    s = _KV_SPACE.sub(lambda m: m.group(1) + "***", s)
     return _LONG.sub(lambda m: "***" if _secretish(m.group(0)) else m.group(0), s)
 
 
@@ -133,8 +139,7 @@ def _nr_body(g: Group, nr_days: int) -> list[str]:
                       f"AND error.class = '{cls}' FACET error.message, transactionName "
                       f"SINCE {int(nr_days)} days ago")
                  + "</pre>")
-    parts.append("<p><b>Kabul kriteri:</b> Bu action'da bu hata sınıfı/mesajı bir daha üretilmez; "
-                 "mevcut davranış korunur.</p>")
+    parts.append(f"<p><b>Kabul kriteri:</b> {acceptance_criteria(g)}</p>")
     return parts
 
 
@@ -163,13 +168,18 @@ def _sonar_body(g: Group, sonar_url: str) -> list[str]:
             url = (f"{sonar_url}/project/issues?id={proj}&rules={f0.rule}"
                    "&issueStatuses=OPEN,CONFIRMED")
             parts.append(f'<p><b>Kaynak:</b> <a href="{html.escape(url)}">{html.escape(proj)}</a></p>')
-    if secret:
-        parts.append("<p><b>Kabul kriteri:</b> Secret döndürülür (rotate) ve koddan kaldırılır; "
-                     "yeni değer gizli yönetiminden okunur.</p>")
-    else:
-        parts.append("<p><b>Kabul kriteri:</b> Listelenen maddeler Sonar'da kapanır; değişen satırlarda "
-                     "yeni madde eklenmez.</p>")
+    parts.append(f"<p><b>Kabul kriteri:</b> {acceptance_criteria(g)}</p>")
     return parts
+
+
+def acceptance_criteria(g: Group) -> str:
+    """Açıklamaya VE AcceptanceCriteria alanına yazılır: alan boşsa hazırlık
+    kapısı (flow._readiness_score) her kalite işinden 15 puan düşer."""
+    if g.source == "newrelic":
+        return "Bu action'da bu hata sınıfı/mesajı bir daha üretilmez; mevcut davranış korunur."
+    if g.findings and g.findings[0].rule.startswith("secrets:"):
+        return ("Secret döndürülür (rotate) ve koddan kaldırılır; yeni değer gizli yönetiminden okunur.")
+    return "Listelenen maddeler Sonar'da kapanır; değişen satırlarda yeni madde eklenmez."
 
 
 def task_description(g: Group, *, sonar_url: str = "", nr_days: int = 7) -> str:
