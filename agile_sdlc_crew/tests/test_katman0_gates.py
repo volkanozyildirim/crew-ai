@@ -3282,6 +3282,54 @@ def test_quality_select():
     check("3 SP bütçede needs_human hiç girmez (pay 0)", rank.select_budget([g("h", 1, 9, True)], 3) == [])
 
 
+def test_quality_render():
+    print("\n[Q4] Kalite alımı — WI metinleri, maskeleme, parmak izi satırı")
+    import html as _html
+    from agile_sdlc_crew.quality import rank, render
+    from agile_sdlc_crew.quality.model import Finding
+    m = render.mask_secrets
+    check("Bearer/Basic ve password=… maskelenir",
+          "abc123def456" not in m("Authorization: Bearer abc123def456ghi")
+          and m("password=Hunter2x&x=1") == "password=***&x=1"
+          and "dXNlcjpwYXNz" not in m("Basic dXNlcjpwYXNz"))
+    check("uzun anahtar adları maskelenmez",
+          m('Undefined array key "is_prime_activate_on_preprod_web"')
+          == 'Undefined array key "is_prime_activate_on_preprod_web"')
+    check("uzun hex/token maskelenir", "***" in m("token 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b"))
+    check("action → dosya ipucu (V1 varyantı dahil)",
+          render.file_hints("Api/Order::integrationCancel") == [
+              "app/Controller/Api/Order.php::integrationCancelAction",
+              "app/Controller/V1/Api/Order.php::integrationCancelAction"]
+          and render.file_hints("cron.php") == [])
+    nr = rank.nr_units([Finding(source="newrelic", repo="webservice", app=f"[Prod] s{i}.ru", action="Content::page",
+                                err_class="E_WARNING", message='Undefined array key "value"', count=10,
+                                uris=["/ru/x"], first_seen=1.7e9, last_seen=1.7e9 + 60, error_rate=0.05)
+                        for i in range(2)])[0]
+    d = render.task_description(nr, nr_days=7)
+    check("NR açıklaması: ilk satır Repo, iki uygulama, ipucu, kabul kriteri, parmak izi",
+          d.startswith("<p><b>Repo:</b> <code>webservice</code></p>") and "[Prod] s0.ru" in d
+          and "[Prod] s1.ru" in d and "app/Controller/Content.php::pageAction" in d
+          and "Kabul kriteri" in d and render.parse_fingerprints(d) == nr.fingerprints)
+    check("NR başlığı", render.task_title(nr) == '[webservice] Content::page: Undefined array key "value"')
+    sec = rank.sonar_units([Finding(source="sonar", repo="webservice", project="EcomBackend:webservice",
+                                    file="config/db.php", rule="secrets:S6703",
+                                    rule_name="Database passwords should not be disclosed",
+                                    severity="BLOCKER", itype="VULNERABILITY", lines=[12],
+                                    message="password = 'S3cr3tValue!'")])[0]
+    sd = render.task_description(sec, sonar_url="https://sonar.x", nr_days=7)
+    check("secrets:* açıklamasına madde mesajı girmez; dosya:satır ve insan nedeni girer",
+          "S3cr3tValue" not in sd and "config/db.php:12" in sd and "Neden insan" in sd)
+    check("etiketler", render.task_tags(sec) == "tempo-quality; tempo-src-sonar; needs-human")
+    nr.recurring_of = 75001
+    check("tekrarlayan iş önceki WI'ı anar", "#75001" in render.task_description(nr, nr_days=7))
+    fps = ['nr:webservice:A::b:E_WARNING:Undefined array key "x"', "sonar:webservice:a.css:css:S4657"]
+    blob = "".join(f"<p><small>tempo-fp: {_html.escape(fp)}</small></p>" for fp in fps)
+    check("parmak izi satırları geri okunur (HTML kaçışlı ve etiketsiz)",
+          render.parse_fingerprints(blob) == fps
+          and render.parse_fingerprints("tempo-fp: a:b tempo-fp: c:d") == ["a:b", "c:d"])
+    check("story başlığı", render.story_title("newrelic", "Sprint 42") == "Kalite: New Relic hataları — Sprint 42")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3322,7 +3370,8 @@ def main():
               test_wi_comments_context,
               test_quality_rank_nr,
               test_quality_rank_sonar,
-              test_quality_select):
+              test_quality_select,
+              test_quality_render):
         try:
             t()
         except Exception as e:
