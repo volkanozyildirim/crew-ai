@@ -3533,6 +3533,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
             existing_content = ""
             try:
                 existing_content = self._client.get_file_content(repo_name, file_path, branch)
+                if existing_content:
+                    self._stage_worktree_file(repo_name, file_path, existing_content)
             except Exception:
                 existing_content = change.get("new_code", "")
 
@@ -3633,6 +3635,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    Push HATA: {push_result.get('error', '?')}")
 
         _cli_rr.clear_repo_ctx()
+        # Hazırlanıp push edilmeyen (atlanan / hatalı) dosyalar da geri alınsın
+        for (_r, _fp) in list((getattr(self, "_staged_worktree", None) or {}).keys()):
+            if _r == repo_name:
+                self._restore_worktree_file(repo_name, _fp)
         _log("  Review retry: dosyalar guncellendi, dogrulama yapiliyor")
 
         if not structured:
@@ -7014,6 +7020,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         """Calisma kopyasini geri al (dev'in in-place edit'i sonraki job'a
         sizmasin). En iyi caba — hata yutulur."""
         try:
+            (getattr(self, "_staged_worktree", None) or {}).pop((repo_name, file_path.lstrip("/")), None)
             repo_dir = self._repo_mgr.base_dir / repo_name
             self._repo_mgr._git(["checkout", "--", file_path.lstrip("/")], cwd=repo_dir)
         except Exception:
@@ -7051,9 +7058,47 @@ class AgileSDLCFlow(Flow[PipelineState]):
         Disk degismemisse (ornek: Python direct-edit yolu) text_output kalir."""
         disk = self._read_worktree_file(repo_name, file_path)
         if disk and disk.strip() != (original or "").strip() and len(disk) > len(text_output or ""):
+            # Disk ancak `original`in üstüne kurulmuşsa kullanılır. Yerel klon
+            # main'de dururken review/build-fix turu PR branch'indeki dosyayı
+            # düzeltir; dev main kopyasını düzenlerse disk, önceki turların
+            # düzeltmelerini GERİ ALIR (#231: `telephone ?? null` kayboldu,
+            # getDiscountInfo protected→private döndü, build iki turda kırmızı).
+            base = self._worktree_base(repo_name, file_path)
+            if base is None or base.strip() != (original or "").strip():
+                _log("    ⚠️ Disk kopyası PR'daki halin üstüne kurulmamış — disk düzenlemesi "
+                     "KULLANILMADI (önceki düzeltmeleri geri alırdı)")
+                return text_output
             _log(f"    Dev disk'te in-place düzenlemiş — disk içeriği push edilecek ({len(disk)} char)")
             return disk
         return text_output
+
+    def _stage_worktree_file(self, repo_name: str, file_path: str, content: str) -> None:
+        """Review/build-fix turundan önce dosyanın PR branch'indeki halini
+        diske yaz: dev in-place düzenlerse doğru tabanın üstüne kurulsun.
+        Tur sonunda _restore_worktree_file ile geri alınır."""
+        try:
+            p = self._repo_mgr.base_dir / repo_name / file_path.lstrip("/")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            staged = getattr(self, "_staged_worktree", None)
+            if staged is None:
+                staged = {}
+                self._staged_worktree = staged
+            staged[(repo_name, file_path.lstrip("/"))] = content
+        except Exception as e:
+            _log(f"    Diske hazırlık yazılamadı ({file_path}): {e}")
+
+    def _worktree_base(self, repo_name: str, file_path: str) -> str | None:
+        """Diskteki kopyanın tabanı: bu turda hazırlanan içerik, yoksa HEAD'deki hali."""
+        key = (repo_name, file_path.lstrip("/"))
+        staged = (getattr(self, "_staged_worktree", None) or {}).get(key)
+        if staged is not None:
+            return staged
+        try:
+            r = self._repo_mgr._git(["show", f"HEAD:{key[1]}"], cwd=self._repo_mgr.base_dir / repo_name)
+            return r.stdout if r.returncode == 0 else None
+        except Exception:
+            return None
 
     def _repo_has_tests(self, repo_name: str) -> bool:
         """Repo'da unit test altyapisi var mi? (phpunit.xml / *Test.php /
@@ -7211,6 +7256,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         if _repo_tools and repo_dir.exists():
             _cli.set_repo_ctx([str(repo_dir)], "Read,Grep,Glob,LS")
         pending: list = []   # (file_path, new_content) — sonunda TEK commit
+        staged_here: list = []
         try:
             for i, file_path in enumerate(fix_files):
                 _log(f"  Build-fix implement [{i+1}/{len(fix_files)}]: {file_path}")
@@ -7218,6 +7264,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     existing = self._client.get_file_content(repo_name, file_path, branch)
                 except Exception:
                     existing = ""
+                if existing:
+                    self._stage_worktree_file(repo_name, file_path, existing)
+                    staged_here.append(file_path)
                 ctx = self._build_step_context("implement_change_task")
                 ctx += (
                     f"\n\n# PR BUILD TEST HATASI (DÜZELT)\n"
@@ -7266,6 +7315,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    ✔ Duzeltme hazir (biriktirildi): {file_path}")
         finally:
             _cli.clear_repo_ctx()
+            for _fp in staged_here:
+                if _fp not in {fp for fp, _ in pending}:
+                    self._restore_worktree_file(repo_name, _fp)
 
         if not pending:
             _log("  Build-fix: push edilecek degisiklik yok")

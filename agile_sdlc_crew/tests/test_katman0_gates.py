@@ -4043,6 +4043,37 @@ def test_quality_lean():
     check("run_pipeline flow'u iş kapsamında koşturur", "job_llm_scope()" in inspect.getsource(_main.run_pipeline))
 
 
+def test_worktree_staging():
+    print("\n[48] Review/build-fix turları önceki düzeltmeleri geri almasın (#231: telephone ?? null kayboldu)")
+    import inspect
+    import types
+    from agile_sdlc_crew import flow as _flow
+    F = _flow.AgileSDLCFlow
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td) / "webservice"
+        (repo / "app").mkdir(parents=True)
+        main_v = "<?php\n$t = $o['telephone'];\n" + "// dolgu\n" * 40
+        branch_v = "<?php\n$t = $o['telephone'] ?? null;\n" + "// dolgu\n" * 40
+        f = repo / "app" / "Order.php"
+        f.write_text(main_v, encoding="utf-8")  # yerel klon main'de
+        fake = types.SimpleNamespace(_repo_mgr=types.SimpleNamespace(base_dir=Path(td)))
+        for name in ("_read_worktree_file", "_prefer_worktree_edit", "_stage_worktree_file", "_worktree_base"):
+            setattr(fake, name, types.MethodType(getattr(F, name), fake))
+        # dev diske dokunmadı, kısa bir metin döndürdü
+        out = fake._prefer_worktree_edit("webservice", "/app/Order.php", "", branch_v)
+        check("hazırlık yokken bile main kopyası branch'teki düzeltmenin üstüne yazılmaz",
+              "?? null" in out or out == "", repr(out[:60]))
+        fake._stage_worktree_file("webservice", "/app/Order.php", branch_v)
+        check("tur öncesi diske PR branch'inin hali yazılır", f.read_text(encoding="utf-8") == branch_v)
+        f.write_text(branch_v.replace("// dolgu", "// dolgu düzeltildi", 1), encoding="utf-8")  # dev in-place edit
+        out2 = fake._prefer_worktree_edit("webservice", "/app/Order.php", "", branch_v)
+        check("dev'in in-place düzenlemesi branch üstüne kurulur (önceki düzeltme korunur)",
+              "?? null" in out2 and "düzeltildi" in out2)
+    src = inspect.getsource(F)
+    check("review tekrarı ve build-fix turları diski PR branch'ine hazırlar",
+          src.count("self._stage_worktree_file(") >= 2)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4094,7 +4125,8 @@ def main():
               test_quality_readiness,
               test_repo_ctx_cross_thread,
               test_windowed_edit,
-              test_quality_lean):
+              test_quality_lean,
+              test_worktree_staging):
         try:
             t()
         except Exception as e:
