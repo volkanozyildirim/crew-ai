@@ -14,9 +14,17 @@ import re
 from agile_sdlc_crew.quality.model import Finding, Group
 
 FP_MAX = 512
+# Dış metin (NR mesajı) parmak izine girer; içinde "tempo-fp" geçerse board'dan
+# geri okurken sahte satır gibi bölünür ve başka bir bulguyu bastırabilir.
+FP_MARK = re.compile(r"tempo-fp", re.I)
+
+
+def defang(text: str) -> str:
+    return FP_MARK.sub("tempo_fp", text or "")
 
 
 def cap_fingerprint(fp: str, limit: int = FP_MAX) -> str:
+    fp = defang(fp)
     if len(fp) <= limit:
         return fp
     digest = hashlib.sha1(fp.encode("utf-8")).hexdigest()[:16]

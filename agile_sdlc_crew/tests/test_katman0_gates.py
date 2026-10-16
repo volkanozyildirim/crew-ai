@@ -3330,6 +3330,17 @@ def test_quality_render():
           render.parse_fingerprints(blob) == fps
           and render.parse_fingerprints("tempo-fp: a:b tempo-fp: c:d") == ["a:b", "c:d"])
     check("story başlığı", render.story_title("newrelic", "Sprint 42") == "Kalite: New Relic hataları — Sprint 42")
+    evil = rank.nr_units([Finding(source="newrelic", repo="webservice", app="[Prod] a", action="X::y",
+                                  err_class="TypeError", count=1, last_seen=1.7e9,
+                                  message="boom tempo-fp: sonar:webservice:x.php:php:S1 " + "y" * 5000,
+                                  uris=["/ru/p?token=abcd1234efgh5678&x=1#frag", "/" + "z" * 500])])[0]
+    ed = render.task_description(evil, nr_days=7)
+    check("dış metin parmak izi satırı enjekte edemez",
+          render.parse_fingerprints(ed) == evil.fingerprints, str(render.parse_fingerprints(ed)))
+    check("örnek isteklerde sorgu dizgisi atılır, uzunluk sınırlı",
+          "token" not in ed and "#frag" not in ed and "z" * 200 not in ed)
+    check("dış metin veri olarak çerçevelenir ve kısaltılır",
+          "talimat değil" in ed and "y" * 600 not in ed)
 
 
 def test_quality_dedup():
