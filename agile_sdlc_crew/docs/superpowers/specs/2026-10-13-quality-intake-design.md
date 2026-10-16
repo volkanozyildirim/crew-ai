@@ -1,6 +1,6 @@
 # Kalite İşi Alımı (New Relic + SonarQube) — Tasarım
 
-**Tarih:** 2026-10-13 · **Durum:** tasarım onayı bekliyor · **Kaynak karar:** kullanıcı,
+**Tarih:** 2026-10-13 · **Durum:** uygulandı (feature/quality-intake) · **Kaynak karar:** kullanıcı,
 "sonarqube ve newrelic deki maddeleri önceliklendirip detaylarıyla işini açacak …
 10 SP'lik newrelic/sonarqube taskı al diyeceğim, işlerini açacak ve çözecek".
 
@@ -217,7 +217,7 @@ Maliyet: her Task bir pipeline işi; iş başına `CREW_MAX_JOB_COST` zaten geç
 | Anahtar | Tip | Varsayılan | Açıklama |
 |---|---|---|---|
 | `CREW_QUALITY_INTAKE` | bool | **false** | Özelliğin ana anahtarı (board'a yazar, kuyruğa iş atar) |
-| `CREW_SONAR_URL` | str | `https://sonarqube.flo.com.tr` | |
+| `CREW_SONAR_URL` | env (knob DEĞİL) | `https://sonarqube.flo.com.tr` | Uygulamada dashboard knob'u yapılmadı: `SONAR_TOKEN` bu adrese gider; yalnızca `.env`, https zorunlu. |
 | `NEW_RELIC_REGION` | str | `eu` | `eu` / `us` |
 | `CREW_QUALITY_NR_LOOKBACK_DAYS` | int | 7 | |
 | `CREW_QUALITY_NR_MIN_ERRORS` | int | 100 | Lookback içinde bu altı elenir |
