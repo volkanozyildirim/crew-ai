@@ -3866,7 +3866,8 @@ def test_quality_readiness():
 
 
 def test_repo_ctx_cross_thread():
-    print("\n[46] claude -p repo bağlamı — crewai başka thread'de çağırsa da --add-dir görülür")
+    print("\n[46] claude -p repo bağlamı — crewai'nin çağrı thread'ine ulaşır, başka işe sızmaz")
+    import contextvars as _cv
     import threading as _th
     from agile_sdlc_crew.tools import claude_cli_llm as _cli
     seen = []
@@ -3877,8 +3878,11 @@ def test_repo_ctx_cross_thread():
             meta.update({"turns": 1, "cost_usd": 0.0})
         return "OK"
 
-    def _call_in_thread():
-        th = _th.Thread(target=lambda: _cli.claude_cli_completion("x", model="sonnet", system="s"))
+    def _call(copy_ctx=True):
+        fn = lambda: _cli.claude_cli_completion("x", model="sonnet", system="s")  # noqa: E731
+        # crewai LLM çağrısını asyncio.to_thread ile yapar → contextvars kopyalanır
+        # (ölçüldü: çağrı 'asyncio_0' thread'inde, ContextVar görünür, threading.local görünmez)
+        th = _th.Thread(target=_cv.copy_context().run, args=(fn,)) if copy_ctx else _th.Thread(target=fn)
         th.start()
         th.join()
         return seen[-1]
@@ -3888,33 +3892,29 @@ def test_repo_ctx_cross_thread():
     try:
         _cli.clear_repo_ctx(); _cli.set_toolless(False)
         _cli.set_repo_ctx(["/tmp/repo-a"], "Read,Grep,Glob,LS")
-        c = _call_in_thread()
-        check("flow thread'inde kurulan repo bağlamı crewai'nin çağrı thread'inde görülür (#225: keşif araçsız kaldı)",
+        c = _call()
+        check("flow adımında kurulan repo bağlamı crewai'nin çağrı thread'inde görülür (#225: keşif araçsız kaldı)",
               "--add-dir" in c and "/tmp/repo-a" in c and "--disallowedTools" not in c, " ".join(c[-8:]))
-        _cli.clear_repo_ctx()
-        c = _call_in_thread()
-        check("temizlenince başka thread'de de araçlar kapanır (emit fazı)",
+        c = _call(copy_ctx=False)
+        check("bağlamı kopyalamayan başka bir iş (ör. eşzamanlı pr_review) bu repoyu ve araçları GÖRMEZ",
               "--add-dir" not in c and "--disallowedTools" in c)
-        own = {}
-
-        def _own():
-            _cli.set_repo_ctx(["/tmp/repo-b"], "Read")
-            own["ctx"] = _cli._get_repo_ctx()
-        _cli.set_repo_ctx(["/tmp/repo-a"], "Read,Grep,Glob,LS")
-        t2 = _th.Thread(target=_own); t2.start(); t2.join()
-        check("kendi bağlamını kuran thread kendininkini görür", own["ctx"][0] == ["/tmp/repo-b"])
-        check("bağlamı kuran thread ölünce kaydı düşer, canlı olanınki kalır",
-              _cli._get_repo_ctx()[0] == ["/tmp/repo-a"])
         _cli.clear_repo_ctx()
+        c = _call()
+        check("temizlenince araçlar kapanır (emit fazı)", "--add-dir" not in c and "--disallowedTools" in c)
+        _cli.set_toolless(True)
+        _cli.set_repo_ctx([], "")
+        c = _call()
+        check("set_toolless da çağrı thread'ine ulaşır", "--disallowedTools" in c)
+        _cli.set_toolless(False)
         with _cli.repo_tools_context(["/tmp/repo-c"]):
-            c = _call_in_thread()
-        c2 = _call_in_thread()
-        check("repo_tools_context de başka thread'e yayılır ve çıkışta geri alınır",
+            c = _call()
+        c2 = _call()
+        check("repo_tools_context çağrı thread'ine yayılır ve çıkışta geri alınır",
               "/tmp/repo-c" in c and "--add-dir" not in c2)
     finally:
         _cli._run_streaming = _orig
         _cli.clear_repo_ctx()
-
+        _cli.set_toolless(False)
 
 def main():
     print("Katman 0 kapıları — regresyon testleri")
