@@ -3441,6 +3441,74 @@ def test_quality_app_map():
         check("önbellek de yoksa QualitySourceError", ok)
 
 
+def test_quality_sources():
+    print("\n[Q7] Kalite alımı — Sonar/NR yanıtlarını bulguya çevirme")
+    import os
+    from agile_sdlc_crew.quality import newrelic, sonar
+    err = [
+        {"facet": ["[Prod] tr-stocks.flo.com.tr", "E_WARNING", 'Undefined array key "host"',
+                   "WebTransaction/Custom/index::index"],
+         "count": 645052, "first": 1791290877564.0, "last": 1791895671566.0, "uris": ["/en"]},
+        {"facet": ["[Preprod] preprod.flo.com.kz", "E_WARNING", "x", "WebTransaction/Custom/Page::notFound"],
+         "count": 5, "uris": []},
+        {"facet": ["Marketplace API", "TypeError", "y", "WebTransaction/Action/api::x"], "count": 3},
+    ]
+    tx = [{"facet": "[Prod] tr-stocks.flo.com.tr", "appName": "[Prod] tr-stocks.flo.com.tr", "count": 1290104},
+          {"facet": "Marketplace API", "count": 0}]
+    fs = newrelic.rows_to_findings(err, tx, is_prod=lambda a: newrelic.is_prod_name(a) or a == "Marketplace API")
+    check("prod filtresi: [Preprod] elenir, eşlenmiş köşeli parantezsiz prod kalır",
+          [f.app for f in fs] == ["[Prod] tr-stocks.flo.com.tr", "Marketplace API"])
+    f0 = fs[0]
+    check("NR satırı → Finding (action, saniye, error rate, uri)",
+          f0.action == "Index::index" and f0.count == 645052 and abs(f0.last_seen - 1791895671.566) < 1e-3
+          and abs(f0.error_rate - 0.5) < 0.01 and f0.uris == ["/en"])
+    check("işlem sayısı 0 → error rate 0", fs[1].error_rate == 0.0)
+    check("prod adı kalıpları",
+          all(newrelic.is_prod_name(a) for a in ("[Prod] x", "[PROD] y", "[Production] FLO Orkestra V2",
+                                                  "[GCP-Prod] panel"))
+          and not newrelic.is_prod_name("[Preprod] x"))
+    issues = [
+        {"key": "k1", "rule": "php:S2076", "severity": "BLOCKER", "type": "VULNERABILITY",
+         "project": "EcomBackend:webservice", "component": "EcomBackend:webservice:app/Login.php",
+         "line": 40, "message": "Make sure..."},
+        {"key": "k2", "rule": "secrets:S6703", "severity": "BLOCKER", "type": "VULNERABILITY",
+         "project": "EcomBackend:webservice", "component": "EcomBackend:webservice:config/db.php",
+         "line": 3, "message": "password = 'S3cret'"},
+    ]
+    sf = sonar.issues_to_findings(issues, {"php:S2076": "OS commands should not be vulnerable"},
+                                  base_url="https://sonar.x")
+    check("Sonar: proje → repo, component → dosya, kural adı, link",
+          sf[0].repo == "webservice" and sf[0].file == "app/Login.php"
+          and sf[0].rule_name == "OS commands should not be vulnerable" and sf[0].lines == [40]
+          and "open=k1" in sf[0].link)
+    check("secrets:* mesajı hiç saklanmaz", sf[1].message == "")
+    check("kapsam: AZURE_DEVOPS_REPO_PROJECTS önekine göre (büyük/küçük harf duyarsız)",
+          sonar.in_scope("EcomBackend:webservice", ["ecombackend", "EcomLojistik"])
+          and not sonar.in_scope("FLOXO:tedweb", ["EcomBackend"]))
+    pages = {1: {"issues": [{"key": "a"}] * 500, "paging": {"total": 863}, "rules": [{"key": "r", "name": "R"}]},
+             2: {"issues": [{"key": "b"}] * 363, "paging": {"total": 863}}}
+    seen = []
+    orig = sonar._get
+    sonar._get = lambda path, params: (seen.append(params["p"]), pages[params["p"]])[1]
+    try:
+        iss, rules = sonar.fetch_issues()
+    finally:
+        sonar._get = orig
+    check("Sonar sayfalama: 863 madde iki sayfada", len(iss) == 863 and seen == [1, 2] and rules == {"r": "R"})
+    saved = {k: os.environ.pop(k, None) for k in ("NEW_RELIC_ACCOUNT_ID", "NEW_RELIC_API_KEY")}
+    try:
+        try:
+            newrelic.nrql("SELECT 1")
+            ok = False
+        except newrelic.QualitySourceError:
+            ok = True
+    finally:
+        for k, val in saved.items():
+            if val is not None:
+                os.environ[k] = val
+    check("NR kimlik bilgisi yoksa QualitySourceError", ok)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3484,7 +3552,8 @@ def main():
               test_quality_select,
               test_quality_render,
               test_quality_dedup,
-              test_quality_app_map):
+              test_quality_app_map,
+              test_quality_sources):
         try:
             t()
         except Exception as e:
