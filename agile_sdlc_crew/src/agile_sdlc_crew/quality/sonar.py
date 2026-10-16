@@ -3,6 +3,10 @@
 Proje anahtarı `EcomBackend:webservice` biçiminde → repo doğrudan. Kapsam,
 anahtarın önekinin AZURE_DEVOPS_REPO_PROJECTS içinde olmasıdır (FLOXO,
 FloxoPLM vb. atlanır). secrets:* maddelerinin mesajı SAKLANMAZ — değer içerebilir.
+
+Adres yalnızca ortamdan (.env CREW_SONAR_URL) okunur, dashboard knob'u DEĞİL:
+SONAR_TOKEN bu adrese gönderilir; dashboard'dan değiştirilebilseydi token başka
+bir sunucuya sızdırılabilirdi. Aynı nedenle https olmayan adrese istek atılmaz.
 """
 
 from __future__ import annotations
@@ -12,7 +16,6 @@ from urllib.parse import quote
 
 import requests
 
-from agile_sdlc_crew import pipeline_config
 from agile_sdlc_crew.quality.model import Finding, QualitySourceError
 
 TYPES = "BUG,VULNERABILITY"
@@ -22,13 +25,15 @@ DEFAULT_URL = "https://sonarqube.flo.com.tr"
 
 
 def base_url() -> str:
-    return str(pipeline_config.get("CREW_SONAR_URL") or DEFAULT_URL).rstrip("/")
+    return str(os.environ.get("CREW_SONAR_URL") or DEFAULT_URL).rstrip("/")
 
 
 def _get(path: str, params: dict) -> dict:
     tok = os.environ.get("SONAR_TOKEN", "")
     if not tok:
         raise QualitySourceError("SONAR_TOKEN tanımlı değil")
+    if not base_url().startswith("https://"):
+        raise QualitySourceError(f"Sonar adresi https değil, token gönderilmedi: {base_url()}")
     try:
         r = requests.get(f"{base_url()}{path}", auth=(tok, ""), params=params, timeout=60)
         r.raise_for_status()

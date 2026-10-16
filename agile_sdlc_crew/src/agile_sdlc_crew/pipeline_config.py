@@ -418,13 +418,6 @@ SCHEMA: list[dict] = [
         "desc": "New Relic / SonarQube bulgularını skor + SP bütçesine göre seçip sprintte User Story + child Task açar ve her Task'ı pipeline kuyruğuna alır (needs_human olanlar hariç). Board'a yazar ve maliyetli iş başlatır — bu yüzden varsayılan kapalı. /api/quality/preview yazmadan aynı seçimi gösterir.",
     },
     {
-        "key": "CREW_SONAR_URL",
-        "label": "Kalite · SonarQube adresi",
-        "type": "str",
-        "default": "https://sonarqube.flo.com.tr",
-        "desc": "SonarQube kök adresi. Token .env'deki SONAR_TOKEN'dan okunur.",
-    },
-    {
         "key": "NEW_RELIC_REGION",
         "label": "Kalite · New Relic bölgesi",
         "type": "str",

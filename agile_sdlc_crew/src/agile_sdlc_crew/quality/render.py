@@ -82,7 +82,7 @@ def _e(s, limit: int = 0) -> str:
     return html.escape(text)
 
 
-def _clean_uri(u: str) -> str:
+def clean_uri(u: str) -> str:
     """Sorgu dizgisi ve fragment atılır (token/oturum taşıyabilir), uzunluk sınırlanır."""
     return re.split(r"[?#]", u or "", maxsplit=1)[0][:URI_MAX]
 
@@ -118,7 +118,7 @@ def _nr_body(g: Group, nr_days: int) -> list[str]:
     parts.append("</table>")
     uris: list[str] = []
     for f in g.findings:
-        for u in map(_clean_uri, f.uris):
+        for u in map(clean_uri, f.uris):
             if u and u not in uris:
                 uris.append(u)
     if uris:

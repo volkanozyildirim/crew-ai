@@ -16,6 +16,7 @@ import requests
 from agile_sdlc_crew import pipeline_config
 from agile_sdlc_crew.quality.model import Finding, QualitySourceError
 from agile_sdlc_crew.quality.rank import action_of
+from agile_sdlc_crew.quality.render import clean_uri, mask_secrets
 
 ENDPOINTS = {"eu": "https://api.eu.newrelic.com/graphql", "us": "https://api.newrelic.com/graphql"}
 _GQL = "query($a:Int!,$q:Nrql!){actor{account(id:$a){nrql(query:$q,timeout:90){results}}}}"
@@ -24,6 +25,7 @@ ERRORS_NRQL = ("SELECT count(*), uniques(request.uri, 3) AS uris, min(timestamp)
                "FACET appName, error.class, error.message, transactionName "
                "SINCE {days} days ago LIMIT MAX")
 TX_NRQL = "SELECT count(*) FROM Transaction FACET appName SINCE {days} days ago LIMIT MAX"
+MSG_MAX = 1000  # dış metin: girişte maskelenir ve kısaltılır, ham hâli hiçbir yere taşınmaz
 _PROD = re.compile(r"^\[(?:prod|production|gcp-prod)\]", re.I)
 
 
@@ -72,8 +74,9 @@ def rows_to_findings(err_rows: list[dict], tx_rows: list[dict], *, is_prod) -> l
             continue
         rate = err_total[app] / tx[app] if tx.get(app) else 0.0
         out.append(Finding(
-            source="newrelic", app=app, err_class=cls, message=msg, action=action_of(txn),
-            count=int(r.get("count") or 0), uris=[u for u in (r.get("uris") or []) if u][:3],
+            source="newrelic", app=app, err_class=cls, message=mask_secrets(msg)[:MSG_MAX],
+            action=action_of(txn), count=int(r.get("count") or 0),
+            uris=[c for c in dict.fromkeys(clean_uri(u) for u in (r.get("uris") or [])) if c][:3],
             first_seen=float(r.get("first") or 0) / 1000, last_seen=float(r.get("last") or 0) / 1000,
             error_rate=min(rate, 1.0)))
     return out

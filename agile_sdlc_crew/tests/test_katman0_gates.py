@@ -3507,6 +3507,28 @@ def test_quality_sources():
             if val is not None:
                 os.environ[k] = val
     check("NR kimlik bilgisi yoksa QualitySourceError", ok)
+    raw = newrelic.rows_to_findings(
+        [{"facet": ["[Prod] a", "E", "login failed password=Hunter2x " + "q" * 3000, "WebTransaction/Custom/a::b"],
+          "count": 1, "uris": ["/p?session=abc123def456&x=1"]}], [], is_prod=newrelic.is_prod_name)[0]
+    check("NR mesajı/URI girişte temizlenir (secret maskesi, sorgu dizgisi, uzunluk)",
+          "Hunter2x" not in raw.message and len(raw.message) <= 1000 and raw.uris == ["/p"], repr(raw.uris))
+    from agile_sdlc_crew import pipeline_config as _pcq
+    check("Sonar adresi dashboard'dan değiştirilemez (token sızmasın)", "CREW_SONAR_URL" not in _pcq._SCHEMA_BY_KEY)
+    old_url, old_tok = os.environ.get("CREW_SONAR_URL"), os.environ.get("SONAR_TOKEN")
+    os.environ["CREW_SONAR_URL"], os.environ["SONAR_TOKEN"] = "http://evil.example", "t0k"
+    try:
+        try:
+            sonar._get("/api/issues/search", {})
+            ok = False
+        except sonar.QualitySourceError as e:
+            ok = "https" in str(e)
+    finally:
+        for k, val in (("CREW_SONAR_URL", old_url), ("SONAR_TOKEN", old_tok)):
+            if val is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = val
+    check("https olmayan Sonar adresine token gönderilmez", ok)
 
 
 def test_quality_intake():
@@ -3514,7 +3536,7 @@ def test_quality_intake():
     from agile_sdlc_crew import pipeline_config as pc
     from agile_sdlc_crew.quality import intake, rank
     from agile_sdlc_crew.quality.model import Finding
-    keys = ("CREW_QUALITY_INTAKE", "CREW_SONAR_URL", "NEW_RELIC_REGION", "CREW_QUALITY_NR_LOOKBACK_DAYS",
+    keys = ("CREW_QUALITY_INTAKE", "NEW_RELIC_REGION", "CREW_QUALITY_NR_LOOKBACK_DAYS",
             "CREW_QUALITY_NR_MIN_ERRORS", "CREW_QUALITY_SONAR_PACK_SP", "CREW_QUALITY_SONAR_PACK_FILES",
             "CREW_QUALITY_HUMAN_SHARE", "CREW_QUALITY_MAX_TASKS", "CREW_QUALITY_REOPEN_GRACE_DAYS")
     check("knob'lar kayıtlı, ana anahtar varsayılan kapalı",
