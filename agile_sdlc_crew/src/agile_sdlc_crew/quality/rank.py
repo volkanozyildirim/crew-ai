@@ -216,3 +216,28 @@ def pack_sonar(units: list[Group], pack_sp: int = 3, pack_files: int = 5) -> lis
         if n > 1:
             g.title = f"{g.title} (+{n - 1} dosya)"
     return out
+
+
+# ── Seçim ────────────────────────────────────────────────────────────────
+
+def select_budget(groups: list[Group], budget_sp: int, *, human_share: float = 0.3,
+                  max_tasks: int = 8) -> list[Group]:
+    """Skora göre açgözlü doldurma: sığmayan atlanır, sıradaki küçük denenir.
+    needs_human işler bütçenin en çok human_share'ini (aşağı yuvarlanmış SP) kaplar."""
+    ordered = sorted(groups, key=lambda g: (
+        -g.score, -max((f.error_rate for f in g.findings), default=0.0), g.sp, g.fingerprints[0]))
+    human_cap = int(budget_sp * human_share)
+    picked: list[Group] = []
+    used = human_used = 0
+    for g in ordered:
+        if len(picked) >= max_tasks:
+            break
+        if used + g.sp > budget_sp:
+            continue
+        if g.needs_human and human_used + g.sp > human_cap:
+            continue
+        picked.append(g)
+        used += g.sp
+        if g.needs_human:
+            human_used += g.sp
+    return picked

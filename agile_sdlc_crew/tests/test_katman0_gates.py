@@ -3262,6 +3262,26 @@ def test_quality_rank_sonar():
     check("farklı kural aynı pakete girmez", len(mixed) == 2)
 
 
+def test_quality_select():
+    print("\n[Q3] Kalite alımı — bütçe seçimi")
+    from agile_sdlc_crew.quality import rank
+    from agile_sdlc_crew.quality.model import Group
+
+    def g(name, sp, score, human=False):
+        return Group(source="sonar", repo="r", title=name, fingerprints=[name], findings=[],
+                     score=score, sp=sp, needs_human=human)
+
+    pick = rank.select_budget([g("a", 5, 100), g("b", 3, 90), g("c", 3, 80), g("d", 2, 70), g("e", 1, 60)], 10)
+    check("açgözlü: sığmayan atlanır, küçük olan denenir, toplam ≤ bütçe",
+          [x.title for x in pick] == ["a", "b", "d"] and sum(x.sp for x in pick) == 10)
+    pick = rank.select_budget([g("h1", 3, 100, True), g("h2", 1, 99, True), g("x", 3, 50), g("y", 3, 40)], 10)
+    check("needs_human payı ≤ %30 (10 SP → en çok 3)",
+          [x.title for x in pick] == ["h1", "x", "y"] and sum(x.sp for x in pick if x.needs_human) <= 3)
+    check("Task sayısı tavanı", len(rank.select_budget([g(str(i), 1, 100 - i) for i in range(20)], 40, max_tasks=8)) == 8)
+    check("bütçeden büyük tek iş → boş seçim", rank.select_budget([g("big", 5, 1)], 3) == [])
+    check("3 SP bütçede needs_human hiç girmez (pay 0)", rank.select_budget([g("h", 1, 9, True)], 3) == [])
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3301,7 +3321,8 @@ def main():
               test_cli_prompt_overhead,
               test_wi_comments_context,
               test_quality_rank_nr,
-              test_quality_rank_sonar):
+              test_quality_rank_sonar,
+              test_quality_select):
         try:
             t()
         except Exception as e:
