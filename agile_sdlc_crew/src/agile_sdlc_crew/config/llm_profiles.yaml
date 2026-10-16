@@ -136,6 +136,14 @@ profiles:
   # ciktisini 1-10 araliginda skorlar; <8 ise iyilestirilmis prompt ile retry.
   # claude_cli (subprocess, API key gerekmez) — projedeki diger agentlarla
   # ayni OAuth oturumunu kullanir. Grader Haiku, agent'lar Sonnet/Opus.
+  # Kalite işlerinin (tempo-quality) tamamlanma raporu: şablon doldurma,
+  # karar yok → Haiku. Yalnız iş kapsamlı geçersiz kılmayla bağlanır
+  # (flow.quality_lean_overrides, CREW_QUALITY_LEAN_MODELS).
+  report_haiku:
+    provider: claude_cli
+    model: haiku
+    max_tokens: 8192
+
   kickoff_grader:
     provider: claude_cli
     model: haiku

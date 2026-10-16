@@ -245,6 +245,15 @@ def acceptance_criteria(g: Group) -> str:
     return "Listelenen maddeler Sonar'da kapanır; değişen satırlarda yeni madde eklenmez."
 
 
+_REPO_LINE = re.compile(r"<b>\s*Repo:\s*</b>\s*<code>\s*([\w.-]+)\s*</code>", re.I)
+
+
+def repo_from_description(desc: str) -> str:
+    """Task açıklamasının ilk satırındaki 'Repo: <code>x</code>' → x."""
+    m = _REPO_LINE.search(desc or "")
+    return m.group(1) if m else ""
+
+
 def task_description(g: Group, *, sonar_url: str = "", nr_days: int = 7) -> str:
     parts = [f"<p><b>Repo:</b> <code>{html.escape(g.repo)}</code></p>"]
     if g.recurring_of:

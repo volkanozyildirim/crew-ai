@@ -486,6 +486,20 @@ SCHEMA: list[dict] = [
         "desc": "Kalite alımının story + Task'ları hangi sprintte açılır: next (varsayılan) = takımın bir sonraki sprinti, aktif sprinte dokunulmaz; isteyen işi elle aktif sprinte çeker. current = aktif sprint. story_id verilirse o story'nin sprinti kullanılır.",
     },
     {
+        "key": "CREW_QUALITY_LEAN_FLOW",
+        "label": "Kalite · yalın akış",
+        "type": "bool",
+        "default": True,
+        "desc": "tempo-quality etiketli işlerde repo keşfi (repo Task açıklamasında yazılı), test planlama ve UAT atlanır. Ölçüm (#228, #230): bu üç adım iş başına ~$2.1 (toplamın %40'ı) — tek satırlık null/isset düzeltmesinde test planı ve UAT raporu karar üretmiyor; PR'daki birim testi + yeşil build + review kapısı kalıyor. Normal pipeline işleri etkilenmez.",
+    },
+    {
+        "key": "CREW_QUALITY_LEAN_MODELS",
+        "label": "Kalite · ucuz modeller",
+        "type": "bool",
+        "default": True,
+        "desc": "tempo-quality etiketli işlerde mimar Opus yerine Sonnet, tamamlanma raporu Haiku ile koşar (yalnız o iş için; dashboard model ayarları değişmez). Reviewer ve geliştirici Opus'ta kalır — tek kalite kapısı review. Ölçüm (#228, #230): mimar planı iş başına ~$1.5 Opus; yeri zaten Sonnet'li keşif buluyor.",
+    },
+    {
         "key": "CREW_QUALITY_REOPEN_GRACE_DAYS",
         "label": "Kalite · yeniden açma bekleme (gün)",
         "type": "int",

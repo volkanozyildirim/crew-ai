@@ -3997,6 +3997,52 @@ def test_windowed_edit():
         skip("php -l", "php yok")
 
 
+def test_quality_lean():
+    print("\n[Q12] Kalite işleri — yalın akış + ucuz modeller (yalnız tempo-quality)")
+    import inspect
+    from crewai.flow.flow import Flow, listen, start
+    from agile_sdlc_crew import flow as _flow
+    from agile_sdlc_crew import main as _main
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.llm import resolver as rs
+    from agile_sdlc_crew.quality import render
+    check("knob'lar kayıtlı, varsayılan açık",
+          pc._SCHEMA_BY_KEY.get("CREW_QUALITY_LEAN_FLOW", {}).get("default") is True
+          and pc._SCHEMA_BY_KEY.get("CREW_QUALITY_LEAN_MODELS", {}).get("default") is True)
+    ov = _flow.quality_lean_overrides()
+    check("mimar → Sonnet, tamamlanma raporu → Haiku; reviewer ve geliştirici dokunulmaz",
+          rs._profile_to_spec(ov["software_architect"])["model"] == "sonnet"
+          and rs._profile_to_spec(ov["scrum_master"])["model"] == "haiku"
+          and "code_reviewer" not in ov and "senior_developer" not in ov)
+    seen = {}
+
+    class _F(Flow):
+        @start()
+        def a(self):
+            rs.set_job_llm_overrides({"software_architect": "architect_cli_sonnet"})
+
+        @listen(a)
+        def b(self):
+            seen["in"] = rs.resolve_spec_with_source("software_architect")
+
+    with rs.job_llm_scope():
+        _F().kickoff()
+    seen["out"] = rs.resolve_spec_with_source("software_architect")
+    check("iş kapsamındaki model geçersiz kılması sonraki adımlarda görülür",
+          seen["in"][1] == "job" and seen["in"][0]["model"] == "sonnet", str(seen.get("in")))
+    check("kapsam dışında (başka iş / sonraki iş) geçersiz kılma yok", seen["out"][1] != "job")
+    rs.set_job_llm_overrides({"software_architect": "architect_cli_sonnet"})
+    check("kapsam yokken set etmek hiçbir şeyi değiştirmez",
+          rs.resolve_spec_with_source("software_architect")[1] != "job")
+    check("Task açıklamasından repo okunur",
+          render.repo_from_description("<p><b>Repo:</b> <code>webservice</code> </p><p>x</p>") == "webservice"
+          and render.repo_from_description("<p>yok</p>") == "")
+    src = inspect.getsource(_flow)
+    check("discover / test planlama / UAT kalite işinde atlanır",
+          src.count("Atlandı — kalite işi") >= 3 and "_quality_lean_flow()" in src)
+    check("run_pipeline flow'u iş kapsamında koşturur", "job_llm_scope()" in inspect.getsource(_main.run_pipeline))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4047,7 +4093,8 @@ def main():
               test_quality_review_fixes,
               test_quality_readiness,
               test_repo_ctx_cross_thread,
-              test_windowed_edit):
+              test_windowed_edit,
+              test_quality_lean):
         try:
             t()
         except Exception as e:

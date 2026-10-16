@@ -936,13 +936,15 @@ def run_pipeline(
     flow._tracker = tracker
 
     try:
-        flow.kickoff(inputs={
-            "work_item_id": str(work_item_id),
-            "use_hal": use_hal,
-            "job_id": job_id,
-            "kickoff_only": bool(kickoff_only),
-            "kickoff_feedback": kickoff_feedback or "",
-        })
+        from agile_sdlc_crew.llm.resolver import job_llm_scope
+        with job_llm_scope():  # iş kapsamlı model seçimi (kalite işleri)
+            flow.kickoff(inputs={
+                "work_item_id": str(work_item_id),
+                "use_hal": use_hal,
+                "job_id": job_id,
+                "kickoff_only": bool(kickoff_only),
+                "kickoff_feedback": kickoff_feedback or "",
+            })
         tracker.finish()
 
         _log(f"\n{'='*60}")

@@ -473,6 +473,16 @@ def _parse_readiness(requirements_text: str):
             "open_questions": len(oq) if isinstance(oq, list) else 0}
 
 
+def _is_quality_wi(tags: str) -> bool:
+    return "tempo-quality" in {t.strip().lower() for t in (tags or "").split(";")}
+
+
+def quality_lean_overrides() -> dict:
+    """Kalite işleri için iş kapsamlı model seçimi (CREW_QUALITY_LEAN_MODELS).
+    Reviewer ve geliştirici bilerek yok: review tek kalite kapısı, kod Opus'ta."""
+    return {"software_architect": "architect_cli_sonnet", "scrum_master": "report_haiku"}
+
+
 def _quality_skips_readiness(tags: str) -> bool:
     """Kalite alımının açtığı işler (etiket tempo-quality) hazırlık kapısının 1.
     aşamasından muaf: kanıt üretim logundan gelir, beklenen davranış açıklamada
@@ -482,7 +492,7 @@ def _quality_skips_readiness(tags: str) -> bool:
     from agile_sdlc_crew import pipeline_config as _pc
     if not _pc.get("CREW_QUALITY_SKIP_READINESS"):
         return False
-    return "tempo-quality" in {t.strip().lower() for t in (tags or "").split(";")}
+    return _is_quality_wi(tags)
 
 
 def _readiness_score(readiness, ac_empty: bool, open_questions: int) -> tuple:
@@ -1693,6 +1703,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.wi_iteration_path = info.get("wi_iteration_path", "") or ""
         self.state.wi_tags = info.get("wi_tags", "") or ""
         self.state.wi_title = info.get("wi_title", "") or ""
+        self._quality_setup(wi_fields)
         # Faz 5: is tipine gore akis turu (bug/story/task/spike) — CREW_TYPE_FLOW
         try:
             from agile_sdlc_crew import pipeline_config as _pc_tf
@@ -1942,6 +1953,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
         """
         import json as _json
         self._step_start("discover_repos_task")
+
+        _q_repo = getattr(self, "_quality_repo", "")
+        if self._quality_lean_flow() and _q_repo and _q_repo in set(self.state.known_repos):
+            self._discovered_repo = _q_repo
+            self._discovered_alternatives = []
+            _log(f"  🧹 Kalite işi: repo Task açıklamasında ({_q_repo}) — keşif atlandı")
+            self._step_done("discover_repos_task", f"Atlandı — kalite işi: repo Task açıklamasında ({_q_repo})")
+            return
 
         if not candidate_repos:
             self._step_done("discover_repos_task", "Atlandı — aday repo yok")
@@ -3808,6 +3827,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._job_real_cost_usd = 0.0   # claude_cli gercek maliyet toplami (budget guard)
         # discover_repos'un kanit-temelli repo karari — step4 otoritesi
         self._discovered_repo = ""
+        self._quality_repo = ""      # kalite işi: Task açıklamasındaki repo (_quality_setup)
         self._discovered_alternatives = []
 
     @start()
@@ -6999,6 +7019,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception:
             pass
 
+    def _quality_lean_flow(self) -> bool:
+        """tempo-quality işinde repo keşfi / test planlama / UAT atlanır."""
+        from agile_sdlc_crew import pipeline_config as _pc
+        return _is_quality_wi(self.state.wi_tags) and bool(_pc.get("CREW_QUALITY_LEAN_FLOW"))
+
+    def _quality_setup(self, wi_fields) -> None:
+        """Kalite işi: repo Task açıklamasından okunur; CREW_QUALITY_LEAN_MODELS
+        açıksa bu işin mimar/rapor modelleri ucuzlatılır (iş kapsamlı)."""
+        if not _is_quality_wi(self.state.wi_tags):
+            return
+        from agile_sdlc_crew import pipeline_config as _pc
+        from agile_sdlc_crew.llm import resolver as _rs
+        from agile_sdlc_crew.quality.render import repo_from_description
+        desc = (wi_fields or {}).get("System.Description") or ""
+        if not desc:
+            try:
+                desc = (self._client.get_work_item(int(self.state.work_item_id)).get("fields") or {}).get(
+                    "System.Description") or ""
+            except Exception:
+                desc = ""
+        self._quality_repo = repo_from_description(desc)
+        if _pc.get("CREW_QUALITY_LEAN_MODELS") and _rs.set_job_llm_overrides(quality_lean_overrides()):
+            _log("  🧹 Kalite işi: mimar → Sonnet, tamamlanma raporu → Haiku (yalnız bu iş)")
+
     def _prefer_worktree_edit(self, repo_name: str, file_path: str,
                               text_output: str, original: str) -> str:
         """Dev dosyayi tool'la in-place duzenlediyse disk icerigini dondur.
@@ -7280,6 +7324,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._step_done("test_planning_task", self.state.test_text)
             return
 
+        if self._quality_lean_flow():
+            self._step_start("test_planning_task")
+            self.state.test_text = "Atlandı — kalite işi: birim testi PR'da, build kapısı yeşil"
+            self._step_done("test_planning_task", "Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)")
+            return
+
         # Resume
         cached_test = self._try_resume_step("test_planning_task")
         if cached_test:
@@ -7410,6 +7460,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._step_start("uat_task")
             self.state.uat_text = "DRY-RUN: UAT skipped"
             self._step_done("uat_task", self.state.uat_text)
+            return
+
+        if self._quality_lean_flow():
+            self._step_start("uat_task")
+            self.state.uat_text = "Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)"
+            self._step_done("uat_task", "Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)")
             return
 
         # Resume
