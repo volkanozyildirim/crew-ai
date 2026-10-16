@@ -3332,6 +3332,36 @@ def test_quality_render():
     check("story başlığı", render.story_title("newrelic", "Sprint 42") == "Kalite: New Relic hataları — Sprint 42")
 
 
+def test_quality_dedup():
+    print("\n[Q5] Kalite alımı — board'dan dedup")
+    from agile_sdlc_crew.quality import dedup
+
+    def wi(i, state, fps, closed=""):
+        return {"id": i, "fields": {
+            "System.State": state, "Microsoft.VSTS.Common.ClosedDate": closed,
+            "System.Description": "".join(f"<p><small>tempo-fp: {fp}</small></p>" for fp in fps)}}
+
+    idx = dedup.index_board([
+        wi(1, "In Progress", ["a"]), wi(2, "Ready for Production", ["b"]), wi(3, "Canceled", ["c"]),
+        wi(4, "Done", ["d"], "2026-10-01T00:00:00Z"), wi(5, "Done", ["e"], "2026-10-01T00:00:00Z"),
+        wi(6, "Done", ["f"], "2026-09-01T00:00:00Z"), wi(7, "To Do", ["f"])])
+    day = 86400
+    closed = dedup._epoch("2026-10-01T00:00:00Z")
+    now = closed + 10 * day
+
+    def v(fp, seen=0.0):
+        return dedup.verdict(idx.get(fp), last_seen=seen, now=now, grace_days=3)
+
+    check("açık WI → blocked", v("a") == ("blocked", 1))
+    check("Ready for Production → blocked (düzeltme canlıda değil)", v("b") == ("blocked", 2))
+    check("Canceled → kalıcı bastırma", v("c") == ("suppressed", 3))
+    check("Done + grace sonrası hâlâ görülüyor → recurring", v("d", seen=closed + 5 * day) == ("recurring", 4))
+    check("Done + grace içinde görülmüş → blocked", v("e", seen=closed + 1 * day) == ("blocked", 5))
+    check("Sonar (last_seen yok) → şimdiye göre", v("d") == ("recurring", 4))
+    check("aynı parmak izi iki WI'da → en yeni (büyük id) kazanır", v("f") == ("blocked", 7))
+    check("hiç yok → new", v("zzz") == ("new", None))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3373,7 +3403,8 @@ def main():
               test_quality_rank_nr,
               test_quality_rank_sonar,
               test_quality_select,
-              test_quality_render):
+              test_quality_render,
+              test_quality_dedup):
         try:
             t()
         except Exception as e:
