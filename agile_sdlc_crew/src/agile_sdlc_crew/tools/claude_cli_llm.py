@@ -30,35 +30,70 @@ log = logging.getLogger("pipeline")
 # --add-dir/--allowedTools eklenir.
 _cli_ctx = threading.local()
 
+# Thread-local TEK BASINA YETMEZ: crewai crew kickoff'unun LLM cagrisini flow
+# adimindan FARKLI bir thread'de kosturuyor (bkz. _acct_global). Flow thread'i
+# set_repo_ctx dese de cagri thread'i bos gorur → --add-dir yok → auto-toolless
+# (CREW_CLI_AUTO_TOOLLESS) dosya araclarini KAPATIR. Olculdu: arac kullanan son
+# mimar kesfi 09.09 (#186, 18-20 tur); auto-toolless'tan sonra Faz A tek turda
+# "Read/Grep aracim yok" deyip INSUFFICIENT dondu (#225-#227, 16.10). Bu yuzden
+# maliyet atfindaki gibi AKTIF baglamlarin kaydi tutulur: cagri thread'inin
+# kendi baglami yoksa, canli setter thread'lerin en yenisininki kullanilir.
+# Sinir (atifla ayni): iki is ayni anda repo baglami kurarsa kendi baglami
+# olmayan bir cagri en yeni kurani gorur.
+_repo_active: dict = {}
+_repo_seq = 0
+_repo_lock = threading.Lock()
+
+
+def _repo_register(add_dirs: list, allowed_tools: str) -> None:
+    global _repo_seq
+    th = threading.current_thread()
+    with _repo_lock:
+        if add_dirs:
+            _repo_seq += 1
+            _repo_active[th.ident] = (_repo_seq, list(add_dirs), allowed_tools, th)
+        else:
+            _repo_active.pop(th.ident, None)
+
 
 def _get_repo_ctx() -> tuple[list, str]:
-    return getattr(_cli_ctx, "add_dirs", []), getattr(_cli_ctx, "allowed_tools", "")
+    own = getattr(_cli_ctx, "add_dirs", None)
+    if own:
+        return own, getattr(_cli_ctx, "allowed_tools", "")
+    with _repo_lock:
+        for k in [k for k, v in _repo_active.items() if not v[3].is_alive()]:
+            _repo_active.pop(k, None)
+        if _repo_active:
+            _s, dirs, tools, _t = max(_repo_active.values(), key=lambda v: v[0])
+            return list(dirs), tools
+    return [], ""
 
 
 def set_repo_ctx(add_dirs: list, allowed_tools: str = "Read,Grep,Glob,LS") -> None:
-    """Bu thread'deki sonraki claude_cli cagrilari verilen repolari --add-dir
-    ile gorsun. clear_repo_ctx ile temizlenmeli (genelde try/finally)."""
+    """Bu thread'deki (ve onun adina crewai'nin actigi cagri thread'lerindeki)
+    sonraki claude_cli cagrilari verilen repolari --add-dir ile gorsun.
+    clear_repo_ctx ile temizlenmeli (genelde try/finally)."""
     _cli_ctx.add_dirs = [str(d) for d in (add_dirs or [])]
     _cli_ctx.allowed_tools = allowed_tools or ""
+    _repo_register(_cli_ctx.add_dirs, _cli_ctx.allowed_tools)
 
 
 def clear_repo_ctx() -> None:
     _cli_ctx.add_dirs = []
     _cli_ctx.allowed_tools = ""
+    _repo_register([], "")
 
 
 @contextmanager
 def repo_tools_context(add_dirs: list, allowed_tools: str = "Read,Grep,Glob,LS"):
     """Bu blok icindeki claude_cli cagrilari verilen repolari --add-dir ile
-    gorur ve allowed_tools'u kullanabilir. Thread-local — ic ice/paralel
-    kickoff'larda yalniz set eden thread'i etkiler."""
-    prev = _get_repo_ctx()
-    _cli_ctx.add_dirs = [str(d) for d in (add_dirs or [])]
-    _cli_ctx.allowed_tools = allowed_tools or ""
+    gorur ve allowed_tools'u kullanabilir. Cikista onceki baglam geri gelir."""
+    prev = (list(getattr(_cli_ctx, "add_dirs", []) or []), getattr(_cli_ctx, "allowed_tools", ""))
+    set_repo_ctx(add_dirs, allowed_tools)
     try:
         yield
     finally:
-        _cli_ctx.add_dirs, _cli_ctx.allowed_tools = prev
+        set_repo_ctx(*prev)
 
 
 # ── Tool'suz (emit) mod ──────────────────────────────────────────────────

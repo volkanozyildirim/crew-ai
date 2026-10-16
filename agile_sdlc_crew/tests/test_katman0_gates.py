@@ -3844,6 +3844,8 @@ def test_quality_readiness():
     gen = render.task_description(g("Call to undefined method Foo::bar()", cls="Error"))
     check("tanımsız anahtar: beklenen davranış (isset/??, akış korunur, hangi dosya, doğrulama)",
           "Beklenen davranış" in und and "isset" in und and "birim testi" in und and "gerçekten" in und)
+    check("olası yer kapsam kilidi değil, başlangıç noktası (#225: mimar kilit sandı)",
+          "başlangıç noktası" in und and "yardımcı" in und)
     check("null erişimi: null koruması", "Beklenen davranış" in nul and "null" in nul.split("Beklenen davranış")[1])
     check("genel hata: kök neden, hatayı yutmak çözüm değil", "Beklenen davranış" in gen and "yutmak" in gen)
     ac = render.acceptance_block(g('Undefined array key "host"'))
@@ -3861,6 +3863,57 @@ def test_quality_readiness():
     src = inspect.getsource(_flow)
     check("hazırlık kapısı muafiyeti kullanıyor",
           "_quality_skips_readiness(self.state.wi_tags)" in src)
+
+
+def test_repo_ctx_cross_thread():
+    print("\n[46] claude -p repo bağlamı — crewai başka thread'de çağırsa da --add-dir görülür")
+    import threading as _th
+    from agile_sdlc_crew.tools import claude_cli_llm as _cli
+    seen = []
+
+    def _fake(cmd, env, timeout_s, meta=None, idle_s=0):
+        seen.append(list(cmd))
+        if meta is not None:
+            meta.update({"turns": 1, "cost_usd": 0.0})
+        return "OK"
+
+    def _call_in_thread():
+        th = _th.Thread(target=lambda: _cli.claude_cli_completion("x", model="sonnet", system="s"))
+        th.start()
+        th.join()
+        return seen[-1]
+
+    _orig = _cli._run_streaming
+    _cli._run_streaming = _fake
+    try:
+        _cli.clear_repo_ctx(); _cli.set_toolless(False)
+        _cli.set_repo_ctx(["/tmp/repo-a"], "Read,Grep,Glob,LS")
+        c = _call_in_thread()
+        check("flow thread'inde kurulan repo bağlamı crewai'nin çağrı thread'inde görülür (#225: keşif araçsız kaldı)",
+              "--add-dir" in c and "/tmp/repo-a" in c and "--disallowedTools" not in c, " ".join(c[-8:]))
+        _cli.clear_repo_ctx()
+        c = _call_in_thread()
+        check("temizlenince başka thread'de de araçlar kapanır (emit fazı)",
+              "--add-dir" not in c and "--disallowedTools" in c)
+        own = {}
+
+        def _own():
+            _cli.set_repo_ctx(["/tmp/repo-b"], "Read")
+            own["ctx"] = _cli._get_repo_ctx()
+        _cli.set_repo_ctx(["/tmp/repo-a"], "Read,Grep,Glob,LS")
+        t2 = _th.Thread(target=_own); t2.start(); t2.join()
+        check("kendi bağlamını kuran thread kendininkini görür", own["ctx"][0] == ["/tmp/repo-b"])
+        check("bağlamı kuran thread ölünce kaydı düşer, canlı olanınki kalır",
+              _cli._get_repo_ctx()[0] == ["/tmp/repo-a"])
+        _cli.clear_repo_ctx()
+        with _cli.repo_tools_context(["/tmp/repo-c"]):
+            c = _call_in_thread()
+        c2 = _call_in_thread()
+        check("repo_tools_context de başka thread'e yayılır ve çıkışta geri alınır",
+              "/tmp/repo-c" in c and "--add-dir" not in c2)
+    finally:
+        _cli._run_streaming = _orig
+        _cli.clear_repo_ctx()
 
 
 def main():
@@ -3911,7 +3964,8 @@ def main():
               test_quality_intake,
               test_quality_endpoints,
               test_quality_review_fixes,
-              test_quality_readiness):
+              test_quality_readiness,
+              test_repo_ctx_cross_thread):
         try:
             t()
         except Exception as e:
