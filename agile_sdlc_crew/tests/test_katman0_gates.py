@@ -3735,6 +3735,10 @@ def test_quality_review_fixes():
              if secret in m(s)]
     check("URL userinfo ve kısa anahtar parolaları maskelenir", not leaks, str(leaks))
     check("bypass=1 gibi kelime içi eşleşme maskelenmez", m("bypass=1") == "bypass=1")
+    pref = [s for s, secret in (("dbpassword=Hunter2x", "Hunter2x"), ("accesstoken=abcdEF", "abcdEF"),
+                                ("authtoken: zzQQ", "zzQQ"), ("mysqlpasswd=x1y2", "x1y2"),
+                                ("clientsecret=abc", "abc")) if secret in m(s)]
+    check("önekli anahtar adları (dbpassword, accesstoken) hâlâ maskelenir", not pref, str(pref))
 
     jf = 'String gitOriginApp = "git@ssh.dev.azure.com:v3/o/ecombackend/webservice"\n'
     df = 'newrelic.appname="[Prod] a.com"\n'

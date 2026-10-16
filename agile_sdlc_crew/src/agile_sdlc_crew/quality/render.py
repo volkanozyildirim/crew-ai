@@ -33,8 +33,10 @@ def task_tags(g: Group) -> str:
 
 _AUTH = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}", re.I)
 _KV = re.compile(
-    r"((?<![A-Za-z])(?:password|passwd|pwd|pass|secret|client_secret|token|auth|credentials?|"
-    r"api[_-]?key|access[_-]?key)[\"']?\s*[=:]\s*[\"']?)"
+    # Uzun anahtar adları önekli de yakalanır (dbpassword, accesstoken); kısa olanlar
+    # (pass, pwd, auth) yalnızca kelime başında — "bypass=1" maskelenmesin.
+    r"((?:password|passwd|secret|token|credentials?|api[_-]?key|access[_-]?key|"
+    r"(?<![A-Za-z])(?:pass|pwd|auth))[\"']?\s*[=:]\s*[\"']?)"
     r"[^\s&\"',;]+", re.I)
 # "pwd hunter2" — ayraçsız; yalnızca değer rakam/simge içeriyorsa (düz cümleyi bozmasın)
 _KV_SPACE = re.compile(r"((?<![A-Za-z])(?:password|passwd|pwd|pass)\s+)(?=\S*[\d!@#$%^&*])[^\s&\"',;]+", re.I)
