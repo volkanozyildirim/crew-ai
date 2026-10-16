@@ -3650,6 +3650,35 @@ def test_quality_intake():
         skip("quality_items tablosu", f"DB erişilemedi: {e}")
 
 
+def test_quality_endpoints():
+    print("\n[Q9] Kalite alımı — endpoint kapıları + dashboard kartı")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    orig = pc.get
+    pc.get = lambda k: False if k == "CREW_QUALITY_INTAKE" else orig(k)
+    try:
+        tc = TestClient(server.app)
+        check("kapalıyken take → 403", tc.post("/api/quality/take", json={"source": "newrelic", "sp": 10}).status_code == 403)
+        check("kapalıyken preview → 403", tc.get("/api/quality/preview?source=sonar&sp=5").status_code == 403)
+        check("kapalıyken unmapped → 403", tc.get("/api/quality/unmapped").status_code == 403)
+        check("recent kapalıyken enabled:false", tc.get("/api/quality/recent").json().get("enabled") is False)
+    finally:
+        pc.get = orig
+    pc.get = lambda k: True if k == "CREW_QUALITY_INTAKE" else orig(k)
+    try:
+        tc = TestClient(server.app)
+        check("geçersiz kaynak → 400", tc.post("/api/quality/take", json={"source": "jira", "sp": 10}).status_code == 400)
+        check("SP sınırı (1..40) → 400", tc.post("/api/quality/take", json={"source": "sonar", "sp": 0}).status_code == 400
+              and tc.get("/api/quality/preview?source=sonar&sp=99").status_code == 400)
+    finally:
+        pc.get = orig
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("dashboard Kalite kartı ve çağrıları",
+          'id="ovQualityCard"' in html and "/api/quality/take" in html and "/api/quality/preview" in html
+          and "function loadQuality" in html and "loadQuality();" in html)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -3695,7 +3724,8 @@ def main():
               test_quality_dedup,
               test_quality_app_map,
               test_quality_sources,
-              test_quality_intake):
+              test_quality_intake,
+              test_quality_endpoints):
         try:
             t()
         except Exception as e:

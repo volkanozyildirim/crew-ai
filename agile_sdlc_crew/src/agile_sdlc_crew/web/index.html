@@ -468,6 +468,17 @@ header {
         <div class="card-head"><span class="h">Takılan işler</span><span id="ovStuckCount" class="chip dim"></span><span style="flex:1"></span><a href="#" onclick="showTab('board');return false" style="font-size:12px;font-weight:600;text-decoration:none">Board sekmesi</a></div>
         <div id="ovStuck"></div>
       </div>
+      <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
+          <select class="sprint-select" id="qSource" title="Kaynak"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
+          <input class="sprint-select" id="qSp" type="number" min="1" max="40" value="10" style="width:64px" title="SP bütçesi">
+          <input class="sprint-select" id="qStory" type="number" placeholder="Story ID (ops.)" style="width:130px" title="Boşsa takımın aktif sprintinde story bulunur/açılır">
+          <button class="sm-btn ghost small" onclick="qualityRun(false)">Önizle</button>
+          <button class="sm-btn small" onclick="qualityRun(true)">Al</button>
+        </div>
+        <div id="qResult" style="padding:0 14px"></div>
+        <div id="qRecent" style="padding:8px 14px 12px;font-size:12px;color:var(--text-dim)"></div>
+      </div>
       <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
         <div class="card-head"><span class="h">Sprint performansı · ekip üyeleri</span><span style="flex:1"></span><span class="perf-legend"><i style="background:var(--success)"></i>Tamamlandı<i style="background:var(--warning)"></i>Test / kabul<i style="background:var(--run)"></i>Geliştirme<i style="background:var(--border)"></i>Başlanmadı</span></div>
         <div id="ovPerf"><div class="board-empty" style="padding:20px 0">Takım ve sprint seçin.</div></div>
@@ -1316,6 +1327,42 @@ function renderOvStuck(){
       <span class="stuck-days ${a.level}">${a.days}g</span></a>`;}).join('')
     +(rows.length>8?`<div class="stuck-row" style="color:var(--text-dim);cursor:default">+${rows.length-8} iş daha</div>`:'');
 }
+// Genel bakis · kalite isi alimi (New Relic / Sonar). Kart yalnizca
+// CREW_QUALITY_INTAKE aciksa gorunur; secim, SP ve dedup kurallari sunucuda.
+async function loadQuality(){
+  const card=document.getElementById('ovQualityCard');if(!card)return;
+  try{
+    const r=await (await fetch('/api/quality/recent')).json();
+    if(!r.enabled){card.style.display='none';return}
+    card.style.display='flex';
+    const uniq=[...new Map((r.items||[]).filter(i=>i.wi_id).map(i=>[i.wi_id,i])).values()].slice(0,10);
+    document.getElementById('qRecent').innerHTML=uniq.length
+      ?'Son alımlar: '+uniq.map(i=>`${wiLink(i.wi_id)} ${esc(i.source)} · ${i.sp} SP${i.job_id?` · iş #${i.job_id}`:''}${i.needs_human?' · insan':''}`).join(' &nbsp;·&nbsp; ')
+      :'Henüz alım yok.';
+  }catch(e){card.style.display='none'}
+}
+async function qualityRun(take){
+  const box=document.getElementById('qResult');
+  const source=document.getElementById('qSource').value;
+  const sp=parseInt(document.getElementById('qSp').value||'10',10);
+  const story=parseInt(document.getElementById('qStory').value||'0',10)||null;
+  const team=(document.getElementById('teamSel')||{}).value||'';
+  box.innerHTML=`<div class="board-empty" style="padding:12px 0">${take?'İşler açılıyor…':'Seçim hesaplanıyor…'}</div>`;
+  try{
+    const resp=take
+      ?await fetch('/api/quality/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,sp,story_id:story,team})})
+      :await fetch(`/api/quality/preview?source=${encodeURIComponent(source)}&sp=${sp}&team=${encodeURIComponent(team)}`);
+    const r=await resp.json();
+    if(!resp.ok){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(r.error||('HTTP '+resp.status))}</div>`;return}
+    const rows=(r.tasks||[]).map(t=>`<tr><td>${t.id?wiLink(t.id):'—'}</td><td>${esc(t.title)}</td><td class="num">${t.sp}</td><td>${t.needs_human?'<span class="chip human">insan</span>':(t.job_id?`iş #${t.job_id}`:esc(t.error||''))}</td></tr>`).join('');
+    const head=r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'';
+    const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
+    box.innerHTML=`<div style="font-size:12px;padding:6px 0">${head}${(r.tasks||[]).length} Task · ${r.total_sp}/${r.budget_sp} SP${sk?` · atlanan — ${sk}`:''}</div>`
+      +(rows?`<table class="perf"><tr><th>WI</th><th>İş</th><th class="num">SP</th><th>Durum</th></tr>${rows}</table>`
+            :`<div class="board-empty" style="padding:8px 0">${esc(r.message||'Bütçeye uyan aday yok.')}</div>`);
+    if(take)loadQuality();
+  }catch(e){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(String(e))}</div>`}
+}
 function renderOvSprint(){
   renderOvPerf();renderOvStuck();
   const box=document.getElementById('ovSprint'),title=document.getElementById('ovSprintTitle'),badge=document.getElementById('ovSprintBadge');
@@ -1374,6 +1421,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   let t='overview';try{t=localStorage.getItem('tempo_tab')||'overview'}catch(e){}
   if(!document.getElementById('pane'+t.charAt(0).toUpperCase()+t.slice(1)))t='overview';
   showTab(t);
+  loadQuality();
 });
 
 

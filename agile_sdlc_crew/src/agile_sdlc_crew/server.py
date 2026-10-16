@@ -142,6 +142,13 @@ class SprintQueueRequest(BaseModel):
     use_hal: bool = False
 
 
+class QualityTakeRequest(BaseModel):
+    source: str
+    sp: int = 10
+    story_id: int | None = None
+    team: str = ""
+
+
 # ── API Routes ──
 
 @app.get("/")
@@ -1845,6 +1852,87 @@ async def sprint_plan_queue(req: SprintQueueRequest):
         return JSONResponse(res, status_code=202 if res.get("queued") else 200)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _quality_guard(source: str, sp: int | None = None):
+    """Ortak kapı: anahtar kapalı → 403, kaynak/SP geçersiz → 400. None = geçti."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    if not _pc.get("CREW_QUALITY_INTAKE"):
+        return JSONResponse({"error": "Kalite işi alımı kapalı (CREW_QUALITY_INTAKE)"}, status_code=403)
+    if source not in ("newrelic", "sonar"):
+        return JSONResponse({"error": "source 'newrelic' ya da 'sonar' olmalı"}, status_code=400)
+    if sp is not None and not 1 <= int(sp) <= 40:
+        return JSONResponse({"error": "sp 1 ile 40 arasında olmalı"}, status_code=400)
+    return None
+
+
+def _quality_error(e: Exception) -> JSONResponse:
+    from agile_sdlc_crew.quality import intake as _qi
+    from agile_sdlc_crew.quality.model import QualitySourceError
+    if isinstance(e, QualitySourceError):
+        return JSONResponse({"error": str(e)}, status_code=502)
+    if isinstance(e, (_qi.Busy, _qi.NoSprint)):
+        return JSONResponse({"error": str(e)}, status_code=409)
+    if isinstance(e, ValueError):
+        return JSONResponse({"error": str(e)}, status_code=400)
+    pipeline_log.exception("Kalite alımı hatası")
+    return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/quality/preview")
+async def quality_preview(source: str = "newrelic", sp: int = 10, team: str = ""):
+    """Kalite alımının seçimini hiçbir şey yazmadan döndürür."""
+    from agile_sdlc_crew.quality import intake as _qi
+    bad = _quality_guard(source, sp)
+    if bad:
+        return bad
+    try:
+        return JSONResponse(await asyncio.to_thread(_qi.preview, AzureDevOpsClient(), source, sp, team=team))
+    except Exception as e:  # noqa: BLE001
+        return _quality_error(e)
+
+
+@app.post("/api/quality/take")
+async def quality_take(req: QualityTakeRequest):
+    """Tam otonom: seç → story bul/aç → child Task'lar → kuyruk. needs_human Task kuyruğa girmez."""
+    from agile_sdlc_crew.quality import intake as _qi
+    bad = _quality_guard(req.source, req.sp)
+    if bad:
+        return bad
+    try:
+        res = await asyncio.to_thread(_qi.take, AzureDevOpsClient(), req.source, req.sp,
+                                      story_id=req.story_id, team=req.team)
+        if any(t.get("job_id") for t in res.get("tasks") or []):
+            _ensure_worker()
+        return JSONResponse(res, status_code=201 if res.get("story") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _quality_error(e)
+
+
+@app.get("/api/quality/unmapped")
+async def quality_unmapped(source: str = "newrelic"):
+    """Eşlenemeyen NR uygulamaları / kapsam dışı Sonar projeleri."""
+    from agile_sdlc_crew.quality import intake as _qi
+    bad = _quality_guard(source)
+    if bad:
+        return bad
+    try:
+        return JSONResponse(await asyncio.to_thread(_qi.unmapped, AzureDevOpsClient(), source))
+    except Exception as e:  # noqa: BLE001
+        return _quality_error(e)
+
+
+@app.get("/api/quality/recent")
+async def quality_recent(limit: int = 30):
+    """Kartın görünürlüğü + son alımlar. Kapalıyken DB'ye dokunmaz."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    if not _pc.get("CREW_QUALITY_INTAKE"):
+        return JSONResponse({"enabled": False, "items": []})
+    try:
+        items = await asyncio.to_thread(db.list_quality_items, max(1, min(int(limit or 30), 200)))
+        return JSONResponse({"enabled": True, "items": items})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"enabled": True, "items": [], "error": str(e)})
 
 
 @app.get("/api/daily")
