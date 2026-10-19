@@ -142,6 +142,22 @@ class SprintQueueRequest(BaseModel):
     use_hal: bool = False
 
 
+class TechdebtManualRequest(BaseModel):
+    repo: str = ""
+    title: str = ""
+    problem: str = ""
+    expected: str = ""
+    files: list[str] = []
+    sp: int = 1
+    needs_human: bool = False
+    team: str = ""
+
+
+class TechdebtQueueRequest(BaseModel):
+    ids: list[int] = []
+    team: str = ""
+
+
 class QualityTakeRequest(BaseModel):
     source: str
     sp: int = 10
@@ -1933,6 +1949,72 @@ async def quality_recent(limit: int = 30):
         return JSONResponse({"enabled": True, "items": items})
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"enabled": True, "items": [], "error": str(e)})
+
+
+def _techdebt_off():
+    from agile_sdlc_crew import pipeline_config as _pc
+    if not _pc.get("CREW_TECHDEBT"):
+        return JSONResponse({"error": "Teknik borç kapalı (CREW_TECHDEBT)"}, status_code=403)
+    return None
+
+
+def _techdebt_error(e: Exception) -> JSONResponse:
+    from agile_sdlc_crew.quality import techdebt as _td
+    if isinstance(e, _td.Duplicate):
+        return JSONResponse({"error": str(e)}, status_code=409)
+    if isinstance(e, ValueError):
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return _quality_error(e)
+
+
+@app.get("/api/techdebt")
+async def techdebt_list(team: str = ""):
+    """Takımın açık tech-debt etiketli WI'ları (yazma yok)."""
+    from agile_sdlc_crew.quality import techdebt as _td
+    bad = _techdebt_off()
+    if bad:
+        return bad
+    try:
+        res = await asyncio.to_thread(_td.list_items, AzureDevOpsClient(), team=team)
+        return JSONResponse({"enabled": True, **res})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"Azure okunamadı: {e}"}, status_code=502)
+
+
+@app.post("/api/techdebt/manual")
+async def techdebt_manual(req: TechdebtManualRequest):
+    """Elle teknik borç: sonraki sprintteki 'Teknik borç' story'sinin altına Task açar (kuyruğa almaz)."""
+    from agile_sdlc_crew.quality import techdebt as _td
+    bad = _techdebt_off()
+    if bad:
+        return bad
+    form = req.model_dump()
+    team = form.pop("team", "")
+    try:
+        res = await asyncio.to_thread(_td.create_manual, AzureDevOpsClient(), form, team=team)
+        return JSONResponse(res, status_code=201)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.post("/api/techdebt/queue")
+async def techdebt_queue(req: TechdebtQueueRequest):
+    """Listeden seçilen tech-debt WI'larını kuyruğa al (insan işi ve liste dışı reddedilir)."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew.quality import techdebt as _td
+    bad = _techdebt_off()
+    if bad:
+        return bad
+    if not req.ids:
+        return JSONResponse({"error": "Seçili iş yok"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_td.queue, AzureDevOpsClient(), req.ids, team=req.team,
+                                      max_queue=int(_pc.get("CREW_TECHDEBT_MAX_QUEUE") or 5))
+        if res.get("queued"):
+            _ensure_worker()
+        return JSONResponse(res, status_code=202 if res.get("queued") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
 
 
 @app.get("/api/daily")

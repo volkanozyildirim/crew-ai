@@ -478,6 +478,22 @@ SCHEMA: list[dict] = [
         "default": True,
         "desc": "tempo-quality etiketli işler BA hazırlık kapısını (1. aşama) atlar: kanıt üretim logundan gelir, beklenen davranış Task açıklamasında ve Acceptance Criteria alanında sabittir. Kapalıyken ilk canlı alımın 3 işi de 30-43/100 ile needs_info'ya düştü. Mimarın keşif kapısı, review ve build kapıları etkilenmez. Yalnızca kalite alımının açtığı işleri etkiler.",
     },
+    # ── Teknik borç (Teknik borç sekmesi) ──
+    {
+        "key": "CREW_TECHDEBT",
+        "label": "Teknik Borç (Teknik borç sekmesi)",
+        "type": "bool",
+        "default": False,
+        "desc": "Teknik borç sekmesinin liste / elle giriş / kuyruk bölümleri ve /api/techdebt uçları. Elle girilen madde sonraki sprintteki tek 'Teknik borç — <sprint>' story'sinin altında tech-debt etiketli Task olarak açılır (kayıt kaynağı Azure); listedeki takımın tech-debt etiketli işleri seçilip pipeline kuyruğuna alınır, needs-human olanlar alınmaz. Sunucuda kimlik doğrulama yok: board'a yazar ve iş başlatır — varsayılan kapalı.",
+    },
+    {
+        "key": "CREW_TECHDEBT_MAX_QUEUE",
+        "label": "Teknik borç · istek başı en çok iş",
+        "type": "int",
+        "default": 5,
+        "min": 1,
+        "desc": "Teknik borç listesinden tek seferde kuyruğa alınabilecek en çok WI. Her biri bir pipeline işi — maliyet tavanı.",
+    },
     {
         "key": "CREW_QUALITY_TARGET_SPRINT",
         "label": "Kalite · hedef sprint",

@@ -501,6 +501,9 @@ def _quality_skips_readiness(tags: str) -> bool:
     from agile_sdlc_crew import pipeline_config as _pc
     if not _pc.get("CREW_QUALITY_SKIP_READINESS"):
         return False
+    # Elle girilen teknik borç serbest metindir — kanıt değil; kapıdan geçer.
+    if "tempo-src-manual" in {t.strip().lower() for t in (tags or "").split(";")}:
+        return False
     return _is_quality_wi(tags)
 
 
