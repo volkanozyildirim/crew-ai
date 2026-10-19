@@ -3538,10 +3538,10 @@ def test_quality_intake():
     from agile_sdlc_crew.quality.model import Finding
     keys = ("CREW_QUALITY_INTAKE", "NEW_RELIC_REGION", "CREW_QUALITY_NR_LOOKBACK_DAYS",
             "CREW_QUALITY_NR_MIN_ERRORS", "CREW_QUALITY_SONAR_PACK_SP", "CREW_QUALITY_SONAR_PACK_FILES",
-            "CREW_QUALITY_HUMAN_SHARE", "CREW_QUALITY_MAX_TASKS", "CREW_QUALITY_REOPEN_GRACE_DAYS")
+            "CREW_QUALITY_HUMAN_MAX", "CREW_QUALITY_MAX_TASKS", "CREW_QUALITY_REOPEN_GRACE_DAYS")
     check("knob'lar kayıtlı, ana anahtar varsayılan kapalı",
           all(k in pc._SCHEMA_BY_KEY for k in keys) and pc._SCHEMA_BY_KEY["CREW_QUALITY_INTAKE"]["default"] is False)
-    cfg = {"nr_days": 7, "nr_min_errors": 100, "pack_sp": 3, "pack_files": 5, "human_share": 0.3,
+    cfg = {"nr_days": 7, "nr_min_errors": 100, "pack_sp": 3, "pack_files": 5, "human_max": 5,
            "max_tasks": 8, "grace_days": 3, "sonar_url": "https://sonar.x"}
 
     def nf(app, key, cnt, action="Index::index", repo="webservice", cls="E_WARNING", msg=None):
@@ -3632,9 +3632,9 @@ def test_quality_intake():
     c3 = FakeClient()
     q0 = len(queued)
     res3 = intake.take(c3, "newrelic", 10, deps=deps._replace(gather=lambda s, cl, cf: (hum + findings, [])))
-    h = [t for t in res3["tasks"] if t["needs_human"]]
+    h = res3["human_tasks"]
     check("needs_human Task açılır, kuyruğa alınmaz, needs-human etiketi taşır",
-          len(h) == 1 and h[0]["job_id"] is None and len(queued) - q0 == len(res3["tasks"]) - 1
+          len(h) == 1 and h[0]["job_id"] is None and len(queued) - q0 == len(res3["tasks"])
           and any("needs-human" in x[1].get("System.Tags", "") for x in c3.created if x[0] == "Task"))
 
     c4 = FakeClient()
@@ -3820,7 +3820,7 @@ def test_quality_review_fixes():
     deps = intake.Deps(gather=lambda s, c, cf: (list(fs), []), board=lambda c: {}, repo_ok=lambda r: True,
                        queue=lambda w, t: 1, record=lambda **k: None, now=lambda: 2.0,
                        cfg=lambda: {"nr_days": 7, "nr_min_errors": 100, "pack_sp": 3, "pack_files": 5,
-                                    "human_share": 0.3, "max_tasks": 8, "grace_days": 3, "sonar_url": ""})
+                                    "human_max": 5, "max_tasks": 8, "grace_days": 3, "sonar_url": ""})
     c = AzC()
     intake.take(c, "newrelic", 5, deps=deps)
     task = next(f for ty, f in c.created if ty == "Task")
@@ -4380,6 +4380,40 @@ def test_human_label():
     check("otomatik satırların durumu da yazılı (boş hücre yok)", "Pipeline kuyruğuna alınır" in html)
 
 
+def test_quality_human_split():
+    print("\n[Q13] Kalite alımı — insan işleri ayrı grup, bütçe otomatik işlere")
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake
+    from agile_sdlc_crew.quality.model import Finding
+
+    def sec(i):
+        return Finding(source="sonar", repo=f"r{i}", project=f"EcomBackend:r{i}", file=f"s{i}.php",
+                       rule="secrets:S6703", rule_name="Secret", severity="BLOCKER", itype="VULNERABILITY", lines=[1])
+
+    def bug(i):
+        return Finding(source="sonar", repo="webservice", project="EcomBackend:webservice", file=f"b{i}.php",
+                       rule=f"php:S{i}", rule_name="Bug", severity="CRITICAL", itype="BUG", lines=[1])
+    findings = [sec(i) for i in range(7)] + [bug(i) for i in range(20)]
+    cfg = {"nr_days": 7, "nr_min_errors": 100, "pack_sp": 3, "pack_files": 5, "max_tasks": 8, "human_max": 5,
+           "grace_days": 3, "sonar_url": "", "target_sprint": "next", "task_fields": {}}
+    deps = intake.Deps(gather=lambda s, c, cf: (list(findings), []), board=lambda c: {}, repo_ok=lambda r: True,
+                       queue=lambda w, t: 1, record=lambda **k: None, now=lambda: 1.0, cfg=lambda: cfg)
+    pv = intake.preview(None, "sonar", 30, deps=deps)
+    check("insan işleri bütçeyi ve Task tavanını yemez: otomatik işler 8 Task'ı doldurur",
+          len(pv["tasks"]) == 8 and not any(t["needs_human"] for t in pv["tasks"]) and pv["total_sp"] == 8)
+    check("insan işi gerektiren önemli maddeler ayrı listede, en çok human_max",
+          len(pv["human_tasks"]) == 5 and all(t["needs_human"] for t in pv["human_tasks"]))
+    check("Task tavanı bütçeyi sınırladıysa açıkça söylenir",
+          pv.get("cap_reached") is True and "8" in pv.get("cap_note", ""))
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("arayüzde iki ayrı grup: otomatik işler ve insan işi gerektiren önemli maddeler + tavan notu",
+          "r.human_tasks" in html and "İnsan işi gerektiren önemli maddeler" in html
+          and "Otomatik işler" in html and "r.cap_note" in html)
+    check("insan işi tavanı ayarı kayıtlı (varsayılan 5); eski pay ayarı kaldırıldı",
+          pc._SCHEMA_BY_KEY.get("CREW_QUALITY_HUMAN_MAX", {}).get("default") == 5
+          and "CREW_QUALITY_HUMAN_SHARE" not in pc._SCHEMA_BY_KEY and intake.load_cfg()["human_max"] == 5)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4440,7 +4474,8 @@ def main():
               test_techdebt_ui,
               test_techdebt_review_fixes,
               test_dashboard_readability,
-              test_human_label):
+              test_human_label,
+              test_quality_human_split):
         try:
             t()
         except Exception as e:

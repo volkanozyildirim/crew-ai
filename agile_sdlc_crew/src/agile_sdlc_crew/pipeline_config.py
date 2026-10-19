@@ -457,11 +457,12 @@ SCHEMA: list[dict] = [
         "desc": "Bir Sonar Task'ı en fazla bu kadar dosyaya dokunur (dar plan = güvenilir geliştirici).",
     },
     {
-        "key": "CREW_QUALITY_HUMAN_SHARE",
-        "label": "Kalite · insan işi payı",
-        "type": "float",
-        "default": 0.3,
-        "desc": "needs_human işler (secret rotasyonu, altyapı hatası) bütçenin en çok bu oranını kaplar.",
+        "key": "CREW_QUALITY_HUMAN_MAX",
+        "label": "Kalite · alım başına en çok insan işi",
+        "type": "int",
+        "default": 5,
+        "min": 0,
+        "desc": "İnsan işi gerektiren önemli maddeler (secret rotasyonu, altyapı hatası) ayrı listelenir ve SP bütçesinden / Task tavanından DÜŞMEZ; skora göre en çok bu kadarı needs-human Task olarak açılır, kuyruğa alınmaz. (Eskiden bütçenin %30'unu kaplıyordu: 30 SP'lik Sonar alımında 8 Task'ın 7'si insan işiydi.)",
     },
     {
         "key": "CREW_QUALITY_MAX_TASKS",

@@ -55,7 +55,7 @@ def load_cfg() -> dict:
         "nr_min_errors": int(g("CREW_QUALITY_NR_MIN_ERRORS") or 100),
         "pack_sp": int(g("CREW_QUALITY_SONAR_PACK_SP") or 3),
         "pack_files": int(g("CREW_QUALITY_SONAR_PACK_FILES") or 5),
-        "human_share": float(g("CREW_QUALITY_HUMAN_SHARE") if g("CREW_QUALITY_HUMAN_SHARE") is not None else 0.3),
+        "human_max": int(g("CREW_QUALITY_HUMAN_MAX") if g("CREW_QUALITY_HUMAN_MAX") is not None else 5),
         "max_tasks": int(g("CREW_QUALITY_MAX_TASKS") or 8),
         "grace_days": int(g("CREW_QUALITY_REOPEN_GRACE_DAYS") if g("CREW_QUALITY_REOPEN_GRACE_DAYS") is not None else 3),
         "sonar_url": sonar.base_url(),
@@ -181,14 +181,30 @@ def _plan(client, source: str, sp: int, deps: Deps) -> tuple[list[Group], dict, 
     groups, sk2 = build_candidates(source, findings, board_index=deps.board(client), now=deps.now(),
                                    repo_ok=deps.repo_ok, cfg=cfg)
     skipped += sk2
-    picked = rank.select_budget(groups, int(sp), human_share=cfg["human_share"], max_tasks=cfg["max_tasks"])
+    # Bütçe ve Task tavanı yalnız OTOMATİK işlere; insan işleri ayrı grup, skora
+    # göre en çok human_max (bütçeden düşmez). Eskiden aynı havuzdaydılar: 30 SP'lik
+    # Sonar alımında yüksek skorlu secret'lar 8 Task tavanının 7'sini doldurdu.
+    auto = [g for g in groups if not g.needs_human]
+    human = sorted((g for g in groups if g.needs_human), key=lambda g: (-g.score, g.fingerprints[0]))
+    human = human[:max(0, int(cfg.get("human_max", 5)))]
+    max_tasks = int(cfg["max_tasks"])
+    picked_auto = rank.select_budget(auto, int(sp), human_share=0.0, max_tasks=max_tasks)
+    picked = picked_auto + human
+    total = sum(g.sp for g in picked_auto)
+    cap_reached = len(picked_auto) >= max_tasks and total < int(sp) and len(auto) > len(picked_auto)
     result = {
-        "source": source, "budget_sp": int(sp), "total_sp": sum(g.sp for g in picked),
-        "candidates": len(groups), "tasks": [_row(g) for g in picked], "skipped": skipped[:50],
+        "source": source, "budget_sp": int(sp), "total_sp": total,
+        "candidates": len(auto), "human_candidates": sum(1 for g in groups if g.needs_human),
+        "tasks": [_row(g) for g in picked_auto], "human_tasks": [_row(g) for g in human],
+        "human_sp": sum(g.sp for g in human), "cap_reached": cap_reached,
+        "skipped": skipped[:50],
         "skipped_counts": dict(Counter(s["reason"] if not s["reason"].startswith(("açık WI", "iptal"))
                                        else s["reason"].split(" #")[0] for s in skipped)),
         "story": None,
     }
+    if cap_reached:
+        result["cap_note"] = (f"Task tavanı {max_tasks} (CREW_QUALITY_MAX_TASKS) doldu: bütçenin "
+                              f"{total}/{int(sp)} SP'si kullanıldı. Her Task bir pipeline işi.")
     if not picked:
         result["message"] = "Bütçeye uyan aday yok."
     return picked, result, cfg
@@ -339,8 +355,10 @@ def take(client, source: str, sp: int, *, story_id: int | None = None, team: str
         rows, added = _open_tasks(client, picked, story, cfg, deps, source=source)
         if added:
             estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
-        result["tasks"] = rows
-        result["total_sp"] = added
+        result["tasks"] = [r for r in rows if not r["needs_human"]]
+        result["human_tasks"] = [r for r in rows if r["needs_human"]]
+        result["total_sp"] = sum(r["sp"] for r in result["tasks"] if r.get("id"))
+        result["human_sp"] = sum(r["sp"] for r in result["human_tasks"] if r.get("id"))
         log.info(f"🧹 Kalite alımı ({source}): story #{story['id']} · {len(rows)} Task · {added} SP")
         return result
     finally:

@@ -1404,12 +1404,18 @@ async function qualityRun(take){
       :await fetch(`/api/quality/preview?source=${encodeURIComponent(source)}&sp=${sp}&team=${encodeURIComponent(team)}`);
     const r=await resp.json();
     if(!resp.ok){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(r.error||('HTTP '+resp.status))}</div>`;return}
-    const rows=(r.tasks||[]).map(t=>`<tr><td>${t.id?wiLink(t.id):'—'}</td><td>${esc(t.title)}</td><td class="num">${t.sp}</td><td>${t.needs_human?humanChip(t.human_reason):(t.job_id?`<span class="chip dim">Kuyrukta · iş #${t.job_id}</span>`:(t.error?`<span style="color:var(--danger)">${esc(t.error)}</span>`:(t.id?'':'<span class="chip dim" title="Al denince Task açılır ve pipeline kuyruğuna alınır">Pipeline kuyruğuna alınır</span>')))}</td></tr>`).join('');
+    const row=t=>`<tr><td>${t.id?wiLink(t.id):'—'}</td><td>${esc(t.title)}</td><td class="num">${t.sp}</td><td>${t.needs_human?humanChip(t.human_reason):(t.job_id?`<span class="chip dim">Kuyrukta · iş #${t.job_id}</span>`:(t.error?`<span style="color:var(--danger)">${esc(t.error)}</span>`:(t.id?'':'<span class="chip dim" title="Al denince Task açılır ve pipeline kuyruğuna alınır">Pipeline kuyruğuna alınır</span>')))}</td></tr>`;
+    const tbl=list=>`<table class="perf"><tr><th>WI</th><th>İş</th><th class="num">SP</th><th>Durum</th></tr>${list.map(row).join('')}</table>`;
+    const auto=r.tasks||[],hum=r.human_tasks||[];
     const head=r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'';
     const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
-    box.innerHTML=`<div style="font-size:12px;padding:6px 0">${head}${(r.tasks||[]).length} Task · ${r.total_sp}/${r.budget_sp} SP${sk?` · atlanan — ${sk}`:''}</div>`
-      +(rows?`<table class="perf"><tr><th>WI</th><th>İş</th><th class="num">SP</th><th>Durum</th></tr>${rows}</table>`
-            :`<div class="board-empty" style="padding:8px 0">${esc(r.message||'Bütçeye uyan aday yok.')}</div>`);
+    const sec=(title,sub)=>`<div style="font-size:12px;font-weight:700;margin:12px 0 4px">${title} <span style="font-weight:400;color:var(--text-dim)">${sub}</span></div>`;
+    // Bütçe yalnız otomatik işlere; insan işleri ayrı grup, bütçeden düşmez (sunucu kuralı)
+    box.innerHTML=`<div style="font-size:12px;padding:6px 0">${head}Otomatik: ${auto.length} Task · ${r.total_sp}/${r.budget_sp} SP · İnsan işi: ${hum.length}${sk?` · atlanan — ${sk}`:''}</div>`
+      +(r.cap_note?`<div style="font-size:12px;color:var(--warning);padding:2px 0">${esc(r.cap_note)}</div>`:'')
+      +sec('Otomatik işler','— pipeline kuyruğuna alınır, SP bütçesinden düşer')
+      +(auto.length?tbl(auto):`<div class="board-empty" style="padding:8px 0">${esc(r.message||'Bütçeye uyan otomatik iş yok.')}</div>`)
+      +(hum.length?sec('İnsan işi gerektiren önemli maddeler',`— Task açılır, kuyruğa alınmaz, bütçeden düşmez${r.human_candidates>hum.length?` (en önemli ${hum.length} / ${r.human_candidates})`:''}`)+tbl(hum):'');
     if(take)loadQuality();
   }catch(e){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(String(e))}</div>`}
 }
