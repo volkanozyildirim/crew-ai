@@ -74,6 +74,11 @@ header {
 @media(max-width:1850px){ .sprint-info{display:none} }
 @media(max-width:1400px){ .sprint-info{display:none} .tabs{margin-left:0} .tab{padding:0 9px} }
 .crumb { display:flex; align-items:center; gap:4px; }
+.ctl-input { background:var(--bg-card); border:1px solid var(--border); color:var(--text); height:32px; padding:0 10px;
+  border-radius:8px; font-size:13px; font-weight:600; font-family:inherit; outline:none; box-sizing:border-box; }
+.ctl-input::placeholder { color:var(--faint); font-weight:500; }
+.ctl-input:focus { border-color:var(--accent); }
+.ctl-label { font-size:12px; color:var(--text-dim); font-weight:600; }
 .sprint-select {
   background:var(--bg-card); border:1px solid var(--border); color:var(--text);
   height:32px; padding:0 30px 0 10px; border-radius:8px; font-size:13px; font-weight:600; font-family:inherit; outline:none; cursor:pointer;
@@ -539,8 +544,8 @@ header {
       <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:hidden">
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
           <select class="sprint-select" id="qSource" title="Kaynak"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
-          <input class="sprint-select" id="qSp" type="number" min="1" max="40" value="10" style="width:64px" title="SP bütçesi">
-          <input class="sprint-select" id="qStory" type="number" placeholder="Story ID (ops.)" style="width:130px" title="Boşsa takımın sonraki sprintinde story bulunur/açılır (aktif sprinte dokunulmaz)">
+          <label class="ctl-label" for="qSp">SP</label><input class="ctl-input" id="qSp" type="number" min="1" max="40" value="10" style="width:64px" title="SP bütçesi (1–40)">
+          <input class="ctl-input" id="qStory" type="number" placeholder="Story ID (ops.)" style="width:140px" title="Boşsa takımın sonraki sprintinde story bulunur/açılır (aktif sprinte dokunulmaz)">
           <button class="sm-btn ghost small" onclick="qualityRun(false)">Önizle</button>
           <button class="sm-btn small" onclick="qualityRun(true)">Al</button>
         </div>

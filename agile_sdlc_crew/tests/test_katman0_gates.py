@@ -4359,6 +4359,9 @@ def test_dashboard_readability():
     tb = _re.search(r'<button[^>]*id="themeBtn"[^>]*>.*?</button>', html, _re.S).group(0)
     check("ayarlar butonu etiketli ve dişli simgeli; tema butonundan ayırt edilir",
           "Ayarlar" in sb and 'data-icon="gear"' in sb and 'data-icon="gear"' not in tb)
+    check("metin/sayı kutuları açılır liste gibi çizilmez (ok simgesi + kesilen değer)",
+          not _re.search(r'<input[^>]*class="sprint-select"', html) and 'id="qSp"' in html
+          and _re.search(r'<input class="ctl-input" id="qSp"', html) is not None)
     check("tema butonu güncel modu simgeyle gösterir (güneş / ay / ekran)",
           "THEME_ICONS" in html and all(k in html for k in ("light:", "dark:", "system:")))
 
