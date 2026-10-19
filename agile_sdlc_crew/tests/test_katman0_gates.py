@@ -4137,6 +4137,54 @@ def test_techdebt_lane():
           and "tempo-techdebt" in c.created[0][1]["System.Tags"] and st["id"] == 7)
 
 
+def test_techdebt_open_tasks_db():
+    print("\n[TD2] Teknik borç — ortak Task açma + quality_items.source kolonu")
+    from agile_sdlc_crew.quality import intake
+    from agile_sdlc_crew.quality.model import Group
+    queued, rec = [], []
+
+    class C:
+        def __init__(self):
+            self.created = []
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append((type_name, fields, parent_id))
+            return {"id": 500 + len(self.created)}
+
+        def update_work_item(self, wid, ops):
+            return {}
+    deps = intake.Deps(gather=None, board=None, repo_ok=None, queue=lambda w, ttl: (queued.append(w), 9)[1],
+                       record=lambda **k: rec.append(k), now=lambda: 1.0, cfg=None)
+    cfg = {"sonar_url": "", "nr_days": 7, "task_fields": {"Custom.ARGEType": "Geliştirme - GE"}}
+    g = Group(source="manual", repo="webservice", title="X temizliği", fingerprints=["manual:webservice:ab"],
+              findings=[], sp=2, meta={"problem": "p", "expected": "e", "files": []})
+    story = {"id": 77, "area": "P\\T", "iteration": "P\\S22", "sp": 0.0}
+    c = C()
+    rows, added = intake._open_tasks(c, [g], story, cfg, deps, source="manual", lane="techdebt", queue=False)
+    f = c.created[0][1]
+    check("ortak Task açma: techdebt etiketleri, story child'ı, org alanı, kuyruğa ALINMAZ",
+          rows[0]["id"] == 501 and rows[0]["job_id"] is None and not queued and added == 2
+          and c.created[0][2] == 77 and "tempo-techdebt" in f["System.Tags"]
+          and f["Custom.ARGEType"] == "Geliştirme - GE" and rec and rec[0]["source"] == "manual")
+    from agile_sdlc_crew import db
+    check("quality_items.source serbest metin (yeni kaynaklar sessizce düşmesin)",
+          "source VARCHAR(32)" in db.SCHEMA and "MODIFY source VARCHAR(32)" in inspect_source(db.init_db))
+    try:
+        db.init_db()
+        with db.get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SHOW COLUMNS FROM quality_items LIKE 'source'")
+            typ = (cur.fetchone() or {}).get("Type", "")
+        check("canlı DB'de kolon varchar'a çevrildi", "varchar" in typ.lower(), typ)
+    except Exception as e:  # noqa: BLE001
+        skip("canlı DB kolon tipi", f"DB erişilemedi: {e}")
+
+
+def inspect_source(fn):
+    import inspect
+    return inspect.getsource(fn)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4190,7 +4238,8 @@ def main():
               test_windowed_edit,
               test_quality_lean,
               test_worktree_staging,
-              test_techdebt_lane):
+              test_techdebt_lane,
+              test_techdebt_open_tasks_db):
         try:
             t()
         except Exception as e:

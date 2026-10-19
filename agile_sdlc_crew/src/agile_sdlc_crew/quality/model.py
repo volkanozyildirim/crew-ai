@@ -47,6 +47,8 @@ class Group:
     needs_human: bool = False
     human_reason: str = ""
     recurring_of: int | None = None
+    # Elle girilen teknik borç (source="manual"): problem, expected, files
+    meta: dict = field(default_factory=dict)
 
     @property
     def last_seen(self) -> float:

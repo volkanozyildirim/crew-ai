@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 CREATE TABLE IF NOT EXISTS quality_items (
     id INT AUTO_INCREMENT PRIMARY KEY,
     fingerprint VARCHAR(512) NOT NULL,
-    source ENUM('sonar','newrelic') NOT NULL,
+    source VARCHAR(32) NOT NULL,
     repo VARCHAR(128) DEFAULT '',
     story_id INT NULL,
     wi_id INT NULL,
@@ -138,6 +138,15 @@ def init_db():
         # Mevcut kurulumlarda jobs.status ENUM'una 'needs_human' ekle (idempotent).
         # 'failed' DEGIL: pipeline kullanilabilir is uretip kendi kapisini
         # gecemediginde kullanilir — PR acik kalir, sayimlarda basarisiz gorunmez.
+        # quality_items.source ENUM('sonar','newrelic') idi: yeni kaynak (manual,
+        # sonar_smell…) insert'i hata verip yalnız warning'e düşüyordu, geçmiş kaybolurdu.
+        try:
+            cur.execute("SHOW COLUMNS FROM quality_items LIKE 'source'")
+            _qrow = cur.fetchone()
+            if _qrow and "enum" in (_qrow.get("Type") or "").lower():
+                cur.execute("ALTER TABLE quality_items MODIFY source VARCHAR(32) NOT NULL")
+        except Exception:
+            pass
         try:
             cur.execute("SHOW COLUMNS FROM jobs LIKE 'status'")
             _row = cur.fetchone()

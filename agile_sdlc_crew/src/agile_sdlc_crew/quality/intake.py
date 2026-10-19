@@ -277,6 +277,52 @@ def _create_task(client, fields: dict, parent_id: int) -> int:
         return int(client.create_work_item("Task", rest, parent_id=parent_id)["id"])
 
 
+def _open_tasks(client, groups: list[Group], story: dict, cfg: dict, deps: Deps, *, source: str,
+                lane: str = "quality", queue: bool = True) -> tuple[list[dict], int]:
+    """Grupları story'nin child Task'ı olarak aç; SP yaz; (queue ise) insan işi olmayanı
+    kuyruğa al; parmak izi başına quality_items kaydı. Kalite ve teknik borç ortak yolu."""
+    from agile_sdlc_crew import estimation
+    me = _assignee(client)
+    rows: list[dict] = []
+    added = 0
+    for g in groups:
+        row = _row(g)
+        fields = {"System.Title": row["title"],
+                  "System.Description": render.task_description(g, sonar_url=cfg.get("sonar_url", ""),
+                                                                nr_days=cfg.get("nr_days", 7)),
+                  "System.Tags": render.task_tags(g, lane=lane),
+                  "System.IterationPath": story["iteration"]}
+        if story.get("area"):
+            fields["System.AreaPath"] = story["area"]
+        if me:
+            fields["System.AssignedTo"] = me
+        fields[AC_FIELD] = render.acceptance_block(g)
+        for k, v in (cfg.get("task_fields") or {}).items():
+            fields.setdefault(k, v)
+        try:
+            wid = _create_task(client, fields, story["id"])
+        except Exception as e:  # noqa: BLE001
+            row["error"] = f"Task açılamadı: {e}"
+            rows.append(row)
+            continue
+        row["id"] = wid
+        added += g.sp
+        estimation.write_story_points(client, str(wid), g.sp, logger=log.info)
+        if queue and not g.needs_human:
+            try:
+                row["job_id"] = deps.queue(wid, row["title"])
+            except Exception as e:  # noqa: BLE001
+                row["error"] = f"kuyruğa alınamadı: {e}"
+        for fp in g.fingerprints:
+            try:
+                deps.record(fingerprint=fp, source=source, repo=g.repo, story_id=story["id"], wi_id=wid,
+                            job_id=row["job_id"], sp=g.sp, score=g.score, needs_human=g.needs_human)
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"⚠️ Kalite: quality_items yazılamadı ({fp[:60]}): {e}")
+        rows.append(row)
+    return rows, added
+
+
 def take(client, source: str, sp: int, *, story_id: int | None = None, team: str = "",
          deps: Deps | None = None) -> dict:
     from agile_sdlc_crew import estimation
@@ -289,44 +335,7 @@ def take(client, source: str, sp: int, *, story_id: int | None = None, team: str
             return result
         story = resolve_story(client, source, story_id, team, cfg.get("target_sprint") or "next")
         result["story"] = {"id": story["id"], "url": _wi_url(client, story["id"]), "created": story["created"]}
-        me = _assignee(client)
-        rows = []
-        added = 0
-        for g in picked:
-            row = _row(g)
-            fields = {"System.Title": row["title"],
-                      "System.Description": render.task_description(g, sonar_url=cfg["sonar_url"],
-                                                                    nr_days=cfg["nr_days"]),
-                      "System.Tags": render.task_tags(g),
-                      "System.IterationPath": story["iteration"]}
-            if story["area"]:
-                fields["System.AreaPath"] = story["area"]
-            if me:
-                fields["System.AssignedTo"] = me
-            fields[AC_FIELD] = render.acceptance_block(g)
-            for k, v in (cfg.get("task_fields") or {}).items():
-                fields.setdefault(k, v)
-            try:
-                wid = _create_task(client, fields, story["id"])
-            except Exception as e:  # noqa: BLE001
-                row["error"] = f"Task açılamadı: {e}"
-                rows.append(row)
-                continue
-            row["id"] = wid
-            added += g.sp
-            estimation.write_story_points(client, str(wid), g.sp, logger=log.info)
-            if not g.needs_human:
-                try:
-                    row["job_id"] = deps.queue(wid, row["title"])
-                except Exception as e:  # noqa: BLE001
-                    row["error"] = f"kuyruğa alınamadı: {e}"
-            for fp in g.fingerprints:
-                try:
-                    deps.record(fingerprint=fp, source=source, repo=g.repo, story_id=story["id"], wi_id=wid,
-                                job_id=row["job_id"], sp=g.sp, score=g.score, needs_human=g.needs_human)
-                except Exception as e:  # noqa: BLE001
-                    log.warning(f"⚠️ Kalite: quality_items yazılamadı ({fp[:60]}): {e}")
-            rows.append(row)
+        rows, added = _open_tasks(client, picked, story, cfg, deps, source=source)
         if added:
             estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
         result["tasks"] = rows
