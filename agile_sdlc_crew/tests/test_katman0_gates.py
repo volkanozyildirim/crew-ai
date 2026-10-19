@@ -4258,6 +4258,9 @@ def test_techdebt_endpoints():
     try:
         tc = TestClient(server.app)
         check("elle giriş kaldırıldı (uç yok)", tc.post("/api/techdebt/manual", json={}).status_code in (404, 405))
+        r0 = tc.get("/api/techdebt")
+        check("takım seçilmeden liste: hata değil, 'takım seçin' mesajı (200)",
+              r0.status_code == 200 and r0.json().get("items") == [] and "Takım" in r0.json().get("message", ""))
         check("boş kuyruk isteği → 400", tc.post("/api/techdebt/queue", json={"ids": []}).status_code == 400)
     finally:
         pc.get = orig
@@ -4339,6 +4342,7 @@ def test_techdebt_review_fixes():
         pc.get, techdebt.queue = orig_get, orig_q
     html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
     otc = html[html.index("async function onTeamChange"):html.index("async function onTeamChange") + 1500]
+    check("takım seçimi yüklenirken ('Yükleniyor...') istek gönderilmez", "function _tdTeam" in html)
     check("takım değişince teknik borç listesi yenilenir; kuyruk butonu istek boyunca kilitli",
           "loadTechdebt()" in otc and "tdQueueBtn" in html and ".disabled=true" in html)
 

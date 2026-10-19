@@ -1963,6 +1963,8 @@ async def techdebt_list(team: str = ""):
     bad = _techdebt_off()
     if bad:
         return bad
+    if not team.strip():
+        return JSONResponse({"enabled": True, "items": [], "message": "Takım seçin — liste takımın alanıyla sınırlı"})
     try:
         res = await asyncio.to_thread(_td.list_items, AzureDevOpsClient(), team=team)
         return JSONResponse({"enabled": True, **res})

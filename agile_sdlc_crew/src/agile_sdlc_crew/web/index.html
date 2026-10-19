@@ -1409,8 +1409,14 @@ function _tdTabShow(){
   const tab=document.getElementById('tabTechdebt');if(tab)tab.style.display=on?'':'none';
   const ln=document.getElementById('ovTechdebtLink');if(ln)ln.style.display=on?'block':'none';
 }
+// Seçili takım; takım listesi yüklenirken seçenek "Yükleniyor..." (value özniteliği
+// yok → .value metni döner) — o durumda takım yok sayılır.
+function _tdTeam(){
+  const s=document.getElementById('teamSel');const o=s&&s.selectedOptions&&s.selectedOptions[0];
+  return o&&o.hasAttribute('value')?o.value:'';
+}
 async function loadTechdebt(){
-  const team=(document.getElementById('teamSel')||{}).value||'';
+  const team=_tdTeam();
   const lc=document.getElementById('tdListCard');
   try{
     const resp=await fetch('/api/techdebt?team='+encodeURIComponent(team));
@@ -1419,7 +1425,7 @@ async function loadTechdebt(){
     lc.style.display='flex';
     const msgEl=document.getElementById('tdMsg');
     if(!resp.ok){_td=[];renderTechdebt();msgEl.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;_tdTabShow();return}
-    msgEl.textContent='';_td=r.items||[];renderTechdebt();
+    msgEl.textContent=r.message||'';_td=r.items||[];renderTechdebt();
   }catch(e){document.getElementById('tdMsg').textContent=String(e)}
   _tdTabShow();
 }
@@ -1439,7 +1445,7 @@ async function techdebtQueue(ids){
   ids=ids||[...document.querySelectorAll('.tdSel:checked')].map(x=>parseInt(x.value,10));
   const msg=document.getElementById('tdMsg');
   if(!ids.length){msg.textContent='Seçili iş yok.';return}
-  const team=(document.getElementById('teamSel')||{}).value||'';
+  const team=_tdTeam();
   msg.textContent='Kuyruğa alınıyor…';
   // İstek sürerken butonlar kilitli: çift tıklama aynı WI için iki iş açmasın
   const btns=[document.getElementById('tdQueueBtn'),...document.querySelectorAll('.tdRowBtn')].filter(Boolean);
