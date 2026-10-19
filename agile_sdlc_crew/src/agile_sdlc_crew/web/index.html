@@ -549,7 +549,7 @@ header {
   <!-- Maliyet analizi -->
   <section class="pane" id="paneTechdebt">
     <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
-      <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:hidden">
+      <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:visible;position:relative;z-index:2">
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
           <select class="sprint-select" id="qSource" title="Kaynak" onchange="qProjReset()"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
           <details class="qproj" id="qProj" ontoggle="if(this.open)loadQualityProjects()"><summary class="ctl-input" id="qProjLbl" title="Yalnız seçilen projelere (repo) bak; boş = hepsi">Projeler: tümü</summary><div class="qproj-menu" id="qProjMenu"></div></details>
