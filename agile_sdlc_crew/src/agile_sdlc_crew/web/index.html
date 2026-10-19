@@ -419,6 +419,7 @@ header {
     <button class="tab" data-tab="retro" onclick="showTab('retro')">Retro</button>
     <button class="tab" data-tab="refine" onclick="showTab('refine')">Refinement <span class="badge" id="tabRefineBadge"></span></button>
     <button class="tab" data-tab="cost" onclick="showTab('cost')">Maliyet</button>
+    <button class="tab" data-tab="techdebt" id="tabTechdebt" style="display:none" onclick="showTab('techdebt')">Teknik borç</button>
   </nav>
   <div class="header-right">
     <div class="crumb">
@@ -468,16 +469,8 @@ header {
         <div class="card-head"><span class="h">Takılan işler</span><span id="ovStuckCount" class="chip dim"></span><span style="flex:1"></span><a href="#" onclick="showTab('board');return false" style="font-size:12px;font-weight:600;text-decoration:none">Board sekmesi</a></div>
         <div id="ovStuck"></div>
       </div>
-      <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:hidden">
-        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
-          <select class="sprint-select" id="qSource" title="Kaynak"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
-          <input class="sprint-select" id="qSp" type="number" min="1" max="40" value="10" style="width:64px" title="SP bütçesi">
-          <input class="sprint-select" id="qStory" type="number" placeholder="Story ID (ops.)" style="width:130px" title="Boşsa takımın sonraki sprintinde story bulunur/açılır (aktif sprinte dokunulmaz)">
-          <button class="sm-btn ghost small" onclick="qualityRun(false)">Önizle</button>
-          <button class="sm-btn small" onclick="qualityRun(true)">Al</button>
-        </div>
-        <div id="qResult" style="padding:0 14px"></div>
-        <div id="qRecent" style="padding:8px 14px 12px;font-size:12px;color:var(--text-dim)"></div>
+      <div class="card" id="ovTechdebtLink" style="display:none;padding:10px 14px;font-size:13px">
+        Kalite alımı ve teknik borç <a href="#" onclick="showTab('techdebt');return false" style="font-weight:600;text-decoration:none">Teknik borç</a> sekmesinde.
       </div>
       <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
         <div class="card-head"><span class="h">Sprint performansı · ekip üyeleri</span><span style="flex:1"></span><span class="perf-legend"><i style="background:var(--success)"></i>Tamamlandı<i style="background:var(--warning)"></i>Test / kabul<i style="background:var(--run)"></i>Geliştirme<i style="background:var(--border)"></i>Başlanmadı</span></div>
@@ -533,6 +526,45 @@ header {
   <section class="pane" id="paneRetro"></section>
 
   <!-- Maliyet analizi -->
+  <section class="pane" id="paneTechdebt">
+    <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
+      <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
+          <select class="sprint-select" id="qSource" title="Kaynak"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
+          <input class="sprint-select" id="qSp" type="number" min="1" max="40" value="10" style="width:64px" title="SP bütçesi">
+          <input class="sprint-select" id="qStory" type="number" placeholder="Story ID (ops.)" style="width:130px" title="Boşsa takımın sonraki sprintinde story bulunur/açılır (aktif sprinte dokunulmaz)">
+          <button class="sm-btn ghost small" onclick="qualityRun(false)">Önizle</button>
+          <button class="sm-btn small" onclick="qualityRun(true)">Al</button>
+        </div>
+        <div id="qResult" style="padding:0 14px"></div>
+        <div id="qRecent" style="padding:8px 14px 12px;font-size:12px;color:var(--text-dim)"></div>
+      </div>
+      <div class="card" id="tdListCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Teknik borç</span><span id="tdCount" class="chip dim"></span><span style="flex:1"></span>
+          <select class="sprint-select" id="tdSrc" onchange="renderTechdebt()" title="Kaynak"><option value="">Tüm kaynaklar</option><option value="manual">Elle girilen</option><option value="azure">Azure etiketi</option></select>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="tdOnlyQ" onchange="renderTechdebt()">Yalnız kuyruklanabilir</label>
+          <button class="sm-btn ghost small" onclick="loadTechdebt()">Yenile</button>
+          <button class="sm-btn small" onclick="techdebtQueue(null)">Seçilenleri kuyruğa al</button>
+        </div>
+        <div id="tdMsg" style="padding:0 14px;font-size:12px"></div>
+        <div id="tdList" style="padding:0 14px 12px"></div>
+      </div>
+      <div class="card" id="tdFormCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head"><span class="h">Elle teknik borç gir</span><span style="flex:1"></span><span style="font-size:12px;color:var(--text-dim)">Sonraki sprintteki "Teknik borç" story'sinin altına Task açılır; kuyruğa listeden alınır.</span></div>
+        <form id="tdForm" onsubmit="techdebtManual(event)" style="padding:10px 14px 14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
+          <label style="font-size:12px">Repo<input class="sprint-select" name="repo" required placeholder="webservice" style="width:100%"></label>
+          <label style="font-size:12px">Başlık<input class="sprint-select" name="title" required maxlength="120" style="width:100%"></label>
+          <label style="font-size:12px">SP<select class="sprint-select" name="sp" style="width:100%"><option>1</option><option selected>2</option><option>3</option><option value="5">5+ (insan işi)</option></select></label>
+          <label style="font-size:12px;grid-column:1/-1">Sorun<textarea class="sprint-select" name="problem" required rows="3" style="width:100%"></textarea></label>
+          <label style="font-size:12px;grid-column:1/-1">Beklenen davranış / kabul kriteri<textarea class="sprint-select" name="expected" required rows="3" style="width:100%"></textarea></label>
+          <label style="font-size:12px;grid-column:1/-1">Olası dosyalar (opsiyonel, satır başına bir yol)<textarea class="sprint-select" name="files" rows="2" placeholder="app/Model/V1/Order.php" style="width:100%"></textarea></label>
+          <label style="font-size:12px;display:flex;align-items:center;gap:6px"><input type="checkbox" name="needs_human">İnsan işi (kuyruğa alınmasın)</label>
+          <div style="display:flex;gap:8px;align-items:center"><button class="sm-btn small" type="submit">Task aç</button><span id="tdFormMsg" style="font-size:12px"></span></div>
+        </form>
+      </div>
+    </div>
+  </section>
+
   <section class="pane" id="paneCost">
     <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
       <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
@@ -1046,6 +1078,7 @@ function showTab(name){
   if(name==='retro'&&typeof openRetro==='function')openRetro();
   if(name==='refine'&&typeof loadRefinement==='function'&&!_rf)loadRefinement();
   if(name==='cost'&&typeof loadCosts==='function'&&!_cost)loadCosts();
+  if(name==='techdebt'&&typeof loadTechdebt==='function')loadTechdebt();
 }
 
 // ── Maliyet analizi (salt okunur; /api/costs) ──
@@ -1333,8 +1366,8 @@ async function loadQuality(){
   const card=document.getElementById('ovQualityCard');if(!card)return;
   try{
     const r=await (await fetch('/api/quality/recent')).json();
-    if(!r.enabled){card.style.display='none';return}
-    card.style.display='flex';
+    if(!r.enabled){card.style.display='none';_tdTabShow();return}
+    card.style.display='flex';_tdTabShow();
     const uniq=[...new Map((r.items||[]).filter(i=>i.wi_id).map(i=>[i.wi_id,i])).values()].slice(0,10);
     document.getElementById('qRecent').innerHTML=uniq.length
       ?'Son alımlar: '+uniq.map(i=>`${wiLink(i.wi_id)} ${esc(i.source)} · ${i.sp} SP${i.job_id?` · iş #${i.job_id}`:''}${i.needs_human?' · insan':''}`).join(' &nbsp;·&nbsp; ')
@@ -1362,6 +1395,70 @@ async function qualityRun(take){
             :`<div class="board-empty" style="padding:8px 0">${esc(r.message||'Bütçeye uyan aday yok.')}</div>`);
     if(take)loadQuality();
   }catch(e){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(String(e))}</div>`}
+}
+// Teknik borç sekmesi: takımın tech-debt etiketli işleri (Azure tek kayıt
+// kaynağı), çoklu seçimle kuyruğa alma ve elle giriş. Kurallar sunucuda.
+let _td=null;
+function _tdTabShow(){
+  const on=(document.getElementById('ovQualityCard')||{}).style?.display==='flex'||!!_td;
+  const tab=document.getElementById('tabTechdebt');if(tab)tab.style.display=on?'':'none';
+  const ln=document.getElementById('ovTechdebtLink');if(ln)ln.style.display=on?'block':'none';
+}
+async function loadTechdebt(){
+  const team=(document.getElementById('teamSel')||{}).value||'';
+  const lc=document.getElementById('tdListCard'),fc=document.getElementById('tdFormCard');
+  try{
+    const resp=await fetch('/api/techdebt?team='+encodeURIComponent(team));
+    if(resp.status===403){_td=null;lc.style.display='none';fc.style.display='none';_tdTabShow();return}
+    const r=await resp.json();
+    lc.style.display='flex';fc.style.display='flex';
+    if(!resp.ok){document.getElementById('tdMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    _td=r.items||[];renderTechdebt();
+  }catch(e){document.getElementById('tdMsg').textContent=String(e)}
+  _tdTabShow();
+}
+function renderTechdebt(){
+  const box=document.getElementById('tdList');if(!box||!_td)return;
+  const src=document.getElementById('tdSrc').value,onlyQ=document.getElementById('tdOnlyQ').checked;
+  const rows=_td.filter(i=>(!src||i.source===src)&&(!onlyQ||i.queueable));
+  document.getElementById('tdCount').textContent=rows.length+' iş';
+  if(!rows.length){box.innerHTML='<div class="board-empty" style="padding:12px 0">Teknik borç kaydı yok. Azure\'da <code>tech-debt</code> etiketi ya da aşağıdaki form.</div>';return}
+  box.innerHTML='<table class="perf"><tr><th></th><th>WI</th><th>İş</th><th>Repo</th><th>Kaynak</th><th class="num">SP</th><th>Durum</th><th>Sprint</th><th>Pipeline</th><th></th></tr>'
+    +rows.map(i=>`<tr><td>${i.queueable?`<input type="checkbox" class="tdSel" value="${i.id}">`:''}</td><td>${wiLink(i.id)}</td><td>${esc(i.title)}</td><td>${esc(i.repo||'—')}</td>
+      <td><span class="chip dim">${i.source==='manual'?'elle':'Azure'}</span>${i.needs_human?' <span class="chip human">insan</span>':''}</td>
+      <td class="num">${i.sp??'—'}</td><td>${esc(i.state)}</td><td>${esc(i.iteration)}</td>
+      <td>${i.job?`iş #${i.job.id} · ${esc(i.job.status)}`:'—'}</td>
+      <td>${i.queueable?`<button class="sm-btn ghost small" onclick="techdebtQueue([${i.id}])">Kuyruğa al</button>`:''}</td></tr>`).join('')+'</table>';
+}
+async function techdebtQueue(ids){
+  ids=ids||[...document.querySelectorAll('.tdSel:checked')].map(x=>parseInt(x.value,10));
+  const msg=document.getElementById('tdMsg');
+  if(!ids.length){msg.textContent='Seçili iş yok.';return}
+  const team=(document.getElementById('teamSel')||{}).value||'';
+  msg.textContent='Kuyruğa alınıyor…';
+  try{
+    const resp=await fetch('/api/techdebt/queue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,team})});
+    const r=await resp.json();
+    if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    msg.innerHTML=`${(r.queued||[]).length} iş kuyruğa alındı`+((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>`#${esc(s.wi)} ${esc(s.reason)}`).join(', '):'');
+    loadTechdebt();
+  }catch(e){msg.textContent=String(e)}
+}
+async function techdebtManual(ev){
+  ev.preventDefault();
+  const f=ev.target,el=f.elements,msg=document.getElementById('tdFormMsg');
+  // f.title formun kendi title özniteliğidir — alanlar elements[] ile okunur
+  const body={repo:el['repo'].value.trim(),title:el['title'].value.trim(),problem:el['problem'].value,expected:el['expected'].value,
+    files:el['files'].value.split('\n').map(s=>s.trim()).filter(Boolean),sp:parseInt(el['sp'].value,10),needs_human:el['needs_human'].checked,
+    team:(document.getElementById('teamSel')||{}).value||''};
+  msg.textContent='Açılıyor…';
+  try{
+    const resp=await fetch('/api/techdebt/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await resp.json();
+    if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    msg.innerHTML=`Task ${wiLink(r.task.id)} açıldı (story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>)`;
+    f.reset();loadTechdebt();
+  }catch(e){msg.textContent=String(e)}
 }
 function renderOvSprint(){
   renderOvPerf();renderOvStuck();
@@ -1420,8 +1517,9 @@ document.addEventListener('DOMContentLoaded',()=>{
   if(rm&&pr)pr.appendChild(rm);
   let t='overview';try{t=localStorage.getItem('tempo_tab')||'overview'}catch(e){}
   if(!document.getElementById('pane'+t.charAt(0).toUpperCase()+t.slice(1)))t='overview';
-  showTab(t);
   loadQuality();
+  loadTechdebt();
+  showTab(t);
 });
 
 

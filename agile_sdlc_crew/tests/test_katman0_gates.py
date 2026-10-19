@@ -4346,6 +4346,23 @@ def test_techdebt_endpoints():
           and _flow._quality_skips_readiness("tempo-quality; tempo-src-newrelic"))
 
 
+def test_techdebt_ui():
+    print("\n[TD6] Teknik borç — dashboard sekmesi")
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    s = html.find('id="paneTechdebt"')
+    e = html.find("<section", s + 10)
+    pane = html[s:e] if s >= 0 else ""
+    ov_s = html.find('id="paneOverview"')
+    ov = html[ov_s:html.find("<section", ov_s + 10)]
+    check("üst barda Teknik borç sekmesi ve paneli", 'data-tab="techdebt"' in html and s >= 0)
+    check("Kalite kartı Genel bakış'tan Teknik borç sekmesine taşındı",
+          'id="ovQualityCard"' in pane and 'id="ovQualityCard"' not in ov)
+    check("liste, çoklu seçimle kuyruk ve elle giriş formu",
+          'id="tdList"' in pane and 'id="tdForm"' in pane and "/api/techdebt/queue" in html
+          and "/api/techdebt/manual" in html and "function loadTechdebt" in html
+          and "name==='techdebt'" in html)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4403,7 +4420,8 @@ def main():
               test_techdebt_open_tasks_db,
               test_techdebt_manual,
               test_techdebt_list_queue,
-              test_techdebt_endpoints):
+              test_techdebt_endpoints,
+              test_techdebt_ui):
         try:
             t()
         except Exception as e:
