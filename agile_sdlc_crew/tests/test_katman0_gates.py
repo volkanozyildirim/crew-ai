@@ -4366,6 +4366,19 @@ def test_dashboard_readability():
           "THEME_ICONS" in html and all(k in html for k in ("light:", "dark:", "system:")))
 
 
+def test_human_label():
+    print("\n[UI] İnsan işi etiketi anlaşılır ve sebebi gösterir")
+    from agile_sdlc_crew.quality import intake
+    from agile_sdlc_crew.quality.model import Group
+    g = Group(source="sonar", repo="r", title="t", fingerprints=["f"], findings=[], needs_human=True,
+              human_reason="Secret rotasyonu gerekir — koddan silmek yetmez")
+    check("önizleme satırı insan işi sebebini taşır", intake._row(g).get("human_reason") == g.human_reason)
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("çıplak 'insan' etiketi kalmadı; 'İnsan işi · kuyruğa alınmaz' + sebep ipucu",
+          'chip human">insan<' not in html and "· insan'" not in html
+          and "function humanChip" in html and "İnsan işi · kuyruğa alınmaz" in html and "t.human_reason" in html)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4425,7 +4438,8 @@ def main():
               test_techdebt_endpoints,
               test_techdebt_ui,
               test_techdebt_review_fixes,
-              test_dashboard_readability):
+              test_dashboard_readability,
+              test_human_label):
         try:
             t()
         except Exception as e:

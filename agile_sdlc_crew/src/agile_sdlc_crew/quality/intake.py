@@ -168,7 +168,8 @@ def default_deps() -> Deps:
 
 def _row(g: Group) -> dict:
     return {"id": None, "title": render.task_title(g), "repo": g.repo, "sp": g.sp,
-            "score": round(g.score, 2), "needs_human": g.needs_human, "fingerprints": g.fingerprints,
+            "score": round(g.score, 2), "needs_human": g.needs_human, "human_reason": g.human_reason,
+            "fingerprints": g.fingerprints,
             "job_id": None}
 
 

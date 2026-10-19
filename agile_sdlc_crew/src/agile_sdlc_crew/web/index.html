@@ -1372,6 +1372,13 @@ function renderOvStuck(){
 }
 // Genel bakis · kalite isi alimi (New Relic / Sonar). Kart yalnizca
 // CREW_QUALITY_INTAKE aciksa gorunur; secim, SP ve dedup kurallari sunucuda.
+// İnsan işi (needs-human): Task açılır ama pipeline kuyruğuna ALINMAZ. Çıplak
+// "insan" etiketi anlaşılmıyordu; sebep üzerine gelince görünür.
+function humanChip(reason){
+  const tip='İnsan işi: Task açılır, pipeline kuyruğuna alınmaz.'+(reason?' Sebep: '+reason:'');
+  return `<span class="chip human" title="${esc(tip)}">İnsan işi · kuyruğa alınmaz</span>`
+    +(reason?`<div style="font-size:11px;color:var(--text-dim);margin-top:2px">${esc(reason)}</div>`:'');
+}
 async function loadQuality(){
   const card=document.getElementById('ovQualityCard');if(!card)return;
   try{
@@ -1380,7 +1387,7 @@ async function loadQuality(){
     card.style.display='flex';_tdTabShow();
     const uniq=[...new Map((r.items||[]).filter(i=>i.wi_id).map(i=>[i.wi_id,i])).values()].slice(0,10);
     document.getElementById('qRecent').innerHTML=uniq.length
-      ?'Son alımlar: '+uniq.map(i=>`${wiLink(i.wi_id)} ${esc(i.source)} · ${i.sp} SP${i.job_id?` · iş #${i.job_id}`:''}${i.needs_human?' · insan':''}`).join(' &nbsp;·&nbsp; ')
+      ?'Son alımlar: '+uniq.map(i=>`${wiLink(i.wi_id)} ${esc(i.source)} · ${i.sp} SP${i.job_id?` · iş #${i.job_id}`:''}${i.needs_human?' · İnsan işi':''}`).join(' &nbsp;·&nbsp; ')
       :'Henüz alım yok.';
   }catch(e){card.style.display='none'}
 }
@@ -1397,7 +1404,7 @@ async function qualityRun(take){
       :await fetch(`/api/quality/preview?source=${encodeURIComponent(source)}&sp=${sp}&team=${encodeURIComponent(team)}`);
     const r=await resp.json();
     if(!resp.ok){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(r.error||('HTTP '+resp.status))}</div>`;return}
-    const rows=(r.tasks||[]).map(t=>`<tr><td>${t.id?wiLink(t.id):'—'}</td><td>${esc(t.title)}</td><td class="num">${t.sp}</td><td>${t.needs_human?'<span class="chip human">insan</span>':(t.job_id?`iş #${t.job_id}`:esc(t.error||''))}</td></tr>`).join('');
+    const rows=(r.tasks||[]).map(t=>`<tr><td>${t.id?wiLink(t.id):'—'}</td><td>${esc(t.title)}</td><td class="num">${t.sp}</td><td>${t.needs_human?humanChip(t.human_reason):(t.job_id?`iş #${t.job_id}`:esc(t.error||''))}</td></tr>`).join('');
     const head=r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'';
     const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
     box.innerHTML=`<div style="font-size:12px;padding:6px 0">${head}${(r.tasks||[]).length} Task · ${r.total_sp}/${r.budget_sp} SP${sk?` · atlanan — ${sk}`:''}</div>`
@@ -1441,7 +1448,7 @@ function renderTechdebt(){
   document.getElementById('tdCount').textContent=rows.length+' iş';
   if(!rows.length){box.innerHTML='<div class="board-empty" style="padding:12px 0">Teknik borç kaydı yok. Takımın Azure\'da <code>tech-debt</code> etiketli Task / Bug / Improvement\'ları burada listelenir.</div>';return}
   box.innerHTML='<table class="perf"><tr><th></th><th>WI</th><th>İş</th><th>Repo</th><th class="num">SP</th><th>Durum</th><th>Sprint</th><th>Pipeline</th><th></th></tr>'
-    +rows.map(i=>`<tr><td>${i.queueable?`<input type="checkbox" class="tdSel" value="${i.id}">`:''}</td><td>${wiLink(i.id)}</td><td>${esc(i.title)}${i.needs_human?' <span class="chip human">insan</span>':''}</td><td>${esc(i.repo||'—')}</td>
+    +rows.map(i=>`<tr><td>${i.queueable?`<input type="checkbox" class="tdSel" value="${i.id}">`:''}</td><td>${wiLink(i.id)}</td><td>${esc(i.title)}${i.needs_human?' '+humanChip('Azure\'da needs-human etiketli — pipeline\'a verilmez'):''}</td><td>${esc(i.repo||'—')}</td>
             <td class="num">${i.sp??'—'}</td><td>${esc(i.state)}</td><td>${esc(i.iteration)}</td>
       <td>${i.job?`iş #${i.job.id} · ${esc(i.job.status)}`:'—'}</td>
       <td>${i.queueable?`<button class="sm-btn ghost small tdRowBtn" onclick="techdebtQueue([${i.id}])">Kuyruğa al</button>`:''}</td></tr>`).join('')+'</table>';
