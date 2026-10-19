@@ -4185,6 +4185,80 @@ def inspect_source(fn):
     return inspect.getsource(fn)
 
 
+def test_techdebt_manual():
+    print("\n[TD3] Teknik borç — elle giriş")
+    from agile_sdlc_crew.quality import intake, render, techdebt
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "webservice" / "app" / "Model").mkdir(parents=True)
+        (root / "webservice" / "app" / "Model" / "Order.php").write_text("<?php", encoding="utf-8")
+        ok = lambda r: (root / r).is_dir()  # noqa: E731
+        base = {"repo": "webservice", "title": "Order sınıfındaki ölü kodu temizle",
+                "problem": "getLegacyStatus artık çağrılmıyor", "expected": "Metot ve testleri kaldırılır",
+                "files": ["app/Model/Order.php"], "sp": 2}
+        g, err = techdebt.validate_manual(base, repo_ok=ok, repo_root=root)
+        check("geçerli form → grup (manual, SP 2, parmak izi)",
+              not err and g.source == "manual" and g.sp == 2 and not g.needs_human
+              and g.fingerprints == [techdebt.manual_fingerprint("webservice", base["title"], base["problem"])]
+              and g.fingerprints[0].startswith("manual:webservice:"))
+        _, e1 = techdebt.validate_manual(dict(base, expected=" "), repo_ok=ok, repo_root=root)
+        _, e2 = techdebt.validate_manual(dict(base, repo="yok"), repo_ok=ok, repo_root=root)
+        _, e3 = techdebt.validate_manual(dict(base, files=["../../etc/passwd"]), repo_ok=ok, repo_root=root)
+        _, e4 = techdebt.validate_manual(dict(base, files=["/etc/passwd"]), repo_ok=ok, repo_root=root)
+        _, e5 = techdebt.validate_manual(dict(base, files=["app/Yok.php"]), repo_ok=ok, repo_root=root)
+        check("eksik alan / yerelde olmayan repo / yol kaçışı / olmayan dosya reddedilir",
+              e1 and e2 and e3 and e4 and e5, str([e1, e2, e3, e4, e5]))
+        big, e6 = techdebt.validate_manual(dict(base, sp=8), repo_ok=ok, repo_root=root)
+        check("3 SP üstü → insan işi", not e6 and big.needs_human and big.sp == 5)
+        d = render.task_description(g)
+        check("Task metni: Repo satırı, sorun, beklenen davranış, dosya, parmak izi",
+              d.startswith("<p><b>Repo:</b> <code>webservice</code></p>") and "getLegacyStatus" in d
+              and "app/Model/Order.php" in d and render.parse_fingerprints(d) == g.fingerprints)
+
+        class C:
+            org_url, project = "https://dev.azure.com/o", "P"
+
+            def __init__(self):
+                self.created = []
+
+            def list_iterations(self, team=""):
+                return [{"name": "S22", "path": "P\\S22", "attributes": {"timeFrame": "future", "startDate": "2026-10-19"}}]
+
+            def query_work_items(self, wiql, limit=0):
+                return []
+
+            def get_team_area_path(self, team=""):
+                return "P\\T"
+
+            def get_authenticated_user(self):
+                return {}
+
+            def create_work_item(self, type_name, fields, parent_id=None):
+                self.created.append((type_name, fields, parent_id))
+                return {"id": 900 + len(self.created), "fields": fields}
+
+            def update_work_item(self, wid, ops):
+                return {}
+        queued = []
+        deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=ok,
+                           queue=lambda w, ttl: queued.append(w), record=lambda **k: None, now=lambda: 1.0,
+                           cfg=lambda: {"target_sprint": "next", "task_fields": {}, "sonar_url": "", "nr_days": 7})
+        c = C()
+        res = techdebt.create_manual(c, base, team="T", deps=deps, repo_root=root)
+        task = [x for x in c.created if x[0] == "Task"][0]
+        check("Task 'Teknik borç' story'sinin altında açılır, kuyruğa ALINMAZ",
+              c.created[0][1]["System.Title"] == "Teknik borç — S22" and task[2] == 901
+              and "tempo-src-manual" in task[1]["System.Tags"] and not queued and res["task"]["id"] == 902)
+        fp = g.fingerprints[0]
+        dup = intake.Deps(**{**deps._asdict(), "board": lambda c: {fp: {"wi": 5, "state": "Active", "closed_at": 0}}})
+        try:
+            techdebt.create_manual(C(), base, team="T", deps=dup, repo_root=root)
+            okd = False
+        except techdebt.Duplicate as e:
+            okd = "#5" in str(e)
+        check("aynı madde board'da açıksa tekrar açılmaz (Duplicate, #WI)", okd)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4239,7 +4313,8 @@ def main():
               test_quality_lean,
               test_worktree_staging,
               test_techdebt_lane,
-              test_techdebt_open_tasks_db):
+              test_techdebt_open_tasks_db,
+              test_techdebt_manual):
         try:
             t()
         except Exception as e:
