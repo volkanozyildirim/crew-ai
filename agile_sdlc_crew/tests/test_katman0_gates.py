@@ -4206,6 +4206,13 @@ def test_techdebt_manual():
         _, e3 = techdebt.validate_manual(dict(base, files=["../../etc/passwd"]), repo_ok=ok, repo_root=root)
         _, e4 = techdebt.validate_manual(dict(base, files=["/etc/passwd"]), repo_ok=ok, repo_root=root)
         _, e5 = techdebt.validate_manual(dict(base, files=["app/Yok.php"]), repo_ok=ok, repo_root=root)
+        (root / "gizli").mkdir()
+        inner = root / "kok"
+        (inner / "webservice").mkdir(parents=True)
+        ok2 = lambda r: (inner / r).is_dir()  # noqa: E731
+        _, e7 = techdebt.validate_manual(dict(base, repo="../gizli", files=[]), repo_ok=ok2, repo_root=inner)
+        _, e8 = techdebt.validate_manual(dict(base, repo=".", files=[]), repo_ok=ok2, repo_root=inner)
+        check("repo adıyla klon kökünden çıkılamaz ('../gizli', '.')", e7 and e8, str([e7, e8]))
         check("eksik alan / yerelde olmayan repo / yol kaçışı / olmayan dosya reddedilir",
               e1 and e2 and e3 and e4 and e5, str([e1, e2, e3, e4, e5]))
         big, e6 = techdebt.validate_manual(dict(base, sp=8), repo_ok=ok, repo_root=root)
@@ -4307,6 +4314,38 @@ def test_techdebt_list_queue():
     check("istek başı tavan", len(out2["queued"]) == 1 and any("tavan" in s["reason"] for s in out2["skipped"]))
 
 
+def test_techdebt_endpoints():
+    print("\n[TD5] Teknik borç — endpoint kapıları, ayarlar, hazırlık kapısı")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import flow as _flow
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    check("ayarlar kayıtlı: CREW_TECHDEBT kapalı, kuyruk tavanı 5",
+          pc._SCHEMA_BY_KEY.get("CREW_TECHDEBT", {}).get("default") is False
+          and pc._SCHEMA_BY_KEY.get("CREW_TECHDEBT_MAX_QUEUE", {}).get("default") == 5)
+    orig = pc.get
+    pc.get = lambda k: False if k == "CREW_TECHDEBT" else orig(k)
+    try:
+        tc = TestClient(server.app)
+        check("kapalıyken liste / elle giriş / kuyruk → 403",
+              tc.get("/api/techdebt").status_code == 403
+              and tc.post("/api/techdebt/manual", json={}).status_code == 403
+              and tc.post("/api/techdebt/queue", json={"ids": [1]}).status_code == 403)
+    finally:
+        pc.get = orig
+    pc.get = lambda k: True if k == "CREW_TECHDEBT" else orig(k)
+    try:
+        tc = TestClient(server.app)
+        r = tc.post("/api/techdebt/manual", json={"repo": "", "title": "", "problem": "", "expected": ""})
+        check("geçersiz elle giriş → 400 ve Türkçe hata", r.status_code == 400 and "zorunlu" in r.json().get("error", ""))
+        check("boş kuyruk isteği → 400", tc.post("/api/techdebt/queue", json={"ids": []}).status_code == 400)
+    finally:
+        pc.get = orig
+    check("elle girilen madde hazırlık kapısından muaf DEĞİL; taranan kalite işi muaf",
+          not _flow._quality_skips_readiness("tempo-quality; tempo-techdebt; tech-debt; tempo-src-manual")
+          and _flow._quality_skips_readiness("tempo-quality; tempo-src-newrelic"))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4363,7 +4402,8 @@ def main():
               test_techdebt_lane,
               test_techdebt_open_tasks_db,
               test_techdebt_manual,
-              test_techdebt_list_queue):
+              test_techdebt_list_queue,
+              test_techdebt_endpoints):
         try:
             t()
         except Exception as e:

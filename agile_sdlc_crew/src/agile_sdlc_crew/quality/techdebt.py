@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 from pathlib import Path
 
 from agile_sdlc_crew.quality import dedup, intake, render
@@ -38,9 +39,15 @@ def manual_fingerprint(repo: str, title: str, problem: str) -> str:
     return f"manual:{repo}:{digest}"
 
 
+_REPO_NAME = re.compile(r"^[A-Za-z0-9][\w.-]*$")
+
+
 def _repo_dir(root: Path, repo: str) -> Path | None:
+    """Klon kökündeki repo dizini; ad yalnız [\w.-], kökten çıkamaz ('../x', '.')."""
+    if not _REPO_NAME.match(repo or "") or repo in (".", ".."):
+        return None
     p = root / repo
-    if p.is_dir():
+    if p.is_dir() and p.resolve().parent == root.resolve():
         return p
     low = repo.lower()
     return next((d for d in root.iterdir() if d.is_dir() and d.name.lower() == low), None) if root.is_dir() else None
@@ -53,7 +60,7 @@ def validate_manual(form: dict, *, repo_ok, repo_root: Path) -> tuple[Group | No
     title = str(form.get("title") or "").strip()
     problem = str(form.get("problem") or "").strip()
     expected = str(form.get("expected") or "").strip()
-    if not repo or not repo_ok(repo):
+    if not repo or not _repo_dir(repo_root, repo) or not repo_ok(repo):
         errs.append("repo yerel klonlarda yok")
     if not title:
         errs.append("başlık zorunlu")
