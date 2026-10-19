@@ -552,7 +552,7 @@ header {
           <select class="sprint-select" id="tdSrc" onchange="renderTechdebt()" title="Kaynak"><option value="">Tüm kaynaklar</option><option value="manual">Elle girilen</option><option value="azure">Azure etiketi</option></select>
           <label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="tdOnlyQ" onchange="renderTechdebt()">Yalnız kuyruklanabilir</label>
           <button class="sm-btn ghost small" onclick="loadTechdebt()">Yenile</button>
-          <button class="sm-btn small" onclick="techdebtQueue(null)">Seçilenleri kuyruğa al</button>
+          <button class="sm-btn small" id="tdQueueBtn" onclick="techdebtQueue(null)">Seçilenleri kuyruğa al</button>
         </div>
         <div id="tdMsg" style="padding:0 14px;font-size:12px"></div>
         <div id="tdList" style="padding:0 14px 12px"></div>
@@ -1420,8 +1420,9 @@ async function loadTechdebt(){
     if(resp.status===403){_td=null;lc.style.display='none';fc.style.display='none';_tdTabShow();return}
     const r=await resp.json();
     lc.style.display='flex';fc.style.display='flex';
-    if(!resp.ok){document.getElementById('tdMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
-    _td=r.items||[];renderTechdebt();
+    const msgEl=document.getElementById('tdMsg');
+    if(!resp.ok){_td=[];renderTechdebt();msgEl.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;_tdTabShow();return}
+    msgEl.textContent='';_td=r.items||[];renderTechdebt();
   }catch(e){document.getElementById('tdMsg').textContent=String(e)}
   _tdTabShow();
 }
@@ -1436,7 +1437,7 @@ function renderTechdebt(){
       <td><span class="chip dim">${i.source==='manual'?'elle':'Azure'}</span>${i.needs_human?' <span class="chip human">insan</span>':''}</td>
       <td class="num">${i.sp??'—'}</td><td>${esc(i.state)}</td><td>${esc(i.iteration)}</td>
       <td>${i.job?`iş #${i.job.id} · ${esc(i.job.status)}`:'—'}</td>
-      <td>${i.queueable?`<button class="sm-btn ghost small" onclick="techdebtQueue([${i.id}])">Kuyruğa al</button>`:''}</td></tr>`).join('')+'</table>';
+      <td>${i.queueable?`<button class="sm-btn ghost small tdRowBtn" onclick="techdebtQueue([${i.id}])">Kuyruğa al</button>`:''}</td></tr>`).join('')+'</table>';
 }
 async function techdebtQueue(ids){
   ids=ids||[...document.querySelectorAll('.tdSel:checked')].map(x=>parseInt(x.value,10));
@@ -1444,6 +1445,9 @@ async function techdebtQueue(ids){
   if(!ids.length){msg.textContent='Seçili iş yok.';return}
   const team=(document.getElementById('teamSel')||{}).value||'';
   msg.textContent='Kuyruğa alınıyor…';
+  // İstek sürerken butonlar kilitli: çift tıklama aynı WI için iki iş açmasın
+  const btns=[document.getElementById('tdQueueBtn'),...document.querySelectorAll('.tdRowBtn')].filter(Boolean);
+  btns.forEach(b=>b.disabled=true);
   try{
     const resp=await fetch('/api/techdebt/queue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,team})});
     const r=await resp.json();
@@ -1451,6 +1455,7 @@ async function techdebtQueue(ids){
     msg.innerHTML=`${(r.queued||[]).length} iş kuyruğa alındı`+((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>`#${esc(s.wi)} ${esc(s.reason)}`).join(', '):'');
     loadTechdebt();
   }catch(e){msg.textContent=String(e)}
+  finally{btns.forEach(b=>b.disabled=false)}
 }
 async function techdebtManual(ev){
   ev.preventDefault();
@@ -1578,6 +1583,7 @@ async function onTeamChange(){
   localStorage.setItem('sdlc_team',t);
   // Takim degistiyse saved sprint'i temizle — yeni takim icin aktif sprint'e dus
   if(teamChanged) localStorage.removeItem('sdlc_sprint');
+  if(typeof loadTechdebt==='function')loadTechdebt();  // liste takım alanıyla sınırlı
   document.getElementById('sprintInfo').innerHTML='';document.getElementById('summary').style.display='none';
   document.getElementById('kanban').innerHTML='<div class="board-empty">Sprint seçin...</div>';
   if(!t){document.getElementById('sprintSel').innerHTML='<option>Önce takım seçin...</option>';return}

@@ -1960,10 +1960,13 @@ def _techdebt_off():
 
 def _techdebt_error(e: Exception) -> JSONResponse:
     from agile_sdlc_crew.quality import techdebt as _td
+    import requests as _rq
     if isinstance(e, _td.Duplicate):
         return JSONResponse({"error": str(e)}, status_code=409)
     if isinstance(e, ValueError):
         return JSONResponse({"error": str(e)}, status_code=400)
+    if isinstance(e, _rq.RequestException) or (isinstance(e, RuntimeError) and "açılamadı" in str(e)):
+        return JSONResponse({"error": f"Azure hatası: {e}"}, status_code=502)
     return _quality_error(e)
 
 
@@ -1977,8 +1980,10 @@ async def techdebt_list(team: str = ""):
     try:
         res = await asyncio.to_thread(_td.list_items, AzureDevOpsClient(), team=team)
         return JSONResponse({"enabled": True, **res})
+    except ValueError as e:
+        return JSONResponse({"enabled": True, "error": str(e)}, status_code=400)
     except Exception as e:  # noqa: BLE001
-        return JSONResponse({"error": f"Azure okunamadı: {e}"}, status_code=502)
+        return JSONResponse({"enabled": True, "error": f"Azure okunamadı: {e}"}, status_code=502)
 
 
 @app.post("/api/techdebt/manual")

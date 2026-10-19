@@ -43,14 +43,17 @@ _REPO_NAME = re.compile(r"^[A-Za-z0-9][\w.-]*$")
 
 
 def _repo_dir(root: Path, repo: str) -> Path | None:
-    """Klon kökündeki repo dizini; ad yalnız [\w.-], kökten çıkamaz ('../x', '.')."""
-    if not _REPO_NAME.match(repo or "") or repo in (".", ".."):
+    """Klon kökündeki repo dizini, GERÇEK (kanonik) adıyla. Ad yalnız [\w.-];
+    kökten çıkamaz ('../x', '.', dışarı giden symlink). macOS dosya sistemi harf
+    duyarsız: 'WebService' de bulunur ama parmak izi ve Repo: satırı diskteki
+    adla ('webservice') üretilmeli, yoksa aynı madde harf farkıyla tekrar açılır
+    ve flow'un known_repos eşleşmesi (yalın akış) kaçar."""
+    if not _REPO_NAME.match(repo or "") or repo in (".", "..") or not root.is_dir():
         return None
-    p = root / repo
-    if p.is_dir() and p.resolve().parent == root.resolve():
-        return p
-    low = repo.lower()
-    return next((d for d in root.iterdir() if d.is_dir() and d.name.lower() == low), None) if root.is_dir() else None
+    real_root = root.resolve()
+    entries = [d for d in root.iterdir() if d.is_dir() and d.resolve().parent == real_root]
+    return (next((d for d in entries if d.name == repo), None)
+            or next((d for d in entries if d.name.lower() == repo.lower()), None))
 
 
 def validate_manual(form: dict, *, repo_ok, repo_root: Path) -> tuple[Group | None, list[str]]:
@@ -97,8 +100,9 @@ def validate_manual(form: dict, *, repo_ok, repo_root: Path) -> tuple[Group | No
     sp = max(1, sp)
     if errs:
         return None, errs
-    g = Group(source="manual", repo=(rdir.name if rdir else repo), title=title,
-              fingerprints=[manual_fingerprint(repo, title, problem)], findings=[], sp=sp,
+    canon = rdir.name if rdir else repo
+    g = Group(source="manual", repo=canon, title=title,
+              fingerprints=[manual_fingerprint(canon, title, problem)], findings=[], sp=sp,
               needs_human=needs_human, human_reason=reason,
               meta={"problem": problem, "expected": expected, "files": files})
     return g, []
@@ -142,6 +146,10 @@ def create_manual(client, form: dict, *, team: str = "", deps: intake.Deps | Non
 # ── Liste + kuyruk ────────────────────────────────────────────────────────
 
 CLOSED_STATES = ("Done", "Closed", "Removed", "Canceled", "Cancelled", "Resolved", "Ready for Production")
+LIST_TYPES = ("Task", "Bug", "Improvement")
+# Son işi bu durumlardaysa yeniden kuyruğa alınmaz: koşuyor / PR'ı açık / insan
+# bekliyor. Tekrar denemeye yalnız 'failed' (ve hiç işi olmayan) açık.
+NOT_QUEUEABLE_JOB = {"queued", "running", "completed", "needs_info", "needs_human"}
 
 
 def _tags(f: dict) -> set[str]:
@@ -164,14 +172,17 @@ def _job_status(ids: list[str]) -> dict:
 
 
 def list_items(client, *, team: str = "", job_status=None) -> dict:
-    """Takımın alan yolundaki açık `tech-debt` etiketli WI'lar (story'ler hariç)."""
-    from agile_sdlc_crew.sprint_planning import OPEN_JOB_STATUSES
+    """Takımın alan yolundaki açık `tech-debt` etiketli Task/Bug/Improvement'lar."""
     area = (client.get_team_area_path(team) or "").replace("'", "''")
+    if not area:
+        # Boş alan = filtresiz WIQL = proje geneli; başka takımların işleri listelenir.
+        raise ValueError("Takım seçin — takımın alan yolu çözülemedi")
     closed = ", ".join(f"'{s}'" for s in CLOSED_STATES)
+    types = ", ".join(f"'{t}'" for t in LIST_TYPES)
     wiql = ("SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project "
-            + (f"AND [System.AreaPath] UNDER '{area}' " if area else "")
-            + f"AND [System.Tags] CONTAINS '{render.TECHDEBT_PUBLIC_TAG}' "
-            f"AND [System.State] NOT IN ({closed}) AND [System.WorkItemType] <> 'User Story' "
+            f"AND [System.AreaPath] UNDER '{area}' "
+            f"AND [System.Tags] CONTAINS '{render.TECHDEBT_PUBLIC_TAG}' "
+            f"AND [System.State] NOT IN ({closed}) AND [System.WorkItemType] IN ({types}) "
             "ORDER BY [System.Id] DESC")
     wis = client.query_work_items(wiql, limit=300) or []
     jobs = (job_status or _job_status)([str(w.get("id")) for w in wis])
@@ -181,7 +192,7 @@ def list_items(client, *, team: str = "", job_status=None) -> dict:
         tags = _tags(f)
         job = jobs.get(str(w.get("id")))
         human = render.HUMAN_TAG in tags
-        busy = bool(job and job.get("status") in OPEN_JOB_STATUSES)
+        busy = bool(job and job.get("status") in NOT_QUEUEABLE_JOB)
         rows.append({
             "id": int(w.get("id")), "title": f.get("System.Title", ""), "type": f.get("System.WorkItemType", ""),
             "state": f.get("System.State", ""),
@@ -199,9 +210,19 @@ def queue(client, ids: list, *, team: str = "", max_queue: int = 5, job_status=N
     işi olanı sprint_planning.queue_selected atlar; istek başı en çok max_queue."""
     if queue_fn is None:
         from agile_sdlc_crew.sprint_planning import queue_selected as queue_fn
+    # Çift tıklama / aynı id'nin tekrarı aynı WI için birden çok iş (paralel PR) açmasın
+    if not intake._LOCK.acquire(blocking=False):
+        raise intake.Busy("Başka bir alım / kuyruk isteği sürüyor")
+    try:
+        return _queue_locked(client, list(dict.fromkeys(ids or [])), team, max_queue, job_status, queue_fn)
+    finally:
+        intake._LOCK.release()
+
+
+def _queue_locked(client, ids, team, max_queue, job_status, queue_fn) -> dict:
     listed = {r["id"]: r for r in list_items(client, team=team, job_status=job_status)["items"]}
     skipped, take = [], []
-    for raw in ids or []:
+    for raw in ids:
         try:
             wid = int(raw)
         except (TypeError, ValueError):
@@ -212,6 +233,9 @@ def queue(client, ids: list, *, team: str = "", max_queue: int = 5, job_status=N
             skipped.append({"wi": str(wid), "reason": "teknik borç listesinde yok"})
         elif row["needs_human"]:
             skipped.append({"wi": str(wid), "reason": "insan işi (needs-human) — kuyruğa alınmaz"})
+        elif not row["queueable"]:
+            j = row.get("job") or {}
+            skipped.append({"wi": str(wid), "reason": f"son iş #{j.get('id')} {j.get('status')} — yeniden alınmaz"})
         elif len(take) >= max(1, int(max_queue)):
             skipped.append({"wi": str(wid), "reason": f"istek başı tavan ({max_queue})"})
         else:

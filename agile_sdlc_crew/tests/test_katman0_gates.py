@@ -4296,8 +4296,8 @@ def test_techdebt_list_queue():
     res = techdebt.list_items(c, team="T", job_status=lambda ids: {k: v for k, v in jobs.items() if k in ids})
     rows = {r["id"]: r for r in res["items"]}
     q = c.wiql[0]
-    check("liste: takım alanı + tech-debt etiketi + açık durum + story hariç",
-          "UNDER 'P\\T'" in q and "'tech-debt'" in q and "NOT IN" in q and "'User Story'" in q)
+    check("liste: takım alanı + tech-debt etiketi + açık durum + yalnız Task/Bug/Improvement",
+          "UNDER 'P\\T'" in q and "'tech-debt'" in q and "NOT IN" in q and "'Task', 'Bug', 'Improvement'" in q)
     check("satır alanları: repo, kaynak, insan işi, iş, kuyruklanabilir",
           rows[1]["repo"] == "webservice" and rows[1]["source"] == "manual" and rows[1]["sp"] == 2
           and rows[2]["source"] == "azure" and rows[3]["needs_human"] and not rows[3]["queueable"]
@@ -4363,6 +4363,77 @@ def test_techdebt_ui():
           and "name==='techdebt'" in html)
 
 
+def test_techdebt_review_fixes():
+    print("\n[TD7] Teknik borç — inceleme düzeltmeleri")
+    import requests as _rq
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import intake, techdebt
+
+    class C:
+        def __init__(self, area="P\\T"):
+            self.area, self.wiql = area, []
+
+        def get_team_area_path(self, team=""):
+            return self.area
+
+        def query_work_items(self, wiql, limit=0):
+            self.wiql.append(wiql)
+            return [{"id": i, "fields": {"System.Title": f"t{i}", "System.Tags": "tech-debt", "System.State": "To Do",
+                                          "System.WorkItemType": "Task"}} for i in (1, 2, 3, 4, 5)]
+    sent = []
+    techdebt.queue(C(), [1, 1, 1], team="T", max_queue=5, job_status=lambda ids: {},
+                   queue_fn=lambda rows: (sent.extend(rows), {"queued": [], "skipped": []})[1])
+    check("aynı id birden çok gönderilse de tek iş", [r["id"] for r in sent] == [1])
+    intake._LOCK.acquire()
+    try:
+        try:
+            techdebt.queue(C(), [2], team="T", job_status=lambda ids: {}, queue_fn=lambda rows: {})
+            busy = False
+        except intake.Busy:
+            busy = True
+    finally:
+        intake._LOCK.release()
+    check("eşzamanlı kuyruk isteği → Busy (çift tıklama)", busy)
+    jobs = {"1": {"id": 11, "status": "completed"}, "2": {"id": 12, "status": "needs_info"},
+            "3": {"id": 13, "status": "needs_human"}, "4": {"id": 14, "status": "failed"}}
+    rows = {r["id"]: r for r in techdebt.list_items(C(), team="T", job_status=lambda ids: jobs)["items"]}
+    check("tamamlanmış / insan bekleyen işi olan WI kuyruklanamaz; failed tekrar alınabilir",
+          not rows[1]["queueable"] and not rows[2]["queueable"] and not rows[3]["queueable"]
+          and rows[4]["queueable"] and rows[5]["queueable"])
+    try:
+        techdebt.list_items(C(area=""), team="", job_status=lambda ids: {})
+        scoped = False
+    except ValueError as e:
+        scoped = "takım" in str(e)
+    check("takım alanı çözülemezse proje geneline düşmez (ValueError)", scoped)
+    c = C()
+    techdebt.list_items(c, team="T", job_status=lambda ids: {})
+    check("yalnız Task/Bug/Improvement listelenir (Feature/Epic kuyruğa gitmez)",
+          "[System.WorkItemType] IN ('Task', 'Bug', 'Improvement')" in c.wiql[0])
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "webservice").mkdir()
+        base = {"repo": "WebService", "title": "x", "problem": "p", "expected": "e", "sp": 1}
+        g1, _ = techdebt.validate_manual(base, repo_ok=lambda r: True, repo_root=root)
+        g2, _ = techdebt.validate_manual(dict(base, repo="webservice"), repo_ok=lambda r: True, repo_root=root)
+        check("repo adı kanonik (harf farkı aynı parmak izi ve Repo: satırı)",
+              g1 and g2 and g1.repo == "webservice" and g1.fingerprints == g2.fingerprints, str((g1 and g1.repo)))
+    orig_get, orig_cm = pc.get, techdebt.create_manual
+    pc.get = lambda k: True if k == "CREW_TECHDEBT" else orig_get(k)
+    techdebt.create_manual = lambda *a, **k: (_ for _ in ()).throw(_rq.ConnectionError("azure yok"))
+    try:
+        r = TestClient(server.app).post("/api/techdebt/manual", json={"repo": "x"})
+        check("Azure hatası → 502", r.status_code == 502, str(r.status_code))
+    finally:
+        pc.get, techdebt.create_manual = orig_get, orig_cm
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    otc = html[html.index("async function onTeamChange"):html.index("async function onTeamChange") + 1500]
+    check("takım değişince teknik borç listesi yenilenir; kuyruk butonu istek boyunca kilitli",
+          "loadTechdebt()" in otc and "tdQueueBtn" in html and ".disabled=true" in html)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4421,7 +4492,8 @@ def main():
               test_techdebt_manual,
               test_techdebt_list_queue,
               test_techdebt_endpoints,
-              test_techdebt_ui):
+              test_techdebt_ui,
+              test_techdebt_review_fixes):
         try:
             t()
         except Exception as e:
