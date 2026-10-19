@@ -4259,6 +4259,54 @@ def test_techdebt_manual():
         check("aynı madde board'da açıksa tekrar açılmaz (Duplicate, #WI)", okd)
 
 
+def test_techdebt_list_queue():
+    print("\n[TD4] Teknik borç — liste ve kuyruğa alma")
+    from agile_sdlc_crew.quality import techdebt
+
+    def wi(i, title, tags, state="To Do", typ="Task", desc="", sp=None):
+        f = {"System.Title": title, "System.Tags": tags, "System.State": state, "System.WorkItemType": typ,
+             "System.IterationPath": "P\\S22", "System.Description": desc}
+        if sp is not None:
+            f["Custom.StoryPoints"] = sp
+        return {"id": i, "fields": f}
+
+    class C:
+        def __init__(self):
+            self.wiql = []
+
+        def get_team_area_path(self, team=""):
+            return "P\\T"
+
+        def query_work_items(self, wiql, limit=0):
+            self.wiql.append(wiql)
+            return [wi(1, "Elle", "tempo-quality; tempo-techdebt; tech-debt; tempo-src-manual",
+                       desc="<p><b>Repo:</b> <code>webservice</code></p>", sp=2),
+                    wi(2, "Ekipten", "tech-debt"),
+                    wi(3, "Büyük", "tech-debt; needs-human"),
+                    wi(4, "Koşan", "tech-debt")]
+    jobs = {"4": {"id": 99, "status": "running"}}
+    c = C()
+    res = techdebt.list_items(c, team="T", job_status=lambda ids: {k: v for k, v in jobs.items() if k in ids})
+    rows = {r["id"]: r for r in res["items"]}
+    q = c.wiql[0]
+    check("liste: takım alanı + tech-debt etiketi + açık durum + story hariç",
+          "UNDER 'P\\T'" in q and "'tech-debt'" in q and "NOT IN" in q and "'User Story'" in q)
+    check("satır alanları: repo, kaynak, insan işi, iş, kuyruklanabilir",
+          rows[1]["repo"] == "webservice" and rows[1]["source"] == "manual" and rows[1]["sp"] == 2
+          and rows[2]["source"] == "azure" and rows[3]["needs_human"] and not rows[3]["queueable"]
+          and rows[4]["job"]["id"] == 99 and not rows[4]["queueable"] and rows[1]["queueable"])
+    sent = []
+    out = techdebt.queue(C(), [1, 2, 3, 77], team="T", max_queue=5,
+                         job_status=lambda ids: {}, queue_fn=lambda rows: (sent.extend(rows), {
+                             "queued": [{"wi": str(r["id"]), "job_id": 10} for r in rows], "skipped": []})[1])
+    reasons = {s["wi"]: s["reason"] for s in out["skipped"]}
+    check("kuyruk: insan işi ve listede olmayan reddedilir, diğerleri kuyruğa",
+          [r["id"] for r in sent] == [1, 2] and "insan" in reasons["3"] and "listesinde yok" in reasons["77"])
+    out2 = techdebt.queue(C(), [1, 2], team="T", max_queue=1, job_status=lambda ids: {},
+                          queue_fn=lambda rows: {"queued": [{"wi": str(r["id"]), "job_id": 1} for r in rows], "skipped": []})
+    check("istek başı tavan", len(out2["queued"]) == 1 and any("tavan" in s["reason"] for s in out2["skipped"]))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4314,7 +4362,8 @@ def main():
               test_worktree_staging,
               test_techdebt_lane,
               test_techdebt_open_tasks_db,
-              test_techdebt_manual):
+              test_techdebt_manual,
+              test_techdebt_list_queue):
         try:
             t()
         except Exception as e:
