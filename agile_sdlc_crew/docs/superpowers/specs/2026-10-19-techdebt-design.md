@@ -3,6 +3,8 @@
 **Tarih:** 2026-10-19 · **Durum:** aşama 0 + 1a uygulandı; 1b/2/3 bekliyor · **Dal:** `feature/techdebt` (`feature/quality-intake` üstünde)
 **Bağımsız inceleme:** Opus reviewer, "değişikliklerle onay" — değişikliklerin tamamı bu spec'e işlendi.
 
+> **Güncelleme (2026-10-19):** Elle giriş formu ve `POST /api/techdebt/manual` kullanıcı kararıyla kaldırıldı. Madde Azure'da `tech-debt` etiketlenerek eklenir; aşağıdaki "Elle giriş" bölümleri tarihsel kayıttır.
+
 ## Amaç
 
 Tempo'da bir **Teknik borç** sekmesi: ekip teknik borcu görür, elle girer ve seçtiğini

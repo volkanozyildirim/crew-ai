@@ -4099,14 +4099,14 @@ def test_techdebt_lane():
     print("\n[TD1] Teknik borç — hat (lane) ve story")
     from agile_sdlc_crew.quality import intake, render
     from agile_sdlc_crew.quality.model import Group
-    check("techdebt hattı tek story başlığı", render.story_title("manual", "S22", lane="techdebt") == "Teknik borç — S22")
+    check("techdebt hattı tek story başlığı", render.story_title("sonar_smell", "S22", lane="techdebt") == "Teknik borç — S22")
     check("quality hattı değişmedi", render.story_title("newrelic", "S22") == "Kalite: New Relic hataları — S22")
     check("bilinmeyen kaynak KeyError vermez", "yeni" in render.story_title("yeni", "S1"))
-    g = Group(source="manual", repo="webservice", title="t", fingerprints=["manual:webservice:x"], findings=[],
+    g = Group(source="sonar_smell", repo="webservice", title="t", fingerprints=["sonar:webservice:x"], findings=[],
               needs_human=True)
     tags = render.task_tags(g, lane="techdebt")
     check("techdebt Task etiketleri (tempo-quality yalın akış için korunur)",
-          tags == "tempo-quality; tempo-techdebt; tech-debt; tempo-src-manual; needs-human", tags)
+          tags == "tempo-quality; tempo-techdebt; tech-debt; tempo-src-sonar_smell; needs-human", tags)
     check("quality Task etiketleri değişmedi",
           render.task_tags(Group(source="sonar", repo="r", title="t", fingerprints=["f"], findings=[])) == "tempo-quality; tempo-src-sonar")
 
@@ -4130,7 +4130,7 @@ def test_techdebt_lane():
             self.created.append((type_name, fields))
             return {"id": 7, "fields": fields}
     c = C()
-    st = intake.resolve_story(c, "manual", None, "T", "next", lane="techdebt")
+    st = intake.resolve_story(c, "sonar_smell", None, "T", "next", lane="techdebt")
     check("techdebt story kaynak etiketi olmadan aranır ve tek etiketle açılır",
           "tempo-techdebt" in c.wiql[0] and "tempo-src-" not in c.wiql[0]
           and c.created[0][1]["System.Title"] == "Teknik borç — S22"
@@ -4156,16 +4156,19 @@ def test_techdebt_open_tasks_db():
     deps = intake.Deps(gather=None, board=None, repo_ok=None, queue=lambda w, ttl: (queued.append(w), 9)[1],
                        record=lambda **k: rec.append(k), now=lambda: 1.0, cfg=None)
     cfg = {"sonar_url": "", "nr_days": 7, "task_fields": {"Custom.ARGEType": "Geliştirme - GE"}}
-    g = Group(source="manual", repo="webservice", title="X temizliği", fingerprints=["manual:webservice:ab"],
-              findings=[], sp=2, meta={"problem": "p", "expected": "e", "files": []})
+    from agile_sdlc_crew.quality.model import Finding
+    g = Group(source="sonar_smell", repo="webservice", title="X temizliği", fingerprints=["sonar:webservice:a.php:php:S125"],
+              findings=[Finding(source="sonar", repo="webservice", project="EcomBackend:webservice", file="a.php",
+                                rule="php:S125", rule_name="Yorumda kod", severity="MAJOR", itype="CODE_SMELL", lines=[3])],
+              sp=2)
     story = {"id": 77, "area": "P\\T", "iteration": "P\\S22", "sp": 0.0}
     c = C()
-    rows, added = intake._open_tasks(c, [g], story, cfg, deps, source="manual", lane="techdebt", queue=False)
+    rows, added = intake._open_tasks(c, [g], story, cfg, deps, source="sonar_smell", lane="techdebt", queue=False)
     f = c.created[0][1]
     check("ortak Task açma: techdebt etiketleri, story child'ı, org alanı, kuyruğa ALINMAZ",
           rows[0]["id"] == 501 and rows[0]["job_id"] is None and not queued and added == 2
           and c.created[0][2] == 77 and "tempo-techdebt" in f["System.Tags"]
-          and f["Custom.ARGEType"] == "Geliştirme - GE" and rec and rec[0]["source"] == "manual")
+          and f["Custom.ARGEType"] == "Geliştirme - GE" and rec and rec[0]["source"] == "sonar_smell")
     from agile_sdlc_crew import db
     check("quality_items.source serbest metin (yeni kaynaklar sessizce düşmesin)",
           "source VARCHAR(32)" in db.SCHEMA and "MODIFY source VARCHAR(32)" in inspect_source(db.init_db))
@@ -4183,87 +4186,6 @@ def test_techdebt_open_tasks_db():
 def inspect_source(fn):
     import inspect
     return inspect.getsource(fn)
-
-
-def test_techdebt_manual():
-    print("\n[TD3] Teknik borç — elle giriş")
-    from agile_sdlc_crew.quality import intake, render, techdebt
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        (root / "webservice" / "app" / "Model").mkdir(parents=True)
-        (root / "webservice" / "app" / "Model" / "Order.php").write_text("<?php", encoding="utf-8")
-        ok = lambda r: (root / r).is_dir()  # noqa: E731
-        base = {"repo": "webservice", "title": "Order sınıfındaki ölü kodu temizle",
-                "problem": "getLegacyStatus artık çağrılmıyor", "expected": "Metot ve testleri kaldırılır",
-                "files": ["app/Model/Order.php"], "sp": 2}
-        g, err = techdebt.validate_manual(base, repo_ok=ok, repo_root=root)
-        check("geçerli form → grup (manual, SP 2, parmak izi)",
-              not err and g.source == "manual" and g.sp == 2 and not g.needs_human
-              and g.fingerprints == [techdebt.manual_fingerprint("webservice", base["title"], base["problem"])]
-              and g.fingerprints[0].startswith("manual:webservice:"))
-        _, e1 = techdebt.validate_manual(dict(base, expected=" "), repo_ok=ok, repo_root=root)
-        _, e2 = techdebt.validate_manual(dict(base, repo="yok"), repo_ok=ok, repo_root=root)
-        _, e3 = techdebt.validate_manual(dict(base, files=["../../etc/passwd"]), repo_ok=ok, repo_root=root)
-        _, e4 = techdebt.validate_manual(dict(base, files=["/etc/passwd"]), repo_ok=ok, repo_root=root)
-        _, e5 = techdebt.validate_manual(dict(base, files=["app/Yok.php"]), repo_ok=ok, repo_root=root)
-        (root / "gizli").mkdir()
-        inner = root / "kok"
-        (inner / "webservice").mkdir(parents=True)
-        ok2 = lambda r: (inner / r).is_dir()  # noqa: E731
-        _, e7 = techdebt.validate_manual(dict(base, repo="../gizli", files=[]), repo_ok=ok2, repo_root=inner)
-        _, e8 = techdebt.validate_manual(dict(base, repo=".", files=[]), repo_ok=ok2, repo_root=inner)
-        check("repo adıyla klon kökünden çıkılamaz ('../gizli', '.')", e7 and e8, str([e7, e8]))
-        check("eksik alan / yerelde olmayan repo / yol kaçışı / olmayan dosya reddedilir",
-              e1 and e2 and e3 and e4 and e5, str([e1, e2, e3, e4, e5]))
-        big, e6 = techdebt.validate_manual(dict(base, sp=8), repo_ok=ok, repo_root=root)
-        check("3 SP üstü → insan işi", not e6 and big.needs_human and big.sp == 5)
-        d = render.task_description(g)
-        check("Task metni: Repo satırı, sorun, beklenen davranış, dosya, parmak izi",
-              d.startswith("<p><b>Repo:</b> <code>webservice</code></p>") and "getLegacyStatus" in d
-              and "app/Model/Order.php" in d and render.parse_fingerprints(d) == g.fingerprints)
-
-        class C:
-            org_url, project = "https://dev.azure.com/o", "P"
-
-            def __init__(self):
-                self.created = []
-
-            def list_iterations(self, team=""):
-                return [{"name": "S22", "path": "P\\S22", "attributes": {"timeFrame": "future", "startDate": "2026-10-19"}}]
-
-            def query_work_items(self, wiql, limit=0):
-                return []
-
-            def get_team_area_path(self, team=""):
-                return "P\\T"
-
-            def get_authenticated_user(self):
-                return {}
-
-            def create_work_item(self, type_name, fields, parent_id=None):
-                self.created.append((type_name, fields, parent_id))
-                return {"id": 900 + len(self.created), "fields": fields}
-
-            def update_work_item(self, wid, ops):
-                return {}
-        queued = []
-        deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=ok,
-                           queue=lambda w, ttl: queued.append(w), record=lambda **k: None, now=lambda: 1.0,
-                           cfg=lambda: {"target_sprint": "next", "task_fields": {}, "sonar_url": "", "nr_days": 7})
-        c = C()
-        res = techdebt.create_manual(c, base, team="T", deps=deps, repo_root=root)
-        task = [x for x in c.created if x[0] == "Task"][0]
-        check("Task 'Teknik borç' story'sinin altında açılır, kuyruğa ALINMAZ",
-              c.created[0][1]["System.Title"] == "Teknik borç — S22" and task[2] == 901
-              and "tempo-src-manual" in task[1]["System.Tags"] and not queued and res["task"]["id"] == 902)
-        fp = g.fingerprints[0]
-        dup = intake.Deps(**{**deps._asdict(), "board": lambda c: {fp: {"wi": 5, "state": "Active", "closed_at": 0}}})
-        try:
-            techdebt.create_manual(C(), base, team="T", deps=dup, repo_root=root)
-            okd = False
-        except techdebt.Duplicate as e:
-            okd = "#5" in str(e)
-        check("aynı madde board'da açıksa tekrar açılmaz (Duplicate, #WI)", okd)
 
 
 def test_techdebt_list_queue():
@@ -4286,7 +4208,7 @@ def test_techdebt_list_queue():
 
         def query_work_items(self, wiql, limit=0):
             self.wiql.append(wiql)
-            return [wi(1, "Elle", "tempo-quality; tempo-techdebt; tech-debt; tempo-src-manual",
+            return [wi(1, "Elle", "tempo-quality; tempo-techdebt; tech-debt",
                        desc="<p><b>Repo:</b> <code>webservice</code></p>", sp=2),
                     wi(2, "Ekipten", "tech-debt"),
                     wi(3, "Büyük", "tech-debt; needs-human"),
@@ -4298,9 +4220,9 @@ def test_techdebt_list_queue():
     q = c.wiql[0]
     check("liste: takım alanı + tech-debt etiketi + açık durum + yalnız Task/Bug/Improvement",
           "UNDER 'P\\T'" in q and "'tech-debt'" in q and "NOT IN" in q and "'Task', 'Bug', 'Improvement'" in q)
-    check("satır alanları: repo, kaynak, insan işi, iş, kuyruklanabilir",
-          rows[1]["repo"] == "webservice" and rows[1]["source"] == "manual" and rows[1]["sp"] == 2
-          and rows[2]["source"] == "azure" and rows[3]["needs_human"] and not rows[3]["queueable"]
+    check("satır alanları: repo, insan işi, iş, kuyruklanabilir",
+          rows[1]["repo"] == "webservice" and rows[1]["sp"] == 2
+          and rows[3]["needs_human"] and not rows[3]["queueable"]
           and rows[4]["job"]["id"] == 99 and not rows[4]["queueable"] and rows[1]["queueable"])
     sent = []
     out = techdebt.queue(C(), [1, 2, 3, 77], team="T", max_queue=5,
@@ -4327,23 +4249,19 @@ def test_techdebt_endpoints():
     pc.get = lambda k: False if k == "CREW_TECHDEBT" else orig(k)
     try:
         tc = TestClient(server.app)
-        check("kapalıyken liste / elle giriş / kuyruk → 403",
+        check("kapalıyken liste / kuyruk → 403",
               tc.get("/api/techdebt").status_code == 403
-              and tc.post("/api/techdebt/manual", json={}).status_code == 403
               and tc.post("/api/techdebt/queue", json={"ids": [1]}).status_code == 403)
     finally:
         pc.get = orig
     pc.get = lambda k: True if k == "CREW_TECHDEBT" else orig(k)
     try:
         tc = TestClient(server.app)
-        r = tc.post("/api/techdebt/manual", json={"repo": "", "title": "", "problem": "", "expected": ""})
-        check("geçersiz elle giriş → 400 ve Türkçe hata", r.status_code == 400 and "zorunlu" in r.json().get("error", ""))
+        check("elle giriş kaldırıldı (uç yok)", tc.post("/api/techdebt/manual", json={}).status_code in (404, 405))
         check("boş kuyruk isteği → 400", tc.post("/api/techdebt/queue", json={"ids": []}).status_code == 400)
     finally:
         pc.get = orig
-    check("elle girilen madde hazırlık kapısından muaf DEĞİL; taranan kalite işi muaf",
-          not _flow._quality_skips_readiness("tempo-quality; tempo-techdebt; tech-debt; tempo-src-manual")
-          and _flow._quality_skips_readiness("tempo-quality; tempo-src-newrelic"))
+    check("taranan kalite işi hazırlık kapısından muaf", _flow._quality_skips_readiness("tempo-quality; tempo-src-newrelic"))
 
 
 def test_techdebt_ui():
@@ -4357,10 +4275,9 @@ def test_techdebt_ui():
     check("üst barda Teknik borç sekmesi ve paneli", 'data-tab="techdebt"' in html and s >= 0)
     check("Kalite kartı Genel bakış'tan Teknik borç sekmesine taşındı",
           'id="ovQualityCard"' in pane and 'id="ovQualityCard"' not in ov)
-    check("liste, çoklu seçimle kuyruk ve elle giriş formu",
-          'id="tdList"' in pane and 'id="tdForm"' in pane and "/api/techdebt/queue" in html
-          and "/api/techdebt/manual" in html and "function loadTechdebt" in html
-          and "name==='techdebt'" in html)
+    check("liste ve çoklu seçimle kuyruk var; elle giriş formu kaldırıldı",
+          'id="tdList"' in pane and "/api/techdebt/queue" in html and "function loadTechdebt" in html
+          and "name==='techdebt'" in html and 'id="tdForm"' not in html and "/api/techdebt/manual" not in html)
 
 
 def test_techdebt_review_fixes():
@@ -4412,26 +4329,34 @@ def test_techdebt_review_fixes():
     techdebt.list_items(c, team="T", job_status=lambda ids: {})
     check("yalnız Task/Bug/Improvement listelenir (Feature/Epic kuyruğa gitmez)",
           "[System.WorkItemType] IN ('Task', 'Bug', 'Improvement')" in c.wiql[0])
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        (root / "webservice").mkdir()
-        base = {"repo": "WebService", "title": "x", "problem": "p", "expected": "e", "sp": 1}
-        g1, _ = techdebt.validate_manual(base, repo_ok=lambda r: True, repo_root=root)
-        g2, _ = techdebt.validate_manual(dict(base, repo="webservice"), repo_ok=lambda r: True, repo_root=root)
-        check("repo adı kanonik (harf farkı aynı parmak izi ve Repo: satırı)",
-              g1 and g2 and g1.repo == "webservice" and g1.fingerprints == g2.fingerprints, str((g1 and g1.repo)))
-    orig_get, orig_cm = pc.get, techdebt.create_manual
+    orig_get, orig_q = pc.get, techdebt.queue
     pc.get = lambda k: True if k == "CREW_TECHDEBT" else orig_get(k)
-    techdebt.create_manual = lambda *a, **k: (_ for _ in ()).throw(_rq.ConnectionError("azure yok"))
+    techdebt.queue = lambda *a, **k: (_ for _ in ()).throw(_rq.ConnectionError("azure yok"))
     try:
-        r = TestClient(server.app).post("/api/techdebt/manual", json={"repo": "x"})
+        r = TestClient(server.app).post("/api/techdebt/queue", json={"ids": [1]})
         check("Azure hatası → 502", r.status_code == 502, str(r.status_code))
     finally:
-        pc.get, techdebt.create_manual = orig_get, orig_cm
+        pc.get, techdebt.queue = orig_get, orig_q
     html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
     otc = html[html.index("async function onTeamChange"):html.index("async function onTeamChange") + 1500]
     check("takım değişince teknik borç listesi yenilenir; kuyruk butonu istek boyunca kilitli",
           "loadTechdebt()" in otc and "tdQueueBtn" in html and ".disabled=true" in html)
+
+
+def test_dashboard_readability():
+    print("\n[UI] Okunabilirlik — ayar editörü, başlık butonları")
+    import re as _re
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    ed = _re.search(r'<textarea id="cfgEditor"[^>]*>', html).group(0)
+    check("ayar editörü tema rengini kullanır (açık temada sarı yazı yok)", "#e6db74" not in ed and "var(--text)" in ed)
+    check("açık temada okunmayan sabit sarı/pembe yazı renkleri yok",
+          not any(c in html for c in ("color:#fbbf24", "color:#fca5a5", "color:#f9c74f")))
+    sb = _re.search(r'<button[^>]*onclick="openSettings\(\)"[^>]*>.*?</button>', html, _re.S).group(0)
+    tb = _re.search(r'<button[^>]*id="themeBtn"[^>]*>.*?</button>', html, _re.S).group(0)
+    check("ayarlar butonu etiketli ve dişli simgeli; tema butonundan ayırt edilir",
+          "Ayarlar" in sb and 'data-icon="gear"' in sb and 'data-icon="gear"' not in tb)
+    check("tema butonu güncel modu simgeyle gösterir (güneş / ay / ekran)",
+          "THEME_ICONS" in html and all(k in html for k in ("light:", "dark:", "system:")))
 
 
 def main():
@@ -4489,11 +4414,11 @@ def main():
               test_worktree_staging,
               test_techdebt_lane,
               test_techdebt_open_tasks_db,
-              test_techdebt_manual,
               test_techdebt_list_queue,
               test_techdebt_endpoints,
               test_techdebt_ui,
-              test_techdebt_review_fixes):
+              test_techdebt_review_fixes,
+              test_dashboard_readability):
         try:
             t()
         except Exception as e:

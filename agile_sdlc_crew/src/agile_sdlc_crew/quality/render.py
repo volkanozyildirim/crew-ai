@@ -17,8 +17,7 @@ from agile_sdlc_crew.quality.rank import defang, is_undefined_key
 TAG = "tempo-quality"
 HUMAN_TAG = "needs-human"
 FP_PREFIX = "tempo-fp:"
-SOURCE_LABEL = {"newrelic": "New Relic hataları", "sonar": "Sonar bulguları",
-                "manual": "elle girilen teknik borç", "azure": "Azure teknik borç kayıtları"}
+SOURCE_LABEL = {"newrelic": "New Relic hataları", "sonar": "Sonar bulguları"}
 # Hatlar: 'quality' kaynak başına story açar (Kalite: <kaynak> — <sprint>);
 # 'techdebt' sprint başına TEK story (Teknik borç — <sprint>). Teknik borç
 # Task'ları tempo-quality'yi de taşır: yalın akış / ucuz modeller / dar test
@@ -219,8 +218,6 @@ def expected_behavior(g: Group) -> list[str]:
     'eksik anahtarda ne olmalı / hangi dosya / nasıl doğrulanır' soruları
     kalite işlerinde hep aynı cevaba sahip — her seferinde insana sormak
     yerine burada sabitlenir."""
-    if g.source == "manual":
-        return [_e(g.meta.get("expected", ""))]
     if g.source == "sonar":
         if g.findings and g.findings[0].rule.startswith("secrets:"):
             return ["Secret değeri koddan kaldırılır, ortam değişkeni / gizli yönetiminden okunur.",
@@ -267,8 +264,6 @@ def acceptance_block(g: Group) -> str:
 def acceptance_criteria(g: Group) -> str:
     """Açıklamaya VE AcceptanceCriteria alanına yazılır: alan boşsa hazırlık
     kapısı (flow._readiness_score) her kalite işinden 15 puan düşer."""
-    if g.source == "manual":
-        return "Beklenen davranış sağlanır; değişiklik dışındaki davranış korunur."
     if g.source == "newrelic":
         return "Bu action'da bu hata sınıfı/mesajı bir daha üretilmez; mevcut davranış korunur."
     if g.findings and g.findings[0].rule.startswith("secrets:"):
@@ -285,29 +280,14 @@ def repo_from_description(desc: str) -> str:
     return m.group(1) if m else ""
 
 
-def _manual_body(g: Group) -> list[str]:
-    """Elle girilen teknik borç: ekibin yazdığı sorun / beklenen davranış / dosyalar."""
-    m = g.meta or {}
-    parts = [f"<p><b>Sorun:</b> {_e(m.get('problem', ''))}</p>"]
-    files = [f for f in (m.get("files") or []) if f]
-    if files:
-        parts.append("<p><b>Olası yer:</b></p><ul>" + "".join(f"<li><code>{_e(f)}</code></li>" for f in files) + "</ul>")
-    parts.append(_behavior_html(g))
-    parts.append(f"<p><b>Kabul kriteri:</b> {acceptance_criteria(g)}</p>")
-    return parts
-
-
 def task_description(g: Group, *, sonar_url: str = "", nr_days: int = 7) -> str:
     parts = [f"<p><b>Repo:</b> <code>{html.escape(g.repo)}</code></p>"]
     if g.recurring_of:
         parts.append(f"<p><b>Tekrarladı</b> — önceki: #{int(g.recurring_of)}</p>")
     if g.needs_human:
         parts.append(f"<p><b>Neden insan:</b> {_e(g.human_reason)}</p>")
-    if g.source == "manual":
-        parts += _manual_body(g)
-    else:
-        parts.append(UNTRUSTED_NOTE)
-        parts += _nr_body(g, nr_days) if g.source == "newrelic" else _sonar_body(g, sonar_url)
+    parts.append(UNTRUSTED_NOTE)
+    parts += _nr_body(g, nr_days) if g.source == "newrelic" else _sonar_body(g, sonar_url)
     parts += [f"<p><small>{FP_PREFIX} {html.escape(fp)}</small></p>" for fp in g.fingerprints]
     return "".join(parts)
 
@@ -327,8 +307,8 @@ def story_title(source: str, sprint_name: str, lane: str = "quality") -> str:
 
 def story_description(source: str, lane: str = "quality") -> str:
     if lane == "techdebt":
-        return ("<p>Tempo'nun Teknik borç sekmesinden alınan işler. Alt Task'lar elle girilen ya da "
-                "taramalardan seçilen teknik borç maddeleridir; <code>" + HUMAN_TAG + "</code> etiketliler "
+        return ("<p>Tempo'nun Teknik borç sekmesinden alınan işler. Alt Task'lar taramalardan seçilen "
+                "teknik borç maddeleridir; <code>" + HUMAN_TAG + "</code> etiketliler "
                 "insan bekler, diğerleri pipeline kuyruğuna alınır.</p>")
     return (f"<p>Tempo'nun {_label(source)} için açtığı kalite işleri. Alt Task'lar skor ve "
             "SP bütçesine göre otomatik seçilir ve pipeline kuyruğuna alınır; "

@@ -1,146 +1,20 @@
-"""Teknik borç hattı — elle giriş, takımın tech-debt listesi, kuyruğa alma.
+"""Teknik borç hattı — takımın tech-debt listesi ve kuyruğa alma.
 
-Kayıt kaynağı Azure'dur: elle girilen madde doğrudan sonraki sprintteki tek
-"Teknik borç — <sprint>" story'sinin altında `tech-debt` etiketli Task olarak
-açılır; liste Azure'daki etiketli WI'lardan okunur. Tempo DB'de backlog yok.
-Kalite alımının ortak yolları kullanılır (intake.resolve_story(lane=),
-intake._open_tasks, board dedup).
+Kayıt kaynağı Azure'dur: liste takımın alan yolundaki açık `tech-debt` etiketli
+Task / Bug / Improvement'lardan okunur; Tempo DB'de backlog tutulmaz. Seçilen
+iş sprint_planning.queue_selected ile kuyruğa alınır. (Elle giriş formu
+kullanıcı kararıyla kaldırıldı — madde Azure'da etiketlenerek eklenir.)
+Taramalardan gelen maddeler (Sonar smell, php_modern…) sonraki aşamalarda
+kalite alımının `techdebt` hattıyla (intake.resolve_story(lane=)) açılacak.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import os
-import re
-from pathlib import Path
 
-from agile_sdlc_crew.quality import dedup, intake, render
-from agile_sdlc_crew.quality.model import Group
+from agile_sdlc_crew.quality import intake, render
 
 log = logging.getLogger("pipeline")
-
-TITLE_MAX = 120
-TEXT_MAX = 4000
-MAX_SP = 3
-BIG_SP = 5
-
-
-class Duplicate(RuntimeError):
-    """Aynı teknik borç maddesi board'da zaten açık (ya da iptal edilmiş)."""
-
-
-def repos_root() -> Path:
-    return Path(os.environ.get("CREW_REPOS_DIR", "~/.crew_repos")).expanduser()
-
-
-def manual_fingerprint(repo: str, title: str, problem: str) -> str:
-    digest = hashlib.sha1(f"{title.strip()}\n{problem.strip()}".encode("utf-8")).hexdigest()[:12]
-    return f"manual:{repo}:{digest}"
-
-
-_REPO_NAME = re.compile(r"^[A-Za-z0-9][\w.-]*$")
-
-
-def _repo_dir(root: Path, repo: str) -> Path | None:
-    """Klon kökündeki repo dizini, GERÇEK (kanonik) adıyla. Ad yalnız [\w.-];
-    kökten çıkamaz ('../x', '.', dışarı giden symlink). macOS dosya sistemi harf
-    duyarsız: 'WebService' de bulunur ama parmak izi ve Repo: satırı diskteki
-    adla ('webservice') üretilmeli, yoksa aynı madde harf farkıyla tekrar açılır
-    ve flow'un known_repos eşleşmesi (yalın akış) kaçar."""
-    if not _REPO_NAME.match(repo or "") or repo in (".", "..") or not root.is_dir():
-        return None
-    real_root = root.resolve()
-    entries = [d for d in root.iterdir() if d.is_dir() and d.resolve().parent == real_root]
-    return (next((d for d in entries if d.name == repo), None)
-            or next((d for d in entries if d.name.lower() == repo.lower()), None))
-
-
-def validate_manual(form: dict, *, repo_ok, repo_root: Path) -> tuple[Group | None, list[str]]:
-    """Formu doğrula → (Group, []) ya da (None, [hatalar]). Hatalar Türkçe."""
-    errs: list[str] = []
-    repo = str(form.get("repo") or "").strip()
-    title = str(form.get("title") or "").strip()
-    problem = str(form.get("problem") or "").strip()
-    expected = str(form.get("expected") or "").strip()
-    if not repo or not _repo_dir(repo_root, repo) or not repo_ok(repo):
-        errs.append("repo yerel klonlarda yok")
-    if not title:
-        errs.append("başlık zorunlu")
-    elif len(title) > TITLE_MAX:
-        errs.append(f"başlık en çok {TITLE_MAX} karakter")
-    if not problem:
-        errs.append("sorun açıklaması zorunlu")
-    if not expected:
-        errs.append("beklenen davranış / kabul kriteri zorunlu")
-    if len(problem) > TEXT_MAX or len(expected) > TEXT_MAX:
-        errs.append(f"metin alanları en çok {TEXT_MAX} karakter")
-    files: list[str] = []
-    rdir = _repo_dir(repo_root, repo) if repo and repo_ok(repo) else None
-    for raw in form.get("files") or []:
-        f = str(raw or "").strip()
-        if not f:
-            continue
-        if f.startswith(("/", "\\")) or ".." in Path(f).parts or ":" in f:
-            errs.append(f"geçersiz dosya yolu: {f}")
-            continue
-        target = (rdir / f).resolve() if rdir is not None else None
-        if target is None or not target.is_relative_to(rdir.resolve()) or not target.is_file():
-            errs.append(f"dosya repoda yok: {f}")
-            continue
-        files.append(f)
-    try:
-        sp = int(form.get("sp") or 1)
-    except (TypeError, ValueError):
-        sp = 1
-    needs_human = bool(form.get("needs_human"))
-    reason = "Elle insan işi olarak işaretlendi" if needs_human else ""
-    if sp > MAX_SP:
-        needs_human, sp, reason = True, BIG_SP, f"{MAX_SP} SP'den büyük — insan planlamalı"
-    sp = max(1, sp)
-    if errs:
-        return None, errs
-    canon = rdir.name if rdir else repo
-    g = Group(source="manual", repo=canon, title=title,
-              fingerprints=[manual_fingerprint(canon, title, problem)], findings=[], sp=sp,
-              needs_human=needs_human, human_reason=reason,
-              meta={"problem": problem, "expected": expected, "files": files})
-    return g, []
-
-
-def create_manual(client, form: dict, *, team: str = "", deps: intake.Deps | None = None,
-                  repo_root: Path | None = None) -> dict:
-    """Elle girilen maddeyi sonraki sprintteki 'Teknik borç' story'sinin altına aç.
-    Kuyruğa ALMAZ — listede 'Kuyruğa al' ile alınır."""
-    from agile_sdlc_crew import estimation
-    deps = deps or intake.default_deps()
-    root = repo_root or repos_root()
-    g, errs = validate_manual(form, repo_ok=deps.repo_ok, repo_root=root)
-    if errs:
-        raise ValueError("; ".join(errs))
-    if not intake._LOCK.acquire(blocking=False):
-        raise intake.Busy("Başka bir alım sürüyor")
-    try:
-        cfg = deps.cfg()
-        fp = g.fingerprints[0]
-        v, prev = dedup.verdict(deps.board(client).get(fp), last_seen=0.0, now=deps.now(),
-                                grace_days=int(cfg.get("grace_days", 3)))
-        if v in ("blocked", "suppressed"):
-            raise Duplicate(f"Bu madde board'da zaten var: #{prev}")
-        story = intake.resolve_story(client, "manual", None, team, cfg.get("target_sprint") or "next",
-                                     lane="techdebt")
-        rows, added = intake._open_tasks(client, [g], story, cfg, deps, source="manual",
-                                         lane="techdebt", queue=False)
-        if added:
-            estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
-        row = rows[0]
-        if row.get("error"):
-            raise RuntimeError(row["error"])
-        log.info(f"🧾 Teknik borç (elle): story #{story['id']} · Task #{row['id']} · {g.sp} SP")
-        return {"task": row, "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]),
-                                       "created": story["created"]}}
-    finally:
-        intake._LOCK.release()
 
 
 # ── Liste + kuyruk ────────────────────────────────────────────────────────
@@ -198,7 +72,6 @@ def list_items(client, *, team: str = "", job_status=None) -> dict:
             "state": f.get("System.State", ""),
             "iteration": (f.get("System.IterationPath") or "").rsplit("\\", 1)[-1],
             "sp": _sp(f), "repo": render.repo_from_description(f.get("System.Description") or ""),
-            "source": "manual" if render.src_tag("manual") in tags else "azure",
             "needs_human": human, "job": job, "queueable": not human and not busy,
         })
     rows.sort(key=lambda r: (not r["queueable"], -r["id"]))
