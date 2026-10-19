@@ -4362,6 +4362,10 @@ def test_dashboard_readability():
     check("metin/sayı kutuları açılır liste gibi çizilmez (ok simgesi + kesilen değer)",
           not _re.search(r'<input[^>]*class="sprint-select"', html) and 'id="qSp"' in html
           and _re.search(r'<input class="ctl-input" id="qSp"', html) is not None)
+    check("modallarda açık temada simsiyah kutu yok (backfill, sprint raporu)",
+          not any(c in html for c in ("background:#111", "background:#222", "background:#6c5ce7")))
+    check("geçmiş iş taraması ilk açılışta boş siyah log/çubuk değil açıklama gösterir",
+          'id="bfHint"' in html and "logEl.style.display" in html)
     check("tema butonu güncel modu simgeyle gösterir (güneş / ay / ekran)",
           "THEME_ICONS" in html and all(k in html for k in ("light:", "dark:", "system:")))
 

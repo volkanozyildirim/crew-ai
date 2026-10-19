@@ -3215,14 +3215,18 @@ async function fetchBackfill(){
 function renderBackfill(p){
   const total=p.total||0, scanned=p.scanned||0;
   const pct=total?Math.round(100*scanned/total):0;
+  const running=!!p.running, logs=p.log||[], started=running||total>0||logs.length>0;
+  // Hiç çalışmamışsa çubuk/sayaç/log yerine açıklama (boş siyah kutular yerine)
+  document.getElementById('bfHint').style.display=started?'none':'';
+  document.getElementById('bfTrack').style.display=started?'':'none';
   document.getElementById('bfBar').style.width=pct+'%';
-  document.getElementById('bfStats').textContent=
+  document.getElementById('bfStats').textContent=started?
     `taranan ${scanned}/${total} | indekslenen ${p.indexed||0} | PR'lı ${p.with_pr||0} | atlanan ${p.skipped||0} | hata ${p.errors||0}`+
-    (p.current_wi?` | şu an WI#${p.current_wi}`:'');
+    (p.current_wi?` | şu an WI#${p.current_wi}`:''):'';
   const logEl=document.getElementById('bfLog');
-  logEl.textContent=(p.log||[]).map(l=>`${l.time}  ${l.message}`).join('\n');
+  logEl.style.display=logs.length?'':'none';
+  logEl.textContent=logs.map(l=>`${l.time}  ${l.message}`).join('\n');
   logEl.scrollTop=logEl.scrollHeight;
-  const running=!!p.running;
   document.getElementById('bfStartBtn').style.display=running?'none':'';
   document.getElementById('bfCancelBtn').style.display=running?'':'none';
   if(!running&&_bfPoll){clearInterval(_bfPoll);_bfPoll=null;}
@@ -3511,11 +3515,12 @@ async function adoptRetroRule(btn,i){
     </div>
     <div style="padding:16px 20px">
       <div style="margin-bottom:12px;font-size:13px">Takım: <b id="bfTeam">-</b></div>
-      <div style="background:#222;border-radius:6px;height:18px;overflow:hidden;margin-bottom:8px">
-        <div id="bfBar" style="height:100%;width:0%;background:#6c5ce7;transition:width .3s"></div>
+      <div id="bfHint" style="font-size:13px;color:var(--text-dim);line-height:1.55;margin-bottom:8px">Takımın geçmiş iş kalemleri Azure DevOps'tan taranır; PR'ı olan işler, yeni işlerde repo önerisi için geçmiş iş indeksine eklenir. Başlatınca ilerleme ve log burada görünür.</div>
+      <div id="bfTrack" style="display:none;background:var(--border);border-radius:6px;height:8px;overflow:hidden;margin-bottom:8px">
+        <div id="bfBar" style="height:100%;width:0%;background:var(--accent);transition:width .3s"></div>
       </div>
       <div id="bfStats" style="font-size:13px;color:var(--text-dim);margin-bottom:8px"></div>
-      <div id="bfLog" style="font-family:monospace;font-size:12px;background:#111;border-radius:6px;padding:8px;height:200px;overflow:auto;white-space:pre-wrap;color:var(--text-dim)"></div>
+      <div id="bfLog" style="display:none;font-family:'Geist Mono',Menlo,monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:220px;overflow:auto;white-space:pre-wrap;color:var(--text)"></div>
       <div style="margin-top:12px;display:flex;gap:8px">
         <button id="bfStartBtn" onclick="startBackfill()" class="sm-btn">Başlat</button>
         <button id="bfCancelBtn" onclick="cancelBackfill()" class="sm-btn" style="display:none;background:var(--danger)">İptal</button>
@@ -3542,7 +3547,7 @@ async function adoptRetroRule(btn,i){
         en çok efor (SP) alan projeler domain rozetiyle ayrı slaytta, kalanlar "Diğer Çalışmalar" özetinde.
         Burndown ve son 6 sprint velocity grafikleri Azure'dan <b>otomatik</b> çizilir.
       </div>
-      <div id="srConfig" style="font-size:11px;color:var(--text-dim);background:#111;border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;line-height:1.7"></div>
+      <div id="srConfig" style="font-size:11px;color:var(--text-dim);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;line-height:1.7"></div>
       <div id="srStatus" style="font-size:13px;min-height:20px;margin-bottom:12px"></div>
       <div style="display:flex;gap:8px;align-items:center">
         <button id="srStartBtn" onclick="startSprintReport()" class="sm-btn">Oluştur</button>
