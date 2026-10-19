@@ -4377,6 +4377,7 @@ def test_human_label():
     check("çıplak 'insan' etiketi kalmadı; 'İnsan işi · kuyruğa alınmaz' + sebep ipucu",
           'chip human">insan<' not in html and "· insan'" not in html
           and "function humanChip" in html and "İnsan işi · kuyruğa alınmaz" in html and "t.human_reason" in html)
+    check("otomatik satırların durumu da yazılı (boş hücre yok)", "Pipeline kuyruğuna alınır" in html)
 
 
 def main():
