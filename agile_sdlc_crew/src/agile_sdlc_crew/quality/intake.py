@@ -153,10 +153,25 @@ def build_candidates(source: str, findings: list[Finding], *, board_index: dict,
     return groups, skipped
 
 
+_GATHER_TTL = 120
+_gather_cache: dict = {}
+
+
+def _gather_cached(source: str, client, cfg: dict):
+    """Proje listesi → önizleme → alım aynı birkaç dakikada aynı veriyi ister; NR
+    sorgusu ~40 sn. Kısa TTL'li önbellek (dedup her seferinde board'dan taze)."""
+    hit = _gather_cache.get(source)
+    if hit and time.time() - hit[0] < _GATHER_TTL:
+        return [Finding(**vars(f)) for f in hit[1]], list(hit[2])
+    found, skipped = gather(source, client, cfg)
+    _gather_cache[source] = (time.time(), [Finding(**vars(f)) for f in found], list(skipped))
+    return found, skipped
+
+
 def default_deps() -> Deps:
     from agile_sdlc_crew import db
     return Deps(
-        gather=gather,
+        gather=_gather_cached,
         board=lambda client: dedup.index_board(dedup.fetch_board(client)),
         repo_ok=repo_is_local,
         queue=lambda wid, title: db.create_job(str(wid), False, wi_title=title[:200]),
@@ -173,11 +188,24 @@ def _row(g: Group) -> dict:
             "job_id": None}
 
 
-def _plan(client, source: str, sp: int, deps: Deps) -> tuple[list[Group], dict, dict]:
+def _filter_repos(findings: list[Finding], repos: list[str] | None) -> tuple[list[Finding], list[str]]:
+    """Kullanıcının seçtiği projeler (repo adları, harf duyarsız). Boş = hepsi.
+    Döner: (kalan bulgular, dışarıda kalan repolar)."""
+    want = {r.strip().lower() for r in (repos or []) if r and r.strip()}
+    if not want:
+        return findings, []
+    kept = [f for f in findings if (f.repo or "").lower() in want]
+    dropped = sorted({f.repo for f in findings if (f.repo or "").lower() not in want and f.repo})
+    return kept, dropped
+
+
+def _plan(client, source: str, sp: int, deps: Deps, repos: list[str] | None = None) -> tuple[list[Group], dict, dict]:
     if source not in SOURCES:
         raise ValueError(f"Geçersiz kaynak: {source}")
     cfg = deps.cfg()
     findings, skipped = deps.gather(source, client, cfg)
+    findings, out_of_sel = _filter_repos(findings, repos)
+    skipped = list(skipped) + [{"repo": r, "reason": "seçim dışı proje"} for r in out_of_sel]
     groups, sk2 = build_candidates(source, findings, board_index=deps.board(client), now=deps.now(),
                                    repo_ok=deps.repo_ok, cfg=cfg)
     skipped += sk2
@@ -205,14 +233,30 @@ def _plan(client, source: str, sp: int, deps: Deps) -> tuple[list[Group], dict, 
     if cap_reached:
         result["cap_note"] = (f"Task tavanı {max_tasks} (CREW_QUALITY_MAX_TASKS) doldu: bütçenin "
                               f"{total}/{int(sp)} SP'si kullanıldı. Her Task bir pipeline işi.")
+    if repos:
+        result["repos"] = list(repos)
     if not picked:
         result["message"] = "Bütçeye uyan aday yok."
     return picked, result, cfg
 
 
-def preview(client, source: str, sp: int, *, team: str = "", deps: Deps | None = None) -> dict:
-    _picked, result, _cfg = _plan(client, source, sp, deps or default_deps())
+def preview(client, source: str, sp: int, *, team: str = "", deps: Deps | None = None,
+            repos: list[str] | None = None) -> dict:
+    _picked, result, _cfg = _plan(client, source, sp, deps or default_deps(), repos=repos)
     return result
+
+
+def projects(client, source: str, *, deps: Deps | None = None) -> dict:
+    """Seçim listesi: bu kaynakta bulgusu olan projeler (repo), bulgu sayısına göre."""
+    if source not in SOURCES:
+        raise ValueError(f"Geçersiz kaynak: {source}")
+    deps = deps or default_deps()
+    findings, _sk = deps.gather(source, client, deps.cfg())
+    cnt: Counter = Counter()
+    for f in findings:
+        if f.repo:
+            cnt[f.repo] += 1
+    return {"source": source, "items": [{"repo": r, "findings": n} for r, n in cnt.most_common()]}
 
 
 def _wi_url(client, wid: int) -> str:
@@ -341,13 +385,13 @@ def _open_tasks(client, groups: list[Group], story: dict, cfg: dict, deps: Deps,
 
 
 def take(client, source: str, sp: int, *, story_id: int | None = None, team: str = "",
-         deps: Deps | None = None) -> dict:
+         deps: Deps | None = None, repos: list[str] | None = None) -> dict:
     from agile_sdlc_crew import estimation
     deps = deps or default_deps()
     if not _LOCK.acquire(blocking=False):
         raise Busy("Başka bir kalite alımı sürüyor")
     try:
-        picked, result, cfg = _plan(client, source, sp, deps)
+        picked, result, cfg = _plan(client, source, sp, deps, repos=repos)
         if not picked:
             return result
         story = resolve_story(client, source, story_id, team, cfg.get("target_sprint") or "next")

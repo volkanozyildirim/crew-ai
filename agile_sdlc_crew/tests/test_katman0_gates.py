@@ -4418,6 +4418,51 @@ def test_quality_human_split():
           and "CREW_QUALITY_HUMAN_SHARE" not in pc._SCHEMA_BY_KEY and intake.load_cfg()["human_max"] == 5)
 
 
+def test_quality_project_filter():
+    print("\n[Q14] Kalite alımı — proje (repo) seçimi")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import intake
+    from agile_sdlc_crew.quality.model import Finding
+
+    def bug(repo, i):
+        return Finding(source="sonar", repo=repo, project=f"EcomBackend:{repo}", file=f"b{i}.php", rule=f"php:S{i}",
+                       rule_name="Bug", severity="CRITICAL", itype="BUG", lines=[1])
+    findings = [bug("webservice", i) for i in range(3)] + [bug("FloNext", i) for i in range(2)] + [bug("orkestra", 9)]
+    cfg = {"nr_days": 7, "nr_min_errors": 100, "pack_sp": 3, "pack_files": 5, "max_tasks": 8, "human_max": 5,
+           "grace_days": 3, "sonar_url": "", "target_sprint": "next", "task_fields": {}}
+    deps = intake.Deps(gather=lambda s, c, cf: (list(findings), []), board=lambda c: {}, repo_ok=lambda r: True,
+                       queue=lambda w, t: 1, record=lambda **k: None, now=lambda: 1.0, cfg=lambda: cfg)
+    pv = intake.preview(None, "sonar", 30, deps=deps, repos=["flonext", "orkestra"])
+    repos = {t["repo"] for t in pv["tasks"]}
+    check("seçilen projeler dışındakiler alınmaz (büyük/küçük harf duyarsız)",
+          repos == {"FloNext", "orkestra"} and pv["skipped_counts"].get("seçim dışı proje") == 1, str(pv["skipped_counts"]))
+    check("seçim boşsa tüm projeler", {t["repo"] for t in intake.preview(None, "sonar", 30, deps=deps)["tasks"]}
+          == {"webservice", "FloNext", "orkestra"})
+    pr = intake.projects(None, "sonar", deps=deps)
+    check("proje listesi: bulgusu olan repolar, bulgu sayısına göre",
+          [(i["repo"], i["findings"]) for i in pr["items"]] == [("webservice", 3), ("FloNext", 2), ("orkestra", 1)])
+    seen = {}
+    orig_get, orig_pv = pc.get, intake.preview
+    pc.get = lambda k: True if k == "CREW_QUALITY_INTAKE" else orig_get(k)
+    intake.preview = lambda *a, **k: (seen.update(k), {"tasks": []})[1]
+    try:
+        TestClient(server.app).get("/api/quality/preview?source=sonar&sp=10&repos=FloNext,orkestra")
+        check("önizleme ucu repos parametresini geçirir", seen.get("repos") == ["FloNext", "orkestra"], str(seen))
+    finally:
+        pc.get, intake.preview = orig_get, orig_pv
+    pc.get = lambda k: False if k == "CREW_QUALITY_INTAKE" else orig_get(k)
+    try:
+        check("proje listesi ucu kapalıyken 403",
+              TestClient(server.app).get("/api/quality/projects?source=sonar").status_code == 403)
+    finally:
+        pc.get = orig_get
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("kartta proje seçimi; önizleme ve alım seçimi gönderir",
+          'id="qProj"' in html and "/api/quality/projects" in html and "repos=" in html and "repos:" in html)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4479,7 +4524,8 @@ def main():
               test_techdebt_review_fixes,
               test_dashboard_readability,
               test_human_label,
-              test_quality_human_split):
+              test_quality_human_split,
+              test_quality_project_filter):
         try:
             t()
         except Exception as e:

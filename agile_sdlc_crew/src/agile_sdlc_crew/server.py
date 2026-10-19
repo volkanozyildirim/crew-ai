@@ -152,6 +152,7 @@ class QualityTakeRequest(BaseModel):
     sp: int = 10
     story_id: int | None = None
     team: str = ""
+    repos: list[str] = []
 
 
 # ── API Routes ──
@@ -1885,14 +1886,16 @@ def _quality_error(e: Exception) -> JSONResponse:
 
 
 @app.get("/api/quality/preview")
-async def quality_preview(source: str = "newrelic", sp: int = 10, team: str = ""):
-    """Kalite alımının seçimini hiçbir şey yazmadan döndürür."""
+async def quality_preview(source: str = "newrelic", sp: int = 10, team: str = "", repos: str = ""):
+    """Kalite alımının seçimini hiçbir şey yazmadan döndürür. repos: virgülle ayrılmış proje (repo) seçimi."""
     from agile_sdlc_crew.quality import intake as _qi
     bad = _quality_guard(source, sp)
     if bad:
         return bad
+    sel = [r.strip() for r in repos.split(",") if r.strip()]
     try:
-        return JSONResponse(await asyncio.to_thread(_qi.preview, AzureDevOpsClient(), source, sp, team=team))
+        return JSONResponse(await asyncio.to_thread(_qi.preview, AzureDevOpsClient(), source, sp, team=team,
+                                                    repos=sel or None))
     except Exception as e:  # noqa: BLE001
         return _quality_error(e)
 
@@ -1906,10 +1909,23 @@ async def quality_take(req: QualityTakeRequest):
         return bad
     try:
         res = await asyncio.to_thread(_qi.take, AzureDevOpsClient(), req.source, req.sp,
-                                      story_id=req.story_id, team=req.team)
+                                      story_id=req.story_id, team=req.team, repos=req.repos or None)
         if any(t.get("job_id") for t in res.get("tasks") or []):
             _ensure_worker()
         return JSONResponse(res, status_code=201 if res.get("story") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _quality_error(e)
+
+
+@app.get("/api/quality/projects")
+async def quality_projects(source: str = "sonar"):
+    """Proje seçimi için: bu kaynakta bulgusu olan repolar ve bulgu sayıları (yazma yok)."""
+    from agile_sdlc_crew.quality import intake as _qi
+    bad = _quality_guard(source)
+    if bad:
+        return bad
+    try:
+        return JSONResponse(await asyncio.to_thread(_qi.projects, AzureDevOpsClient(), source))
     except Exception as e:  # noqa: BLE001
         return _quality_error(e)
 

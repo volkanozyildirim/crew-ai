@@ -79,6 +79,14 @@ header {
 .ctl-input::placeholder { color:var(--faint); font-weight:500; }
 .ctl-input:focus { border-color:var(--accent); }
 .ctl-label { font-size:12px; color:var(--text-dim); font-weight:600; }
+.qproj { position:relative; }
+.qproj summary { list-style:none; cursor:pointer; display:flex; align-items:center; white-space:nowrap; }
+.qproj summary::-webkit-details-marker { display:none; }
+.qproj-menu { position:absolute; right:0; top:38px; z-index:30; background:var(--bg-card); border:1px solid var(--border); border-radius:10px;
+  padding:8px; min-width:280px; max-height:340px; overflow:auto; box-shadow:0 10px 28px rgba(0,0,0,.14); font-size:13px; }
+.qproj-menu label { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:6px; cursor:pointer; }
+.qproj-menu label:hover { background:var(--bg); }
+.qproj-menu .n { margin-left:auto; color:var(--text-dim); font-family:'Geist Mono',Menlo,monospace; font-size:12px; }
 .sprint-select {
   background:var(--bg-card); border:1px solid var(--border); color:var(--text);
   height:32px; padding:0 30px 0 10px; border-radius:8px; font-size:13px; font-weight:600; font-family:inherit; outline:none; cursor:pointer;
@@ -543,7 +551,8 @@ header {
     <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
       <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:hidden">
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
-          <select class="sprint-select" id="qSource" title="Kaynak"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
+          <select class="sprint-select" id="qSource" title="Kaynak" onchange="qProjReset()"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
+          <details class="qproj" id="qProj" ontoggle="if(this.open)loadQualityProjects()"><summary class="ctl-input" id="qProjLbl" title="Yalnız seçilen projelere (repo) bak; boş = hepsi">Projeler: tümü</summary><div class="qproj-menu" id="qProjMenu"></div></details>
           <label class="ctl-label" for="qSp">SP</label><input class="ctl-input" id="qSp" type="number" min="1" max="40" value="10" style="width:64px" title="SP bütçesi (1–40)">
           <input class="ctl-input" id="qStory" type="number" placeholder="Story ID (ops.)" style="width:140px" title="Boşsa takımın sonraki sprintinde story bulunur/açılır (aktif sprinte dokunulmaz)">
           <button class="sm-btn ghost small" onclick="qualityRun(false)">Önizle</button>
@@ -1391,7 +1400,33 @@ async function loadQuality(){
       :'Henüz alım yok.';
   }catch(e){card.style.display='none'}
 }
+// Proje (repo) seçimi: yalnız seçilenlere bak; boş = hepsi. Liste kaynağa göre
+// sunucudan (bulgusu olan repolar); seçim kaynak değişince sıfırlanır.
+const _qProj={source:null,items:[],sel:new Set()};
+document.addEventListener('click',e=>{const d=document.getElementById('qProj');if(d&&d.open&&!d.contains(e.target))d.open=false});
+function _qProjLabel(){
+  const n=_qProj.sel.size;document.getElementById('qProjLbl').textContent=n?`Projeler: ${n} seçili`:'Projeler: tümü';
+}
+function qProjReset(){_qProj.source=null;_qProj.items=[];_qProj.sel.clear();_qProjLabel();
+  const d=document.getElementById('qProj');if(d&&d.open)loadQualityProjects();}
+async function loadQualityProjects(){
+  const source=document.getElementById('qSource').value,menu=document.getElementById('qProjMenu');
+  if(_qProj.source===source&&_qProj.items.length){_renderQProj();return}
+  menu.innerHTML=`<div style="padding:6px;color:var(--text-dim)">Yükleniyor…${source==='newrelic'?' (New Relic ~40 sn)':''}</div>`;
+  try{
+    const resp=await fetch('/api/quality/projects?source='+encodeURIComponent(source));const r=await resp.json();
+    if(!resp.ok){menu.innerHTML=`<div style="padding:6px;color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</div>`;return}
+    _qProj.source=source;_qProj.items=r.items||[];_renderQProj();
+  }catch(e){menu.innerHTML=`<div style="padding:6px;color:var(--danger)">${esc(String(e))}</div>`}
+}
+function _renderQProj(){
+  const menu=document.getElementById('qProjMenu');
+  if(!_qProj.items.length){menu.innerHTML='<div style="padding:6px;color:var(--text-dim)">Bulgusu olan proje yok.</div>';return}
+  menu.innerHTML=`<div style="display:flex;justify-content:space-between;padding:2px 6px 6px;font-size:12px;color:var(--text-dim)"><span>Boş bırakılırsa tüm projeler</span><a href="#" onclick="_qProj.sel.clear();_renderQProj();_qProjLabel();return false">Temizle</a></div>`
+    +_qProj.items.map(i=>`<label><input type="checkbox" value="${esc(i.repo)}" ${_qProj.sel.has(i.repo)?'checked':''} onchange="this.checked?_qProj.sel.add(this.value):_qProj.sel.delete(this.value);_qProjLabel()"><span>${esc(i.repo)}</span><span class="n">${i.findings}</span></label>`).join('');
+}
 async function qualityRun(take){
+  const repos=[..._qProj.sel];
   const box=document.getElementById('qResult');
   const source=document.getElementById('qSource').value;
   const sp=parseInt(document.getElementById('qSp').value||'10',10);
@@ -1400,8 +1435,8 @@ async function qualityRun(take){
   box.innerHTML=`<div class="board-empty" style="padding:12px 0">${take?'İşler açılıyor…':'Seçim hesaplanıyor…'}</div>`;
   try{
     const resp=take
-      ?await fetch('/api/quality/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,sp,story_id:story,team})})
-      :await fetch(`/api/quality/preview?source=${encodeURIComponent(source)}&sp=${sp}&team=${encodeURIComponent(team)}`);
+      ?await fetch('/api/quality/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,sp,story_id:story,team,repos:repos})})
+      :await fetch(`/api/quality/preview?source=${encodeURIComponent(source)}&sp=${sp}&team=${encodeURIComponent(team)}&repos=${encodeURIComponent(repos.join(','))}`);
     const r=await resp.json();
     if(!resp.ok){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(r.error||('HTTP '+resp.status))}</div>`;return}
     const row=t=>`<tr><td>${t.id?wiLink(t.id):'—'}</td><td>${esc(t.title)}</td><td class="num">${t.sp}</td><td>${t.needs_human?humanChip(t.human_reason):(t.job_id?`<span class="chip dim">Kuyrukta · iş #${t.job_id}</span>`:(t.error?`<span style="color:var(--danger)">${esc(t.error)}</span>`:(t.id?'':'<span class="chip dim" title="Al denince Task açılır ve pipeline kuyruğuna alınır">Pipeline kuyruğuna alınır</span>')))}</td></tr>`;
