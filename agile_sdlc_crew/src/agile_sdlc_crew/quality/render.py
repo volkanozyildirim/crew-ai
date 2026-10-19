@@ -17,18 +17,39 @@ from agile_sdlc_crew.quality.rank import defang, is_undefined_key
 TAG = "tempo-quality"
 HUMAN_TAG = "needs-human"
 FP_PREFIX = "tempo-fp:"
-SOURCE_LABEL = {"newrelic": "New Relic hataları", "sonar": "Sonar bulguları"}
+SOURCE_LABEL = {"newrelic": "New Relic hataları", "sonar": "Sonar bulguları",
+                "manual": "elle girilen teknik borç", "azure": "Azure teknik borç kayıtları"}
+# Hatlar: 'quality' kaynak başına story açar (Kalite: <kaynak> — <sprint>);
+# 'techdebt' sprint başına TEK story (Teknik borç — <sprint>). Teknik borç
+# Task'ları tempo-quality'yi de taşır: yalın akış / ucuz modeller / dar test
+# kuralı (flow._is_quality_wi) bu işlere de uygulanır.
+TECHDEBT_TAG = "tempo-techdebt"
+TECHDEBT_PUBLIC_TAG = "tech-debt"
+LANES = ("quality", "techdebt")
 
 
 def src_tag(source: str) -> str:
     return f"tempo-src-{source}"
 
 
-def task_tags(g: Group) -> str:
-    tags = [TAG, src_tag(g.source)]
+def _label(source: str) -> str:
+    return SOURCE_LABEL.get(source, source)
+
+
+def task_tags(g: Group, lane: str = "quality") -> str:
+    tags = [TAG]
+    if lane == "techdebt":
+        tags += [TECHDEBT_TAG, TECHDEBT_PUBLIC_TAG]
+    tags.append(src_tag(g.source))
     if g.needs_human:
         tags.append(HUMAN_TAG)
     return "; ".join(tags)
+
+
+def story_tags(source: str, lane: str = "quality") -> str:
+    if lane == "techdebt":
+        return f"{TECHDEBT_TAG}; {TECHDEBT_PUBLIC_TAG}"
+    return f"{TAG}; {src_tag(source)}"
 
 
 _AUTH = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}", re.I)
@@ -279,11 +300,17 @@ def parse_fingerprints(desc: str) -> list[str]:
     return [html.unescape(m.group(1)).strip() for m in _FP_LINE.finditer(desc or "")]
 
 
-def story_title(source: str, sprint_name: str) -> str:
-    return f"Kalite: {SOURCE_LABEL[source]} — {sprint_name}".strip()
+def story_title(source: str, sprint_name: str, lane: str = "quality") -> str:
+    if lane == "techdebt":
+        return f"Teknik borç — {sprint_name}".strip()
+    return f"Kalite: {_label(source)} — {sprint_name}".strip()
 
 
-def story_description(source: str) -> str:
-    return (f"<p>Tempo'nun {SOURCE_LABEL[source]} için açtığı kalite işleri. Alt Task'lar skor ve "
+def story_description(source: str, lane: str = "quality") -> str:
+    if lane == "techdebt":
+        return ("<p>Tempo'nun Teknik borç sekmesinden alınan işler. Alt Task'lar elle girilen ya da "
+                "taramalardan seçilen teknik borç maddeleridir; <code>" + HUMAN_TAG + "</code> etiketliler "
+                "insan bekler, diğerleri pipeline kuyruğuna alınır.</p>")
+    return (f"<p>Tempo'nun {_label(source)} için açtığı kalite işleri. Alt Task'lar skor ve "
             "SP bütçesine göre otomatik seçilir ve pipeline kuyruğuna alınır; "
             f"<code>{HUMAN_TAG}</code> etiketliler insan bekler.</p>")

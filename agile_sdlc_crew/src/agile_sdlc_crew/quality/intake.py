@@ -213,7 +213,8 @@ def target_iteration(iterations: list[dict], target: str = "next") -> dict | Non
     return min(future, key=lambda i: (i.get("attributes") or {}).get("startDate") or "9999", default=None)
 
 
-def resolve_story(client, source: str, story_id: int | None, team: str, target: str = "next") -> dict:
+def resolve_story(client, source: str, story_id: int | None, team: str, target: str = "next",
+                  lane: str = "quality") -> dict:
     if story_id:
         f = (client.get_work_item(int(story_id)) or {}).get("fields") or {}
         if f.get("System.WorkItemType") != "User Story":
@@ -228,10 +229,12 @@ def resolve_story(client, source: str, story_id: int | None, team: str, target: 
         raise NoSprint("Takımın " + ("aktif" if target == "current" else "sonraki") + " sprinti yok — story_id verin")
     ipath = cur.get("path") or ""
     esc = ipath.replace("'", "''")
+    tag_filter = (f"AND [System.Tags] CONTAINS '{render.TECHDEBT_TAG}' " if lane == "techdebt" else
+                  f"AND [System.Tags] CONTAINS '{render.TAG}' "
+                  f"AND [System.Tags] CONTAINS '{render.src_tag(source)}' ")
     found = client.query_work_items(
         "SELECT [System.Id] FROM WorkItems WHERE [System.WorkItemType] = 'User Story' "
-        f"AND [System.IterationPath] = '{esc}' AND [System.Tags] CONTAINS '{render.TAG}' "
-        f"AND [System.Tags] CONTAINS '{render.src_tag(source)}' "
+        f"AND [System.IterationPath] = '{esc}' " + tag_filter +
         "AND [System.State] NOT IN ('Done', 'Closed', 'Removed', 'Canceled') ORDER BY [System.Id] DESC",
         limit=1)
     if found:
@@ -240,9 +243,9 @@ def resolve_story(client, source: str, story_id: int | None, team: str, target: 
                 "iteration": f.get("System.IterationPath", ipath),
                 "sp": float(f.get("Custom.StoryPoints") or 0), "created": False}
     area = client.get_team_area_path(team) or ""
-    fields = {"System.Title": render.story_title(source, cur.get("name") or ipath),
-              "System.Description": render.story_description(source),
-              "System.Tags": f"{render.TAG}; {render.src_tag(source)}",
+    fields = {"System.Title": render.story_title(source, cur.get("name") or ipath, lane=lane),
+              "System.Description": render.story_description(source, lane=lane),
+              "System.Tags": render.story_tags(source, lane=lane),
               "System.IterationPath": ipath}
     if area:
         fields["System.AreaPath"] = area

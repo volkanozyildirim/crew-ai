@@ -4095,6 +4095,48 @@ def test_worktree_staging():
           src.count("self._stage_worktree_file(") >= 2)
 
 
+def test_techdebt_lane():
+    print("\n[TD1] Teknik borç — hat (lane) ve story")
+    from agile_sdlc_crew.quality import intake, render
+    from agile_sdlc_crew.quality.model import Group
+    check("techdebt hattı tek story başlığı", render.story_title("manual", "S22", lane="techdebt") == "Teknik borç — S22")
+    check("quality hattı değişmedi", render.story_title("newrelic", "S22") == "Kalite: New Relic hataları — S22")
+    check("bilinmeyen kaynak KeyError vermez", "yeni" in render.story_title("yeni", "S1"))
+    g = Group(source="manual", repo="webservice", title="t", fingerprints=["manual:webservice:x"], findings=[],
+              needs_human=True)
+    tags = render.task_tags(g, lane="techdebt")
+    check("techdebt Task etiketleri (tempo-quality yalın akış için korunur)",
+          tags == "tempo-quality; tempo-techdebt; tech-debt; tempo-src-manual; needs-human", tags)
+    check("quality Task etiketleri değişmedi",
+          render.task_tags(Group(source="sonar", repo="r", title="t", fingerprints=["f"], findings=[])) == "tempo-quality; tempo-src-sonar")
+
+    class C:
+        org_url, project = "https://dev.azure.com/o", "P"
+
+        def __init__(self):
+            self.wiql, self.created = [], []
+
+        def list_iterations(self, team=""):
+            return [{"name": "S22", "path": "P\\S22", "attributes": {"timeFrame": "future", "startDate": "2026-10-19"}}]
+
+        def query_work_items(self, wiql, limit=0):
+            self.wiql.append(wiql)
+            return []
+
+        def get_team_area_path(self, team=""):
+            return "P\\T"
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append((type_name, fields))
+            return {"id": 7, "fields": fields}
+    c = C()
+    st = intake.resolve_story(c, "manual", None, "T", "next", lane="techdebt")
+    check("techdebt story kaynak etiketi olmadan aranır ve tek etiketle açılır",
+          "tempo-techdebt" in c.wiql[0] and "tempo-src-" not in c.wiql[0]
+          and c.created[0][1]["System.Title"] == "Teknik borç — S22"
+          and "tempo-techdebt" in c.created[0][1]["System.Tags"] and st["id"] == 7)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4147,7 +4189,8 @@ def main():
               test_repo_ctx_cross_thread,
               test_windowed_edit,
               test_quality_lean,
-              test_worktree_staging):
+              test_worktree_staging,
+              test_techdebt_lane):
         try:
             t()
         except Exception as e:
