@@ -1,6 +1,6 @@
 # Teknik Borç Alanı — Tasarım
 
-**Tarih:** 2026-10-19 · **Durum:** onaylandı (kullanıcı: "başla") · **Dal:** `feature/techdebt` (`feature/quality-intake` üstünde)
+**Tarih:** 2026-10-19 · **Durum:** aşama 0 + 1a uygulandı; 1b/2/3 bekliyor · **Dal:** `feature/techdebt` (`feature/quality-intake` üstünde)
 **Bağımsız inceleme:** Opus reviewer, "değişikliklerle onay" — değişikliklerin tamamı bu spec'e işlendi.
 
 ## Amaç
