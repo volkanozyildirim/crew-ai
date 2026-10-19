@@ -53,6 +53,12 @@ header {
 .logo h1 { display:inline-flex; align-items:center; font-size:19px; font-weight:700; letter-spacing:-0.03em; line-height:1; }
 .logo h1 svg { margin-left:1px; margin-top:3px; }
 .tabs { display:flex; gap:2px; margin-left:6px; }
+.tabs { flex-shrink:0; } .tab { white-space:nowrap; }
+.td-field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-dim); }
+.td-field input, .td-field textarea, .td-field select { background:var(--bg-card); border:1px solid var(--border); color:var(--text);
+  border-radius:8px; padding:7px 10px; font-size:13px; font-family:inherit; outline:none; width:100%; box-sizing:border-box; }
+.td-field textarea { resize:vertical; min-height:64px; }
+.td-field input:focus, .td-field textarea:focus, .td-field select:focus { border-color:var(--accent); }
 .tab {
   height:32px; padding:0 12px; border-radius:8px; display:inline-flex; align-items:center; gap:6px;
   font-size:13px; font-weight:500; color:var(--text-dim); background:none; border:none; cursor:pointer; font-family:inherit; white-space:nowrap;
@@ -63,7 +69,9 @@ header {
 .tab .badge:empty { display:none; }
 .header-right { display:flex; align-items:center; gap:8px; margin-left:auto; flex-wrap:nowrap; justify-content:flex-end; min-width:0; }
 .header-time { font-family:'Geist Mono',Menlo,monospace; font-size:12px; color:var(--text-dim); }
-@media(max-width:1700px){ .header-time{display:none} }
+@media(max-width:1900px){ .header-time{display:none} }
+/* Teknik borç sekmesiyle 7 sekme: sağ blok (sabit nowrap) sekmelerin üstüne taşmasın */
+@media(max-width:1850px){ .sprint-info{display:none} }
 @media(max-width:1400px){ .sprint-info{display:none} .tabs{margin-left:0} .tab{padding:0 9px} }
 .crumb { display:flex; align-items:center; gap:4px; }
 .sprint-select {
@@ -552,12 +560,12 @@ header {
       <div class="card" id="tdFormCard" style="display:none;flex-direction:column;overflow:hidden">
         <div class="card-head"><span class="h">Elle teknik borç gir</span><span style="flex:1"></span><span style="font-size:12px;color:var(--text-dim)">Sonraki sprintteki "Teknik borç" story'sinin altına Task açılır; kuyruğa listeden alınır.</span></div>
         <form id="tdForm" onsubmit="techdebtManual(event)" style="padding:10px 14px 14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
-          <label style="font-size:12px">Repo<input class="sprint-select" name="repo" required placeholder="webservice" style="width:100%"></label>
-          <label style="font-size:12px">Başlık<input class="sprint-select" name="title" required maxlength="120" style="width:100%"></label>
-          <label style="font-size:12px">SP<select class="sprint-select" name="sp" style="width:100%"><option>1</option><option selected>2</option><option>3</option><option value="5">5+ (insan işi)</option></select></label>
-          <label style="font-size:12px;grid-column:1/-1">Sorun<textarea class="sprint-select" name="problem" required rows="3" style="width:100%"></textarea></label>
-          <label style="font-size:12px;grid-column:1/-1">Beklenen davranış / kabul kriteri<textarea class="sprint-select" name="expected" required rows="3" style="width:100%"></textarea></label>
-          <label style="font-size:12px;grid-column:1/-1">Olası dosyalar (opsiyonel, satır başına bir yol)<textarea class="sprint-select" name="files" rows="2" placeholder="app/Model/V1/Order.php" style="width:100%"></textarea></label>
+          <label class="td-field">Repo<input name="repo" required placeholder="webservice"></label>
+          <label class="td-field">Başlık<input name="title" required maxlength="120"></label>
+          <label class="td-field">SP<select name="sp"><option>1</option><option selected>2</option><option>3</option><option value="5">5+ (insan işi)</option></select></label>
+          <label class="td-field" style="grid-column:1/-1">Sorun<textarea name="problem" required rows="3"></textarea></label>
+          <label class="td-field" style="grid-column:1/-1">Beklenen davranış / kabul kriteri<textarea name="expected" required rows="3"></textarea></label>
+          <label class="td-field" style="grid-column:1/-1">Olası dosyalar (opsiyonel, satır başına bir yol)<textarea name="files" rows="2" placeholder="app/Model/V1/Order.php"></textarea></label>
           <label style="font-size:12px;display:flex;align-items:center;gap:6px"><input type="checkbox" name="needs_human">İnsan işi (kuyruğa alınmasın)</label>
           <div style="display:flex;gap:8px;align-items:center"><button class="sm-btn small" type="submit">Task aç</button><span id="tdFormMsg" style="font-size:12px"></span></div>
         </form>
