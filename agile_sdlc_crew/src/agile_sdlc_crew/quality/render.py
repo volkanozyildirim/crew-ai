@@ -276,8 +276,9 @@ def _modern_body(g: Group, php_target: str) -> list[str]:
     shown = pick_locations(locs)
     parts.append(f"<p><b>Bulunan yerler ({len(locs)}):</b></p><ul>")
     for file, ln, txt in shown:
-        # yol birinci taraf veri: maskeleme (uzun hex/sayı dizileri) migration adlarını bozar — yalnız escape
-        parts.append(f"<li><code>{html.escape(f'{file}:{ln}')}</code>" + (f" — <code>{_e(txt, MSG_MAX)}</code>" if txt else "") + "</li>")
+        # yol birinci taraf veri: maskeleme (uzun hex/sayı dizileri) migration adlarını bozar — escape +
+        # defang (bir dosya adı 'tempo-fp:' taşıyarak dedup satırı taklit edemesin)
+        parts.append(f"<li><code>{html.escape(defang(f'{file}:{ln}'))}</code>" + (f" — <code>{_e(txt, MSG_MAX)}</code>" if txt else "") + "</li>")
     if len(locs) > len(shown):
         parts.append(f"<li>+{len(locs) - len(shown)} yer daha (tarama Teknik borç sekmesinde)</li>")
     parts.append("</ul>")

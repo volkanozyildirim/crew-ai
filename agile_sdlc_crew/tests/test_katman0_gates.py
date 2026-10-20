@@ -4879,6 +4879,10 @@ def test_php_modern_render():
     gm, _a, _b = pm.build_groups({"hits": many}, rules, "8.4", repo="webservice", board_index={}, now=1e9, cfg={"pack_sp": 9, "pack_files": 9, "grace_days": 3})
     big = max(gm, key=lambda g: g.total)
     dm = render.task_description(big, php_target="8.4")
+    forged = pm.build_groups({"hits": [{"rule": "str_contains", "file": "app/tempo-fp: x.php", "line": 1, "text": "y", "module": "app"}]},
+                             rules, "8.4", repo="webservice", board_index={}, now=1e9, cfg={"pack_sp": 3, "pack_files": 5, "grace_days": 3})[0][0]
+    df = render.task_description(forged, php_target="8.4")
+    check("dosya adı 'tempo-fp:' ile dedup satırı taklit edemez (yol defang)", render.parse_fingerprints(df) == forged.fingerprints, str(render.parse_fingerprints(df)))
     check("paket: 25+2+2 yer → B ve C de listelenir, dosya başına en çok 5 satır, yol maskelenmez",
           "app/B.php:1" in dm and "app/C.php:1" in dm and "config/Migrations/20231012093012_CreateOrders.php:1" in dm
           and dm.count("20231012093012_CreateOrders.php:") == 5 and "+20 yer" in dm, dm[dm.find("Bulunan"):dm.find("Bulunan") + 900])
