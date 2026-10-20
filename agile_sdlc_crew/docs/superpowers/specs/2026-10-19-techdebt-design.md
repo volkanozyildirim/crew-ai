@@ -1,6 +1,6 @@
 # Teknik Borç Alanı — Tasarım
 
-**Tarih:** 2026-10-19 · **Durum:** aşama 0 + 1a uygulandı; **aşama 2a (php_modern) tasarlandı, bekliyor**; 1b/2b/3 bekliyor · **Dal:** `feature/techdebt` (`feature/quality-intake` üstünde)
+**Tarih:** 2026-10-19 · **Durum:** aşama 0 + 1a uygulandı; **aşama 2a (php_modern) uygulandı**; 1b/2b/3 bekliyor · **Dal:** `feature/techdebt` (`feature/quality-intake` üstünde)
 **Bağımsız inceleme:** Opus reviewer, "değişikliklerle onay" — değişikliklerin tamamı bu spec'e işlendi.
 
 > **Güncelleme (2026-10-19):** Elle giriş formu ve `POST /api/techdebt/manual` kullanıcı kararıyla kaldırıldı. Madde Azure'da `tech-debt` etiketlenerek eklenir; aşağıdaki "Elle giriş" bölümleri tarihsel kayıttır.
@@ -120,7 +120,7 @@ açabilsin. Oturumda elle değil, sistem yapar.
 | `CREW_TECHDEBT_PATH_EXCLUDE` | str | yukarıdaki liste |
 | `CREW_TECHDEBT_SCAN_TTL_H` | int | 24 |
 | `CREW_TECHDEBT_MODERN_MAX_TAKE` | int | 8 |
-| `CREW_PHP_BIN` | str | `php` |
+| `CREW_PHP_BIN` | str (**yalnız .env**, dashboard knob'u değil; ad `php…` olmalı) | `php` |
 
 ### Uçlar
 
