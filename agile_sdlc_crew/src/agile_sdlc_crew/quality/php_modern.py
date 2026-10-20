@@ -362,6 +362,20 @@ def _knob(key: str, default):
     return default if v is None or v == "" else v
 
 
+_BIN = re.compile(r"^[\w./~-]+$")
+
+
+def _safe_bin(v: str) -> str:
+    """Boşluk / ; / & gibi karakterler reddedilir: subprocess liste argümanı kullanır ama
+    yine de 'php; rm' gibi bir değer başka bir yerde shell'e giderse diye."""
+    v = (v or "").strip()
+    if not v or not _BIN.match(v):
+        if v:
+            log.warning(f"⚠️ CREW_PHP_BIN geçersiz ({v!r}) — 'php' kullanılıyor")
+        return "php"
+    return v
+
+
 def load_cfg() -> dict:
     """intake.load_cfg + php_modern'e özel ayarlar."""
     import os
@@ -370,7 +384,7 @@ def load_cfg() -> dict:
     ex = str(_knob("CREW_TECHDEBT_PATH_EXCLUDE", DEFAULT_EXCLUDE))
     cfg.update({
         "php_exclude": [x.strip() for x in ex.split(",") if x.strip()],
-        "php_bin": str(_knob("CREW_PHP_BIN", "php")).strip() or "php",
+        "php_bin": _safe_bin(str(_knob("CREW_PHP_BIN", "php"))),
         "scan_ttl_h": int(_knob("CREW_TECHDEBT_SCAN_TTL_H", 24)),
         "max_take": int(_knob("CREW_TECHDEBT_MODERN_MAX_TAKE", 8)),
         "repos_dir": Path(os.environ.get("CREW_REPOS_DIR", "~/.crew_repos")).expanduser(),

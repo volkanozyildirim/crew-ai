@@ -5004,6 +5004,73 @@ def test_php_modern_take():
     check("load_cfg knob'ları okur", {"php_exclude", "php_bin", "scan_ttl_h", "max_take"} <= set(pm.load_cfg()))
 
 
+def test_php_modern_endpoints():
+    print("\n[PM6] php_modern — ayarlar ve uçlar")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import intake, php_modern as pm
+    from agile_sdlc_crew.quality.model import QualitySourceError
+    sb = pc._SCHEMA_BY_KEY
+    check("ayarlar kayıtlı ve varsayılanlar güvenli",
+          sb.get("CREW_TECHDEBT_PHP_MODERN", {}).get("default") is False
+          and sb.get("CREW_TECHDEBT_SCAN_TTL_H", {}).get("default") == 24
+          and sb.get("CREW_TECHDEBT_MODERN_MAX_TAKE", {}).get("default") == 8
+          and sb.get("CREW_PHP_BIN", {}).get("default") == "php"
+          and "vendor" in sb.get("CREW_TECHDEBT_PATH_EXCLUDE", {}).get("default", ""))
+    orig = pc.get
+
+    def on(**kw):
+        return lambda k: kw[k] if k in kw else orig(k)
+    pc.get = on(CREW_TECHDEBT=True, CREW_TECHDEBT_PHP_MODERN=False)
+    try:
+        tc = TestClient(server.app)
+        check("php_modern kapalıyken üç uç → 403",
+              tc.get("/api/techdebt/modern/repos").status_code == 403
+              and tc.get("/api/techdebt/modern/scan?repo=webservice").status_code == 403
+              and tc.post("/api/techdebt/modern/take", json={"repo": "webservice", "group_ids": ["a"]}).status_code == 403)
+    finally:
+        pc.get = orig
+    pc.get = on(CREW_TECHDEBT=False, CREW_TECHDEBT_PHP_MODERN=True)
+    try:
+        check("teknik borç ana anahtarı kapalıyken de 403", TestClient(server.app).get("/api/techdebt/modern/repos").status_code == 403)
+    finally:
+        pc.get = orig
+    pc.get = on(CREW_TECHDEBT=True, CREW_TECHDEBT_PHP_MODERN=True, CREW_PHP_BIN="php; rm -rf /")
+    o_scan, o_take, o_repos, o_worker = pm.scan, pm.take, pm.repos, server._ensure_worker
+    worker = []
+    try:
+        tc = TestClient(server.app)
+        check("repo boş → 400", tc.get("/api/techdebt/modern/scan?repo=").status_code == 400)
+        check("group_ids boş → 400", tc.post("/api/techdebt/modern/take", json={"repo": "webservice", "group_ids": []}).status_code == 400)
+
+        def raiser(exc):
+            def f(*a, **k):
+                raise exc
+            return f
+        pm.scan = raiser(QualitySourceError("php yok"))
+        check("tarayıcı hatası → 502", tc.get("/api/techdebt/modern/scan?repo=webservice").status_code == 502)
+        pm.scan = raiser(ValueError("repo yok"))
+        check("geçersiz repo → 400", tc.get("/api/techdebt/modern/scan?repo=x").status_code == 400)
+        pm.take = raiser(intake.Busy("meşgul"))
+        check("kilit → 409", tc.post("/api/techdebt/modern/take", json={"repo": "webservice", "group_ids": ["a"]}).status_code == 409)
+        pm.take = lambda c, repo, ids, **k: {"repo": repo, "story": {"id": 1, "url": "u", "created": True},
+                                             "tasks": [{"id": 2, "job_id": 9}], "human_tasks": [], "skipped": []}
+        server._ensure_worker = lambda: worker.append(1)
+        r = tc.post("/api/techdebt/modern/take", json={"repo": "webservice", "group_ids": ["a"], "team": "T"})
+        check("başarılı alım → 201 + worker tetiklenir", r.status_code == 201 and worker == [1], str(r.status_code))
+        pm.scan = lambda c, repo, **k: {"repo": repo, "auto": [], "human": [], "force": k.get("force")}
+        r2 = tc.get("/api/techdebt/modern/scan?repo=webservice&force=1")
+        check("scan force parametresi geçer", r2.status_code == 200 and r2.json()["force"] is True)
+        pm.repos = lambda c, **k: {"items": [{"repo": "webservice", "version": "8.4"}]}
+        r3 = tc.get("/api/techdebt/modern/repos")
+        check("repos 200 + enabled", r3.status_code == 200 and r3.json()["enabled"] is True and r3.json()["items"])
+        check("CREW_PHP_BIN komut enjeksiyonuna kapalı (boşluk/; → varsayılan php)", pm.load_cfg()["php_bin"] == "php")
+    finally:
+        pm.scan, pm.take, pm.repos, server._ensure_worker = o_scan, o_take, o_repos, o_worker
+        pc.get = orig
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -5078,7 +5145,8 @@ def main():
               test_php_modern_scan,
               test_php_modern_groups,
               test_php_modern_render,
-              test_php_modern_take):
+              test_php_modern_take,
+              test_php_modern_endpoints):
         try:
             t()
         except Exception as e:

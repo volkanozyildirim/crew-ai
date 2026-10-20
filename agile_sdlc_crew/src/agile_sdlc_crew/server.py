@@ -147,6 +147,12 @@ class TechdebtQueueRequest(BaseModel):
     team: str = ""
 
 
+class TechdebtModernTakeRequest(BaseModel):
+    repo: str
+    group_ids: list[str] = []
+    team: str = ""
+
+
 class QualityTakeRequest(BaseModel):
     source: str
     sp: int = 10
@@ -2006,6 +2012,66 @@ async def techdebt_queue(req: TechdebtQueueRequest):
         if res.get("queued"):
             _ensure_worker()
         return JSONResponse(res, status_code=202 if res.get("queued") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+def _modern_off():
+    from agile_sdlc_crew import pipeline_config as _pc
+    bad = _techdebt_off()
+    if bad:
+        return bad
+    if not _pc.get("CREW_TECHDEBT_PHP_MODERN"):
+        return JSONResponse({"error": "PHP modernleştirme kapalı (CREW_TECHDEBT_PHP_MODERN)"}, status_code=403)
+    return None
+
+
+@app.get("/api/techdebt/modern/repos")
+async def techdebt_modern_repos():
+    """Yerel PHP repoları + FLODevOps imajından hedef PHP sürümü (yazma yok)."""
+    from agile_sdlc_crew.quality import php_modern as _pm
+    bad = _modern_off()
+    if bad:
+        return bad
+    try:
+        res = await asyncio.to_thread(_pm.repos, AzureDevOpsClient())
+        return JSONResponse({"enabled": True, **res})
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.get("/api/techdebt/modern/scan")
+async def techdebt_modern_scan(repo: str = "", team: str = "", force: bool = False):
+    """Repoyu tara (önbellekli): kural özeti + otomatik / insan grupları + dedup. Yazma yok."""
+    from agile_sdlc_crew.quality import php_modern as _pm
+    bad = _modern_off()
+    if bad:
+        return bad
+    if not repo.strip():
+        return JSONResponse({"error": "repo seçin"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_pm.scan, AzureDevOpsClient(), repo.strip(), team=team, force=bool(force))
+        return JSONResponse(res)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.post("/api/techdebt/modern/take")
+async def techdebt_modern_take(req: TechdebtModernTakeRequest):
+    """Seçilen grupları 'Teknik borç — <sprint>' story'si altında Task olarak aç; mekanik olanları kuyruğa al."""
+    from agile_sdlc_crew.quality import php_modern as _pm
+    bad = _modern_off()
+    if bad:
+        return bad
+    if not req.repo.strip():
+        return JSONResponse({"error": "repo seçin"}, status_code=400)
+    if not req.group_ids:
+        return JSONResponse({"error": "Seçili öneri yok"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_pm.take, AzureDevOpsClient(), req.repo.strip(), req.group_ids, team=req.team)
+        if any(t.get("job_id") for t in res.get("tasks") or []):
+            _ensure_worker()
+        return JSONResponse(res, status_code=201 if res.get("story") else 200)
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
 
