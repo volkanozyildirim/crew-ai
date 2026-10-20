@@ -32,3 +32,5 @@ sprint_reports/
 
 # Kalite alımı: FLODevOps'tan kurulan NR → repo önbelleği (her 24 saatte yeniden kurulur)
 src/agile_sdlc_crew/config/quality_app_map.yaml
+src/agile_sdlc_crew/config/quality_php_targets.yaml
+src/agile_sdlc_crew/config/quality_php_modern_cache/

@@ -4635,6 +4635,68 @@ def test_completion_comment_integrity():
           "uat_skipped=" in inspect.getsource(_flow.AgileSDLCFlow.step11_completion_report))
 
 
+# ── Teknik borç aşama 2a: PHP modernleştirme ─────────────────────────────
+
+def test_php_modern_catalog():
+    print("\n[PM1] php_modern — katalog ve hedef PHP sürümü")
+    from agile_sdlc_crew.quality import php_modern as pm
+    rules = pm.load_rules()
+    keys = {r.key for r in rules}
+    check("katalog yüklendi (≥15 kural)", len(rules) >= 15, str(len(rules)))
+    req = ("key", "since", "kind", "title", "summary", "advantages", "risks", "before", "after", "ref", "unit")
+    bad = [r.key for r in rules if any(not getattr(r, f) for f in req)]
+    check("her kuralda zorunlu alanlar dolu", not bad, str(bad))
+    check("kind geçerli", all(r.kind in ("deprecation", "mechanical", "structural", "report") for r in rules))
+    check("unit geçerli", all(r.unit in ("file", "module") for r in rules))
+    check("since (major, minor)", all(isinstance(r.since, tuple) and len(r.since) == 2 for r in rules))
+    check("structural/report kurallar otonom değil", all(not r.auto for r in rules if r.kind in ("structural", "report")))
+    check("deprecation/mechanical kurallar otonom", all(r.auto for r in rules if r.kind in ("deprecation", "mechanical")))
+    check("beklenen kurallar var", {"implicit_nullable", "str_contains", "match", "enum", "typed_properties",
+                                    "property_hooks", "dto_from_array", "strict_types"} <= keys, str(keys))
+    check("ağırlık: deprecation > structural > mechanical > report",
+          pm.WEIGHT["deprecation"] > pm.WEIGHT["structural"] > pm.WEIGHT["mechanical"] > pm.WEIGHT["report"] == 0)
+    k82 = {r.key for r in pm.applicable(rules, "8.2")}
+    k84 = {r.key for r in pm.applicable(rules, "8.4")}
+    check("8.2 hedefe property hooks / implicit_nullable önerilmez; 8.4'e önerilir",
+          "property_hooks" not in k82 and "implicit_nullable" not in k82
+          and {"property_hooks", "implicit_nullable", "enum", "str_contains"} <= k84)
+    check("7.4 hedefe yalnız ≤7.4 kurallar", all(r.since <= (7, 4) for r in pm.applicable(rules, "7.4"))
+          and "null_coalesce" in {r.key for r in pm.applicable(rules, "7.4")})
+    check("imaj adından sürüm", pm.parse_php_image("europe-west1-docker.pkg.dev/flo-global/prod-ar/php-8-4:1.0") == (8, 4)
+          and pm.parse_php_image("cr.yandex/crpsbatlmbdqnhk3392d/php-7-4:1.0") == (7, 4)
+          and pm.parse_php_image("alpine:3.19") is None and pm.parse_php_image("php:8.3-fpm") == (8, 3))
+
+    class C:
+        def __init__(self, files):
+            self.files = files
+
+        def get_file_content(self, repo, path, branch="", project=""):
+            if path not in self.files:
+                import requests
+                e = requests.HTTPError("404"); e.response = SimpleNamespace(status_code=404); raise e
+            return self.files[path]
+    amap = {"[Prod] A": {"repo": "webservice", "project": "EcomBackend", "src": "anatolia/build/webservice"},
+            "[Prod] B": {"repo": "webservice", "project": "EcomBackend", "src": "russia/build/websites"},
+            "[Prod] C": {"repo": "alfred", "project": "EcomBackend", "src": "anatolia/build/alfred"}}
+    c = C({"/build/webservice/Dockerfile": "FROM x/php-8-4:1.0\nRUN a", "/build/websites/Dockerfile": "FROM y/php-7-4:1.0",
+           "/build/alfred/Dockerfile": "FROM x/php-8-2:1.0"})
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        t = pm.target_version(c, "webservice", app_map_cache=amap, repo_root=root, cache_path=root / "t.yaml")
+        check("iki imaj (8.4, 7.4) → en düşük 7.4", t["version"] == "7.4" and t["source"] == "dockerfile"
+              and sorted(t["images"]) == ["x/php-8-4:1.0", "y/php-7-4:1.0"], str(t))
+        (root / "composer.json").write_text('{"require": {"php": "^8.1 || ^8.2"}}', encoding="utf-8")
+        t2 = pm.target_version(c, "pigeon", app_map_cache=amap, repo_root=root, cache_path=root / "t.yaml")
+        check("imaj yok → composer.json alt sınırı 8.1", t2["version"] == "8.1" and t2["source"] == "composer", str(t2))
+        t3 = pm.target_version(c, "sorting", app_map_cache=amap, repo_root=root / "yok", cache_path=root / "t.yaml")
+        check("ne imaj ne composer → None", t3["version"] is None and t3["source"] is None, str(t3))
+        c.files.clear()
+        t4 = pm.target_version(c, "webservice", app_map_cache=amap, repo_root=root, cache_path=root / "t.yaml")
+        check("önbellek: ikinci çağrı ağa gitmeden aynı sonucu verir", t4["version"] == "7.4", str(t4))
+        t5 = pm.target_version(c, "webservice", app_map_cache=amap, repo_root=root, cache_path=root / "t.yaml", max_age_h=0)
+        check("önbellek süresi dolunca yeniden okur (imaj 404 → composer'a düşer)", t5["source"] == "composer", str(t5))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4704,7 +4766,8 @@ def main():
               test_quality_estimate,
               test_no_env_dependent_tests,
               test_pr_comment_emoticons,
-              test_completion_comment_integrity):
+              test_completion_comment_integrity,
+              test_php_modern_catalog):
         try:
             t()
         except Exception as e:
