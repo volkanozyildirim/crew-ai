@@ -37,7 +37,7 @@ class Legacy
         if (strpos($uri, '/api/') !== false) { // @expect str_contains
             $uri = '';
         }
-        if (false === stripos($uri, 'x')) { // @expect str_contains
+        if (false === stripos($uri, 'x')) { // stripos: harf duyarsız, str_contains değil
             $uri = '';
         }
         if (substr($sku, 0, 4) === 'FLO-') { // @expect str_starts_with
@@ -48,7 +48,7 @@ class Legacy
         }
         $city = isset($addr['city']) ? $addr['city'] : null; // @expect null_coalesce
         $other = isset($addr['x']) ? $addr['y'] : null;
-        $name = $order->getCustomer() ? $order->getCustomer()->getName() : null; // @expect nullsafe
+        $name = $order->getCustomer() ? $order->getCustomer()->getName() : null; // truthiness: false dönebilir, önerilmez
         $mail = $order->getCustomer() !== null ? $order->getCustomer()->getMail() : null; // @expect nullsafe
         $tel = !is_null($order->getCustomer()) ? $order->getCustomer()->getTel() : null; // @expect nullsafe
         $flag = $order ? $order->flag : null;

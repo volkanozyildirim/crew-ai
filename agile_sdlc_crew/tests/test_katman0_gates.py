@@ -4720,21 +4720,24 @@ def test_php_modern_scan():
         rel = f.relative_to(root).as_posix()
         if rel.startswith("vendor/"):
             continue
-        for i, ln in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        for i, ln in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             for m in re.finditer(r"@expect (\w+)", ln):
                 want.add((rel, i, m.group(1)))
     missing = sorted(want - got)
     extra = sorted(got - want)
     check("beklenen her bulgu yerinde (dosya, satır, kural)", not missing, str(missing))
     check("fazladan bulgu yok (string/heredoc/yorum içi kalıplar, modern.php, vendor)", not extra, str(extra))
-    check("tarama sayacı: vendor hariç 5 dosya", res["files"] == 5, str(res["files"]))
+    check("tarama sayacı: vendor hariç 9 dosya (bozuk ve Latin-5 dosya dahil, tarayıcı takılmaz)", res["files"] == 9, str(res["files"]))
+    check("bulgu metni tarayıcı çıkışında maskelenir (önbelleğe ham secret yazılmaz)",
+          any("Secret123" not in h["text"] and "pw" in h["text"] for h in hits if h["file"] == "app/Lib/edge.php" and h["rule"] == "null_coalesce")
+          and not any("Secret123" in h["text"] for h in hits))
     check("bulgu satır metni taşır", all(h.get("text") for h in hits))
     check("modül: kaynak kökünden 2 dizin", {h["module"] for h in hits} <= {"app/Model", "app/Lib"}, str({h["module"] for h in hits}))
     ad = res["adoption"]
-    check("benimseme sayaçları", ad["enum"] == 1 and ad["match"] == 1 and ad["nullsafe"] == 1 and ad["attribute"] == 1
-          and ad["readonly"] == 1 and ad["strict_types_files"] == 1 and ad["untyped_props"] == 4 and ad["typed_props"] >= 4, str(ad))
+    check("benimseme sayaçları", ad["enum"] == 1 and ad["match"] == 1 and ad["nullsafe"] == 1 and ad["attribute"] == 2
+          and ad["readonly"] == 1 and ad["strict_types_files"] == 1 and ad["untyped_props"] == 7 and ad["typed_props"] >= 4, str(ad))
     res2 = pm.scan_repo(root, exclude=[], php_bin="php")
-    check("hariç tutma kapalıyken vendor da taranır", res2["files"] == 6 and any(h["file"].startswith("vendor/") for h in res2["hits"]))
+    check("hariç tutma kapalıyken vendor da taranır", res2["files"] == 10 and any(h["file"].startswith("vendor/") for h in res2["hits"]))
     try:
         pm.scan_repo(root, exclude=[], php_bin="/nonexistent/php")
         check("php yoksa QualitySourceError", False)
@@ -4827,6 +4830,9 @@ def test_php_modern_groups():
         pm.scan_cached("webservice", Path(td), cache_dir=cdir, scan_fn=lambda root, **kw: fake_scan(root, _sha="s2", **kw),
                        head_sha_fn=lambda r: "s2", exclude=[], php_bin="php", ttl_h=0)
         check("TTL dolunca yeniden tarar", len(calls) == 4)
+        pm.scan_cached("webservice", Path(td), cache_dir=cdir, scan_fn=lambda root, **kw: fake_scan(root, _sha="s2", **kw),
+                       head_sha_fn=lambda r: "s2", exclude=["vendor"], php_bin="php", ttl_h=24)
+        check("hariç listesi değişince yeniden tarar (önbellek anahtarı)", len(calls) == 5)
         check("önbellek dosyası repo adıyla, yol kaçışı yok", (cdir / "webservice.json").exists())
         try:
             pm.scan_cached("../x", Path(td), cache_dir=cdir, scan_fn=fake_scan, head_sha_fn=lambda r: "s", exclude=[], php_bin="php")
@@ -4866,7 +4872,16 @@ def test_php_modern_render():
     check("mekanik kabul kriteri", "eski yapı kalmaz" in ac and "davranış" in ac, ac)
     ds = render.task_description(struct, php_target="8.4")
     check("yapısal: 'Neden insan' + tasarım kararı", "Neden insan:</b> Tasarım kararı" in ds)
-    check("yapısal: 25 yer → 20 listelenir + '+5' notu", ds.count("app/Model/M") == 20 and "+5" in ds, ds[-600:])
+    check("yapısal: 25 dosya → her dosya en az bir kez listelenir (parmak izi = dosya; listelenmeyen dosya 'yapıldı' sayılmasın)",
+          ds.count("app/Model/M") == 25, str(ds.count("app/Model/M")))
+    many = [{"rule": "str_contains", "file": "config/Migrations/20231012093012_CreateOrders.php", "line": i, "text": "x", "module": "config/Migrations"} for i in range(1, 26)]
+    many += [{"rule": "str_contains", "file": "app/B.php", "line": 1, "text": "y", "module": "app"}, {"rule": "str_contains", "file": "app/C.php", "line": 1, "text": "z", "module": "app"}]
+    gm, _a, _b = pm.build_groups({"hits": many}, rules, "8.4", repo="webservice", board_index={}, now=1e9, cfg={"pack_sp": 9, "pack_files": 9, "grace_days": 3})
+    big = max(gm, key=lambda g: g.total)
+    dm = render.task_description(big, php_target="8.4")
+    check("paket: 25+2+2 yer → B ve C de listelenir, dosya başına en çok 5 satır, yol maskelenmez",
+          "app/B.php:1" in dm and "app/C.php:1" in dm and "config/Migrations/20231012093012_CreateOrders.php:1" in dm
+          and dm.count("20231012093012_CreateOrders.php:") == 5 and "+20 yer" in dm, dm[dm.find("Bulunan"):dm.find("Bulunan") + 900])
     es = " ".join(render.expected_behavior(struct))
     check("yapısal beklenen davranış: insan kapsam belirler, etiket kaldırılınca kuyruğa", "insan" in es and "needs-human" in es, es)
     check("AC alanı dolu", "<li>" in render.acceptance_block(struct))
@@ -4950,6 +4965,9 @@ def test_php_modern_take():
         check("deprecation önce sıralanır", sc["auto"][0]["rule"] == "utf8_encode")
         sc2 = pm.scan(c, "webservice", team="T", **pm_kw)
         check("ikinci tarama önbellekten (aynı sha)", len(scans) == 1 and sc2["cached"] is True)
+        sc_up = pm.scan(c, "WEBSERVICE", team="T", **pm_kw)
+        check("repo adı kanonik (dizin adı): WEBSERVICE → webservice, parmak izi aynı",
+              sc_up["repo"] == "webservice" and sc_up["auto"][0]["fingerprints"] == sc["auto"][0]["fingerprints"], str(sc_up["repo"]))
         gids = [r["gid"] for r in sc["auto"]] + [r["gid"] for r in sc["human"]]
         # kilit
         intake._LOCK.acquire()
@@ -5104,6 +5122,10 @@ def test_php_modern_ui():
     check("sürümü bilinmeyen repo seçilemez", "disabled" in js and "hedef sürüm bilinmiyor" in js)
     check("tema renkleri (sabit renk yok)", "var(--text" in js and not re.search(r"#[0-9a-fA-F]{6}\b", js), "sabit renk var")
     check("sekme açılınca modern repolar yüklenir", "loadModernRepos()" in html[html.find("name==='techdebt'"):html.find("name==='techdebt'") + 200])
+    tk = js[js.find("async function modernTake"):]
+    check("alım sonucu silinmez, yeniden tarama beklenir (butonlar erken açılmaz)", "await modernScan(false,true)" in tk and "keepMsg" in js)
+    check("tekrarlayan (recurring) satır da seçilebilir", "t.recurring_of?'':" not in js)
+    check("tarayıcı dosya hataları gösterilir", "errors" in js[js.find("function renderModern"):js.find("async function modernTake")])
 
 
 def main():

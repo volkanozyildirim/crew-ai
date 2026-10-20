@@ -213,7 +213,8 @@ def _sonar_body(g: Group, sonar_url: str) -> list[str]:
 
 # ── PHP modernleştirme ───────────────────────────────────────────────────
 
-LOC_MAX = 20
+LOC_MAX = 30        # listelenen toplam yer
+LOC_PER_FILE = 5    # dosya başına en çok satır — her dosya en az bir kez görünür (parmak izi dosya başına)
 
 
 def _modern_rule(g: Group):
@@ -235,6 +236,28 @@ def _modern_locations(g: Group) -> list[tuple[str, int, str]]:
     return out
 
 
+def pick_locations(locs: list[tuple[str, int, str]], per_file: int = LOC_PER_FILE, total: int = LOC_MAX) -> list:
+    """Her dosyadan en çok per_file satır, dosya sırası korunur; sonra kalan kota ile tamamlanır.
+    Paketin her dosyası listelenir — listelenmeyen dosya Task'ta 'yapıldı' sayılıp dedup'ta kilitlenmesin."""
+    by_file: dict[str, list] = {}
+    for loc in locs:
+        by_file.setdefault(loc[0], []).append(loc)
+    files = list(by_file)
+    budget = max(total, len(files))
+    out: list = []
+    for f in files:
+        out += by_file[f][:per_file]
+    if len(out) > budget:
+        # önce her dosyadan 1, sonra sırayla doldur
+        out = [by_file[f][0] for f in files]
+        for f in files:
+            for loc in by_file[f][1:per_file]:
+                if len(out) >= budget:
+                    break
+                out.append(loc)
+    return out
+
+
 def _modern_body(g: Group, php_target: str) -> list[str]:
     r = _modern_rule(g)
     parts: list[str] = []
@@ -250,11 +273,13 @@ def _modern_body(g: Group, php_target: str) -> list[str]:
         parts.append("<p><b>Riskler:</b></p><ul>" + "".join(f"<li>{_e(x)}</li>" for x in r.risks) + "</ul>")
         parts.append(f"<p><b>Önce:</b></p><pre>{_e(r.before)}</pre><p><b>Sonra:</b></p><pre>{_e(r.after)}</pre>")
     locs = _modern_locations(g)
+    shown = pick_locations(locs)
     parts.append(f"<p><b>Bulunan yerler ({len(locs)}):</b></p><ul>")
-    for file, ln, txt in locs[:LOC_MAX]:
-        parts.append(f"<li><code>{_e(f'{file}:{ln}')}</code>" + (f" — <code>{_e(txt, MSG_MAX)}</code>" if txt else "") + "</li>")
-    if len(locs) > LOC_MAX:
-        parts.append(f"<li>+{len(locs) - LOC_MAX} yer daha (tarama Teknik borç sekmesinde)</li>")
+    for file, ln, txt in shown:
+        # yol birinci taraf veri: maskeleme (uzun hex/sayı dizileri) migration adlarını bozar — yalnız escape
+        parts.append(f"<li><code>{html.escape(f'{file}:{ln}')}</code>" + (f" — <code>{_e(txt, MSG_MAX)}</code>" if txt else "") + "</li>")
+    if len(locs) > len(shown):
+        parts.append(f"<li>+{len(locs) - len(shown)} yer daha (tarama Teknik borç sekmesinde)</li>")
     parts.append("</ul>")
     if r is not None and r.ref:
         parts.append(f'<p><b>Kaynak:</b> <a href="{html.escape(r.ref)}">{html.escape(r.ref)}</a></p>')

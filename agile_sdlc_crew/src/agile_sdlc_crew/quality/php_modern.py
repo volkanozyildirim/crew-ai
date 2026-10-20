@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from collections import Counter
 import logging
 import re
@@ -157,7 +158,7 @@ def _composer_version(repo_root: Path | None) -> tuple[int, int] | None:
 
 
 def target_version(client, repo: str, *, app_map_cache: dict | None = None, repo_root: Path | None = None,
-                   cache_path: Path = TARGETS_CACHE_PATH, max_age_h: int = 24) -> dict:
+                   cache_path: Path = TARGETS_CACHE_PATH, max_age_h: int = 24, write_cache: bool = True) -> dict:
     """{"version": "8.4"|None, "images": [...], "source": "dockerfile"|"composer"|None}.
     Birden çok imaj → EN DÜŞÜK sürüm (yüksek alınırsa 7.4 imajına match önerilir, kırılır)."""
     cached = _read_yaml(cache_path)
@@ -173,11 +174,12 @@ def target_version(client, repo: str, *, app_map_cache: dict | None = None, repo
         cv = _composer_version(repo_root)
         res = ({"version": f"{cv[0]}.{cv[1]}", "images": [], "source": "composer"} if cv
                else {"version": None, "images": [], "source": None})
-    try:
-        cached.setdefault("repos", {})[repo] = {**res, "built_at": time.time()}
-        cache_path.write_text(yaml.safe_dump(cached, allow_unicode=True), encoding="utf-8")
-    except OSError as e:
-        log.warning(f"⚠️ php_modern: hedef sürüm önbelleği yazılamadı: {e}")
+    if write_cache:
+        try:
+            cached.setdefault("repos", {})[repo] = {**res, "built_at": time.time()}
+            cache_path.write_text(yaml.safe_dump(cached, allow_unicode=True), encoding="utf-8")
+        except OSError as e:
+            log.warning(f"⚠️ php_modern: hedef sürüm önbelleği yazılamadı: {e}")
     return res
 
 
@@ -225,10 +227,14 @@ def scan_repo(repo_root: Path, *, exclude: list[str] | None = None, php_bin: str
         data = json.loads(r.stdout)
     except ValueError as e:
         raise QualitySourceError(f"Tarayıcı çıktısı okunamadı: {r.stdout[:200]!r}") from e
+    from agile_sdlc_crew.quality.render import mask_secrets
     hits = []
     for h in data.get("hits") or []:
         h = dict(h)
         h["module"] = module_of(h.get("file", ""))
+        # Satır metni kimlik doğrulamasız /scan yanıtına ve önbelleğe gider: `private $apiKey = '…'`
+        # gibi satırlar tipsiz property kuralına takılır → daha burada maskelenir.
+        h["text"] = mask_secrets(str(h.get("text") or ""))[:200]
         hits.append(h)
     return {"files": int(data.get("files") or 0), "sha": _head_sha(root), "hits": hits,
             "adoption": data.get("adoption") or {}, "errors": data.get("errors") or []}
@@ -321,6 +327,19 @@ CACHE_DIR = _CONFIG_DIR / "quality_php_modern_cache"
 _REPO_NAME = re.compile(r"^[A-Za-z0-9][\w.-]*$")
 
 
+def _inputs_key(exclude) -> str:
+    """Hariç listesi ya da tarayıcı dosyası değişince önbellek geçersiz (aksi halde 24 saat
+    eski hariç listesiyle Task açılır)."""
+    import hashlib
+    try:
+        st = SCAN_PHP.stat()
+        scanner = f"{st.st_size}:{int(st.st_mtime)}"
+    except OSError:
+        scanner = "?"
+    ex = ",".join(sorted(x.strip() for x in (exclude if exclude is not None else DEFAULT_EXCLUDE.split(",")) if x.strip()))
+    return hashlib.sha1(f"{ex}|{scanner}".encode("utf-8")).hexdigest()[:10]
+
+
 def scan_cached(repo: str, repo_root: Path, *, cache_dir: Path = CACHE_DIR, scan_fn=None, head_sha_fn=None,
                 exclude: list[str] | None = None, php_bin: str = "php", ttl_h: int = 24, force: bool = False) -> dict:
     """Aynı HEAD sha + aynı katalog sürümü + TTL içinde → önbellek; aksi halde yeniden tarama.
@@ -329,7 +348,7 @@ def scan_cached(repo: str, repo_root: Path, *, cache_dir: Path = CACHE_DIR, scan
         raise ValueError(f"Geçersiz repo adı: {repo!r}")
     scan_fn = scan_fn or scan_repo
     head_sha_fn = head_sha_fn or _head_sha
-    rv = rules_version()
+    rv = rules_version() + "|" + _inputs_key(exclude)
     path = Path(cache_dir) / f"{repo}.json"
     sha = head_sha_fn(repo_root)
     if not force:
@@ -406,18 +425,26 @@ def _root(cfg: dict, repo: str, deps) -> Path:
     if not _REPO_NAME.match(repo or "") or ".." in repo or not deps.repo_ok(repo):
         raise ValueError(f"Repo yerelde yok ya da adı geçersiz: {repo!r}")
     base = Path(cfg["repos_dir"])
-    if (base / repo).is_dir():
-        return base / repo
+    # Dizin adı kanonik ad: macOS'ta (base / "WEBSERVICE").is_dir() da True döner, bu yüzden
+    # gerçek dizin adı listeden alınır (parmak izi her zaman aynı adla üretilsin).
     low = repo.lower()
-    for p in base.iterdir():
-        if p.is_dir() and p.name.lower() == low:
+    match = None
+    for p in base.iterdir() if base.is_dir() else []:
+        if not p.is_dir():
+            continue
+        if p.name == repo:
             return p
+        if match is None and p.name.lower() == low:
+            match = p
+    if match is not None:
+        return match
     raise ValueError(f"Repo yerelde yok: {repo!r}")
 
 
-def _target(client, repo: str, root: Path, cfg: dict, app_map_cache: dict | None) -> dict:
+def _target(client, repo: str, root: Path, cfg: dict, app_map_cache: dict | None, *, write_cache: bool = True) -> dict:
     return target_version(client, repo, app_map_cache=app_map_cache, repo_root=root,
-                          cache_path=Path(cfg["targets_cache"]), max_age_h=int(cfg.get("scan_ttl_h", 24)))
+                          cache_path=Path(cfg["targets_cache"]), max_age_h=int(cfg.get("scan_ttl_h", 24)),
+                          write_cache=write_cache)
 
 
 # ── Sekme akışı: repolar → tarama → iş açma ──────────────────────────────
@@ -451,6 +478,7 @@ def repos(client, *, deps=None, app_map_cache: dict | None = None, **_ignored) -
     items = []
     if base.is_dir():
         amap = app_map_cache
+        amap_failed = False
         for p in sorted(base.iterdir(), key=lambda x: x.name.lower()):
             if not p.is_dir() or not (p / "composer.json").is_file():
                 continue
@@ -459,14 +487,23 @@ def repos(client, *, deps=None, app_map_cache: dict | None = None, **_ignored) -
                     amap = app_map.load_map(client)
                 except Exception as e:  # noqa: BLE001
                     log.warning(f"⚠️ php_modern: FLODevOps eşlemesi okunamadı, composer.json'a düşülüyor: {e}")
-                    amap = {}
+                    amap, amap_failed = {}, True  # geçici kesinti 24 saatlik yanlış hedef olarak kalmasın
             try:
-                tv = _target(client, p.name, p, cfg, amap)
+                tv = _target(client, p.name, p, cfg, amap, write_cache=not amap_failed)
             except Exception as e:  # noqa: BLE001
                 tv = {"version": None, "images": [], "source": None, "error": str(e)}
             items.append({"repo": p.name, "version": tv.get("version"), "source": tv.get("source"),
                           "images": tv.get("images") or [], "scannable": bool(tv.get("version"))})
     return {"items": items}
+
+
+_SCAN_LOCKS: dict[str, threading.Lock] = {}
+_SCAN_LOCKS_GUARD = threading.Lock()
+
+
+def _scan_lock(repo: str) -> threading.Lock:
+    with _SCAN_LOCKS_GUARD:
+        return _SCAN_LOCKS.setdefault(repo, threading.Lock())
 
 
 def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, scan_fn=None, head_sha_fn=None,
@@ -475,10 +512,12 @@ def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, s
     deps = deps or default_deps()
     cfg = deps.cfg()
     root = _root(cfg, repo, deps)
+    repo = root.name  # kanonik: WEBSERVICE ve webservice aynı parmak izini üretsin
     tv = _target(client, repo, root, cfg, app_map_cache)
-    res = scan_cached(repo, root, cache_dir=Path(cfg["scan_cache"]), scan_fn=scan_fn, head_sha_fn=head_sha_fn,
-                      exclude=cfg.get("php_exclude"), php_bin=cfg.get("php_bin", "php"),
-                      ttl_h=int(cfg.get("scan_ttl_h", 24)), force=force)
+    with _scan_lock(repo):  # aynı repo için paralel 300 sn'lik php süreçleri açılmasın
+        res = scan_cached(repo, root, cache_dir=Path(cfg["scan_cache"]), scan_fn=scan_fn, head_sha_fn=head_sha_fn,
+                          exclude=cfg.get("php_exclude"), php_bin=cfg.get("php_bin", "php"),
+                          ttl_h=int(cfg.get("scan_ttl_h", 24)), force=force)
     rules = load_rules()
     rules_by_key = {r.key: r for r in rules}
     groups, skipped, summary = build_groups(res, rules, tv["version"], repo=repo, board_index=deps.board(client),
@@ -513,12 +552,14 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, 
     try:
         cfg = deps.cfg()
         root = _root(cfg, repo, deps)
+        repo = root.name
         tv = _target(client, repo, root, cfg, app_map_cache)
         if not tv["version"]:
             raise ValueError("Hedef PHP sürümü bilinmiyor — bu repo için öneri açılamaz")
-        res = scan_cached(repo, root, cache_dir=Path(cfg["scan_cache"]), scan_fn=scan_fn, head_sha_fn=head_sha_fn,
-                          exclude=cfg.get("php_exclude"), php_bin=cfg.get("php_bin", "php"),
-                          ttl_h=int(cfg.get("scan_ttl_h", 24)))
+        with _scan_lock(repo):
+            res = scan_cached(repo, root, cache_dir=Path(cfg["scan_cache"]), scan_fn=scan_fn, head_sha_fn=head_sha_fn,
+                              exclude=cfg.get("php_exclude"), php_bin=cfg.get("php_bin", "php"),
+                              ttl_h=int(cfg.get("scan_ttl_h", 24)))
         rules = load_rules()
         rules_by_key = {r.key: r for r in rules}
         groups, _skipped, _summary = build_groups(res, rules, tv["version"], repo=repo, board_index=deps.board(client),

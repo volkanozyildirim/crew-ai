@@ -1560,11 +1560,11 @@ function _tdmKindChip(k){
   const m={deprecation:['Deprecation','var(--warning)','var(--human-soft)'],mechanical:['Mekanik','var(--accent)','var(--accent-soft)'],structural:['Yapısal','var(--warning)','var(--human-soft)'],report:['Rapor','var(--text-dim)','var(--bg)']}[k]||[k,'var(--text-dim)','var(--bg)'];
   return `<span class="chip" style="background:${m[2]};color:${m[1]}">${m[0]}</span>`;
 }
-async function modernScan(force){
+async function modernScan(force,keepMsg){
   const repo=document.getElementById('tdmRepo').value;const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
   if(!repo){msg.textContent='Repo seçin.';return}
   const team=_tdTeam();
-  box.innerHTML='<div class="board-empty" style="padding:12px 0">Taranıyor…</div>';msg.textContent='';
+  box.innerHTML='<div class="board-empty" style="padding:12px 0">Taranıyor…</div>';if(!keepMsg)msg.textContent='';
   const btns=[document.getElementById('tdmScan'),document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
   btns.forEach(b=>b.disabled=true);
   try{
@@ -1586,7 +1586,7 @@ function renderModern(){
   const row=(t,human)=>{
     const loc=(t.locations||[]).map(l=>`<li><code>${esc(l.file)}:${l.line}</code>${l.text?` — <code>${esc(l.text)}</code>`:''}</li>`).join('');
     const where=t.module?`${esc(t.module)} · ${t.files.length} dosya`:(t.files.length===1?esc(t.files[0]):`${esc(t.files[0])} +${t.files.length-1}`);
-    return `<tr><td>${t.recurring_of?'':`<input type="checkbox" class="tdmSel" value="${esc(t.gid)}">`}</td>
+    return `<tr><td><input type="checkbox" class="tdmSel" value="${esc(t.gid)}"></td>
       <td><details><summary style="cursor:pointer">${esc(t.rule_title)} <span class="chip dim">PHP ${esc(t.since)}</span></summary>
         <div style="font-size:12px;margin:6px 0 4px;color:var(--text)"><b>Ne:</b> ${esc(t.summary)}</div>
         <div style="font-size:12px;color:var(--text)"><b>Avantajlar:</b><ul style="margin:2px 0 4px 18px">${(t.advantages||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>
@@ -1601,7 +1601,8 @@ function renderModern(){
   const tbl=(list,human)=>`<table class="perf"><tr><th></th><th>Öneri</th><th>Yer</th><th class="num">Adet</th><th class="num">SP</th><th>Durum</th></tr>${list.map(t=>row(t,human)).join('')}</table>`;
   const sec=(title,sub)=>`<div style="font-size:12px;font-weight:700;margin:12px 0 4px">${title} <span style="font-weight:400;color:var(--text-dim)">${sub}</span></div>`;
   const auto=r.auto||[],hum=r.human||[];
-  box.innerHTML=`<div style="font-size:12px;padding:6px 0">${chips||'<span style="color:var(--text-dim)">Öneri yok.</span>'}${sk?`<div style="color:var(--text-dim);margin-top:4px">atlanan — ${sk}</div>`:''}</div>`
+  const errs=(r.errors||[]).length?`<div style="color:var(--warning);margin-top:4px">${(r.errors||[]).length} dosya taranamadı — liste eksik olabilir (${esc((r.errors||[]).slice(0,3).join('; '))})</div>`:'';
+  box.innerHTML=`<div style="font-size:12px;padding:6px 0">${chips||'<span style="color:var(--text-dim)">Öneri yok.</span>'}${sk?`<div style="color:var(--text-dim);margin-top:4px">atlanan — ${sk}</div>`:''}${errs}</div>`
     +(r.message?`<div class="board-empty" style="padding:8px 0">${esc(r.message)}</div>`:'')
     +(auto.length?sec('Otomatik işler','— Task açılır ve pipeline kuyruğuna alınır'):'')+(auto.length?tbl(auto,false):'')
     +(hum.length?sec('İnsan kararı gerektiren yapısal işler','— Task needs-human açılır; kapsamı insan belirler, etiket kalkınca kuyruğa alınabilir')+tbl(hum,true):'');
@@ -1623,7 +1624,7 @@ async function modernTake(){
       +(t.concat(h).filter(x=>x.id).length?' — '+t.concat(h).filter(x=>x.id).map(x=>wiLink(x.id)).join(', '):'')
       +((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>esc(s.reason)).join(', '):'');
     if(typeof loadTechdebt==='function')loadTechdebt();
-    modernScan(false);
+    await modernScan(false,true);  // sonuç satırı korunur; butonlar yeniden tarama bitince açılır
   }catch(e){msg.textContent=String(e)}
   finally{btns.forEach(b=>b.disabled=false)}
 }
