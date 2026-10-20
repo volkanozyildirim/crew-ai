@@ -483,7 +483,9 @@ QUALITY_BUILD_FIX_RULE = (
     "assert only the behaviour of the changed line (e.g. no warning when the key is missing) "
     "instead of feeding a large method a fuller fake payload. Do not change the visibility "
     "of production methods (private/final) to make a test pass; revert such changes if this PR "
-    "made them. If no narrow test is possible, delete the test this PR added."
+    "made them. If no narrow test is possible, delete the test this PR added. Never keep an "
+    "ENVIRONMENT-DEPENDENT assertion (collected warnings/deprecations list is empty, PHP version, "
+    "time): assert the changed code's return value instead."
 )
 
 
@@ -1821,6 +1823,24 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew import estimation as _est
         try:
             if not _pc_est.get("CREW_ESTIMATE"):
+                return
+            # Kalite işi: SP'yi kalite alımı kuralları belirledi (tanımsız anahtar 1,
+            # paket 2-3…) ve WI'a yazdı. Yapısal tahmin gereksinim/dosya sayısından
+            # gider; beklenen davranış + kabul kriteri blokları BA'ya çok madde
+            # yazdırıyor → #76201 tek satırlık düzeltmeye 13 SP dedi. Alımın SP'si esas.
+            if _is_quality_wi(self.state.wi_tags) and self.state.wi_story_points:
+                sp = _est.snap_fib(self.state.wi_story_points) or 1
+                self.state.estimate = {
+                    "sp": sp, "class": _est.size_class(sp), "source": "kalite alımı", "stage": stage,
+                    "ba_sp": None, "confidence": None, "rationale": "", "structural_sp": None,
+                    "reasons": ["kalite alımının SP'si (WI)"],
+                }
+                _log(f"  📐 Tahmin [{stage}]: {sp} SP (kalite alımı — yapısal tahmin kullanılmadı)")
+                if stage == "plan" and self._db and self.state.job_id:
+                    try:
+                        self._db.update_job(self.state.job_id, estimate_sp=int(sp))
+                    except Exception as _e_db:
+                        _log(f"  📐 estimate_sp yazilamadi: {_e_db}")
                 return
             ba = _est.parse_ba_estimate(self.state.requirements_text or "")
             n_req = len(_requirement_ids(self.state.requirements_text or ""))
@@ -7335,7 +7355,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"\n\n# PR BUILD TEST HATASI (DÜZELT)\n"
                     f"Aşağıdaki CI build hatası testlerin kırıldığını gösteriyor. Bu dosyadaki "
                     f"kodu/testleri hatayı giderecek şekilde düzelt; mevcut davranışı koru, "
-                    f"değişen davranış için test ekle/güncelle.\n```\n{failure_summary[:2500]}\n```"
+                    f"değişen davranış için test ekle/güncelle. Ortama bağlı kontrol yazma: "
+                    f"kırılan test toplanan uyarı/deprecation listesinin boş olmasını, PHP sürümünü "
+                    f"ya da saati assert ediyorsa o kontrolü kaldırıp dönen değeri doğrula — CI'daki "
+                    f"PHP ilgisiz dosyalardan deprecation basabilir.\n```\n{failure_summary[:2500]}\n```"
                 )
                 if _is_quality_wi(self.state.wi_tags):
                     ctx += QUALITY_BUILD_FIX_RULE

@@ -75,3 +75,10 @@ Yazarken en sık takılanlar:
 
 `CREW_REQUIRE_TESTS` açıkken plandaki test dosyalarını da yaz. Test, kabul
 kriterindeki davranışı doğrulasın — kapsama sayısı için boş test değil.
+
+Ortama bağlı kontrol yazma: "toplanan uyarı / deprecation / notice listesi boş",
+`error_get_last()`, saat, rastgele değer, PHP sürümü ya da yerel dosya yolu gibi
+çalıştığı makineye göre değişen şeyleri assert etme. CI'daki PHP sürümü ilgisiz
+bir dosyadan deprecation basabilir ve test kırılır (job #230: bu yüzden bir CI
+turu ve $0.90 boşa gitti). Bunun yerine değişen kodun **dönen değerini** ya da
+**gözlenen sonucunu** doğrula (ör. anahtar yokken dönen varsayılan).

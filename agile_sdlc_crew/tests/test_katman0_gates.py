@@ -4535,6 +4535,48 @@ def test_review_prefetch_window():
           "satır atlandı" in ctx and "kısaltıldı" not in ctx)
 
 
+def test_quality_estimate():
+    print("\n[Q15] Kalite işi tahmini — alımın SP'si (yapısal tahmin şişirmesin; #76201: 13 SP)")
+    from agile_sdlc_crew.flow import AgileSDLCFlow
+    reqs = json.dumps({"functional_requirements": [{"id": f"FR{i}", "desc": "x"} for i in range(1, 7)],
+                       "technical_requirements": [{"id": f"TR{i}", "desc": "x"} for i in range(1, 6)],
+                       "acceptance_criteria": [{"id": f"AC{i}", "desc": "x"} for i in range(1, 6)]})
+
+    def mk(tags, wi_sp):
+        f = AgileSDLCFlow()
+        f._db = None
+        f.state.requirements_text = reqs
+        f.state.plan = {"changes": [{"file_path": f"f{i}.php"} for i in range(4)]}
+        f.state.wi_tags, f.state.wi_story_points = tags, wi_sp
+        f._needed_explore = True
+        f._estimate("plan")
+        return f.state.estimate
+    q = mk("tempo-quality; tempo-src-newrelic", 1.0)
+    check("kalite işi: tahmin = alımın SP'si (1), kaynak kalite alımı",
+          q["sp"] == 1 and "kalite" in q["source"], str(q))
+    n = mk("", None)
+    check("normal iş: yapısal tahmin aynen", n["sp"] >= 8, str(n.get("sp")))
+
+
+def test_no_env_dependent_tests():
+    print("\n[51] Test talimatı — ortama bağlı kontrol yok (#230: 'uyarı listesi boş' testi CI'da kırıldı)")
+    import inspect
+    from agile_sdlc_crew import flow as _flow
+    from agile_sdlc_crew.quality import rank, render
+    from agile_sdlc_crew.quality.model import Finding
+    skill = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/skills/implementation/SKILL.md").read_text(encoding="utf-8")
+    check("implementation skill'i ortama bağlı kontrolü yasaklar (tüm işler)",
+          "ortama bağlı" in skill.lower() and "deprecation" in skill.lower())
+    g = rank.nr_units([Finding(source="newrelic", repo="w", app="[Prod] a", action="A::b", err_class="E_WARNING",
+                               message='Undefined array key "count"', count=500, last_seen=1.0)])[0]
+    d = render.task_description(g)
+    check("kalite Task'ı 'uyarı üretilmemesi'ni test etmeyi önermez; dönen değeri test etmeyi söyler",
+          "uyarı üretilmemesi" not in d and "dönen değer" in d and "ortama bağlı" in d.lower())
+    src = inspect.getsource(_flow)
+    check("build-fix turu (tüm işler + kalite kuralı) ortama bağlı kontrolü kaldırmayı söyler",
+          "ENVIRONMENT-DEPENDENT" in _flow.QUALITY_BUILD_FIX_RULE and "Ortama bağlı kontrol" in src)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4600,7 +4642,9 @@ def main():
               test_quality_project_filter,
               test_guidance_in_steps,
               test_completion_report_no_tool_note,
-              test_review_prefetch_window):
+              test_review_prefetch_window,
+              test_quality_estimate,
+              test_no_env_dependent_tests):
         try:
             t()
         except Exception as e:

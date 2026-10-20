@@ -233,11 +233,17 @@ def expected_behavior(g: Group) -> list[str]:
     # #232: test bütün prepareOrderDetailData'yı eksik sahte siparişle çağırdı; her
     # CI turu bir sonraki eksik anahtarı gösterdi ("telephone" → "web" → …), test
     # mock'lansın diye private metotlar protected yapıldı. Test dar tutulur.
-    verify = ("Doğrulama: yalnız değişen satırın davranışını kilitleyen küçük bir birim testi "
-              "(ör. anahtar yokken uyarı üretilmemesi). Test, büyük bir metodu sahte veriyle baştan sona "
-              "çağırmaz; test yazabilmek için üretim kodunda private/final metotların görünürlüğü "
-              "değiştirilmez. Dar bir test mümkün değilse test eklenmez, PR açıklamasında belirtilir. "
-              "Deploy sonrası Kaynak (NRQL) sorgusunda bu hata için yeni kayıt görülmez.")
+    # #230: "uyarı üretilmemesi" örneği, testin toplanan uyarı listesinin boş
+    # olduğunu assert etmesine yol açtı; CI'daki PHP 8.4 ilgisiz bir dosyadan
+    # deprecation bastı ve build kırıldı. Test dönen değeri doğrular.
+    verify = ("Doğrulama: yalnız değişen satırın davranışını kilitleyen küçük bir birim testi; "
+              "değişen kodun dönen değerini ya da sonucunu doğrular (ör. anahtar yokken dönen "
+              "varsayılan). Ortama bağlı kontrol yazılmaz: toplanan uyarı/deprecation listesinin boş "
+              "olması, PHP sürümü, saat gibi CI'da değişebilen şeyler assert edilmez. Test, büyük bir "
+              "metodu sahte veriyle baştan sona çağırmaz; test yazabilmek için üretim kodunda "
+              "private/final metotların görünürlüğü değiştirilmez. Dar bir test mümkün değilse test "
+              "eklenmez, PR açıklamasında belirtilir. Deploy sonrası Kaynak (NRQL) sorgusunda bu hata "
+              "için yeni kayıt görülmez.")
     if is_undefined_key(g):
         first = ("Anahtar/indeks yoksa kod hata üretmeden devam eder: okuma <code>isset()</code> / "
                  "<code>??</code> ile korunur ve mevcut kodun o alan yokken anlamlı olan varsayılanı "
