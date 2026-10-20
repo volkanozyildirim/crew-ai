@@ -3,7 +3,7 @@
 # since: özelliğin geldiği PHP sürümü; yalnız since ≤ hedef sürüm olan kurallar önerilir.
 # kind: deprecation (hedefte uyarı/hata) | mechanical (davranış aynı, otonom) | structural (tasarım kararı, needs-human) | report (iş açılmaz)
 # unit: file (dosya başına birim, paketlenir) | module (kaynak kökünden 2 dizin, paketlenmez)
-version: 1
+version: 2
 rules:
   # ── deprecation: hedef sürümde uyarı / hata üretir ──
   - key: implicit_nullable
@@ -104,7 +104,7 @@ rules:
       - "Klasik 0 / false tuzağı (== false, !strpos) biter — bu tuzak gerçek bug üretir."
       - "Aynı aile: str_starts_with / str_ends_with."
     risks:
-      - "Yok — strict karşılaştırmalı yerler birebir eşdeğer. (== false ya da !strpos yazılmış yerler zaten hatalı olabilir; dönüşüm bunu düzeltir, PR açıklamasında belirtilir.)"
+      - "Yok — tarayıcı yalnız iki argümanlı, sıkı (=== / !==) karşılaştırmalı strpos/mb_strpos çağrılarını önerir; stripos (harf duyarsız), offset'li çağrılar ve gevşek (== false) karşılaştırmalar eşdeğer olmadığı için önerilmez."
     before: "if (strpos($uri, '/api/') !== false)"
     after: "if (str_contains($uri, '/api/'))"
     ref: "https://wiki.php.net/rfc/str_contains"
@@ -121,7 +121,7 @@ rules:
       - "Elle sayılan uzunluk (yaygın off-by-one kaynağı) kalkar."
       - "Okunabilirlik: str_starts_with($sku, 'FLO-')."
     risks:
-      - "Yok."
+      - "Yok — tarayıcı yalnız uzunluğu literal'in uzunluğuna eşit olan substr($s, 0, N) === 'literal' biçimini önerir."
     before: "if (substr($sku, 0, 4) === 'FLO-')"
     after: "if (str_starts_with($sku, 'FLO-'))"
     ref: "https://wiki.php.net/rfc/add_str_starts_with_and_ends_with_functions"
@@ -154,7 +154,7 @@ rules:
     advantages:
       - "Zincir kısalır, koşul ve erişim tek yerde; 'null üzerinde metot çağrısı' hatasının önleyici biçimi."
     risks:
-      - "$a falsy ama null değilse (0, '') eski kod null dönerdi, ?-> çağırır — tarayıcı yalnız null/is_null/=== null karşılaştırmalı yerleri önerir."
+      - "$a falsy ama null değilse (0, '', false) eski kod null dönerdi, ?-> Error fırlatır — bu yüzden tarayıcı truthiness biçimini ($a ? $a->b : null) ÖNERMEZ; yalnız `$a !== null ? $a->b : null` ve `!is_null($a) ? $a->b : null` biçimlerini, then dalı tam olarak tek üye erişimi/çağrısı olduğunda önerir."
     before: "$name = $order->getCustomer() ? $order->getCustomer()->getName() : null;"
     after: "$name = $order->getCustomer()?->getName();"
     ref: "https://wiki.php.net/rfc/nullsafe_operator"
@@ -188,7 +188,7 @@ rules:
       - "Eşleşmeyen değer sessizce geçmez, UnhandledMatchError fırlatır — eksik dal testte görünür."
       - "İfade olduğu için doğrudan return/atama; break yok, düşme (fall-through) hatası yok."
     risks:
-      - "Eski switch'te eşleşmeyen değer sessizce geçiyorsa match'e default eklenmeli — tarayıcı default'suz switch'leri işaretler."
+      - "Eski switch'te eşleşmeyen değer sessizce geçer, match UnhandledMatchError fırlatır; switch gevşek (==), match sıkı (===) karşılaştırır. Tarayıcı bu yüzden yalnız default'u olan, etiketleri string literal olan ve düşme (fall-through) içermeyen switch'leri önerir."
     before: |
       switch ($status) {
           case 'paid': $label = 'Ödendi'; break;
@@ -232,7 +232,7 @@ rules:
       - "Her bağımlılık tek satır; sınıf gövdesi kısalır, yeni bağımlılık eklemek tek yer."
       - "Tip property'ye de yazılır (örtük typed property kazancı)."
     risks:
-      - "Property'nin docblock'unda sınıf dışından okunan bir ek açıklama varsa taşınmalı."
+      - "Property'nin docblock'unda sınıf dışından okunan bir ek açıklama varsa taşınmalı. Tarayıcı yalnız property adı parametre adıyla aynı olan, callable tipli ya da variadic olmayan atamaları önerir; property üst sınıftan geliyorsa promotion derleme hatası verir — uygulamadan önce kontrol edilir."
     before: |
       private $client;
       public function __construct(HttpClient $client) { $this->client = $client; }
