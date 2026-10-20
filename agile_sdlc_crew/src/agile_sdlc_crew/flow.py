@@ -2429,19 +2429,33 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 except Exception:
                     return ""
 
+        # Base (PR hedef dalı) HER İKİ modda gerekir: diff modu için diff'in tabanı,
+        # normal mod için focused_source'un değişen satırları bulması. Eskiden
+        # yalnız diff modunda çözülüyordu → normal review'da base_ref "" kalıyor,
+        # base gövdesi hiç okunmuyor ve focused_source BAŞTAN KIRPMAYA düşüyordu:
+        # #230'da reviewer Basket.php'nin ilk 173 satırını gördü, değişen
+        # shoppingCartCountAction (~1460) bağlama hiç girmedi ve "satırı
+        # göremedim" diye yine de APPROVE verdi.
         base_ref = ""
-        if diff_mode:
-            for cand in ("main", "master"):
+        for cand in ("main", "master"):
+            try:
+                self._client.get_file_content(repo, files[0], cand)
+                base_ref = cand
+                break
+            except Exception:
+                continue
+        if not base_ref:
+            # Base okunamiyorsa (ilk dosya yeni olabilir) yine main varsay;
+            # per-dosya base fetch'i asagida ayrica denenir.
+            base_ref = "main"
+
+        def _base(fp: str) -> str | None:
+            for ref in dict.fromkeys((base_ref, "main", "master")):
                 try:
-                    self._client.get_file_content(repo, files[0], cand)
-                    base_ref = cand
-                    break
-                except Exception:
+                    return self._client.get_file_content(repo, fp, ref)
+                except Exception:  # noqa: BLE001 — yeni dosya: base'te yok
                     continue
-            if not base_ref:
-                # Base okunamiyorsa (ilk dosya yeni olabilir) yine main varsay;
-                # per-dosya base fetch'i asagida ayrica denenir.
-                base_ref = "main"
+            return None
 
         if diff_mode:
             parts = [
@@ -2481,12 +2495,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 # kendisi sayip kaydiriyordu (job #208: +8/+9). Satir numarasi
                 # onekli verilir; olculen: %58-62 daha kucuk context, degisen
                 # kodun tamami GARANTI gorunur.
-                base_body = None
-                if len(content) > per_file and base_ref:
-                    try:
-                        base_body = self._client.get_file_content(repo, fp, base_ref)
-                    except Exception:  # noqa: BLE001 — yeni dosya: base'te yok
-                        base_body = None
+                base_body = _base(fp) if len(content) > per_file else None
                 parts.append(
                     f"\n## {fp}\n```\n"
                     f"{_focused_source(content, base_body, per_file=per_file)}\n```"

@@ -4512,6 +4512,29 @@ def test_completion_report_no_tool_note():
     check("araçtan söz etmeyen metne dokunulmaz", _flow._strip_tool_meta("## Özet\nPR açıldı.") == "## Özet\nPR açıldı.")
 
 
+def test_review_prefetch_window():
+    print("\n[50] Review bağlamı — büyük dosyada değişen satırın çevresi (#230: ilk 173 satır)")
+    from agile_sdlc_crew.flow import AgileSDLCFlow
+    base = "\n".join(f"    $x{i} = $a['k{i}'];" for i in range(1, 3001))
+    new = base.replace("    $x1460 = $a['k1460'];", "    $x1460 = $a['k1460'] ?? 0;")
+
+    class Cl:
+        def get_file_content(self, repo, fp, ref):
+            if ref == "feature/76201":
+                return new
+            if ref == "main":
+                return base
+            raise RuntimeError("404")
+    f = SimpleNamespace(
+        state=SimpleNamespace(repo_name="webservice", branch_name="feature/76201", pr_id="1",
+                              plan={"changes": [{"file_path": "/app/Controller/Api/V1/Basket.php"}]}, all_pushes=[]),
+        _client=Cl(), _repo_mgr=None, _pr_file_bodies={})
+    ctx = AgileSDLCFlow._prefetch_pr_changes_context(f)
+    check("değişen satır (1460) review bağlamında, satır numarasıyla", "1460| " in ctx and "?? 0" in ctx, ctx[:200])
+    check("dosya baştan kesilmez; değişmeyen yerler 'atlandı' diye işaretlenir",
+          "satır atlandı" in ctx and "kısaltıldı" not in ctx)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4576,7 +4599,8 @@ def main():
               test_quality_human_split,
               test_quality_project_filter,
               test_guidance_in_steps,
-              test_completion_report_no_tool_note):
+              test_completion_report_no_tool_note,
+              test_review_prefetch_window):
         try:
             t()
         except Exception as e:
