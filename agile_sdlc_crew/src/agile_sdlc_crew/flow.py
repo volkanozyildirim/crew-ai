@@ -7,6 +7,7 @@ deklaratif olarak tanimlanir.
 
 import json as _json
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -484,6 +485,23 @@ QUALITY_BUILD_FIX_RULE = (
     "of production methods (private/final) to make a test pass; revert such changes if this PR "
     "made them. If no narrow test is possible, delete the test this PR added."
 )
+
+
+# Tamamlanma raporunda ajanın "yorumu ben ekleyemiyorum, bir insan eklemeli"
+# notu: görev ajandan yorum EKLEMESİNİ istiyordu, claude_cli ajanının o aracı
+# yok (tool köprüsü), ajan bunu not düştü — sonra pipeline metni yorum olarak
+# ekledi ve not WI'da kaldı (#76201). Görev metni düzeltildi; bu da emniyet.
+_TOOL_META_RE = re.compile(
+    r"yorum (yazamıyor|yazamıyorum|ekleyemiyor|ekleyemiyorum|olarak eklenmek üzere)|insan eklemelidir|"
+    r"yorum adımı|No such tool|araçlar(ım)? yalnızca|cannot (post|add) (a )?comment|"
+    r"don'?t have (a|the) tool", re.I)
+
+
+def _strip_tool_meta(text: str) -> str:
+    """Ajanın araç / yorum ekleme hakkındaki meta notlarını (paragraf bazında) ayıkla."""
+    paras = re.split(r"\n\s*\n", text or "")
+    kept = [p for p in paras if not _TOOL_META_RE.search(p)]
+    return "\n\n".join(kept).strip() if len(kept) != len(paras) else (text or "")
 
 
 def quality_lean_overrides() -> dict:
@@ -7646,6 +7664,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             })
             completion_text = (completion_result.raw or "") if completion_result else ""
 
+        completion_text = _strip_tool_meta(completion_text)
         self.state.completion_text = completion_text
         self._step_done("completion_report_task", completion_text[:3000])
         _log(f"  Tamamlanma raporu olusturuldu")

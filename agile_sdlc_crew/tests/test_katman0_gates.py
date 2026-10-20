@@ -4492,6 +4492,26 @@ def test_guidance_in_steps():
         _kg.format_for_context = orig
 
 
+def test_completion_report_no_tool_note():
+    print("\n[49] Tamamlanma raporu — ajan 'yorum ekleyemiyorum' notu yazmasın")
+    import yaml
+    from agile_sdlc_crew import flow as _flow
+    tasks = yaml.safe_load((Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/config/tasks.yaml")
+                           .read_text(encoding="utf-8"))
+    d = tasks["completion_report_task"]["description"] + tasks["completion_report_task"]["expected_output"]
+    check("görev ajandan yorum EKLEMESİNİ istemiyor; metni pipeline ekliyor",
+          "Add the summary as a comment" not in d and "Comment must be added" not in d
+          and "pipeline posts" in d)
+    raw = ("**Tamamlanma Raporu**\n\n> **Not:** Elimdeki araçlar yalnızca WI okuyup listeleyebiliyor, yorum yazamıyor. "
+           "Bu rapor, WI'ya yorum olarak eklenmek üzere hazırlanmış tam metindir. Yorumu pipeline'ın yorum adımı "
+           "veya bir insan eklemelidir.\n\n## Özet\nTek satır düzeltildi.")
+    out = _flow._strip_tool_meta(raw)
+    check("ajan araç notu rapordan ayıklanır, içerik kalır",
+          "yorum yazamıyor" not in out and "insan eklemelidir" not in out and "Tek satır düzeltildi" in out
+          and "Tamamlanma Raporu" in out)
+    check("araçtan söz etmeyen metne dokunulmaz", _flow._strip_tool_meta("## Özet\nPR açıldı.") == "## Özet\nPR açıldı.")
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4555,7 +4575,8 @@ def main():
               test_human_label,
               test_quality_human_split,
               test_quality_project_filter,
-              test_guidance_in_steps):
+              test_guidance_in_steps,
+              test_completion_report_no_tool_note):
         try:
             t()
         except Exception as e:

@@ -1038,13 +1038,16 @@ completion_report_task:
     TASK: Produce a completion report for work item {work_item_id}.
     Summarize the whole process: requirements, changes made, test results,
     UAT results and PR info.
-    Add the summary as a comment to the work item.
+    Write ONLY the report text, in Turkish. The pipeline posts your output to the
+    work item as a comment — do not try to post it yourself, and do not mention
+    tools, permissions, or how/by whom the report will be posted.
 
     PREVIOUS STEP OUTPUTS:
     {previous_context}
   expected_output: >
-    Completion report: work summary, change list, test results, UAT results,
-    PR link. Comment must be added to the work item.
+    Completion report in Turkish (markdown): work summary, change list, test
+    results, UAT results, PR link. The pipeline posts this text as the work item
+    comment.
   agent: scrum_master
 
 # ══════════════════════════════════════════════════════════════
