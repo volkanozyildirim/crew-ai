@@ -570,6 +570,18 @@ header {
         <div id="tdMsg" style="padding:0 14px;font-size:12px"></div>
         <div id="tdList" style="padding:0 14px 12px"></div>
       </div>
+      <div class="card" id="tdModernCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Modernleştirme (PHP)</span>
+          <span class="chip dim" id="tdmTarget" title="Hedef PHP sürümü: FLODevOps imajından (birden çok imaj varsa en düşük)"></span><span style="flex:1"></span>
+          <select class="sprint-select" id="tdmRepo" title="Yerel PHP repoları" onchange="_tdmRepoChanged()"><option>Yükleniyor…</option></select>
+          <button class="sm-btn ghost small" id="tdmScan" onclick="modernScan(false)">Tara</button>
+          <button class="sm-btn ghost small" id="tdmRescan" onclick="modernScan(true)" title="Önbelleği atla, yeniden tara">Yeniden tara</button>
+          <button class="sm-btn small" id="tdmTake" onclick="modernTake()">Seçilenleri iş olarak aç</button>
+        </div>
+        <div id="tdmAdoption" style="padding:0 14px;font-size:12px;color:var(--text-dim)"></div>
+        <div id="tdmMsg" style="padding:0 14px;font-size:12px"></div>
+        <div id="tdmResult" style="padding:0 14px 12px"></div>
+      </div>
     </div>
   </section>
 
@@ -1087,6 +1099,7 @@ function showTab(name){
   if(name==='refine'&&typeof loadRefinement==='function'&&!_rf)loadRefinement();
   if(name==='cost'&&typeof loadCosts==='function'&&!_cost)loadCosts();
   if(name==='techdebt'&&typeof loadTechdebt==='function')loadTechdebt();
+  if(name==='techdebt'&&typeof loadModernRepos==='function')loadModernRepos();
 }
 
 // ── Maliyet analizi (salt okunur; /api/costs) ──
@@ -1509,6 +1522,108 @@ async function techdebtQueue(ids){
     if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
     msg.innerHTML=`${(r.queued||[]).length} iş kuyruğa alındı`+((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>`#${esc(s.wi)} ${esc(s.reason)}`).join(', '):'');
     loadTechdebt();
+  }catch(e){msg.textContent=String(e)}
+  finally{btns.forEach(b=>b.disabled=false)}
+}
+// Modernleştirme (PHP): repo FLODevOps imajındaki hedef sürüme göre token tabanlı
+// taranır (LLM yok); hedefin sunduğu ama kodun kullanmadığı yapılar katalogdan
+// ayrıntı / avantaj / risk / önce-sonra ile listelenir. Seçilenler "Teknik borç —
+// <sprint>" story'si altında Task olur; mekanik → kuyruk, yapısal → needs-human.
+let _tdm={repos:[],scan:null,loaded:false};
+function _tdmRepoChanged(){
+  const sel=document.getElementById('tdmRepo');const r=_tdm.repos.find(x=>x.repo===sel.value);
+  const chip=document.getElementById('tdmTarget');
+  chip.textContent=r?(r.version?`Hedef PHP ${r.version}`:'hedef sürüm bilinmiyor'):'';
+  chip.title=r&&r.images&&r.images.length?r.images.join('\n'):'Hedef PHP sürümü: FLODevOps imajından (birden çok imaj varsa en düşük)';
+  document.getElementById('tdmScan').disabled=document.getElementById('tdmRescan').disabled=!(r&&r.version);
+  _tdm.scan=null;document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';
+  document.getElementById('tdmMsg').textContent=r&&!r.version?'Bu repo için hedef PHP sürümü bulunamadı (FLODevOps imajı / composer.json) — tarama yapılmaz.':'';
+}
+async function loadModernRepos(){
+  const card=document.getElementById('tdModernCard');if(!card)return;
+  if(_tdm.loaded){return}
+  try{
+    const resp=await fetch('/api/techdebt/modern/repos');
+    if(resp.status===403){card.style.display='none';return}
+    const r=await resp.json();
+    card.style.display='flex';
+    if(!resp.ok){document.getElementById('tdmMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    _tdm.repos=r.items||[];_tdm.loaded=true;
+    const sel=document.getElementById('tdmRepo');
+    sel.innerHTML=_tdm.repos.length?_tdm.repos.map(i=>`<option value="${esc(i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${i.version?'PHP '+esc(i.version):'hedef sürüm bilinmiyor'}</option>`).join('')
+      :'<option value="">Yerel PHP reposu yok</option>';
+    const first=_tdm.repos.find(i=>i.version);if(first)sel.value=first.repo;
+    _tdmRepoChanged();
+  }catch(e){document.getElementById('tdmMsg').textContent=String(e)}
+}
+function _tdmKindChip(k){
+  const m={deprecation:['Deprecation','var(--warning)','var(--human-soft)'],mechanical:['Mekanik','var(--accent)','var(--accent-soft)'],structural:['Yapısal','var(--warning)','var(--human-soft)'],report:['Rapor','var(--text-dim)','var(--bg)']}[k]||[k,'var(--text-dim)','var(--bg)'];
+  return `<span class="chip" style="background:${m[2]};color:${m[1]}">${m[0]}</span>`;
+}
+async function modernScan(force){
+  const repo=document.getElementById('tdmRepo').value;const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
+  if(!repo){msg.textContent='Repo seçin.';return}
+  const team=_tdTeam();
+  box.innerHTML='<div class="board-empty" style="padding:12px 0">Taranıyor…</div>';msg.textContent='';
+  const btns=[document.getElementById('tdmScan'),document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
+  btns.forEach(b=>b.disabled=true);
+  try{
+    const resp=await fetch(`/api/techdebt/modern/scan?repo=${encodeURIComponent(repo)}&team=${encodeURIComponent(team)}${force?'&force=1':''}`);
+    const r=await resp.json();
+    if(!resp.ok){box.innerHTML='';msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    _tdm.scan=r;renderModern();
+  }catch(e){box.innerHTML='';msg.textContent=String(e)}
+  finally{btns.forEach(b=>b.disabled=false)}
+}
+function renderModern(){
+  const r=_tdm.scan;const box=document.getElementById('tdmResult');if(!r||!box)return;
+  const ad=r.adoption||{};const tp=(ad.typed_props||0),up=(ad.untyped_props||0);
+  const pct=tp+up?Math.round(100*tp/(tp+up)):null;
+  document.getElementById('tdmAdoption').innerHTML=`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya`;
+  const rules=Object.entries(r.rules||{}).sort((a,b)=>b[1].count-a[1].count);
+  const chips=rules.map(([k,v])=>`<span class="chip dim" title="${esc(v.title)} (PHP ${esc(v.since)})">${esc(v.title.split(' → ')[0].slice(0,34))} <b>${v.count}</b></span>`).join(' ');
+  const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
+  const row=(t,human)=>{
+    const loc=(t.locations||[]).map(l=>`<li><code>${esc(l.file)}:${l.line}</code>${l.text?` — <code>${esc(l.text)}</code>`:''}</li>`).join('');
+    const where=t.module?`${esc(t.module)} · ${t.files.length} dosya`:(t.files.length===1?esc(t.files[0]):`${esc(t.files[0])} +${t.files.length-1}`);
+    return `<tr><td>${t.recurring_of?'':`<input type="checkbox" class="tdmSel" value="${esc(t.gid)}">`}</td>
+      <td><details><summary style="cursor:pointer">${esc(t.rule_title)} <span class="chip dim">PHP ${esc(t.since)}</span></summary>
+        <div style="font-size:12px;margin:6px 0 4px;color:var(--text)"><b>Ne:</b> ${esc(t.summary)}</div>
+        <div style="font-size:12px;color:var(--text)"><b>Avantajlar:</b><ul style="margin:2px 0 4px 18px">${(t.advantages||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>
+        <div style="font-size:12px;color:var(--text)"><b>Riskler:</b><ul style="margin:2px 0 4px 18px">${(t.risks||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px"><div style="flex:1;min-width:220px"><b>Önce</b><pre style="margin:2px 0;white-space:pre-wrap;color:var(--text)">${esc(t.before)}</pre></div><div style="flex:1;min-width:220px"><b>Sonra</b><pre style="margin:2px 0;white-space:pre-wrap;color:var(--text)">${esc(t.after)}</pre></div></div>
+        <div style="font-size:12px;color:var(--text)"><b>Bulunan yerler (${t.count}):</b><ul style="margin:2px 0 4px 18px">${loc}${t.count>(t.locations||[]).length?`<li>+${t.count-(t.locations||[]).length} yer daha</li>`:''}</ul></div>
+        ${t.ref?`<div style="font-size:12px"><b>Kaynak:</b> <a href="${esc(t.ref)}" target="_blank" rel="noopener">${esc(t.ref)}</a></div>`:''}
+      </details></td>
+      <td>${where}</td><td class="num">${t.count}</td><td class="num">${t.sp}</td>
+      <td>${_tdmKindChip(t.kind)} ${human?humanChip(t.human_reason):(t.recurring_of?`<span class="chip dim">tekrar · önceki #${t.recurring_of}</span>`:'<span class="chip dim" title="İş olarak açılınca pipeline kuyruğuna alınır">Kuyruğa alınır</span>')}</td></tr>`;
+  };
+  const tbl=(list,human)=>`<table class="perf"><tr><th></th><th>Öneri</th><th>Yer</th><th class="num">Adet</th><th class="num">SP</th><th>Durum</th></tr>${list.map(t=>row(t,human)).join('')}</table>`;
+  const sec=(title,sub)=>`<div style="font-size:12px;font-weight:700;margin:12px 0 4px">${title} <span style="font-weight:400;color:var(--text-dim)">${sub}</span></div>`;
+  const auto=r.auto||[],hum=r.human||[];
+  box.innerHTML=`<div style="font-size:12px;padding:6px 0">${chips||'<span style="color:var(--text-dim)">Öneri yok.</span>'}${sk?`<div style="color:var(--text-dim);margin-top:4px">atlanan — ${sk}</div>`:''}</div>`
+    +(r.message?`<div class="board-empty" style="padding:8px 0">${esc(r.message)}</div>`:'')
+    +(auto.length?sec('Otomatik işler','— Task açılır ve pipeline kuyruğuna alınır'):'')+(auto.length?tbl(auto,false):'')
+    +(hum.length?sec('İnsan kararı gerektiren yapısal işler','— Task needs-human açılır; kapsamı insan belirler, etiket kalkınca kuyruğa alınabilir')+tbl(hum,true):'');
+}
+async function modernTake(){
+  const repo=document.getElementById('tdmRepo').value;const msg=document.getElementById('tdmMsg');
+  const ids=[...document.querySelectorAll('.tdmSel:checked')].map(x=>x.value);
+  if(!ids.length){msg.textContent='Seçili öneri yok.';return}
+  const team=_tdTeam();
+  const btns=[document.getElementById('tdmScan'),document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
+  btns.forEach(b=>b.disabled=true);msg.textContent='İşler açılıyor…';
+  try{
+    const resp=await fetch('/api/techdebt/modern/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,group_ids:ids,team})});
+    const r=await resp.json();
+    if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    const t=(r.tasks||[]),h=(r.human_tasks||[]);
+    msg.innerHTML=(r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'')
+      +`${t.length} iş kuyruğa alındı (${r.total_sp||0} SP) · ${h.length} yapısal Task insan bekliyor (${r.human_sp||0} SP)`
+      +(t.concat(h).filter(x=>x.id).length?' — '+t.concat(h).filter(x=>x.id).map(x=>wiLink(x.id)).join(', '):'')
+      +((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>esc(s.reason)).join(', '):'');
+    if(typeof loadTechdebt==='function')loadTechdebt();
+    modernScan(false);
   }catch(e){msg.textContent=String(e)}
   finally{btns.forEach(b=>b.disabled=false)}
 }

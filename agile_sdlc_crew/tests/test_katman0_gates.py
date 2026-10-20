@@ -5016,7 +5016,7 @@ def test_php_modern_endpoints():
           sb.get("CREW_TECHDEBT_PHP_MODERN", {}).get("default") is False
           and sb.get("CREW_TECHDEBT_SCAN_TTL_H", {}).get("default") == 24
           and sb.get("CREW_TECHDEBT_MODERN_MAX_TAKE", {}).get("default") == 8
-          and sb.get("CREW_PHP_BIN", {}).get("default") == "php"
+          and "CREW_PHP_BIN" not in sb  # env-only: dashboard'dan yazılabilen binary yolu = keyfi çalıştırma
           and "vendor" in sb.get("CREW_TECHDEBT_PATH_EXCLUDE", {}).get("default", ""))
     orig = pc.get
 
@@ -5036,7 +5036,9 @@ def test_php_modern_endpoints():
         check("teknik borç ana anahtarı kapalıyken de 403", TestClient(server.app).get("/api/techdebt/modern/repos").status_code == 403)
     finally:
         pc.get = orig
-    pc.get = on(CREW_TECHDEBT=True, CREW_TECHDEBT_PHP_MODERN=True, CREW_PHP_BIN="php; rm -rf /")
+    pc.get = on(CREW_TECHDEBT=True, CREW_TECHDEBT_PHP_MODERN=True)
+    import os as _os
+    _env_bin = _os.environ.get("CREW_PHP_BIN")
     o_scan, o_take, o_repos, o_worker = pm.scan, pm.take, pm.repos, server._ensure_worker
     worker = []
     try:
@@ -5065,10 +5067,43 @@ def test_php_modern_endpoints():
         pm.repos = lambda c, **k: {"items": [{"repo": "webservice", "version": "8.4"}]}
         r3 = tc.get("/api/techdebt/modern/repos")
         check("repos 200 + enabled", r3.status_code == 200 and r3.json()["enabled"] is True and r3.json()["items"])
-        check("CREW_PHP_BIN komut enjeksiyonuna kapalı (boşluk/; → varsayılan php)", pm.load_cfg()["php_bin"] == "php")
+        _os.environ["CREW_PHP_BIN"] = "php; rm -rf /"
+        bad1 = pm.load_cfg()["php_bin"]
+        _os.environ["CREW_PHP_BIN"] = "/usr/bin/python3"
+        bad2 = pm.load_cfg()["php_bin"]
+        _os.environ["CREW_PHP_BIN"] = "/opt/homebrew/bin/php8.4"
+        ok = pm.load_cfg()["php_bin"]
+        check("CREW_PHP_BIN env-only; boşluk/; ve php olmayan ad reddedilir, php8.4 yolu kabul",
+              bad1 == "php" and bad2 == "php" and ok == "/opt/homebrew/bin/php8.4", f"{bad1} {bad2} {ok}")
     finally:
         pm.scan, pm.take, pm.repos, server._ensure_worker = o_scan, o_take, o_repos, o_worker
         pc.get = orig
+        if _env_bin is None:
+            _os.environ.pop("CREW_PHP_BIN", None)
+        else:
+            _os.environ["CREW_PHP_BIN"] = _env_bin
+
+
+def test_php_modern_ui():
+    print("\n[PM7] php_modern — Modernleştirme (PHP) kartı")
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    s = html.find('id="paneTechdebt"')
+    pane = html[s:html.find("<section", s + 10)] if s >= 0 else ""
+    check("kart Teknik borç sekmesinde, başlangıçta gizli", 'id="tdModernCard"' in pane and "Modernleştirme (PHP)" in pane
+          and 'id="tdModernCard" style="display:none' in pane)
+    check("repo seçici, hedef sürüm chip'i, benimseme özeti, Tara / Yeniden tara, İş olarak aç",
+          all(x in pane for x in ('id="tdmRepo"', 'id="tdmTarget"', 'id="tdmAdoption"', 'id="tdmScan"', 'id="tdmRescan"', 'id="tdmTake"'))
+          and "Seçilenleri iş olarak aç" in pane)
+    for fn in ("loadModernRepos", "modernScan", "modernTake", "renderModern"):
+        check(f"JS: {fn}", f"function {fn}" in html)
+    js = html[html.find("function loadModernRepos"):html.find("function loadModernRepos") + 9000]
+    check("uçlar", "/api/techdebt/modern/repos" in js and "/api/techdebt/modern/scan" in js and "/api/techdebt/modern/take" in js)
+    check("iki grup başlığı", "Otomatik işler" in js and "İnsan kararı gerektiren yapısal işler" in js)
+    check("satır ayrıntısı: Avantajlar / Riskler / Önce / Sonra / Bulunan yerler / Kaynak", all(x in js for x in ("Avantajlar", "Riskler", "Önce", "Sonra", "Bulunan yerler", "Kaynak")))
+    check("403'te kart gizli, takım _tdTeam() ile, humanChip kullanılır", "status===403" in js and "_tdTeam()" in js and "humanChip(" in js)
+    check("sürümü bilinmeyen repo seçilemez", "disabled" in js and "hedef sürüm bilinmiyor" in js)
+    check("tema renkleri (sabit renk yok)", "var(--text" in js and not re.search(r"#[0-9a-fA-F]{6}\b", js), "sabit renk var")
+    check("sekme açılınca modern repolar yüklenir", "loadModernRepos()" in html[html.find("name==='techdebt'"):html.find("name==='techdebt'") + 200])
 
 
 def main():
@@ -5146,7 +5181,8 @@ def main():
               test_php_modern_groups,
               test_php_modern_render,
               test_php_modern_take,
-              test_php_modern_endpoints):
+              test_php_modern_endpoints,
+              test_php_modern_ui):
         try:
             t()
         except Exception as e:

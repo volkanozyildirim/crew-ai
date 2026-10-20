@@ -533,13 +533,6 @@ SCHEMA: list[dict] = [
         "desc": "'İş olarak aç' tek seferde en çok bu kadar grup açar (mekanik olanların her biri bir pipeline işi — maliyet tavanı).",
     },
     {
-        "key": "CREW_PHP_BIN",
-        "label": "PHP binary'si",
-        "type": "str",
-        "default": "php",
-        "desc": "Tarayıcının (token_get_all) koşacağı php binary'si: ad ya da tam yol. Boşluk/; içeren değer reddedilir (shell yok, liste argümanı). Sürüm en az 8.0 olmalı; taranan kodun sürümünden bağımsız.",
-    },
-    {
         "key": "CREW_QUALITY_TARGET_SPRINT",
         "label": "Kalite · hedef sprint",
         "type": "str",
