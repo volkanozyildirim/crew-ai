@@ -4613,9 +4613,17 @@ def test_completion_comment_integrity():
     check("yorum 3000 karakterde kesilmiyor", "completion_text[:3000]}" not in src and "_trim_report(" in src)
     d = _wl.evaluate_dod(review_approved=True, open_review_issues=0, build_status="succeeded",
                          uat_text="Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)", pushed_files=["a.php"],
-                         require_tests=False, pr_id="1")
+                         require_tests=False, pr_id="1", uat_skipped=True)
     uat = next(i for i in d.items if i.key == "uat")
     check("atlanan UAT DoD'da 'atlandı' der", "atlandı" in uat.note and "parse" not in uat.note, uat.note)
+    rej = _wl.evaluate_dod(review_approved=True, open_review_issues=0, build_status="succeeded",
+                           uat_text="Atlandı gibi başlayan ama **Overall Evaluation: REJECTED** UAT çıktısı\n1. AC1 FAIL",
+                           pushed_files=["a.php"], require_tests=False, pr_id="1")
+    u2 = next(i for i in rej.items if i.key == "uat")
+    check("UAT metni 'Atlandı' ile başlasa da bayrak yoksa sonuç atlanmaz (fail-open yok)",
+          u2.ok is False, str((u2.ok, u2.note)))
+    check("atlama bayrağı flow'dan gelir, metinden değil",
+          "uat_skipped=" in inspect.getsource(_flow.AgileSDLCFlow.step11_completion_report))
 
 
 def main():

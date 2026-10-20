@@ -3931,6 +3931,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # discover_repos'un kanit-temelli repo karari — step4 otoritesi
         self._discovered_repo = ""
         self._quality_repo = ""      # kalite işi: Task açıklamasındaki repo (_quality_setup)
+        self._uat_skipped = False    # yalın akış UAT atladıysa DoD bunu "atlandı" gösterir
         self._discovered_alternatives = []
 
     @start()
@@ -7628,6 +7629,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             return
 
         if self._quality_lean_flow():
+            self._uat_skipped = True
             self._step_start("uat_task")
             self.state.uat_text = "Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)"
             self._step_done("uat_task", "Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)")
@@ -7753,6 +7755,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     # Bug akisinda regresyon testi DoD'da zorunlu (faz 5)
                     require_tests=bool(_pc_dod.get("CREW_REQUIRE_TESTS")) or self.state.flow_kind == "bug",
                     pr_id=self.state.pr_id,
+                    uat_skipped=bool(getattr(self, "_uat_skipped", False)),
                 )
                 self.state.dod = [_i.as_dict() for _i in _dod.items]
                 _dod_md = "\n\n" + _wl_dod.render_dod(_dod, enforce=_dod_enforce)
