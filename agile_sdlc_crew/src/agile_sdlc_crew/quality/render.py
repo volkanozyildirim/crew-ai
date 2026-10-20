@@ -17,7 +17,7 @@ from agile_sdlc_crew.quality.rank import defang, is_undefined_key
 TAG = "tempo-quality"
 HUMAN_TAG = "needs-human"
 FP_PREFIX = "tempo-fp:"
-SOURCE_LABEL = {"newrelic": "New Relic hataları", "sonar": "Sonar bulguları"}
+SOURCE_LABEL = {"newrelic": "New Relic hataları", "sonar": "Sonar bulguları", "php_modern": "PHP modernleştirme"}
 # Hatlar: 'quality' kaynak başına story açar (Kalite: <kaynak> — <sprint>);
 # 'techdebt' sprint başına TEK story (Teknik borç — <sprint>). Teknik borç
 # Task'ları tempo-quality'yi de taşır: yalın akış / ucuz modeller / dar test
@@ -210,6 +210,59 @@ def _sonar_body(g: Group, sonar_url: str) -> list[str]:
     return parts
 
 
+
+# ── PHP modernleştirme ───────────────────────────────────────────────────
+
+LOC_MAX = 20
+
+
+def _modern_rule(g: Group):
+    from agile_sdlc_crew.quality import php_modern
+    key = g.findings[0].rule if g.findings else ""
+    return next((r for r in php_modern.load_rules() if r.key == key), None)
+
+
+def _modern_locations(g: Group) -> list[tuple[str, int, str]]:
+    """(dosya, satır, satır metni) — tarayıcı satır metnini Finding.uris'e '<satır>|<metin>' koyar."""
+    out: list[tuple[str, int, str]] = []
+    for f in g.findings:
+        texts = {}
+        for u in f.uris:
+            ln, _, txt = u.partition("|")
+            texts[ln] = txt
+        for ln in f.lines:
+            out.append((f.file, int(ln), texts.get(str(ln), "")))
+    return out
+
+
+def _modern_body(g: Group, php_target: str) -> list[str]:
+    r = _modern_rule(g)
+    parts: list[str] = []
+    if php_target:
+        parts.append(f"<p><b>Hedef PHP:</b> {_e(php_target)} (FLODevOps imajı)</p>")
+    if r is None:
+        parts.append(f"<p><b>Kural:</b> <code>{_e(g.findings[0].rule if g.findings else '')}</code></p>")
+    else:
+        parts.append(f"<p><b>Kural:</b> {_e(r.title)} — PHP {_e(r.since_str)}'dan beri "
+                     f"({'otomatik' if r.auto else 'tasarım kararı'})</p>")
+        parts.append(f"<p><b>Ne:</b> {_e(r.summary)}</p>")
+        parts.append("<p><b>Avantajlar:</b></p><ul>" + "".join(f"<li>{_e(x)}</li>" for x in r.advantages) + "</ul>")
+        parts.append("<p><b>Riskler:</b></p><ul>" + "".join(f"<li>{_e(x)}</li>" for x in r.risks) + "</ul>")
+        parts.append(f"<p><b>Önce:</b></p><pre>{_e(r.before)}</pre><p><b>Sonra:</b></p><pre>{_e(r.after)}</pre>")
+    locs = _modern_locations(g)
+    parts.append(f"<p><b>Bulunan yerler ({len(locs)}):</b></p><ul>")
+    for file, ln, txt in locs[:LOC_MAX]:
+        parts.append(f"<li><code>{_e(f'{file}:{ln}')}</code>" + (f" — <code>{_e(txt, MSG_MAX)}</code>" if txt else "") + "</li>")
+    if len(locs) > LOC_MAX:
+        parts.append(f"<li>+{len(locs) - LOC_MAX} yer daha (tarama Teknik borç sekmesinde)</li>")
+    parts.append("</ul>")
+    if r is not None and r.ref:
+        parts.append(f'<p><b>Kaynak:</b> <a href="{html.escape(r.ref)}">{html.escape(r.ref)}</a></p>')
+    parts.append(_behavior_html(g))
+    parts.append(f"<p><b>Kabul kriteri:</b> {acceptance_criteria(g)}</p>")
+    return parts
+
+
 _NULLISH = re.compile(r"on null|of type null|null given|passing null|on value of type null", re.I)
 
 
@@ -218,6 +271,18 @@ def expected_behavior(g: Group) -> list[str]:
     'eksik anahtarda ne olmalı / hangi dosya / nasıl doğrulanır' soruları
     kalite işlerinde hep aynı cevaba sahip — her seferinde insana sormak
     yerine burada sabitlenir."""
+    if g.source == "php_modern":
+        if g.needs_human:
+            return ["Bu bir tasarım kararıdır: kapsamı (hangi sınıflar, hangi sırayla, hangi dış API korunacak) "
+                    "insan belirler ve Task'ı rafine eder; needs-human etiketi kaldırılınca Teknik borç sekmesinden "
+                    "kuyruğa alınabilir.",
+                    "Dönüşüm sonrası dış davranış (yanıt, kaydedilen veri, serileştirme) değişmez; riskler bölümündeki "
+                    "kırılma noktaları tek tek ele alınır."]
+        return ["Yalnızca 'Bulunan yerler' altında listelenen satırlar katalogdaki Sonra biçimine çevrilir; dış davranış "
+                "(dönen değer, yanıt, kaydedilen veri) değişmez. İlgisiz yeniden düzenleme yapılmaz.",
+                "Doğrulama: değişen her yer için dönen değeri doğrulayan dar bir birim testi (ya da mevcut test). "
+                "Ortama bağlı kontrol yazılmaz: deprecation listesinin boş olması, PHP sürümü gibi şeyler assert edilmez. "
+                "Dar bir test mümkün değilse eklenmez, PR açıklamasında belirtilir."]
     if g.source == "sonar":
         if g.findings and g.findings[0].rule.startswith("secrets:"):
             return ["Secret değeri koddan kaldırılır, ortam değişkeni / gizli yönetiminden okunur.",
@@ -272,6 +337,10 @@ def acceptance_criteria(g: Group) -> str:
     kapısı (flow._readiness_score) her kalite işinden 15 puan düşer."""
     if g.source == "newrelic":
         return "Bu action'da bu hata sınıfı/mesajı bir daha üretilmez; mevcut davranış korunur."
+    if g.source == "php_modern":
+        if g.needs_human:
+            return "Kapsam insan tarafından belirlenir; belirlenen sınıflarda eski yapı kalmaz, testler geçer, dış davranış değişmez."
+        return "Listelenen yerlerde eski yapı kalmaz; testler geçer; dış davranış değişmez."
     if g.findings and g.findings[0].rule.startswith("secrets:"):
         return ("Secret döndürülür (rotate) ve koddan kaldırılır; yeni değer gizli yönetiminden okunur.")
     return "Listelenen maddeler Sonar'da kapanır; değişen satırlarda yeni madde eklenmez."
@@ -286,14 +355,19 @@ def repo_from_description(desc: str) -> str:
     return m.group(1) if m else ""
 
 
-def task_description(g: Group, *, sonar_url: str = "", nr_days: int = 7) -> str:
+def task_description(g: Group, *, sonar_url: str = "", nr_days: int = 7, php_target: str = "") -> str:
     parts = [f"<p><b>Repo:</b> <code>{html.escape(g.repo)}</code></p>"]
     if g.recurring_of:
         parts.append(f"<p><b>Tekrarladı</b> — önceki: #{int(g.recurring_of)}</p>")
     if g.needs_human:
         parts.append(f"<p><b>Neden insan:</b> {_e(g.human_reason)}</p>")
     parts.append(UNTRUSTED_NOTE)
-    parts += _nr_body(g, nr_days) if g.source == "newrelic" else _sonar_body(g, sonar_url)
+    if g.source == "newrelic":
+        parts += _nr_body(g, nr_days)
+    elif g.source == "php_modern":
+        parts += _modern_body(g, php_target)
+    else:
+        parts += _sonar_body(g, sonar_url)
     parts += [f"<p><small>{FP_PREFIX} {html.escape(fp)}</small></p>" for fp in g.fingerprints]
     return "".join(parts)
 

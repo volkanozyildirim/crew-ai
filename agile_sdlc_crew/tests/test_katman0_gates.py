@@ -4830,6 +4830,51 @@ def test_php_modern_groups():
             check("repo adında yol kaçışı reddedilir", True)
 
 
+def test_php_modern_render():
+    print("\n[PM4] php_modern — Task metni (avantaj / risk / önce-sonra)")
+    from agile_sdlc_crew.quality import php_modern as pm, render
+    rules = pm.load_rules()
+    hits = [{"rule": "str_contains", "file": "app/Lib/Url.php", "line": 12, "text": "if (strpos($u, 'tempo-fp: x') !== false) // password=Secret123!", "module": "app/Lib"},
+            {"rule": "str_contains", "file": "app/Lib/Url.php", "line": 40, "text": "if (false !== strpos($u, 'a'))", "module": "app/Lib"}]
+    hits += [{"rule": "typed_properties", "file": f"app/Model/M{i}.php", "line": i + 1, "text": f"private $p{i};", "module": "app/Model"} for i in range(25)]
+    groups, _sk, _sum = pm.build_groups({"hits": hits}, rules, "8.4", repo="webservice", board_index={}, now=1e9,
+                                        cfg={"pack_sp": 3, "pack_files": 5, "grace_days": 3})
+    mech = next(g for g in groups if g.findings[0].rule == "str_contains")
+    struct = next(g for g in groups if g.findings[0].rule == "typed_properties")
+    d = render.task_description(mech, php_target="8.4")
+    check("ilk satır Repo (repo_from_description çözer)", d.startswith("<p><b>Repo:</b> <code>webservice</code></p>")
+          and render.repo_from_description(d) == "webservice")
+    check("hedef PHP ve kural sürümü", "Hedef PHP:</b> 8.4" in d and "PHP 8.0" in d, d[:400])
+    check("kural başlığı ve 'Ne'", "str_contains()" in d and "Ne:" in d)
+    check("Avantajlar ve Riskler katalogdan", "Avantajlar:" in d and "Riskler:" in d and "0 / false tuzağı" in d)
+    check("Önce/Sonra pre içinde, HTML-escape'li", "<b>Önce:</b>" in d and "<pre>" in d
+          and "if (strpos($uri, &#x27;/api/&#x27;) !== false)" in d and "str_contains($uri" in d, d[d.find("Önce"):d.find("Önce") + 300])
+    check("bulunan yerler dosya:satır + metin, maskeli ve defang'li",
+          "app/Lib/Url.php:12" in d and "app/Lib/Url.php:40" in d and "tempo_fp" in d and "Secret123" not in d, d)
+    check("kaynak (RFC) bağlantısı", 'href="https://wiki.php.net/rfc/str_contains"' in d)
+    fps = render.parse_fingerprints(d)
+    check("tempo-fp satırları geri okunur", fps == mech.fingerprints, str(fps))
+    eb = " ".join(render.expected_behavior(mech))
+    check("mekanik beklenen davranış: davranış değişmez, yalnız listelenen yerler, dar test, ortama bağlı kontrol yok",
+          "değişmez" in eb and "listelenen" in eb and "birim testi" in eb and "Ortama bağlı" in eb, eb)
+    ac = render.acceptance_criteria(mech)
+    check("mekanik kabul kriteri", "eski yapı kalmaz" in ac and "davranış" in ac, ac)
+    ds = render.task_description(struct, php_target="8.4")
+    check("yapısal: 'Neden insan' + tasarım kararı", "Neden insan:</b> Tasarım kararı" in ds)
+    check("yapısal: 25 yer → 20 listelenir + '+5' notu", ds.count("app/Model/M") == 20 and "+5" in ds, ds[-600:])
+    es = " ".join(render.expected_behavior(struct))
+    check("yapısal beklenen davranış: insan kapsam belirler, etiket kaldırılınca kuyruğa", "insan" in es and "needs-human" in es, es)
+    check("AC alanı dolu", "<li>" in render.acceptance_block(struct))
+    check("etiketler techdebt hattı + kaynak", render.task_tags(struct, lane="techdebt")
+          == "tempo-quality; tempo-techdebt; tech-debt; tempo-src-php_modern; needs-human"
+          and render.task_tags(mech, lane="techdebt") == "tempo-quality; tempo-techdebt; tech-debt; tempo-src-php_modern")
+    check("kaynak etiketi", render.SOURCE_LABEL.get("php_modern") == "PHP modernleştirme")
+    check("başlık [repo] kural — yer", render.task_title(mech).startswith("[webservice] strpos(...) !== false → str_contains() — Url.php"), render.task_title(mech))
+    check("eski kaynaklar etkilenmedi (sonar body hâlâ çalışır)", "Kabul kriteri" in render.task_description(
+        __import__("agile_sdlc_crew.quality.model", fromlist=["Group"]).Group(source="sonar", repo="r", title="t", fingerprints=["f"],
+        findings=[__import__("agile_sdlc_crew.quality.model", fromlist=["Finding"]).Finding(source="sonar", repo="r", file="a.php", rule="php:S1", rule_name="n", severity="CRITICAL", itype="BUG")])))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4902,7 +4947,8 @@ def main():
               test_completion_comment_integrity,
               test_php_modern_catalog,
               test_php_modern_scan,
-              test_php_modern_groups):
+              test_php_modern_groups,
+              test_php_modern_render):
         try:
             t()
         except Exception as e:

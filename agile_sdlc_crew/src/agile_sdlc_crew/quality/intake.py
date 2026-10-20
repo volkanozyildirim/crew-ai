@@ -350,7 +350,8 @@ def _open_tasks(client, groups: list[Group], story: dict, cfg: dict, deps: Deps,
         row = _row(g)
         fields = {"System.Title": row["title"],
                   "System.Description": render.task_description(g, sonar_url=cfg.get("sonar_url", ""),
-                                                                nr_days=cfg.get("nr_days", 7)),
+                                                                nr_days=cfg.get("nr_days", 7),
+                                                                php_target=cfg.get("php_target", "")),
                   "System.Tags": render.task_tags(g, lane=lane),
                   "System.IterationPath": story["iteration"]}
         if story.get("area"):
