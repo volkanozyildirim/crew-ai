@@ -139,6 +139,11 @@ def job_llm_scope():
         _job_overrides.reset(token)
 
 
+def has_job_override(agent_key: str) -> bool:
+    holder = _job_overrides.get()
+    return bool(holder) and agent_key in holder
+
+
 def set_job_llm_overrides(mapping: dict) -> bool:
     """{agent_key: profile_adı}. Kapsam yoksa hiçbir şey yapmaz (False)."""
     holder = _job_overrides.get()

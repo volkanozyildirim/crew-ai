@@ -4048,6 +4048,15 @@ def test_quality_lean():
           "self._wi_begin(" in res_branch)
     check("kalite işinde build-fix testi daraltır, üretim görünürlüğünü değiştirmez",
           "QUALITY_BUILD_FIX_RULE" in src and "do not change the visibility" in src.lower())
+    from agile_sdlc_crew.crew import AgileSDLCCrew
+    with rs.job_llm_scope():
+        crew_obj = AgileSDLCCrew()  # flow init'te kurulur: _wi_begin'den ÖNCE
+        before = getattr(crew_obj.llm_architect, "model", "")
+        rs.set_job_llm_overrides({"software_architect": "architect_cli_sonnet", "scrum_master": "report_haiku"})
+        after_a = getattr(crew_obj.llm_architect, "model", "")
+        after_s = getattr(crew_obj.llm_scrum, "model", "")
+    check("crew kurulduktan SONRA gelen iş kapsamlı model seçimi de uygulanır (#234: mimar Opus kaldı)",
+          "sonnet" in str(after_a) and "haiku" in str(after_s), f"{before} → {after_a} / {after_s}")
     check("run_pipeline flow'u iş kapsamında koşturur", "job_llm_scope()" in inspect.getsource(_main.run_pipeline))
 
 
