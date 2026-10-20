@@ -84,3 +84,25 @@ def issues_to_findings(issues: list[dict], rules: dict[str, str], *, base_url: s
 def in_scope(project_key: str, repo_projects: list[str]) -> bool:
     prefix = (project_key or "").split(":", 1)[0].lower()
     return prefix in {p.lower() for p in repo_projects or []}
+
+
+def excluded(f: Finding, skip_langs: list[str], path_exclude: list[str]) -> str | None:
+    """Bulgu alım dışıysa Türkçe neden, değilse None. Dil = kural anahtarının öneki
+    (`css:S4654` → css; Sonar'da SCSS/LESS de css: taşır). Yol: önek ya da glob (*.min.js)."""
+    import fnmatch
+    lang = (f.rule or "").split(":", 1)[0].lower()
+    for l in skip_langs or []:
+        if l and lang == l.strip().lower():
+            return f"kural dili hariç ({lang})"
+    path = (f.file or "").lstrip("/")
+    name = path.rsplit("/", 1)[-1]
+    for pat in path_exclude or []:
+        pat = pat.strip().strip("/")
+        if not pat:
+            continue
+        if "*" in pat or "?" in pat:
+            if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(path, pat):
+                return f"hariç yol ({pat})"
+        elif path == pat or path.startswith(pat + "/"):
+            return f"hariç yol ({pat})"
+    return None

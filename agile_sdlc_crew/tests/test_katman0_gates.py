@@ -5132,6 +5132,41 @@ def test_php_modern_ui():
     check("tarayıcı dosya hataları gösterilir", "errors" in js[js.find("function renderModern"):js.find("async function modernTake")])
 
 
+def test_quality_sonar_exclude():
+    print("\n[Q16] Kalite alımı — Sonar'da CSS/SCSS kuralları ve tema/public yolları hariç (#239/#240)")
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake, sonar
+    from agile_sdlc_crew.quality.model import Finding
+    sb = pc._SCHEMA_BY_KEY
+    check("ayarlar: kural dili + yol hariç listesi (varsayılan css ve tema/public/vendor/min.js)",
+          "css" in sb.get("CREW_QUALITY_SONAR_SKIP_LANGS", {}).get("default", "")
+          and all(x in sb.get("CREW_QUALITY_SONAR_PATH_EXCLUDE", {}).get("default", "") for x in ("app/Themes", "public", "vendor", "*.min.js")))
+
+    def f(file, rule):
+        return Finding(source="sonar", repo="webservice", project="EcomBackend:webservice", file=file, rule=rule, rule_name=rule,
+                       severity="CRITICAL", itype="BUG")
+    langs, paths = ["css"], ["app/Themes", "public", "vendor", "*.min.js", "*.bundle.js"]
+    check("css:* kuralı hariç (SCSS/LESS de css: öneki taşır)", sonar.excluded(f("app/x.scss", "css:S4654"), langs, paths) == "kural dili hariç (css)")
+    check("tema / public / vendor yolları hariç", sonar.excluded(f("app/Themes/butigo/a.php", "php:S1"), langs, paths) == "hariç yol (app/Themes)"
+          and sonar.excluded(f("public/frontend/src/style.css", "php:S1"), langs, paths) == "hariç yol (public)"
+          and sonar.excluded(f("vendor/x/y.php", "php:S1"), langs, paths) == "hariç yol (vendor)")
+    check("*.min.js / *.bundle.js hariç", sonar.excluded(f("webroot/js/app.min.js", "javascript:S1"), langs, paths) == "hariç yol (*.min.js)")
+    check("PHP kaynak dosyası kalır", sonar.excluded(f("app/Service/RequestInquiry.php", "php:S4830"), langs, paths) is None
+          and sonar.excluded(f("app/Publication.php", "php:S1"), langs, paths) is None)
+    check("liste boşsa hiçbir şey hariç değil", sonar.excluded(f("app/x.scss", "css:S1"), [], []) is None)
+    cfg = intake.load_cfg()
+    check("load_cfg hariç listelerini taşır", cfg.get("sonar_skip_langs") == ["css"] and "app/Themes" in cfg.get("sonar_path_exclude", []))
+    orig_fetch, orig_conv = sonar.fetch_issues, sonar.issues_to_findings
+    sonar.fetch_issues = lambda *a, **k: ([], {})
+    sonar.issues_to_findings = lambda *a, **k: [f("app/x.scss", "css:S4654"), f("app/Themes/t/a.php", "php:S1"), f("app/A.php", "php:S2")]
+    try:
+        out, skipped = intake.gather("sonar", SimpleNamespace(repo_projects=["EcomBackend"]), cfg)
+        check("gather: hariç bulgular düşer ve atlananlarda nedeniyle görünür",
+              [x.file for x in out] == ["app/A.php"] and {sk["reason"] for sk in skipped} == {"kural dili hariç (css)", "hariç yol (app/Themes)"}, str(skipped))
+    finally:
+        sonar.fetch_issues, sonar.issues_to_findings = orig_fetch, orig_conv
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -5208,7 +5243,8 @@ def main():
               test_php_modern_render,
               test_php_modern_take,
               test_php_modern_endpoints,
-              test_php_modern_ui):
+              test_php_modern_ui,
+              test_quality_sonar_exclude):
         try:
             t()
         except Exception as e:

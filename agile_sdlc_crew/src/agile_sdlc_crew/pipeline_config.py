@@ -464,6 +464,20 @@ SCHEMA: list[dict] = [
         "desc": "Bir Sonar Task'ı en fazla bu kadar dosyaya dokunur (dar plan = güvenilir geliştirici).",
     },
     {
+        "key": "CREW_QUALITY_SONAR_SKIP_LANGS",
+        "label": "Kalite · Sonar hariç kural dilleri",
+        "type": "str",
+        "default": "css",
+        "desc": "Kural anahtarı bu dil önekiyle başlayan Sonar bulguları alınmaz (virgülle; 'css' CSS/SCSS/LESS'i kapsar). #239/#240: SCSS işlerinde LLM doğrulaması geçerli '&__x' seçicilerine hata verdi, 35 bin satırlık style.css'te geliştirici dosyayı 5 satıra indirdi — iki iş de push kapısında düştü, $6.2 harcandı. Boş = hiçbiri hariç değil.",
+    },
+    {
+        "key": "CREW_QUALITY_SONAR_PATH_EXCLUDE",
+        "label": "Kalite · Sonar hariç yollar",
+        "type": "str",
+        "default": "app/Themes,public,webroot,vendor,node_modules,*.min.js,*.bundle.js",
+        "desc": "Dosya yolu bu önekle başlayan ya da bu glob'a uyan Sonar bulguları alınmaz (virgülle). Tema kopyaları, derlenmiş/üçüncü taraf dosyalar öneri üretmesin. Boş = hiçbiri hariç değil.",
+    },
+    {
         "key": "CREW_QUALITY_HUMAN_MAX",
         "label": "Kalite · alım başına en çok insan işi",
         "type": "int",

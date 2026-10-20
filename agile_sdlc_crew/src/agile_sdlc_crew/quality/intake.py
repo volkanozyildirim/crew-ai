@@ -61,6 +61,8 @@ def load_cfg() -> dict:
         "sonar_url": sonar.base_url(),
         "task_fields": load_task_fields(),
         "target_sprint": str(g("CREW_QUALITY_TARGET_SPRINT") or "next").strip().lower(),
+        "sonar_skip_langs": [x.strip() for x in str(g("CREW_QUALITY_SONAR_SKIP_LANGS") or "").split(",") if x.strip()],
+        "sonar_path_exclude": [x.strip() for x in str(g("CREW_QUALITY_SONAR_PATH_EXCLUDE") or "").split(",") if x.strip()],
     }
 
 
@@ -105,9 +107,17 @@ def gather(source: str, client, cfg: dict) -> tuple[list[Finding], list[dict]]:
     issues, rules = sonar.fetch_issues()
     found = sonar.issues_to_findings(issues, rules, base_url=cfg["sonar_url"])
     projects = list(getattr(client, "repo_projects", []) or [])
-    out = [f for f in found if sonar.in_scope(f.project, projects)]
+    in_scope = [f for f in found if sonar.in_scope(f.project, projects)]
     skipped += [{"project": p, "reason": "kapsam dışı proje"}
                 for p in sorted({f.project for f in found if not sonar.in_scope(f.project, projects)})]
+    # CSS/SCSS kuralları ve tema/public/vendor yolları: pipeline bu dosyalarda güvenilir değil (#239/#240)
+    out: list[Finding] = []
+    for f in in_scope:
+        why = sonar.excluded(f, cfg.get("sonar_skip_langs") or [], cfg.get("sonar_path_exclude") or [])
+        if why:
+            skipped.append({"file": f.file, "rule": f.rule, "reason": why})
+        else:
+            out.append(f)
     return out, skipped
 
 
