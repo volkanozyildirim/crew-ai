@@ -4577,6 +4577,26 @@ def test_no_env_dependent_tests():
           "ENVIRONMENT-DEPENDENT" in _flow.QUALITY_BUILD_FIX_RULE and "Ortama bağlı kontrol" in src)
 
 
+def test_pr_comment_emoticons():
+    print("\n[52] PR yorumu — ':/' gibi değerler emojiye dönüşmesin (PR #44918)")
+    from agile_sdlc_crew.tools import azure_devops_base as az
+    d = az.defuse_emoticons
+    s = "Test, host olmayan canonical için ':/' ve '://en' gibi bozuk URL'leri bekliyor."
+    out = d(s)
+    check("emoji'ye dönüşecek değerler satır içi koda alınır",
+          "`':/'`" in out and "`'://en'`" in out and out.endswith("bekliyor."), out)
+    check("URL ve normal metin değişmez",
+          d("Bkz. https://dev.azure.com/x ve Sonuç: tamam") == "Bkz. https://dev.azure.com/x ve Sonuç: tamam")
+    code = "```php\n$u = ':/' . $x;\n```\nve `'://en'` zaten kod"
+    check("kod blokları ve satır içi kod dokunulmaz", d(code) == code)
+    check("cümle sonu noktalama kodun dışında kalır", d("değer :/,") == "değer `:/`,")
+    tbl = "| Madde | Durum |\n|:---|---:|\n| R1 | açık |"
+    check("markdown tablo hizalama satırı bozulmaz", d(tbl) == tbl)
+    import inspect
+    src = inspect.getsource(az.AzureDevOpsClient.add_pr_comment) + inspect.getsource(az.AzureDevOpsClient.reply_to_pr_thread)
+    check("PR yorumu ve yanıtı gönderilmeden önce uygulanır", src.count("defuse_emoticons(") == 2)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4644,7 +4664,8 @@ def main():
               test_completion_report_no_tool_note,
               test_review_prefetch_window,
               test_quality_estimate,
-              test_no_env_dependent_tests):
+              test_no_env_dependent_tests,
+              test_pr_comment_emoticons):
         try:
             t()
         except Exception as e:

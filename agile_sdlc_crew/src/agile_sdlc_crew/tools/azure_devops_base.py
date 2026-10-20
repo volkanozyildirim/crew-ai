@@ -5,6 +5,37 @@ import re
 import requests
 
 
+# Azure DevOps PR yorumlarında markdown ":/", ":(", ":D" gibi ifadeleri emojiye
+# çevirir. Reviewer bir değeri tırnak içinde yazınca (PR #44918: "host olmayan
+# canonical için ':/' ve '://en'") metin "'😕/'" olarak göründü ve anlam
+# kayboldu. Kod dışındaki bu tür sözcükler satır içi koda alınır — kodda
+# dönüşüm yapılmaz; URL'ler (harften sonra gelen ':/') etkilenmez.
+_EMOTICON_TOKEN = re.compile(r"[^\s`|]*(?<![A-Za-z0-9\-|]):[/\\()DPpOo][^\s`|]*")
+_TRAIL_PUNCT = ",.;!?)"
+
+
+def _defuse_segment(seg: str) -> str:
+    def wrap(m: re.Match) -> str:
+        tok = m.group(0)
+        core = tok.rstrip(_TRAIL_PUNCT) if tok.rstrip(_TRAIL_PUNCT) else tok
+        return f"`{core}`{tok[len(core):]}"
+    return _EMOTICON_TOKEN.sub(wrap, seg)
+
+
+def defuse_emoticons(md: str) -> str:
+    """Kod blokları ve satır içi kod hariç, emojiye dönüşecek sözcükleri koda al."""
+    if not md or ":" not in md:
+        return md or ""
+    out = []
+    for i, block in enumerate(re.split(r"(```.*?```)", md, flags=re.S)):
+        if i % 2:
+            out.append(block)
+            continue
+        parts = re.split(r"(`[^`]*`)", block)
+        out.append("".join(p if j % 2 else _defuse_segment(p) for j, p in enumerate(parts)))
+    return "".join(out)
+
+
 class AzureDevOpsClient:
     """Azure DevOps REST API icin paylasilan HTTP istemcisi."""
 
@@ -542,7 +573,7 @@ class AzureDevOpsClient:
         url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}/threads"
         params = {"api-version": self.API_VERSION}
         thread: dict = {
-            "comments": [{"content": content, "commentType": "text"}],
+            "comments": [{"content": defuse_emoticons(content), "commentType": "text"}],
             "status": "active",
         }
         if file_path:
@@ -570,7 +601,7 @@ class AzureDevOpsClient:
             f"{pull_request_id}/threads/{thread_id}/comments"
         )
         params = {"api-version": self.API_VERSION}
-        body = {"content": content, "commentType": "text"}
+        body = {"content": defuse_emoticons(content), "commentType": "text"}
         resp = requests.post(url, headers=self._headers, json=body, params=params, timeout=30)
         resp.raise_for_status()
         return resp.json()
