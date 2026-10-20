@@ -4880,6 +4880,130 @@ def test_php_modern_render():
         findings=[__import__("agile_sdlc_crew.quality.model", fromlist=["Finding"]).Finding(source="sonar", repo="r", file="a.php", rule="php:S1", rule_name="n", severity="CRITICAL", itype="BUG")])))
 
 
+def test_php_modern_take():
+    print("\n[PM5] php_modern — repo listesi, tarama, iş açma")
+    from agile_sdlc_crew.quality import intake, php_modern as pm
+    queued, rec = [], []
+
+    class C:
+        org_url, project = "https://dev.azure.com/o", "P"
+
+        def __init__(self):
+            self.created, self.wiql = [], []
+
+        def list_iterations(self, team=""):
+            return [{"name": "S23", "path": "P\\S23", "attributes": {"timeFrame": "future", "startDate": "2026-11-02"}}]
+
+        def query_work_items(self, wiql, limit=0):
+            self.wiql.append(wiql)
+            return []
+
+        def get_team_area_path(self, team=""):
+            return "P\\T"
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append((type_name, fields, parent_id))
+            return {"id": 600 + len(self.created), "fields": fields}
+
+        def update_work_item(self, wid, ops):
+            return {}
+
+        def get_authenticated_user(self):
+            return {"uniqueName": "me@x"}
+    hits = [{"rule": "str_contains", "file": "app/Lib/A.php", "line": 3, "text": "x", "module": "app/Lib"},
+            {"rule": "typed_properties", "file": "app/Model/M.php", "line": 2, "text": "y", "module": "app/Model"},
+            {"rule": "utf8_encode", "file": "app/Lib/B.php", "line": 4, "text": "z", "module": "app/Lib"}]
+    scans = []
+    board = {}
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "webservice").mkdir()
+        (root / "webservice" / "composer.json").write_text('{"require":{"php":"^8.4"}}', encoding="utf-8")
+        (root / "notphp").mkdir()
+        (root / "oldphp").mkdir()
+        (root / "oldphp" / "composer.json").write_text('{}', encoding="utf-8")
+        cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "target_sprint": "next", "task_fields": {},
+               "sonar_url": "", "nr_days": 7, "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8,
+               "repos_dir": root, "targets_cache": root / "t.yaml", "scan_cache": root / "cache"}
+        deps = intake.Deps(gather=None, board=lambda c: board, repo_ok=lambda r: (root / r).is_dir(),
+                           queue=lambda w, ttl: (queued.append(w), 9)[1], record=lambda **k: rec.append(k),
+                           now=lambda: 1e9, cfg=lambda: cfg)
+
+        def scan_fn(repo_root, **kw):
+            scans.append(str(repo_root))
+            return {"files": 3, "sha": "s1", "hits": hits, "adoption": {"enum": 0}, "errors": []}
+        pm_kw = dict(deps=deps, scan_fn=scan_fn, head_sha_fn=lambda r: "s1", app_map_cache={})
+        c = C()
+        rp = pm.repos(c, **pm_kw)
+        items = {i["repo"]: i for i in rp["items"]}
+        check("repo listesi: composer.json olan yerel repolar, hedef sürüm composer'dan; sürümsüz repo işaretli; php olmayan yok",
+              set(items) == {"webservice", "oldphp"} and items["webservice"]["version"] == "8.4"
+              and items["oldphp"]["version"] is None and items["oldphp"]["scannable"] is False, str(rp))
+        sc = pm.scan(c, "webservice", team="T", **pm_kw)
+        check("tarama yazma yapmaz", not c.created and len(scans) == 1)
+        check("tarama sonucu: sürüm, sha, kural özeti, otomatik/insan grupları, gid",
+              sc["version"] == "8.4" and sc["sha"] == "s1" and sc["rules"]["str_contains"]["count"] == 1
+              and len(sc["auto"]) == 2 and len(sc["human"]) == 1 and all(len(r["gid"]) == 12 for r in sc["auto"] + sc["human"]), str(sc)[:600])
+        row = sc["auto"][0]
+        check("grup satırı katalog ayrıntısını taşır", all(k in row for k in ("rule", "kind", "since", "title", "summary", "advantages",
+              "risks", "before", "after", "ref", "count", "files", "locations", "sp", "needs_human")), str(row.keys()))
+        check("deprecation önce sıralanır", sc["auto"][0]["rule"] == "utf8_encode")
+        sc2 = pm.scan(c, "webservice", team="T", **pm_kw)
+        check("ikinci tarama önbellekten (aynı sha)", len(scans) == 1 and sc2["cached"] is True)
+        gids = [r["gid"] for r in sc["auto"]] + [r["gid"] for r in sc["human"]]
+        # kilit
+        intake._LOCK.acquire()
+        try:
+            try:
+                pm.take(c, "webservice", gids, team="T", **pm_kw)
+                check("kilitliyken Busy", False)
+            except intake.Busy:
+                check("kilitliyken Busy", True)
+        finally:
+            intake._LOCK.release()
+        try:
+            pm.take(c, "webservice", ["000000000000"], team="T", **pm_kw)
+            check("yalnız bilinmeyen gid → ValueError (tarama değişti)", False)
+        except ValueError as e:
+            check("yalnız bilinmeyen gid → ValueError (tarama değişti)", "tarama" in str(e).lower(), str(e))
+        res = pm.take(c, "webservice", gids + ["000000000000", gids[0]], team="T", **pm_kw)
+        types = [t for t, _f, _p in c.created]
+        check("story techdebt hattında (Teknik borç — S23, tempo-techdebt) + 3 Task",
+              types == ["User Story", "Task", "Task", "Task"] and c.created[0][1]["System.Title"] == "Teknik borç — S23"
+              and "tempo-techdebt" in c.created[0][1]["System.Tags"], str(types))
+        tf = [f for t, f, _p in c.created if t == "Task"]
+        check("Task etiketleri php_modern kaynağı; yapısal needs-human", sum("needs-human" in f["System.Tags"] for f in tf) == 1
+              and all("tempo-src-php_modern" in f["System.Tags"] for f in tf))
+        check("Task açıklamasında hedef PHP ve avantajlar", all("Hedef PHP:</b> 8.4" in f["System.Description"] and "Avantajlar" in f["System.Description"] for f in tf))
+        check("mekanik 2 iş kuyruğa alındı, yapısal alınmadı", len(queued) == 2 and len(res["tasks"]) == 2 and len(res["human_tasks"]) == 1
+              and res["human_tasks"][0]["job_id"] is None, str(res))
+        check("bilinmeyen gid atlanan listesinde, tekrar gid tekilleşti", any("tarama" in s_["reason"] for s_ in res["skipped"]) and len(res["skipped"]) == 1)
+        check("quality_items kaydı source=php_modern", rec and all(r["source"] == "php_modern" for r in rec))
+        check("story bağlantısı + SP", res["story"]["id"] == 601 and res["total_sp"] == 2 and res["human_sp"] == 5)
+        # board'da açık fp → atlanır
+        board.clear()
+        board[gids_fp := pm.fingerprint("webservice", "str_contains", "app/Lib/A.php")] = {"wi": 700, "state": "Active"}
+        sc3 = pm.scan(c, "webservice", team="T", force=True, **pm_kw)
+        check("board'da açık WI → grup listede yok, atlananlarda", all(r["rule"] != "str_contains" for r in sc3["auto"])
+              and sc3["skipped_counts"].get("açık WI") == 1, str(sc3["skipped_counts"]))
+        # tavan
+        cfg["max_take"] = 1
+        c2 = C()
+        res2 = pm.take(c2, "webservice", gids, team="T", **pm_kw)
+        check("istek başı tavan", len([t for t, _f, _p in c2.created if t == "Task"]) == 1 and any("tavan" in s_["reason"] for s_ in res2["skipped"]))
+        try:
+            pm.take(c, "oldphp", gids, team="T", **pm_kw)
+            check("hedef sürümü bilinmeyen repo → ValueError", False)
+        except ValueError as e:
+            check("hedef sürümü bilinmeyen repo → ValueError", "sürüm" in str(e), str(e))
+        try:
+            pm.scan(c, "yok", team="T", **pm_kw)
+            check("yerel olmayan repo → ValueError", False)
+        except ValueError:
+            check("yerel olmayan repo → ValueError", True)
+    check("load_cfg knob'ları okur", {"php_exclude", "php_bin", "scan_ttl_h", "max_take"} <= set(pm.load_cfg()))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4953,7 +5077,8 @@ def main():
               test_php_modern_catalog,
               test_php_modern_scan,
               test_php_modern_groups,
-              test_php_modern_render):
+              test_php_modern_render,
+              test_php_modern_take):
         try:
             t()
         except Exception as e:

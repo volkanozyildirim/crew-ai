@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter
 import logging
 import re
 import time
@@ -348,3 +349,189 @@ def scan_cached(repo: str, repo_root: Path, *, cache_dir: Path = CACHE_DIR, scan
     except OSError as e:
         log.warning(f"⚠️ php_modern: tarama önbelleği yazılamadı: {e}")
     return res
+
+
+# ── Ayarlar / bağımlılıklar ──────────────────────────────────────────────
+
+def _knob(key: str, default):
+    from agile_sdlc_crew import pipeline_config
+    try:
+        v = pipeline_config.get(key)
+    except KeyError:
+        return default
+    return default if v is None or v == "" else v
+
+
+def load_cfg() -> dict:
+    """intake.load_cfg + php_modern'e özel ayarlar."""
+    import os
+    from agile_sdlc_crew.quality import intake
+    cfg = intake.load_cfg()
+    ex = str(_knob("CREW_TECHDEBT_PATH_EXCLUDE", DEFAULT_EXCLUDE))
+    cfg.update({
+        "php_exclude": [x.strip() for x in ex.split(",") if x.strip()],
+        "php_bin": str(_knob("CREW_PHP_BIN", "php")).strip() or "php",
+        "scan_ttl_h": int(_knob("CREW_TECHDEBT_SCAN_TTL_H", 24)),
+        "max_take": int(_knob("CREW_TECHDEBT_MODERN_MAX_TAKE", 8)),
+        "repos_dir": Path(os.environ.get("CREW_REPOS_DIR", "~/.crew_repos")).expanduser(),
+        "targets_cache": TARGETS_CACHE_PATH,
+        "scan_cache": CACHE_DIR,
+    })
+    return cfg
+
+
+def default_deps():
+    from agile_sdlc_crew.quality import intake
+    return intake.default_deps()._replace(cfg=load_cfg)
+
+
+def _root(cfg: dict, repo: str, deps) -> Path:
+    if not _REPO_NAME.match(repo or "") or ".." in repo or not deps.repo_ok(repo):
+        raise ValueError(f"Repo yerelde yok ya da adı geçersiz: {repo!r}")
+    base = Path(cfg["repos_dir"])
+    if (base / repo).is_dir():
+        return base / repo
+    low = repo.lower()
+    for p in base.iterdir():
+        if p.is_dir() and p.name.lower() == low:
+            return p
+    raise ValueError(f"Repo yerelde yok: {repo!r}")
+
+
+def _target(client, repo: str, root: Path, cfg: dict, app_map_cache: dict | None) -> dict:
+    return target_version(client, repo, app_map_cache=app_map_cache, repo_root=root,
+                          cache_path=Path(cfg["targets_cache"]), max_age_h=int(cfg.get("scan_ttl_h", 24)))
+
+
+# ── Sekme akışı: repolar → tarama → iş açma ──────────────────────────────
+
+def gid_of(g) -> str:
+    import hashlib
+    return hashlib.sha1("|".join(sorted(g.fingerprints)).encode("utf-8")).hexdigest()[:12]
+
+
+def _row(g, rules_by_key: dict[str, Rule]) -> dict:
+    from agile_sdlc_crew.quality import intake, render
+    r = rules_by_key.get(g.findings[0].rule)
+    row = intake._row(g)
+    locs = render._modern_locations(g)
+    where = g.fingerprints[0].split(":", 3)[-1] if r and r.unit == "module" else ""
+    row.update({
+        "gid": gid_of(g), "rule": g.findings[0].rule, "kind": r.kind if r else "", "since": r.since_str if r else "",
+        "rule_title": r.title if r else "", "summary": r.summary if r else "", "advantages": list(r.advantages) if r else [],
+        "risks": list(r.risks) if r else [], "before": r.before if r else "", "after": r.after if r else "",
+        "ref": r.ref if r else "", "count": g.total, "files": g.files, "module": where,
+        "locations": [{"file": f, "line": ln, "text": t} for f, ln, t in locs[:20]], "recurring_of": g.recurring_of,
+    })
+    return row
+
+
+def repos(client, *, deps=None, app_map_cache: dict | None = None, **_ignored) -> dict:
+    """Yerel PHP repoları (composer.json) + hedef sürüm. Sürümü bilinmeyen repo taranamaz."""
+    deps = deps or default_deps()
+    cfg = deps.cfg()
+    base = Path(cfg["repos_dir"])
+    items = []
+    if base.is_dir():
+        amap = app_map_cache
+        for p in sorted(base.iterdir(), key=lambda x: x.name.lower()):
+            if not p.is_dir() or not (p / "composer.json").is_file():
+                continue
+            if amap is None:
+                try:
+                    amap = app_map.load_map(client)
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"⚠️ php_modern: FLODevOps eşlemesi okunamadı, composer.json'a düşülüyor: {e}")
+                    amap = {}
+            try:
+                tv = _target(client, p.name, p, cfg, amap)
+            except Exception as e:  # noqa: BLE001
+                tv = {"version": None, "images": [], "source": None, "error": str(e)}
+            items.append({"repo": p.name, "version": tv.get("version"), "source": tv.get("source"),
+                          "images": tv.get("images") or [], "scannable": bool(tv.get("version"))})
+    return {"items": items}
+
+
+def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, scan_fn=None, head_sha_fn=None,
+         app_map_cache: dict | None = None) -> dict:
+    """Yazma yok: hedef sürüm + (önbellekli) tarama + kurallar + dedup → kural özeti ve aday gruplar."""
+    deps = deps or default_deps()
+    cfg = deps.cfg()
+    root = _root(cfg, repo, deps)
+    tv = _target(client, repo, root, cfg, app_map_cache)
+    res = scan_cached(repo, root, cache_dir=Path(cfg["scan_cache"]), scan_fn=scan_fn, head_sha_fn=head_sha_fn,
+                      exclude=cfg.get("php_exclude"), php_bin=cfg.get("php_bin", "php"),
+                      ttl_h=int(cfg.get("scan_ttl_h", 24)), force=force)
+    rules = load_rules()
+    rules_by_key = {r.key: r for r in rules}
+    groups, skipped, summary = build_groups(res, rules, tv["version"], repo=repo, board_index=deps.board(client),
+                                            now=deps.now(), cfg=cfg)
+    out = {
+        "repo": repo, "version": tv["version"], "version_source": tv.get("source"), "images": tv.get("images") or [],
+        "sha": res.get("sha", ""), "files": res.get("files", 0), "adoption": res.get("adoption") or {},
+        "cached": bool(res.get("cached")), "scanned_at": res.get("built_at"), "errors": res.get("errors") or [],
+        "rules": summary,
+        "auto": [_row(g, rules_by_key) for g in groups if not g.needs_human],
+        "human": [_row(g, rules_by_key) for g in groups if g.needs_human],
+        "skipped": skipped[:50],
+        "skipped_counts": dict(Counter(s["reason"].split(" #")[0] for s in skipped)),
+    }
+    if not tv["version"]:
+        out["message"] = "Hedef PHP sürümü bilinmiyor (FLODevOps imajı ve composer.json'da yok) — öneri üretilmez."
+    elif not groups:
+        out["message"] = "Hedef sürümün sunduğu özelliklerle ilgili öneri yok."
+    return out
+
+
+def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, scan_fn=None, head_sha_fn=None,
+         app_map_cache: dict | None = None) -> dict:
+    """Seçilen grupları 'Teknik borç — <sprint>' story'si altında Task olarak aç; mekanik olanları
+    kuyruğa al, yapısal olanlar needs-human. Seçim kilit altında taze taramaya (aynı sha) ve board'a
+    karşı yeniden doğrulanır."""
+    from agile_sdlc_crew import estimation
+    from agile_sdlc_crew.quality import intake
+    deps = deps or default_deps()
+    if not intake._LOCK.acquire(blocking=False):
+        raise intake.Busy("Başka bir alım / kuyruk isteği sürüyor")
+    try:
+        cfg = deps.cfg()
+        root = _root(cfg, repo, deps)
+        tv = _target(client, repo, root, cfg, app_map_cache)
+        if not tv["version"]:
+            raise ValueError("Hedef PHP sürümü bilinmiyor — bu repo için öneri açılamaz")
+        res = scan_cached(repo, root, cache_dir=Path(cfg["scan_cache"]), scan_fn=scan_fn, head_sha_fn=head_sha_fn,
+                          exclude=cfg.get("php_exclude"), php_bin=cfg.get("php_bin", "php"),
+                          ttl_h=int(cfg.get("scan_ttl_h", 24)))
+        rules = load_rules()
+        rules_by_key = {r.key: r for r in rules}
+        groups, _skipped, _summary = build_groups(res, rules, tv["version"], repo=repo, board_index=deps.board(client),
+                                                  now=deps.now(), cfg=cfg)
+        by_gid = {gid_of(g): g for g in groups}
+        picked, skipped = [], []
+        max_take = max(1, int(cfg.get("max_take", 8)))
+        for gid in dict.fromkeys(str(x) for x in (group_ids or [])):
+            g = by_gid.get(gid)
+            if g is None:
+                skipped.append({"gid": gid, "reason": "tarama değişti ya da board'da açık — yeniden tarayın"})
+            elif len(picked) >= max_take:
+                skipped.append({"gid": gid, "reason": f"istek başı tavan ({max_take})"})
+            else:
+                picked.append(g)
+        if not picked:
+            if skipped and all("tarama" in s["reason"] for s in skipped):
+                raise ValueError("Seçim güncel taramada yok — tarama değişti, yeniden tarayın")
+            return {"repo": repo, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
+        story = intake.resolve_story(client, SOURCE, None, team, cfg.get("target_sprint") or "next", lane="techdebt")
+        cfg2 = {**cfg, "php_target": tv["version"]}
+        rows, added = intake._open_tasks(client, picked, story, cfg2, deps, source=SOURCE, lane="techdebt", queue=True)
+        if added:
+            estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
+        tasks = [r for r in rows if not r["needs_human"]]
+        human = [r for r in rows if r["needs_human"]]
+        log.info(f"🧹 PHP modernleştirme ({repo}): story #{story['id']} · {len(rows)} Task · {added} SP")
+        return {"repo": repo, "version": tv["version"],
+                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"]},
+                "tasks": tasks, "human_tasks": human, "skipped": skipped,
+                "total_sp": sum(r["sp"] for r in tasks if r.get("id")), "human_sp": sum(r["sp"] for r in human if r.get("id"))}
+    finally:
+        intake._LOCK.release()
