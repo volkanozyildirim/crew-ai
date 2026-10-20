@@ -14,6 +14,7 @@ grubu sınıfları, dizi şekli dönen metotlar, `strpos(...) !== false`. Burada
 from __future__ import annotations
 
 import json
+import math
 import logging
 import re
 import time
@@ -230,3 +231,120 @@ def scan_repo(repo_root: Path, *, exclude: list[str] | None = None, php_bin: str
         hits.append(h)
     return {"files": int(data.get("files") or 0), "sha": _head_sha(root), "hits": hits,
             "adoption": data.get("adoption") or {}, "errors": data.get("errors") or []}
+
+
+# ── Gruplama / skor / dedup ──────────────────────────────────────────────
+
+def fingerprint(repo: str, rule: str, where: str) -> str:
+    from agile_sdlc_crew.quality.rank import cap_fingerprint
+    return cap_fingerprint(f"{SOURCE}:{repo}:{rule}:{where}")
+
+
+def _units(hits: list[dict], rules_by_key: dict[str, Rule], repo: str) -> tuple[list, dict]:
+    """Kural birimine göre Group'lar: file birimi dosya başına, module birimi modül başına.
+    report kuralları grup üretmez, yalnız özete girer."""
+    from agile_sdlc_crew.quality.model import Finding, Group
+    by: dict[str, Group] = {}
+    summary: dict[str, dict] = {}
+    for h in hits:
+        r = rules_by_key.get(h.get("rule", ""))
+        if r is None:
+            continue
+        s = summary.setdefault(r.key, {"count": 0, "_files": set(), "_modules": set(), "kind": r.kind, "auto": r.auto,
+                                        "title": r.title, "since": r.since_str, "unit": r.unit, "sp_unit": r.sp_unit})
+        s["count"] += 1
+        s["_files"].add(h["file"])
+        s["_modules"].add(h.get("module") or module_of(h["file"]))
+        if r.kind == "report":
+            continue
+        where = h["file"] if r.unit == "file" else (h.get("module") or module_of(h["file"]))
+        fp = fingerprint(repo, r.key, where)
+        g = by.get(fp)
+        if g is None:
+            label = where.rsplit("/", 1)[-1] if r.unit == "file" else where
+            g = by[fp] = Group(source=SOURCE, repo=repo, title=f"{r.title} — {label}", fingerprints=[fp], findings=[],
+                               needs_human=r.kind == "structural",
+                               human_reason=("Tasarım kararı: " + (r.risks[0] if r.risks else "")) if r.kind == "structural" else "")
+        f = next((x for x in g.findings if x.file == h["file"]), None)
+        if f is None:
+            f = Finding(source=SOURCE, repo=repo, file=h["file"], rule=r.key, rule_name=r.title, count=0, lines=[],
+                        message="")
+            g.findings.append(f)
+        f.count += 1
+        f.lines.append(int(h.get("line") or 0))
+        # satır metinleri: render "bulunan yerler" için (dosya:satır → metin)
+        f.uris.append(f"{h.get('line') or 0}|{h.get('text') or ''}")
+    for k, s in summary.items():
+        s["files"] = len(s.pop("_files"))
+        s["modules"] = len(s.pop("_modules"))
+    for g in by.values():
+        r = rules_by_key[g.findings[0].rule]
+        g.score = r.weight * (1 + math.log10(max(1, g.total)))
+        g.sp = r.sp_unit if r.unit == "module" else max(1, r.sp_unit)
+    return list(by.values()), summary
+
+
+def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: str, board_index: dict, now: float,
+                 cfg: dict) -> tuple[list, list[dict], dict]:
+    """(gruplar, atlananlar, kural özeti). Yalnız hedef sürümün sunduğu kurallar; dedup board'dan;
+    dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez."""
+    from agile_sdlc_crew.quality import dedup, rank
+    rules_by_key = {r.key: r for r in applicable(rules, version)}
+    units, summary = _units(scan.get("hits") or [], rules_by_key, repo)
+    skipped: list[dict] = []
+    live = []
+    for u in units:
+        fp = u.fingerprints[0]
+        v, prev = dedup.verdict(board_index.get(fp), last_seen=now, now=now, grace_days=int(cfg.get("grace_days", 3)))
+        if v == "blocked":
+            skipped.append({"fingerprint": fp, "reason": f"açık WI #{prev}"})
+            continue
+        if v == "suppressed":
+            skipped.append({"fingerprint": fp, "reason": f"iptal edilmiş WI #{prev}"})
+            continue
+        if v == "recurring":
+            u.recurring_of = prev
+        live.append(u)
+    file_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "file"]
+    module_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "module"]
+    packed = rank.pack_units(file_units, pack_sp=int(cfg.get("pack_sp", 3)), pack_files=int(cfg.get("pack_files", 5)),
+                             source=SOURCE)
+    groups = packed + module_units
+    groups.sort(key=lambda g: (-g.score, g.fingerprints[0]))
+    return groups, skipped, summary
+
+
+# ── Tarama önbelleği ─────────────────────────────────────────────────────
+
+CACHE_DIR = _CONFIG_DIR / "quality_php_modern_cache"
+_REPO_NAME = re.compile(r"^[A-Za-z0-9][\w.-]*$")
+
+
+def scan_cached(repo: str, repo_root: Path, *, cache_dir: Path = CACHE_DIR, scan_fn=None, head_sha_fn=None,
+                exclude: list[str] | None = None, php_bin: str = "php", ttl_h: int = 24, force: bool = False) -> dict:
+    """Aynı HEAD sha + aynı katalog sürümü + TTL içinde → önbellek; aksi halde yeniden tarama.
+    Dönen sözlükte `cached` alanı var."""
+    if not _REPO_NAME.match(repo or "") or ".." in repo:
+        raise ValueError(f"Geçersiz repo adı: {repo!r}")
+    scan_fn = scan_fn or scan_repo
+    head_sha_fn = head_sha_fn or _head_sha
+    rv = rules_version()
+    path = Path(cache_dir) / f"{repo}.json"
+    sha = head_sha_fn(repo_root)
+    if not force:
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cached = None
+        if (cached and cached.get("sha") == sha and cached.get("rules_version") == rv
+                and ttl_h > 0 and time.time() - float(cached.get("built_at") or 0) < ttl_h * 3600):
+            cached["cached"] = True
+            return cached
+    res = scan_fn(repo_root, exclude=exclude, php_bin=php_bin)
+    res = {**res, "sha": sha or res.get("sha", ""), "rules_version": rv, "built_at": time.time(), "cached": False}
+    try:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        log.warning(f"⚠️ php_modern: tarama önbelleği yazılamadı: {e}")
+    return res

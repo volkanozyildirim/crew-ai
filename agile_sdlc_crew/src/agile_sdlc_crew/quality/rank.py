@@ -207,8 +207,13 @@ def sonar_units(findings: list[Finding]) -> list[Group]:
 
 
 def pack_sonar(units: list[Group], pack_sp: int = 3, pack_files: int = 5) -> list[Group]:
+    return pack_units(units, pack_sp=pack_sp, pack_files=pack_files, source="sonar")
+
+
+def pack_units(units: list[Group], *, pack_sp: int = 3, pack_files: int = 5, source: str = "sonar") -> list[Group]:
     """Aynı repo + kural birimlerini ≤pack_sp SP ve ≤pack_files dosyalık Task'larda topla.
-    Paket skoru = en yüksek birim skoru (toplam değil — adet baskınlığı geri gelmesin)."""
+    Paket skoru = en yüksek birim skoru (toplam değil — adet baskınlığı geri gelmesin).
+    Sonar ve php_modern (dosya birimli kurallar) ortak."""
     buckets: dict[tuple[str, str, bool], list[Group]] = {}
     for u in units:
         buckets.setdefault((u.repo, u.findings[0].rule, u.needs_human), []).append(u)
@@ -225,7 +230,7 @@ def pack_sonar(units: list[Group], pack_sp: int = 3, pack_files: int = 5) -> lis
                 cur.score = max(cur.score, u.score)
                 cur.recurring_of = cur.recurring_of or u.recurring_of
                 continue
-            cur = Group(source="sonar", repo=repo, title=u.title, fingerprints=list(u.fingerprints),
+            cur = Group(source=source, repo=repo, title=u.title, fingerprints=list(u.fingerprints),
                         findings=list(u.findings), score=u.score, sp=u.sp, needs_human=u.needs_human,
                         human_reason=u.human_reason, recurring_of=u.recurring_of)
             out.append(cur)

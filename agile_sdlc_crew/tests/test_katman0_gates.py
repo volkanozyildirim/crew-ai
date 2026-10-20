@@ -4742,6 +4742,94 @@ def test_php_modern_scan():
         check("repo dizini yoksa QualitySourceError", True)
 
 
+def test_php_modern_groups():
+    print("\n[PM3] php_modern — gruplama, skor, dedup, önbellek")
+    import math
+    from agile_sdlc_crew.quality import php_modern as pm, rank
+    rules = pm.load_rules()
+    cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3}
+
+    def h(rule, file, line=1):
+        return {"rule": rule, "file": file, "line": line, "text": "x", "module": pm.module_of(file)}
+    hits = ([h("str_contains", f"app/Lib/F{i}.php", 3) for i in range(12)]
+            + [h("str_contains", "app/Lib/F0.php", 9)]
+            + [h("utf8_encode", "app/Lib/F0.php", 5)]
+            + [h("typed_properties", f"app/Model/M{i}.php", 2) for i in range(8)]
+            + [h("typed_properties", "app/Lib/F1.php", 2)]
+            + [h("property_hooks", "app/Model/M1.php", 7)]
+            + [h("strict_types", "app/Lib/F0.php", 1)])
+    scan = {"files": 20, "sha": "abc", "hits": hits, "adoption": {}}
+    groups, skipped, summary = pm.build_groups(scan, rules, "8.2", repo="webservice", board_index={}, now=1e9, cfg=cfg)
+    keys = {g.findings[0].rule for g in groups}
+    check("8.2 hedefte property_hooks grubu yok", "property_hooks" not in keys, str(keys))
+    g84, _s, sum84 = pm.build_groups(scan, rules, "8.4", repo="webservice", board_index={}, now=1e9, cfg=cfg)
+    check("8.4 hedefte property_hooks grubu var", "property_hooks" in {g.findings[0].rule for g in g84})
+    sc = [g for g in groups if g.findings[0].rule == "str_contains"]
+    check("mekanik: dosya başına birim, aynı kural ≤5 dosya / ≤3 SP paket → 12 dosya → 4 paket",
+          len(sc) == 4 and all(g.sp <= 3 and len(g.files) <= 5 for g in sc) and sum(len(g.files) for g in sc) == 12,
+          str([(g.sp, len(g.files)) for g in sc]))
+    check("paket parmak izleri dosya başına php_modern:<repo>:<kural>:<dosya>",
+          all(fp.startswith("php_modern:webservice:str_contains:app/Lib/F") for g in sc for fp in g.fingerprints)
+          and sum(len(g.fingerprints) for g in sc) == 12)
+    check("aynı dosyada 2 bulgu → tek birim, count 2", any(f.count == 2 and f.file == "app/Lib/F0.php" for g in sc for f in g.findings))
+    check("mekanik grup otonom, SP = dosya başına sp_unit", all(not g.needs_human for g in sc))
+    tp = [g for g in groups if g.findings[0].rule == "typed_properties"]
+    check("yapısal: modül başına birim (app/Model, app/Lib) → 2 grup, SP 5, needs_human",
+          len(tp) == 2 and all(g.needs_human and g.sp == 5 for g in tp)
+          and {g.fingerprints[0] for g in tp} == {"php_modern:webservice:typed_properties:app/Model", "php_modern:webservice:typed_properties:app/Lib"},
+          str([(g.fingerprints, g.sp) for g in tp]))
+    check("yapısal neden metni katalog riskinden", all(g.human_reason.startswith("Tasarım kararı") for g in tp))
+    dep = next(g for g in groups if g.findings[0].rule == "utf8_encode")
+    one_sc = next(g for g in sc if len(g.files) == 1) if any(len(g.files) == 1 for g in sc) else None
+    w = pm.WEIGHT
+    check("skor = ağırlık × (1+log10(adet)); deprecation(1) > mechanical(1)",
+          abs(dep.score - w["deprecation"]) < 1e-9 and (one_sc is None or dep.score > one_sc.score), str(dep.score))
+    big = max(tp, key=lambda g: g.total)
+    check("yapısal skor adetle log artar", abs(big.score - w["structural"] * (1 + math.log10(8))) < 1e-9, str(big.score))
+    check("report kuralı grup üretmez ama özette", "strict_types" not in keys and summary["strict_types"]["count"] == 1
+          and summary["strict_types"]["kind"] == "report")
+    check("özet: kural → adet/dosya/modül/kind/auto", summary["str_contains"]["count"] == 13 and summary["str_contains"]["files"] == 12
+          and summary["typed_properties"]["modules"] == 2 and summary["typed_properties"]["auto"] is False, str(summary["str_contains"]))
+    # dedup: board'da açık fp → atlanır
+    bi = {"php_modern:webservice:utf8_encode:app/Lib/F0.php": {"wi": 500, "state": "Active"},
+          "php_modern:webservice:typed_properties:app/Model": {"wi": 501, "state": "Canceled"}}
+    g2, sk2, _ = pm.build_groups(scan, rules, "8.2", repo="webservice", board_index=bi, now=1e9, cfg=cfg)
+    reasons = {s["reason"].split(" #")[0] for s in sk2}
+    check("board'da açık WI → 'açık WI #', iptal → 'iptal edilmiş WI #'", reasons == {"açık WI", "iptal edilmiş WI"}
+          and not any(g.findings[0].rule == "utf8_encode" for g in g2)
+          and not any(fp.endswith("typed_properties:app/Model") for g in g2 for fp in g.fingerprints), str(sk2))
+    # pack_sonar eski davranışı
+    check("pack_sonar, pack_units'e sarmalayıcı", rank.pack_sonar([]) == [] and hasattr(rank, "pack_units"))
+    # önbellek
+    calls = []
+
+    def fake_scan(root, **kw):
+        calls.append(kw)
+        return {"files": 1, "sha": kw.get("_sha", "s1"), "hits": [], "adoption": {}, "errors": []}
+    with tempfile.TemporaryDirectory() as td:
+        cdir = Path(td)
+        a = pm.scan_cached("webservice", Path(td), cache_dir=cdir, scan_fn=lambda root, **kw: fake_scan(root, _sha="s1", **kw),
+                           head_sha_fn=lambda r: "s1", exclude=[], php_bin="php", ttl_h=24)
+        b = pm.scan_cached("webservice", Path(td), cache_dir=cdir, scan_fn=lambda root, **kw: fake_scan(root, _sha="s1", **kw),
+                           head_sha_fn=lambda r: "s1", exclude=[], php_bin="php", ttl_h=24)
+        check("aynı sha → ikinci çağrı tarayıcıyı çağırmaz", len(calls) == 1 and b["sha"] == "s1" and a["cached"] is False and b["cached"] is True)
+        pm.scan_cached("webservice", Path(td), cache_dir=cdir, scan_fn=lambda root, **kw: fake_scan(root, _sha="s2", **kw),
+                       head_sha_fn=lambda r: "s2", exclude=[], php_bin="php", ttl_h=24)
+        check("sha değişince yeniden tarar", len(calls) == 2)
+        pm.scan_cached("webservice", Path(td), cache_dir=cdir, scan_fn=lambda root, **kw: fake_scan(root, _sha="s2", **kw),
+                       head_sha_fn=lambda r: "s2", exclude=[], php_bin="php", ttl_h=24, force=True)
+        check("force → yeniden tarar", len(calls) == 3)
+        pm.scan_cached("webservice", Path(td), cache_dir=cdir, scan_fn=lambda root, **kw: fake_scan(root, _sha="s2", **kw),
+                       head_sha_fn=lambda r: "s2", exclude=[], php_bin="php", ttl_h=0)
+        check("TTL dolunca yeniden tarar", len(calls) == 4)
+        check("önbellek dosyası repo adıyla, yol kaçışı yok", (cdir / "webservice.json").exists())
+        try:
+            pm.scan_cached("../x", Path(td), cache_dir=cdir, scan_fn=fake_scan, head_sha_fn=lambda r: "s", exclude=[], php_bin="php")
+            check("repo adında yol kaçışı reddedilir", False)
+        except ValueError:
+            check("repo adında yol kaçışı reddedilir", True)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4813,7 +4901,8 @@ def main():
               test_pr_comment_emoticons,
               test_completion_comment_integrity,
               test_php_modern_catalog,
-              test_php_modern_scan):
+              test_php_modern_scan,
+              test_php_modern_groups):
         try:
             t()
         except Exception as e:
