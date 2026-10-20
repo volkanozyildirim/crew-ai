@@ -95,7 +95,7 @@ final class Scanner
 
     private function hit(string $rule, int $line): void
     {
-        $key = $rule . ':' . $line;
+        $key = $this->file . ':' . $rule . ':' . $line;
         if (isset($this->hits[$key])) {
             return;
         }
