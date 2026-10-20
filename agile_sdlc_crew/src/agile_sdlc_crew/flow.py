@@ -1378,6 +1378,22 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"{s.kickoff_text[:_cb.cap('KICKOFF_REVIEW')]}"
                 )
 
+        # Kickoff kılavuzu (retro'dan "Kılavuza ekle" / kickoff feedback'i):
+        # yalnız kickoff toplantısı okuyordu; toplantı kapalıyken
+        # (CREW_KICKOFF_MEETING=0) eklenen kurallar hiçbir işe ulaşmıyordu.
+        # Analiz ve teknik tasarımın SONUNA eklenir (adıma özel kısım — önbellek
+        # öneki bozulmaz). CREW_KICKOFF_GUIDANCE_IN_STEPS ile kapatılabilir.
+        if step_key in ("requirements_analysis_task", "technical_design_task"):
+            try:
+                from agile_sdlc_crew import kickoff_guidance as _kg_s
+                from agile_sdlc_crew import pipeline_config as _pc_g
+                if _pc_g.get("CREW_KICKOFF_GUIDANCE_IN_STEPS"):
+                    _gb = _kg_s.format_for_context()
+                    if _gb:
+                        tail.append("\n" + _gb)
+            except Exception:  # noqa: BLE001 — kılavuz okunamazsa adım kılavuzsuz koşar
+                pass
+
         # Muhendislik olcutu (dil + Sonar): tasarim, gelistirme ve inceleme
         # ayni referansi gorsun — hata en ucuz yerde, yazarken yakalansin.
         if step_key in ("technical_design_task", "implement_change_task", "review_pr_task"):

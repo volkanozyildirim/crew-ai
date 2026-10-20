@@ -315,6 +315,13 @@ SCHEMA: list[dict] = [
         "desc": "Pipeline WI'ı bugüne kadar yalnızca alanlardan okuyordu (Başlık/Açıklama/Kabul Kriterleri); yorumlar Azure'da AYRI bir endpoint ve hiç çağrılmıyordu. Oysa ekip eksikleri çoğunlukla yorumda cevaplıyor. Ölçüldü: WI #73061 hazırlık kapısından 5/100 ile döndü, ardından 11 insan yorumu tam da eksik kriterleri yazdı ('noktanın lokasyonu shipment_cod_allowed'da değilse kapıda ödeme gösterilmeyecek', 'evet, tüm kargolar için geçerli'), iş 10 gün sonra yeniden koşturuldu ve YİNE 5/100 verdi; WI #73732'de çalışan bir curl komutu ve 'Dalli'yi de dahil edebiliriz' kapsam kararı aynı şekilde görülmedi. Açıkken bot olmayan yorumlar kronolojik olarak BA context'ine ve karar veren adımlara (kickoff, teknik tasarım, implement, review, test, UAT) girer; hazırlık kapısının içerik uzunluğuna da sayılır. Kapatmak eski davranışa döner.",
     },
     {
+        "key": "CREW_KICKOFF_GUIDANCE_IN_STEPS",
+        "label": "Kickoff kılavuzu adımlarda",
+        "type": "bool",
+        "default": True,
+        "desc": "Kickoff kılavuzundaki kurallar (Retro → 'Kılavuza ekle', kickoff feedback'i) iş analizi ve teknik tasarım bağlamının sonuna da eklenir. Eskiden yalnız kickoff toplantısı okuyordu; toplantı kapalıyken eklenen kurallar hiçbir işe ulaşmıyordu.",
+    },
+    {
         "key": "CREW_READINESS_GATE",
         "label": "Hazırlık Kapısı (WI detay yeterliliği)",
         "type": "bool",

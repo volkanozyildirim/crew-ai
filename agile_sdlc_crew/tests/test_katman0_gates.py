@@ -4463,6 +4463,35 @@ def test_quality_project_filter():
           'id="qProj"' in html and "/api/quality/projects" in html and "repos=" in html and "repos:" in html)
 
 
+def test_guidance_in_steps():
+    print("\n[48b] Kickoff kılavuzu — toplantı kapalıyken de requirements ve teknik tasarıma girer")
+    from agile_sdlc_crew import kickoff_guidance as _kg
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.flow import AgileSDLCFlow, PipelineState
+    orig = _kg.format_for_context
+    _kg.format_for_context = lambda max_rules=30: "# OGRENILMIS YONERGELER (gecmis kickoff'lardan)\n1. (WI #retro) AC türet"
+    try:
+        s = PipelineState(work_item_id="1", requirements_text="{}", repo_name="r")
+        f = SimpleNamespace(state=s, _vector_store=None, _forward_text=lambda k, t, c: t[:c])
+        ctx = {k: AgileSDLCFlow._build_step_context(f, k) for k in
+               ("requirements_analysis_task", "technical_design_task", "implement_change_task")}
+        check("retro'dan eklenen kural requirements ve teknik tasarım bağlamında",
+              "AC türet" in ctx["requirements_analysis_task"] and "AC türet" in ctx["technical_design_task"])
+        check("diğer adımlara girmez (önbellek öneki bozulmaz)", "AC türet" not in ctx["implement_change_task"])
+        tail_ok = ctx["technical_design_task"].rstrip().endswith("AC türet") or \
+            ctx["technical_design_task"].index("AC türet") > ctx["technical_design_task"].find("# Is Kalemi")
+        check("kılavuz bağlamın sonunda (adıma özel kısım)", tail_ok)
+        orig_get = pc.get
+        pc.get = lambda k: False if k == "CREW_KICKOFF_GUIDANCE_IN_STEPS" else orig_get(k)
+        try:
+            off = AgileSDLCFlow._build_step_context(f, "technical_design_task")
+            check("ayarla kapatılabilir", "AC türet" not in off)
+        finally:
+            pc.get = orig_get
+    finally:
+        _kg.format_for_context = orig
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4525,7 +4554,8 @@ def main():
               test_dashboard_readability,
               test_human_label,
               test_quality_human_split,
-              test_quality_project_filter):
+              test_quality_project_filter,
+              test_guidance_in_steps):
         try:
             t()
         except Exception as e:
