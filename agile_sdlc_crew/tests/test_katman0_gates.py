@@ -3878,6 +3878,11 @@ def test_quality_readiness():
     src = inspect.getsource(_flow)
     check("hazırlık kapısı muafiyeti kullanıyor",
           "_quality_skips_readiness(self.state.wi_tags)" in src)
+    # #236: Sonar SSL işi 2. aşamada düştü — BA'nın 12 maddesinin 8'i (tempo-fp korunur,
+    # Sonar'da kapanır, yalnız listelenen satırlar…) plan değişikliğiyle kapsanamaz.
+    stage2 = src[src.index("HAZIRLIK KAPISI (asama 2)"):src.index("raise NeedsMoreInfo(_msg)", src.index("HAZIRLIK KAPISI (asama 2)"))]
+    check("2. aşama kapsam eşiği kalite işinde atlanır (mimar reddi kalır)",
+          "_quality_skips_readiness(self.state.wi_tags)" in stage2 and "_refusal" in stage2)
 
 
 def test_repo_ctx_cross_thread():

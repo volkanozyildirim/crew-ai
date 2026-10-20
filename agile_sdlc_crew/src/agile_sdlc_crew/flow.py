@@ -5829,6 +5829,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _cov = int(round(100 * (len(_all_ids) - len(_unc2)) / len(_all_ids))) if _all_ids else 100
             _min_cov = int(_pc_rd2.get("CREW_READINESS_MIN_COVERAGE") or 50)
             _refusal = getattr(self, "_architect_refusal", "") or ""
+            # Kalite işi (#236): BA'nın türettiği maddelerin çoğu süreç/doğrulama
+            # (tempo-fp korunur, Sonar'da kapanır, yalnız listelenen satırlar) —
+            # plan değişikliğiyle kapsanamaz; %33 kapsam ile needs_info'ya düştü.
+            # Kapsam eşiği 1. aşama gibi atlanır; mimar reddi yine durdurur.
+            if _cov < _min_cov and _quality_skips_readiness(self.state.wi_tags):
+                _log(f"  📋 Hazırlık kapısı 2. aşama: kalite işi — kapsam eşiği atlandı (%{_cov}, {len(_unc2)} madde açık)")
+                _cov = 100
             if _cov < _min_cov or _refusal:
                 _why = []
                 if _cov < _min_cov:
