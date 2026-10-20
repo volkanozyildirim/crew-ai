@@ -506,6 +506,31 @@ def _strip_tool_meta(text: str) -> str:
     return "\n\n".join(kept).strip() if len(kept) != len(paras) else (text or "")
 
 
+REPORT_MAX = 12000
+
+
+def _trim_report(text: str, limit: int = REPORT_MAX) -> str:
+    """Rapor metnini PARAGRAF sınırında kısalt. Eskiden yorum `[:3000]` ile
+    kesiliyordu: #76200'ün raporu tablo satırının ortasında ("| AC7 Birim testi
+    var v") bitti, AC7/AC8 ve notlar kayboldu, tablo bozuk göründü."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = head.rfind("\n\n")
+    if cut < limit // 2:
+        cut = head.rfind("\n")
+    body = head[:cut if cut > 0 else limit].rstrip()
+    # yarım kalmış tablo satırı / kod bloğu bırakma
+    lines = body.splitlines()
+    while lines and lines[-1].lstrip().startswith("|") and not lines[-1].rstrip().endswith("|"):
+        lines.pop()
+    body = "\n".join(lines)
+    if body.count("```") % 2:
+        body += "\n```"
+    return body + "\n\n*… rapor kısaltıldı — tamamı iş kaydında (job_steps).*"
+
+
 def quality_lean_overrides() -> dict:
     """Kalite işleri için iş kapsamlı model seçimi (CREW_QUALITY_LEAN_MODELS).
     Reviewer ve geliştirici bilerek yok: review tek kalite kapısı, kod Opus'ta."""
@@ -7761,7 +7786,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             f"## Tamamlanma Raporu\n\n"
             f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
             f"{_est_line}"
-            f"{completion_text[:3000]}"
+            f"{_trim_report(completion_text)}"
             f"{_dod_md}\n\n"
             f"---\n*Tempo - Pipeline tamamlandi*"
         )

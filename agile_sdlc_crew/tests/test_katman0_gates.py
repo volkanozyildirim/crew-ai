@@ -4597,6 +4597,27 @@ def test_pr_comment_emoticons():
     check("PR yorumu ve yanıtı gönderilmeden önce uygulanır", src.count("defuse_emoticons(") == 2)
 
 
+def test_completion_comment_integrity():
+    print("\n[53] Tamamlanma yorumu — tablo ortasında kesilmesin, atlanan UAT 'parse edilemedi' demesin (#76200)")
+    import inspect
+    from agile_sdlc_crew import flow as _flow
+    from agile_sdlc_crew import wi_lifecycle as _wl
+    rows = "\n".join(f"| AC{i} kriter | GEÇTİ |" for i in range(1, 120))
+    rep = "## Özet\nx\n\n## Kabul\n| Kriter | Durum |\n|---|---|\n" + rows + "\n\n## Notlar\nson"
+    cut = _flow._trim_report(rep, 1500)
+    last = cut.rstrip().splitlines()
+    check("kısaltma paragraf sınırında; yarım tablo satırı yok, kısaltıldı notu var",
+          len(cut) <= 1600 and "kısaltıldı" in cut and not any(l.startswith("| AC") and not l.rstrip().endswith("|") for l in last))
+    check("sığan rapor aynen kalır", _flow._trim_report("## Özet\nkısa", 1500) == "## Özet\nkısa")
+    src = inspect.getsource(_flow.AgileSDLCFlow.step11_completion_report)
+    check("yorum 3000 karakterde kesilmiyor", "completion_text[:3000]}" not in src and "_trim_report(" in src)
+    d = _wl.evaluate_dod(review_approved=True, open_review_issues=0, build_status="succeeded",
+                         uat_text="Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)", pushed_files=["a.php"],
+                         require_tests=False, pr_id="1")
+    uat = next(i for i in d.items if i.key == "uat")
+    check("atlanan UAT DoD'da 'atlandı' der", "atlandı" in uat.note and "parse" not in uat.note, uat.note)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4665,7 +4686,8 @@ def main():
               test_review_prefetch_window,
               test_quality_estimate,
               test_no_env_dependent_tests,
-              test_pr_comment_emoticons):
+              test_pr_comment_emoticons,
+              test_completion_comment_integrity):
         try:
             t()
         except Exception as e:
