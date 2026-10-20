@@ -177,3 +177,56 @@ def target_version(client, repo: str, *, app_map_cache: dict | None = None, repo
     except OSError as e:
         log.warning(f"⚠️ php_modern: hedef sürüm önbelleği yazılamadı: {e}")
     return res
+
+
+# ── Tarama ───────────────────────────────────────────────────────────────
+
+SCAN_PHP = Path(__file__).resolve().parent / "php_modern_scan.php"
+DEFAULT_EXCLUDE = "vendor,node_modules,app/Themes,tmp,webroot,public,storage,cache,Test,tests"
+MODULE_DEPTH = 2
+
+
+def module_of(rel_path: str, depth: int = MODULE_DEPTH) -> str:
+    parts = rel_path.replace("\\", "/").split("/")
+    dirs = parts[:-1]
+    return "/".join(dirs[:depth]) if dirs else "."
+
+
+def _head_sha(root: Path) -> str:
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=20)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def scan_repo(repo_root: Path, *, exclude: list[str] | None = None, php_bin: str = "php", timeout: int = 300) -> dict:
+    """php_modern_scan.php'yi koştur. php yok / hata / bozuk JSON → QualitySourceError
+    (kısmi veriyle liste gösterilmez)."""
+    import subprocess
+    from agile_sdlc_crew.quality.model import QualitySourceError
+    root = Path(repo_root)
+    if not root.is_dir():
+        raise QualitySourceError(f"Repo dizini yok: {root}")
+    ex = DEFAULT_EXCLUDE.split(",") if exclude is None else list(exclude)
+    try:
+        r = subprocess.run([php_bin, "-d", "display_errors=stderr", str(SCAN_PHP), str(root), ",".join(ex)],
+                           capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as e:
+        raise QualitySourceError(f"PHP bulunamadı ({php_bin}) — CREW_PHP_BIN ayarlayın") from e
+    except subprocess.TimeoutExpired as e:
+        raise QualitySourceError(f"Tarama {timeout} sn içinde bitmedi") from e
+    if r.returncode != 0:
+        raise QualitySourceError(f"Tarayıcı hata verdi (kod {r.returncode}): {(r.stderr or r.stdout)[-400:]}")
+    try:
+        data = json.loads(r.stdout)
+    except ValueError as e:
+        raise QualitySourceError(f"Tarayıcı çıktısı okunamadı: {r.stdout[:200]!r}") from e
+    hits = []
+    for h in data.get("hits") or []:
+        h = dict(h)
+        h["module"] = module_of(h.get("file", ""))
+        hits.append(h)
+    return {"files": int(data.get("files") or 0), "sha": _head_sha(root), "hits": hits,
+            "adoption": data.get("adoption") or {}, "errors": data.get("errors") or []}

@@ -4697,6 +4697,51 @@ def test_php_modern_catalog():
         check("önbellek süresi dolunca yeniden okur (imaj 404 → composer'a düşer)", t5["source"] == "composer", str(t5))
 
 
+def test_php_modern_scan():
+    print("\n[PM2] php_modern — token tarayıcı")
+    import shutil
+    from agile_sdlc_crew.quality import php_modern as pm
+    from agile_sdlc_crew.quality.model import QualitySourceError
+    if not shutil.which("php"):
+        skip("php_modern tarayıcı", "php binary yok")
+        return
+    root = Path(__file__).resolve().parent / "fixtures" / "php_modern"
+    res = pm.scan_repo(root, exclude=["vendor"], php_bin="php")
+    hits = res["hits"]
+    got = {(h["file"], h["line"], h["rule"]) for h in hits}
+    # Beklenen: fikstürlerdeki `// @expect <kural>` işaretleri (satır = işaretin satırı)
+    want = set()
+    for f in sorted(root.rglob("*.php")):
+        rel = f.relative_to(root).as_posix()
+        if rel.startswith("vendor/"):
+            continue
+        for i, ln in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            for m in re.finditer(r"@expect (\w+)", ln):
+                want.add((rel, i, m.group(1)))
+    missing = sorted(want - got)
+    extra = sorted(got - want)
+    check("beklenen her bulgu yerinde (dosya, satır, kural)", not missing, str(missing))
+    check("fazladan bulgu yok (string/heredoc/yorum içi kalıplar, modern.php, vendor)", not extra, str(extra))
+    check("tarama sayacı: vendor hariç 5 dosya", res["files"] == 5, str(res["files"]))
+    check("bulgu satır metni taşır", all(h.get("text") for h in hits))
+    check("modül: kaynak kökünden 2 dizin", {h["module"] for h in hits} <= {"app/Model", "app/Lib"}, str({h["module"] for h in hits}))
+    ad = res["adoption"]
+    check("benimseme sayaçları", ad["enum"] == 1 and ad["match"] == 1 and ad["nullsafe"] == 1 and ad["attribute"] == 1
+          and ad["readonly"] == 1 and ad["strict_types_files"] == 1 and ad["untyped_props"] == 4 and ad["typed_props"] >= 4, str(ad))
+    res2 = pm.scan_repo(root, exclude=[], php_bin="php")
+    check("hariç tutma kapalıyken vendor da taranır", res2["files"] == 6 and any(h["file"].startswith("vendor/") for h in res2["hits"]))
+    try:
+        pm.scan_repo(root, exclude=[], php_bin="/nonexistent/php")
+        check("php yoksa QualitySourceError", False)
+    except QualitySourceError:
+        check("php yoksa QualitySourceError", True)
+    try:
+        pm.scan_repo(root / "yok", exclude=[], php_bin="php")
+        check("repo dizini yoksa QualitySourceError", False)
+    except QualitySourceError:
+        check("repo dizini yoksa QualitySourceError", True)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -4767,7 +4812,8 @@ def main():
               test_no_env_dependent_tests,
               test_pr_comment_emoticons,
               test_completion_comment_integrity,
-              test_php_modern_catalog):
+              test_php_modern_catalog,
+              test_php_modern_scan):
         try:
             t()
         except Exception as e:
