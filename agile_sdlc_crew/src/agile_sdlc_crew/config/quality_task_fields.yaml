@@ -1,0 +1,4 @@
+# Kalite alımının açtığı Task'lara eklenen alanlar. Org'un Task tipinde zorunlu
+# özel alanlar var; boş bırakılırsa Azure 400 (TF401320) döner. Değer, alanın
+# izin verilen değerlerinden biri olmalı (workitemtypes/Task/fields?$expand=allowedValues).
+Custom.ARGEType: "Geliştirme - GE"

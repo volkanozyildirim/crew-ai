@@ -186,6 +186,31 @@ LLM_PO = lambda: build_for_agent("product_owner")  # faz 5: PO degerlendirmesi
 class AgileSDLCCrew:
     """Full Agile SDLC pipeline with 7 agents."""
 
+    _LLM_ATTRS = {
+        "llm_architect": "software_architect", "llm_developer": "senior_developer",
+        "llm_reviewer": "code_reviewer", "llm_analyst": "business_analyst",
+        "llm_qa": "qa_engineer", "llm_uat": "uat_specialist",
+        "llm_scrum": "scrum_master", "llm_po": "product_owner",
+    }
+
+    def _llm(self, agent_key: str):
+        from agile_sdlc_crew.llm import resolver as _rs
+        if _rs.has_job_override(agent_key):
+            return build_for_agent(agent_key)
+        cache = self.__dict__.setdefault("_llm_cache", {})
+        if agent_key not in cache:
+            cache[agent_key] = build_for_agent(agent_key)
+        return cache[agent_key]
+
+    llm_architect = property(lambda self: self._llm("software_architect"))
+    llm_developer = property(lambda self: self._llm("senior_developer"))
+    llm_reviewer = property(lambda self: self._llm("code_reviewer"))
+    llm_analyst = property(lambda self: self._llm("business_analyst"))
+    llm_qa = property(lambda self: self._llm("qa_engineer"))
+    llm_uat = property(lambda self: self._llm("uat_specialist"))
+    llm_scrum = property(lambda self: self._llm("scrum_master"))
+    llm_po = property(lambda self: self._llm("product_owner"))
+
     def __init__(self):
         import yaml
         from pathlib import Path
@@ -194,14 +219,12 @@ class AgileSDLCCrew:
             self.agents_config = yaml.safe_load(f)
         with open(config_dir / "tasks.yaml", encoding="utf-8") as f:
             self.tasks_config = yaml.safe_load(f)
-        self.llm_architect = LLM_ARCHITECT()
-        self.llm_developer = LLM_DEVELOPER()
-        self.llm_reviewer = LLM_REVIEWER()
-        self.llm_analyst = LLM_ANALYST()
-        self.llm_qa = LLM_QA()
-        self.llm_uat = LLM_UAT()
-        self.llm_scrum = LLM_SCRUM()
-        self.llm_po = LLM_PO()
+        # Ajan LLM'leri kurulumda bir kez çözülür (log + doğrulama) ve önbelleğe
+        # alınır; ama bir iş kapsamlı geçersiz kılma (kalite işi: mimar Sonnet,
+        # rapor Haiku) varsa ERİŞİMDE yeniden çözülür. Crew flow init'te, yani
+        # _wi_begin'in etiketleri okuyup geçersiz kılmayı kurmasından ÖNCE
+        # kuruluyor — önbellek bu yüzden iş #234'te mimarı Opus'ta tuttu.
+        self._llm_cache = {k: build_for_agent(k) for k in self._LLM_ATTRS.values()}
         self.status_tracker: StatusTracker | None = None
         self.local_repo_mgr = None  # LocalRepoManager, flow.py tarafindan set edilir
         self.vector_store = None  # VectorStore, flow.py tarafindan set edilir

@@ -195,6 +195,7 @@ def evaluate_dod(
     pushed_files: list[str],
     require_tests: bool,
     pr_id: str,
+    uat_skipped: bool = False,
 ) -> DodResult:
     items: list[DodItem] = []
 
@@ -225,7 +226,12 @@ def evaluate_dod(
 
     # 4. UAT kabul
     uat = parse_uat(uat_text)
-    if uat["overall"] is None and not uat["items"]:
+    if uat_skipped:
+        # Yalın akış (kalite işi) UAT'ı bilerek atlar — "parse edilemedi" yanlış izlenim
+        # veriyordu. Bayrak flow'dan gelir, UAT METNİNDEN DEĞİL: LLM çıktısı "Atlandı"
+        # ile başlayabilir ve reddedilmiş bir UAT'ı kapıdan geçirirdi.
+        items.append(DodItem("uat", "UAT kabul etti", None, "atlandı (kalite işi — yalın akış)"))
+    elif uat["overall"] is None and not uat["items"]:
         items.append(DodItem("uat", "UAT kabul etti", None, "UAT raporu parse edilemedi"))
     else:
         ok = uat["overall"] == "ACCEPTED" and uat["fail"] == 0

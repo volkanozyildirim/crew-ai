@@ -7,6 +7,8 @@ deklaratif olarak tanimlanir.
 
 import json as _json
 import logging
+import re
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -471,6 +473,97 @@ def _parse_readiness(requirements_text: str):
     oq = d.get("open_questions") or []
     return {"score": score, "missing_details": details,
             "open_questions": len(oq) if isinstance(oq, list) else 0}
+
+
+def _ec_evidence_lines(root, desc: str, limit: int = 6) -> list[str]:
+    """Task açıklamasındaki `dosya.php:16` kanıtlarının repodaki satırları (env adı sıralaması için ipucu)."""
+    out: list[str] = []
+    for m in re.finditer(r"((?:[\w.-]+/)*[\w.-]+\.php):(\d+)", desc or ""):
+        try:
+            lines = (Path(root) / m.group(1)).read_text(encoding="utf-8", errors="replace").splitlines()
+            ln = int(m.group(2))
+            if 1 <= ln <= len(lines):
+                out.append(lines[ln - 1])
+        except OSError:
+            continue
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _is_quality_wi(tags: str) -> bool:
+    return "tempo-quality" in {t.strip().lower() for t in (tags or "").split(";")}
+
+
+QUALITY_BUILD_FIX_RULE = (
+    "\n\nQUALITY TASK RULE: if the failing test is one this PR added, make that test SMALLER — "
+    "assert only the behaviour of the changed line (e.g. no warning when the key is missing) "
+    "instead of feeding a large method a fuller fake payload. Do not change the visibility "
+    "of production methods (private/final) to make a test pass; revert such changes if this PR "
+    "made them. If no narrow test is possible, delete the test this PR added. Never keep an "
+    "ENVIRONMENT-DEPENDENT assertion (collected warnings/deprecations list is empty, PHP version, "
+    "time): assert the changed code's return value instead."
+)
+
+
+# Tamamlanma raporunda ajanın "yorumu ben ekleyemiyorum, bir insan eklemeli"
+# notu: görev ajandan yorum EKLEMESİNİ istiyordu, claude_cli ajanının o aracı
+# yok (tool köprüsü), ajan bunu not düştü — sonra pipeline metni yorum olarak
+# ekledi ve not WI'da kaldı (#76201). Görev metni düzeltildi; bu da emniyet.
+_TOOL_META_RE = re.compile(
+    r"yorum (yazamıyor|yazamıyorum|ekleyemiyor|ekleyemiyorum|olarak eklenmek üzere)|insan eklemelidir|"
+    r"yorum adımı|No such tool|araçlar(ım)? yalnızca|cannot (post|add) (a )?comment|"
+    r"don'?t have (a|the) tool", re.I)
+
+
+def _strip_tool_meta(text: str) -> str:
+    """Ajanın araç / yorum ekleme hakkındaki meta notlarını (paragraf bazında) ayıkla."""
+    paras = re.split(r"\n\s*\n", text or "")
+    kept = [p for p in paras if not _TOOL_META_RE.search(p)]
+    return "\n\n".join(kept).strip() if len(kept) != len(paras) else (text or "")
+
+
+REPORT_MAX = 12000
+
+
+def _trim_report(text: str, limit: int = REPORT_MAX) -> str:
+    """Rapor metnini PARAGRAF sınırında kısalt. Eskiden yorum `[:3000]` ile
+    kesiliyordu: #76200'ün raporu tablo satırının ortasında ("| AC7 Birim testi
+    var v") bitti, AC7/AC8 ve notlar kayboldu, tablo bozuk göründü."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = head.rfind("\n\n")
+    if cut < limit // 2:
+        cut = head.rfind("\n")
+    body = head[:cut if cut > 0 else limit].rstrip()
+    # yarım kalmış tablo satırı / kod bloğu bırakma
+    lines = body.splitlines()
+    while lines and lines[-1].lstrip().startswith("|") and not lines[-1].rstrip().endswith("|"):
+        lines.pop()
+    body = "\n".join(lines)
+    if body.count("```") % 2:
+        body += "\n```"
+    return body + "\n\n*… rapor kısaltıldı — tamamı iş kaydında (job_steps).*"
+
+
+def quality_lean_overrides() -> dict:
+    """Kalite işleri için iş kapsamlı model seçimi (CREW_QUALITY_LEAN_MODELS).
+    Reviewer ve geliştirici bilerek yok: review tek kalite kapısı, kod Opus'ta."""
+    return {"software_architect": "architect_cli_sonnet", "scrum_master": "report_haiku"}
+
+
+def _quality_skips_readiness(tags: str) -> bool:
+    """Kalite alımının açtığı işler (etiket tempo-quality) hazırlık kapısının 1.
+    aşamasından muaf: kanıt üretim logundan gelir, beklenen davranış açıklamada
+    sabittir; BA'nın sorduğu 'hangi dizi / hangi dosya' soruları kodu okuyan
+    sonraki adımların işidir. Canlı ölçüm: 3 iş 30-43/100 ile needs_info'ya düştü.
+    Mimarın keşif kapısı (aşama 2) ve review/build kapıları yerinde kalır."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    if not _pc.get("CREW_QUALITY_SKIP_READINESS"):
+        return False
+    return _is_quality_wi(tags)
 
 
 def _readiness_score(readiness, ac_empty: bool, open_questions: int) -> tuple:
@@ -1347,6 +1440,22 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     f"{s.kickoff_text[:_cb.cap('KICKOFF_REVIEW')]}"
                 )
 
+        # Kickoff kılavuzu (retro'dan "Kılavuza ekle" / kickoff feedback'i):
+        # yalnız kickoff toplantısı okuyordu; toplantı kapalıyken
+        # (CREW_KICKOFF_MEETING=0) eklenen kurallar hiçbir işe ulaşmıyordu.
+        # Analiz ve teknik tasarımın SONUNA eklenir (adıma özel kısım — önbellek
+        # öneki bozulmaz). CREW_KICKOFF_GUIDANCE_IN_STEPS ile kapatılabilir.
+        if step_key in ("requirements_analysis_task", "technical_design_task"):
+            try:
+                from agile_sdlc_crew import kickoff_guidance as _kg_s
+                from agile_sdlc_crew import pipeline_config as _pc_g
+                if _pc_g.get("CREW_KICKOFF_GUIDANCE_IN_STEPS"):
+                    _gb = _kg_s.format_for_context()
+                    if _gb:
+                        tail.append("\n" + _gb)
+            except Exception:  # noqa: BLE001 — kılavuz okunamazsa adım kılavuzsuz koşar
+                pass
+
         # Muhendislik olcutu (dil + Sonar): tasarim, gelistirme ve inceleme
         # ayni referansi gorsun — hata en ucuz yerde, yazarken yakalansin.
         if step_key in ("technical_design_task", "implement_change_task", "review_pr_task"):
@@ -1360,6 +1469,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 skill_ctx = ""
             if skill_ctx:
                 tail.append(skill_ctx)
+            # Kimlik bilgisi işlerinde repodaki ortam değişkeni adları (PR 45061:
+            # mimar yalnız parola satırını görüp ORKESTRA_RO_DB_PASSWORD'ü uydurdu;
+            # repo DB_ORKESTRA_PROD_PASS kullanıyordu). İş-değişmezi: kuyruğa.
+            try:
+                env_ctx = self._env_conventions_block()
+            except Exception:  # noqa: BLE001
+                env_ctx = ""
+            if env_ctx:
+                tail.append(env_ctx)
 
         # Kabul kriterleri — BA analizinden sonra belirlenir, pipeline boyunca
         # baglayici tek kaynak: tasarim, gelistirme, inceleme ve UAT buna gore yapilir.
@@ -1681,6 +1799,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.wi_iteration_path = info.get("wi_iteration_path", "") or ""
         self.state.wi_tags = info.get("wi_tags", "") or ""
         self.state.wi_title = info.get("wi_title", "") or ""
+        self._quality_setup(wi_fields)
         # Faz 5: is tipine gore akis turu (bug/story/task/spike) — CREW_TYPE_FLOW
         try:
             from agile_sdlc_crew import pipeline_config as _pc_tf
@@ -1755,6 +1874,24 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew import estimation as _est
         try:
             if not _pc_est.get("CREW_ESTIMATE"):
+                return
+            # Kalite işi: SP'yi kalite alımı kuralları belirledi (tanımsız anahtar 1,
+            # paket 2-3…) ve WI'a yazdı. Yapısal tahmin gereksinim/dosya sayısından
+            # gider; beklenen davranış + kabul kriteri blokları BA'ya çok madde
+            # yazdırıyor → #76201 tek satırlık düzeltmeye 13 SP dedi. Alımın SP'si esas.
+            if _is_quality_wi(self.state.wi_tags) and self.state.wi_story_points:
+                sp = _est.snap_fib(self.state.wi_story_points) or 1
+                self.state.estimate = {
+                    "sp": sp, "class": _est.size_class(sp), "source": "kalite alımı", "stage": stage,
+                    "ba_sp": None, "confidence": None, "rationale": "", "structural_sp": None,
+                    "reasons": ["kalite alımının SP'si (WI)"],
+                }
+                _log(f"  📐 Tahmin [{stage}]: {sp} SP (kalite alımı — yapısal tahmin kullanılmadı)")
+                if stage == "plan" and self._db and self.state.job_id:
+                    try:
+                        self._db.update_job(self.state.job_id, estimate_sp=int(sp))
+                    except Exception as _e_db:
+                        _log(f"  📐 estimate_sp yazilamadi: {_e_db}")
                 return
             ba = _est.parse_ba_estimate(self.state.requirements_text or "")
             n_req = len(_requirement_ids(self.state.requirements_text or ""))
@@ -1930,6 +2067,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
         """
         import json as _json
         self._step_start("discover_repos_task")
+
+        _q_repo = getattr(self, "_quality_repo", "")
+        if self._quality_lean_flow() and _q_repo and _q_repo in set(self.state.known_repos):
+            self._discovered_repo = _q_repo
+            self._discovered_alternatives = []
+            _log(f"  🧹 Kalite işi: repo Task açıklamasında ({_q_repo}) — keşif atlandı")
+            self._step_done("discover_repos_task", f"Atlandı — kalite işi: repo Task açıklamasında ({_q_repo})")
+            return
 
         if not candidate_repos:
             self._step_done("discover_repos_task", "Atlandı — aday repo yok")
@@ -2355,19 +2500,33 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 except Exception:
                     return ""
 
+        # Base (PR hedef dalı) HER İKİ modda gerekir: diff modu için diff'in tabanı,
+        # normal mod için focused_source'un değişen satırları bulması. Eskiden
+        # yalnız diff modunda çözülüyordu → normal review'da base_ref "" kalıyor,
+        # base gövdesi hiç okunmuyor ve focused_source BAŞTAN KIRPMAYA düşüyordu:
+        # #230'da reviewer Basket.php'nin ilk 173 satırını gördü, değişen
+        # shoppingCartCountAction (~1460) bağlama hiç girmedi ve "satırı
+        # göremedim" diye yine de APPROVE verdi.
         base_ref = ""
-        if diff_mode:
-            for cand in ("main", "master"):
+        for cand in ("main", "master"):
+            try:
+                self._client.get_file_content(repo, files[0], cand)
+                base_ref = cand
+                break
+            except Exception:
+                continue
+        if not base_ref:
+            # Base okunamiyorsa (ilk dosya yeni olabilir) yine main varsay;
+            # per-dosya base fetch'i asagida ayrica denenir.
+            base_ref = "main"
+
+        def _base(fp: str) -> str | None:
+            for ref in dict.fromkeys((base_ref, "main", "master")):
                 try:
-                    self._client.get_file_content(repo, files[0], cand)
-                    base_ref = cand
-                    break
-                except Exception:
+                    return self._client.get_file_content(repo, fp, ref)
+                except Exception:  # noqa: BLE001 — yeni dosya: base'te yok
                     continue
-            if not base_ref:
-                # Base okunamiyorsa (ilk dosya yeni olabilir) yine main varsay;
-                # per-dosya base fetch'i asagida ayrica denenir.
-                base_ref = "main"
+            return None
 
         if diff_mode:
             parts = [
@@ -2407,12 +2566,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 # kendisi sayip kaydiriyordu (job #208: +8/+9). Satir numarasi
                 # onekli verilir; olculen: %58-62 daha kucuk context, degisen
                 # kodun tamami GARANTI gorunur.
-                base_body = None
-                if len(content) > per_file and base_ref:
-                    try:
-                        base_body = self._client.get_file_content(repo, fp, base_ref)
-                    except Exception:  # noqa: BLE001 — yeni dosya: base'te yok
-                        base_body = None
+                base_body = _base(fp) if len(content) > per_file else None
                 parts.append(
                     f"\n## {fp}\n```\n"
                     f"{_focused_source(content, base_body, per_file=per_file)}\n```"
@@ -3502,6 +3656,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
             existing_content = ""
             try:
                 existing_content = self._client.get_file_content(repo_name, file_path, branch)
+                if existing_content:
+                    self._stage_worktree_file(repo_name, file_path, existing_content)
             except Exception:
                 existing_content = change.get("new_code", "")
 
@@ -3602,6 +3758,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    Push HATA: {push_result.get('error', '?')}")
 
         _cli_rr.clear_repo_ctx()
+        # Hazırlanıp push edilmeyen (atlanan / hatalı) dosyalar da geri alınsın
+        for (_r, _fp) in list((getattr(self, "_staged_worktree", None) or {}).keys()):
+            if _r == repo_name:
+                self._restore_worktree_file(repo_name, _fp)
         _log("  Review retry: dosyalar guncellendi, dogrulama yapiliyor")
 
         if not structured:
@@ -3796,6 +3956,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._job_real_cost_usd = 0.0   # claude_cli gercek maliyet toplami (budget guard)
         # discover_repos'un kanit-temelli repo karari — step4 otoritesi
         self._discovered_repo = ""
+        self._quality_repo = ""      # kalite işi: Task açıklamasındaki repo (_quality_setup)
+        self._uat_skipped = False    # yalın akış UAT atladıysa DoD bunu "atlandı" gösterir
         self._discovered_alternatives = []
 
     @start()
@@ -4185,6 +4347,11 @@ class AgileSDLCFlow(Flow[PipelineState]):
             # (3 retry/$18) yerine config (1 retry/$10) gecerli oldu ve verify'in
             # buldugu tek regresyon icin 2. tur hakki kalmadi.
             self._apply_envelope("requirements")
+            # Resume yolunda da WI bağlamı kurulsun: etiketler (tempo-quality →
+            # yalın akış / ucuz modeller), tip akışı, yaşam döngüsü. #232'de
+            # requirements resume edildi, _wi_begin hiç çağrılmadı → kalite işi
+            # normal iş gibi Opus'la koştu.
+            self._wi_begin()
             self._resume_step("requirements_analysis_task", cached_ba)
             return
 
@@ -4451,7 +4618,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
         # Adim _step_fail ile kapanir: WI duzenlendikten sonraki kosu bu
         # analizi resume ETMEMELI.
         from agile_sdlc_crew import pipeline_config as _pc_rd
-        if _pc_rd.get("CREW_READINESS_GATE"):
+        if _pc_rd.get("CREW_READINESS_GATE") and _quality_skips_readiness(self.state.wi_tags):
+            _log("  📋 Hazırlık kapısı: kalite işi (tempo-quality) — 1. aşama atlandı")
+        elif _pc_rd.get("CREW_READINESS_GATE"):
             _rd = _parse_readiness(requirements_text)
             _rd_min = int(_pc_rd.get("CREW_READINESS_MIN_SCORE") or 60)
             _rd_score, _rd_pen = _readiness_score(
@@ -5686,6 +5855,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _cov = int(round(100 * (len(_all_ids) - len(_unc2)) / len(_all_ids))) if _all_ids else 100
             _min_cov = int(_pc_rd2.get("CREW_READINESS_MIN_COVERAGE") or 50)
             _refusal = getattr(self, "_architect_refusal", "") or ""
+            # Kalite işi (#236): BA'nın türettiği maddelerin çoğu süreç/doğrulama
+            # (tempo-fp korunur, Sonar'da kapanır, yalnız listelenen satırlar) —
+            # plan değişikliğiyle kapsanamaz; %33 kapsam ile needs_info'ya düştü.
+            # Kapsam eşiği 1. aşama gibi atlanır; mimar reddi yine durdurur.
+            if _cov < _min_cov and _quality_skips_readiness(self.state.wi_tags):
+                _log(f"  📋 Hazırlık kapısı 2. aşama: kalite işi — kapsam eşiği atlandı (%{_cov}, {len(_unc2)} madde açık)")
+                _cov = 100
             if _cov < _min_cov or _refusal:
                 _why = []
                 if _cov < _min_cov:
@@ -6099,55 +6275,63 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 from agile_sdlc_crew.main import _try_direct_edit
                 cur_lines = len(current_code.strip().splitlines())
                 new_lines = len(new_code.strip().splitlines())
-                # Guvenlik: current_code >> new_code ise buyuk kod kaybi riski, append'e yonlendir
-                if cur_lines > 20 and new_lines < cur_lines * 0.3:
-                    _log(f"    Guvenlik: current_code ({cur_lines} satir) >> new_code ({new_lines} satir), append yapiliyor")
-                    final_content = full_content.rstrip() + "\n\n" + new_code + "\n"
-                else:
+                # Buyuk current_code + kucuk new_code → duz replace kod kaybettirir;
+                # o durumda dogrudan pencereli duzenlemeye gec.
+                replaced = None
+                if not (cur_lines > 20 and new_lines < cur_lines * 0.3):
                     replaced = _try_direct_edit(full_content, current_code, new_code)
-                    if replaced is not None:
-                        final_content = replaced
-                        _log(f"    ✅ Direkt replace basarili (LLM cagrilmadi)")
-                    else:
-                        # Match edilemedi — LLM'e "SADECE YENI BLOK" sor (tam dosya degil)
-                        # Kucuk local modeller (Qwen 7B) tam dosya basaramiyor,
-                        # ama blok uretmek dogal. Python tarafi replace'i yapar.
-                        _log(f"    Direct-edit (4 katman fuzzy) match edilemedi, LLM'den blok isteniyor")
+                if replaced is not None:
+                    final_content = replaced
+                    _log(f"    ✅ Direkt replace basarili (LLM cagrilmadi)")
+                else:
+                    # Pencereli duzenleme (edit_window): degisikligin yeri bulunur,
+                    # ±50 satir numarali verilir, gelistirici yalniz pencerenin yeni
+                    # halini dondurur. ESKI YOL blok oturmazsa dosyanin SONUNA
+                    # ekliyordu — #229'da 352KB Order.php'nin sonuna satir tarifi
+                    # eklendi, dosya kirildi. Pencere oturmazsa dosya DEGISMEZ.
+                    from agile_sdlc_crew.edit_window import apply_windowed
+                    _log(f"    Direct-edit oturmadi — pencereli duzenleme (±50 satir)")
+
+                    def _ask_window(window_text, w_start, w_end, _fp=file_path, _desc=description,
+                                    _new=new_code, _target=agent_target_file):
                         code_crew = self._agile_crew.create_code_crew()
-                        # Blok modu: sadece current_code → new_code degisimi
-                        # previous_context MINIMAL — context length asilmasin
-                        code_result = code_crew.kickoff(inputs={
+                        res = code_crew.kickoff(inputs={
                             "work_item_id": self.state.work_item_id,
                             "target_repo": repo_name,
-                            "target_file": agent_target_file,
+                            "target_file": _target,
                             "change_description": (
-                                f"{description}\n\n"
-                                f"⚠️ CIKTIN: SADECE YENI KOD BLOGU olmali, TAM DOSYA DEGIL.\n"
-                                f"- Asagidaki current_code bloğunun YERINE gelecek yeni kodu yaz.\n"
-                                f"- Dosyanin geri kalanini (import'lar, diger fonksiyonlar vb.) "
-                                f"tekrar yazma — Python tarafi geri kalanini koruyacak.\n"
-                                f"- Aciklama/yorum yazma, sadece degisecek blok."
+                                f"{_desc}\n\n"
+                                f"WINDOWED EDIT. `current_code` below is lines {w_start}-{w_end} of "
+                                f"{_fp}, each prefixed with 'NNNN| ' (the prefix is NOT part of the file). "
+                                f"Apply the change to these lines and return the COMPLETE new version of "
+                                f"lines {w_start}-{w_end} — every line, unchanged ones included — in ONE "
+                                f"fenced code block, WITHOUT the 'NNNN| ' prefixes. Do not edit the file "
+                                f"on disk, do not describe the change, no prose outside the code block."
                             ),
-                            "current_code": current_code[:4000],
-                            "new_code": new_code[:4000],
+                            "current_code": window_text,
+                            "new_code": _new[:4000],
                             "previous_context": f"# PLAN\n{plan_summary}",
                         })
-                        self._track_and_check_budget(code_result, f"implement:{file_path}")
-                        dev_block = _extract_dev_output(code_result)
-                        if not dev_block.strip():
-                            _log(f"    Developer bos icerik dondurdu, atlaniyor")
-                            continue
-                        _log(f"    Developer blok: {len(dev_block)} karakter")
-                        # Python tarafi: current_code'u dev_block ile fuzzy-replace et
-                        replaced2 = _try_direct_edit(full_content, current_code, dev_block)
-                        if replaced2 is not None:
-                            final_content = replaced2
-                            _log(f"    ✅ Developer blok + Python fuzzy-replace basarili")
+                        self._track_and_check_budget(res, f"implement-window:{_fp}")
+                        return _extract_dev_output(res)
+
+                    _hint = change.get("line") or change.get("line_start")
+                    try:
+                        _hint = int(_hint) if _hint else None
+                    except (TypeError, ValueError):
+                        _hint = None
+                    windowed, _w_info = apply_windowed(full_content, current_code, new_code,
+                                                       _ask_window, hint_line=_hint)
+                    if windowed is not None:
+                        final_content = windowed
+                        _log(f"    ✅ Pencereli duzenleme: {_w_info}")
+                    else:
+                        _disk = self._prefer_worktree_edit(repo_name, file_path, full_content, full_content)
+                        if _disk != full_content:
+                            final_content = _disk
                         else:
-                            # Developer blok bile match edilemedi — son care: plan'in new_code'u
-                            # ile append yap (dosyanin sonuna eklenir, kaybetmektense)
-                            _log(f"    ⚠️ Blok match edilemedi, append stratejisine dusuluyor")
-                            final_content = full_content.rstrip() + "\n\n" + dev_block + "\n"
+                            _log(f"    ❌ Duzenleme oturmadi ({_w_info}) — dosya DEGISTIRILMEDI, push yok")
+                            continue
 
             elif full_content and new_code:
                 # current_code yok — append (add scenario)
@@ -6972,10 +7156,60 @@ class AgileSDLCFlow(Flow[PipelineState]):
         """Calisma kopyasini geri al (dev'in in-place edit'i sonraki job'a
         sizmasin). En iyi caba — hata yutulur."""
         try:
+            (getattr(self, "_staged_worktree", None) or {}).pop((repo_name, file_path.lstrip("/")), None)
             repo_dir = self._repo_mgr.base_dir / repo_name
             self._repo_mgr._git(["checkout", "--", file_path.lstrip("/")], cwd=repo_dir)
         except Exception:
             pass
+
+    def _quality_lean_flow(self) -> bool:
+        """tempo-quality işinde repo keşfi / test planlama / UAT atlanır."""
+        from agile_sdlc_crew import pipeline_config as _pc
+        return _is_quality_wi(self.state.wi_tags) and bool(_pc.get("CREW_QUALITY_LEAN_FLOW"))
+
+    def _env_conventions_block(self) -> str:
+        """Sabit kodlu kimlik bilgisi işi (Sonar S6437/S2068/secrets) ise repodaki env
+        adlarını ve 'uydurma' kuralını döndürür; aksi halde boş. Sonuç iş boyunca sabit."""
+        cached = getattr(self, "_env_block_cache", None)
+        if cached is not None:
+            return cached
+        from agile_sdlc_crew import pipeline_config as _pc
+        from agile_sdlc_crew.quality import env_conventions as _ec
+        s = self.state
+        block = ""
+        if _pc.get("CREW_ENV_CONVENTIONS") and _ec.is_credential_task(s.wi_title, getattr(self, "_quality_desc", ""), s.wi_tags):
+            repo = getattr(self, "_quality_repo", "") or s.repo_name or ""
+            base = getattr(getattr(self, "_repo_mgr", None), "base_dir", None)
+            if repo and base:
+                root = Path(base) / repo
+                info = _ec.collect(root)
+                hints = [s.wi_title] + _ec_evidence_lines(root, getattr(self, "_quality_desc", ""))
+                block = _ec.context_block(info, hints, repo=repo)
+                if block:
+                    _log(f"  🔑 Ortam değişkeni kuralı bağlama eklendi ({len(info['names'])} ad, "
+                         f"{len(info['example_files'])} örnek dosya)")
+        self._env_block_cache = block
+        return block
+
+    def _quality_setup(self, wi_fields) -> None:
+        """Kalite işi: repo Task açıklamasından okunur; CREW_QUALITY_LEAN_MODELS
+        açıksa bu işin mimar/rapor modelleri ucuzlatılır (iş kapsamlı)."""
+        if not _is_quality_wi(self.state.wi_tags):
+            return
+        from agile_sdlc_crew import pipeline_config as _pc
+        from agile_sdlc_crew.llm import resolver as _rs
+        from agile_sdlc_crew.quality.render import repo_from_description
+        desc = (wi_fields or {}).get("System.Description") or ""
+        if not desc:
+            try:
+                desc = (self._client.get_work_item(int(self.state.work_item_id)).get("fields") or {}).get(
+                    "System.Description") or ""
+            except Exception:
+                desc = ""
+        self._quality_repo = repo_from_description(desc)
+        self._quality_desc = desc
+        if _pc.get("CREW_QUALITY_LEAN_MODELS") and _rs.set_job_llm_overrides(quality_lean_overrides()):
+            _log("  🧹 Kalite işi: mimar → Sonnet, tamamlanma raporu → Haiku (yalnız bu iş)")
 
     def _prefer_worktree_edit(self, repo_name: str, file_path: str,
                               text_output: str, original: str) -> str:
@@ -6985,9 +7219,53 @@ class AgileSDLCFlow(Flow[PipelineState]):
         Disk degismemisse (ornek: Python direct-edit yolu) text_output kalir."""
         disk = self._read_worktree_file(repo_name, file_path)
         if disk and disk.strip() != (original or "").strip() and len(disk) > len(text_output or ""):
+            # Disk ancak `original`in üstüne kurulmuşsa kullanılır. Yerel klon
+            # main'de dururken review/build-fix turu PR branch'indeki dosyayı
+            # düzeltir; dev main kopyasını düzenlerse disk, önceki turların
+            # düzeltmelerini GERİ ALIR (#231: `telephone ?? null` kayboldu,
+            # getDiscountInfo protected→private döndü, build iki turda kırmızı).
+            base = self._worktree_base(repo_name, file_path)
+            if base is None or base.strip() != (original or "").strip():
+                _log("    ⚠️ Disk kopyası PR'daki halin üstüne kurulmamış — disk düzenlemesi "
+                     "KULLANILMADI (önceki düzeltmeleri geri alırdı)")
+                return text_output
             _log(f"    Dev disk'te in-place düzenlemiş — disk içeriği push edilecek ({len(disk)} char)")
             return disk
         return text_output
+
+    def _stage_worktree_file(self, repo_name: str, file_path: str, content: str) -> None:
+        """Review/build-fix turundan önce dosyanın PR branch'indeki halini
+        diske yaz: dev in-place düzenlerse doğru tabanın üstüne kurulsun.
+        Tur sonunda _restore_worktree_file ile geri alınır."""
+        try:
+            repo_dir = (self._repo_mgr.base_dir / repo_name).resolve()
+            p = self._repo_mgr.base_dir / repo_name / file_path.lstrip("/")
+            # Yol plan/review'dan (LLM) ve repodan gelir: symlink ya da '../'
+            # ile klon dışına yazılmasın.
+            if p.is_symlink() or not p.resolve().is_relative_to(repo_dir):
+                _log(f"    ⚠️ Diske hazırlık atlandı (symlink / repo dışı yol): {file_path}")
+                return
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            staged = getattr(self, "_staged_worktree", None)
+            if staged is None:
+                staged = {}
+                self._staged_worktree = staged
+            staged[(repo_name, file_path.lstrip("/"))] = content
+        except Exception as e:
+            _log(f"    Diske hazırlık yazılamadı ({file_path}): {e}")
+
+    def _worktree_base(self, repo_name: str, file_path: str) -> str | None:
+        """Diskteki kopyanın tabanı: bu turda hazırlanan içerik, yoksa HEAD'deki hali."""
+        key = (repo_name, file_path.lstrip("/"))
+        staged = (getattr(self, "_staged_worktree", None) or {}).get(key)
+        if staged is not None:
+            return staged
+        try:
+            r = self._repo_mgr._git(["show", f"HEAD:{key[1]}"], cwd=self._repo_mgr.base_dir / repo_name)
+            return r.stdout if r.returncode == 0 else None
+        except Exception:
+            return None
 
     def _repo_has_tests(self, repo_name: str) -> bool:
         """Repo'da unit test altyapisi var mi? (phpunit.xml / *Test.php /
@@ -7145,6 +7423,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         if _repo_tools and repo_dir.exists():
             _cli.set_repo_ctx([str(repo_dir)], "Read,Grep,Glob,LS")
         pending: list = []   # (file_path, new_content) — sonunda TEK commit
+        staged_here: list = []
         try:
             for i, file_path in enumerate(fix_files):
                 _log(f"  Build-fix implement [{i+1}/{len(fix_files)}]: {file_path}")
@@ -7152,13 +7431,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     existing = self._client.get_file_content(repo_name, file_path, branch)
                 except Exception:
                     existing = ""
+                if existing:
+                    self._stage_worktree_file(repo_name, file_path, existing)
+                    staged_here.append(file_path)
                 ctx = self._build_step_context("implement_change_task")
                 ctx += (
                     f"\n\n# PR BUILD TEST HATASI (DÜZELT)\n"
                     f"Aşağıdaki CI build hatası testlerin kırıldığını gösteriyor. Bu dosyadaki "
                     f"kodu/testleri hatayı giderecek şekilde düzelt; mevcut davranışı koru, "
-                    f"değişen davranış için test ekle/güncelle.\n```\n{failure_summary[:2500]}\n```"
+                    f"değişen davranış için test ekle/güncelle. Ortama bağlı kontrol yazma: "
+                    f"kırılan test toplanan uyarı/deprecation listesinin boş olmasını, PHP sürümünü "
+                    f"ya da saati assert ediyorsa o kontrolü kaldırıp dönen değeri doğrula — CI'daki "
+                    f"PHP ilgisiz dosyalardan deprecation basabilir.\n```\n{failure_summary[:2500]}\n```"
                 )
+                if _is_quality_wi(self.state.wi_tags):
+                    ctx += QUALITY_BUILD_FIX_RULE
                 code_crew = self._agile_crew.create_code_crew()
                 code_result = code_crew.kickoff(inputs={
                     "work_item_id": self.state.work_item_id,
@@ -7200,6 +7487,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"    ✔ Duzeltme hazir (biriktirildi): {file_path}")
         finally:
             _cli.clear_repo_ctx()
+            for _fp in staged_here:
+                if _fp not in {fp for fp, _ in pending}:
+                    self._restore_worktree_file(repo_name, _fp)
 
         if not pending:
             _log("  Build-fix: push edilecek degisiklik yok")
@@ -7256,6 +7546,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._step_start("test_planning_task")
             self.state.test_text = "DRY-RUN: test planning skipped"
             self._step_done("test_planning_task", self.state.test_text)
+            return
+
+        if self._quality_lean_flow():
+            self._step_start("test_planning_task")
+            self.state.test_text = "Atlandı — kalite işi: birim testi PR'da, build kapısı yeşil"
+            self._step_done("test_planning_task", "Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)")
             return
 
         # Resume
@@ -7390,6 +7686,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._step_done("uat_task", self.state.uat_text)
             return
 
+        if self._quality_lean_flow():
+            self._uat_skipped = True
+            self._step_start("uat_task")
+            self.state.uat_text = "Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)"
+            self._step_done("uat_task", "Atlandı — kalite işi (CREW_QUALITY_LEAN_FLOW)")
+            return
+
         # Resume
         cached_uat = self._try_resume_step("uat_task")
         if cached_uat:
@@ -7478,6 +7781,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             })
             completion_text = (completion_result.raw or "") if completion_result else ""
 
+        completion_text = _strip_tool_meta(completion_text)
         self.state.completion_text = completion_text
         self._step_done("completion_report_task", completion_text[:3000])
         _log(f"  Tamamlanma raporu olusturuldu")
@@ -7509,6 +7813,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     # Bug akisinda regresyon testi DoD'da zorunlu (faz 5)
                     require_tests=bool(_pc_dod.get("CREW_REQUIRE_TESTS")) or self.state.flow_kind == "bug",
                     pr_id=self.state.pr_id,
+                    uat_skipped=bool(getattr(self, "_uat_skipped", False)),
                 )
                 self.state.dod = [_i.as_dict() for _i in _dod.items]
                 _dod_md = "\n\n" + _wl_dod.render_dod(_dod, enforce=_dod_enforce)
@@ -7542,7 +7847,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             f"## Tamamlanma Raporu\n\n"
             f"PR: [#{self.state.pr_id}]({self.state.pr_url})\n\n"
             f"{_est_line}"
-            f"{completion_text[:3000]}"
+            f"{_trim_report(completion_text)}"
             f"{_dod_md}\n\n"
             f"---\n*Tempo - Pipeline tamamlandi*"
         )
