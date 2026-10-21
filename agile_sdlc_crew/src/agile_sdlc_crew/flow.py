@@ -8,6 +8,7 @@ deklaratif olarak tanimlanir.
 import json as _json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -472,6 +473,22 @@ def _parse_readiness(requirements_text: str):
     oq = d.get("open_questions") or []
     return {"score": score, "missing_details": details,
             "open_questions": len(oq) if isinstance(oq, list) else 0}
+
+
+def _ec_evidence_lines(root, desc: str, limit: int = 6) -> list[str]:
+    """Task açıklamasındaki `dosya.php:16` kanıtlarının repodaki satırları (env adı sıralaması için ipucu)."""
+    out: list[str] = []
+    for m in re.finditer(r"((?:[\w.-]+/)*[\w.-]+\.php):(\d+)", desc or ""):
+        try:
+            lines = (Path(root) / m.group(1)).read_text(encoding="utf-8", errors="replace").splitlines()
+            ln = int(m.group(2))
+            if 1 <= ln <= len(lines):
+                out.append(lines[ln - 1])
+        except OSError:
+            continue
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _is_quality_wi(tags: str) -> bool:
@@ -1452,6 +1469,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 skill_ctx = ""
             if skill_ctx:
                 tail.append(skill_ctx)
+            # Kimlik bilgisi işlerinde repodaki ortam değişkeni adları (PR 45061:
+            # mimar yalnız parola satırını görüp ORKESTRA_RO_DB_PASSWORD'ü uydurdu;
+            # repo DB_ORKESTRA_PROD_PASS kullanıyordu). İş-değişmezi: kuyruğa.
+            try:
+                env_ctx = self._env_conventions_block()
+            except Exception:  # noqa: BLE001
+                env_ctx = ""
+            if env_ctx:
+                tail.append(env_ctx)
 
         # Kabul kriterleri — BA analizinden sonra belirlenir, pipeline boyunca
         # baglayici tek kaynak: tasarim, gelistirme, inceleme ve UAT buna gore yapilir.
@@ -7141,6 +7167,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
         from agile_sdlc_crew import pipeline_config as _pc
         return _is_quality_wi(self.state.wi_tags) and bool(_pc.get("CREW_QUALITY_LEAN_FLOW"))
 
+    def _env_conventions_block(self) -> str:
+        """Sabit kodlu kimlik bilgisi işi (Sonar S6437/S2068/secrets) ise repodaki env
+        adlarını ve 'uydurma' kuralını döndürür; aksi halde boş. Sonuç iş boyunca sabit."""
+        cached = getattr(self, "_env_block_cache", None)
+        if cached is not None:
+            return cached
+        from agile_sdlc_crew import pipeline_config as _pc
+        from agile_sdlc_crew.quality import env_conventions as _ec
+        s = self.state
+        block = ""
+        if _pc.get("CREW_ENV_CONVENTIONS") and _ec.is_credential_task(s.wi_title, getattr(self, "_quality_desc", ""), s.wi_tags):
+            repo = getattr(self, "_quality_repo", "") or s.repo_name or ""
+            base = getattr(getattr(self, "_repo_mgr", None), "base_dir", None)
+            if repo and base:
+                root = Path(base) / repo
+                info = _ec.collect(root)
+                hints = [s.wi_title] + _ec_evidence_lines(root, getattr(self, "_quality_desc", ""))
+                block = _ec.context_block(info, hints, repo=repo)
+                if block:
+                    _log(f"  🔑 Ortam değişkeni kuralı bağlama eklendi ({len(info['names'])} ad, "
+                         f"{len(info['example_files'])} örnek dosya)")
+        self._env_block_cache = block
+        return block
+
     def _quality_setup(self, wi_fields) -> None:
         """Kalite işi: repo Task açıklamasından okunur; CREW_QUALITY_LEAN_MODELS
         açıksa bu işin mimar/rapor modelleri ucuzlatılır (iş kapsamlı)."""
@@ -7157,6 +7207,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             except Exception:
                 desc = ""
         self._quality_repo = repo_from_description(desc)
+        self._quality_desc = desc
         if _pc.get("CREW_QUALITY_LEAN_MODELS") and _rs.set_job_llm_overrides(quality_lean_overrides()):
             _log("  🧹 Kalite işi: mimar → Sonnet, tamamlanma raporu → Haiku (yalnız bu iş)")
 

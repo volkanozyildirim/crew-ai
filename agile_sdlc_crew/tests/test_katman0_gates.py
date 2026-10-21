@@ -5167,6 +5167,60 @@ def test_quality_sonar_exclude():
         sonar.fetch_issues, sonar.issues_to_findings = orig_fetch, orig_conv
 
 
+def test_env_conventions():
+    print("\n[Q17] Ortam değişkeni kuralı — repo adlarını kullan, uydurma (PR 45061: ORKESTRA_RO_DB_PASSWORD)")
+    import inspect
+    from agile_sdlc_crew import flow as _flow
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import env_conventions as ec, rank, render
+    from agile_sdlc_crew.quality.model import Finding
+    check("ayar kayıtlı, varsayılan açık (bozuk davranış onarımı; yalnız kimlik bilgisi işlerinde, birkaç KB)",
+          pc._SCHEMA_BY_KEY.get("CREW_ENV_CONVENTIONS", {}).get("default") is True)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "main").mkdir(); (root / "ru").mkdir(); (root / "vendor" / "x").mkdir(parents=True)
+        (root / "main" / ".env.example").write_text("# DB\nDB_ORKESTRA_PROD_HOST=localhost\nDB_ORKESTRA_PROD_PASS=password\nAUTH_PASSWORD=yoursecurepassword\n", encoding="utf-8")
+        (root / "main" / ".env").write_text("DB_ORKESTRA_PROD_PASS=RealSecret99!\nONLY_IN_REAL_ENV=x\n", encoding="utf-8")
+        (root / "main" / "init.php").write_text("<?php\n$x = new Mysqlidb(getenv('DB_ORKESTRA_PROD_HOST'), getenv('DB_ORKESTRA_PROD_USER'), getenv('DB_ORKESTRA_PROD_PASS'));\n$a = $_ENV['APP_FLORCHESTRA_URL'] ?? env('MAIL_DSN');\n", encoding="utf-8")
+        (root / "vendor" / "x" / "v.php").write_text("<?php getenv('VENDOR_ONLY');", encoding="utf-8")
+        info = ec.collect(root)
+        names = set(info["names"])
+        check("adlar .env.example + getenv/$_ENV/env() kullanımlarından; vendor hariç",
+              {"DB_ORKESTRA_PROD_HOST", "DB_ORKESTRA_PROD_PASS", "DB_ORKESTRA_PROD_USER", "AUTH_PASSWORD", "APP_FLORCHESTRA_URL", "MAIL_DSN"} <= names
+              and "VENDOR_ONLY" not in names, str(names))
+        check("gerçek .env okunmaz: değer ve yalnız orada geçen ad sızmaz",
+              "ONLY_IN_REAL_ENV" not in names and "RealSecret99" not in str(info) and "yoursecurepassword" not in str(info))
+        check("kullanım yeri dosya:satır", any(u["name"] == "DB_ORKESTRA_PROD_PASS" and u["file"] == "main/init.php" and u["line"] == 2 for u in info["usages"]), str(info["usages"][:3]))
+        ranked = ec.rank(info["names"], ["$oMySQL_orkestra_prod_reporting = new Mysqlidb('orkestradbro.ydx.intl', 'reader-user', 'x', 'orkestra-db');"])
+        check("ipucu satırındaki 'orkestra' / 'prod' → DB_ORKESTRA_PROD_* önce",
+              ranked[:3] and all(n.startswith("DB_ORKESTRA_PROD_") for n in ranked[:3]), str(ranked[:4]))
+        # gerçek repo: 'reader-user' değeri DB_DASHBOARD_REPORTING_USER'ı öne çıkarmasın (DB ortak parça sayılmaz, aile bonusu)
+        real = Path.home() / ".crew_repos" / "flo-dashboard"
+        if (real / "ru" / "init.php").is_file():
+            ri = ec.collect(real)
+            rr = ec.rank(ri["names"], ["Credentials should not be hard-coded — init.php", (real / "ru" / "init.php").read_text(errors="replace").splitlines()[15]])
+            check("flo-dashboard: DB_ORKESTRA_PROD_PASS ilk 4'te", "DB_ORKESTRA_PROD_PASS" in rr[:4] and all(n.startswith("DB_ORKESTRA_PROD_") for n in rr[:4]), str(rr[:6]))
+        else:
+            skip("flo-dashboard gerçek repo sıralaması", "klon yok")
+        block = ec.context_block(info, ["$oMySQL_orkestra_prod_reporting = new Mysqlidb('orkestradbro.ydx.intl', 'reader-user', 'x', 'orkestra-db');"], repo="flo-dashboard")
+        check("bağlam bloğu: ad uydurma yasağı, en yakın adlar, kaynak dosyalar, örnek dosyaya ekleme kuralı",
+              "DB_ORKESTRA_PROD_PASS" in block and "main/.env.example" in block and "main/init.php" in block
+              and "never invent" in block.lower() and ".env.example" in block, block[:600])
+        check("repo'da env kuralı yoksa blok boş", ec.context_block(ec.collect(root / "yok"), [], repo="r") == "")
+    check("kimlik bilgisi işi tespiti: S6437 / S2068 / secrets:* / başlık", ec.is_credential_task("[x] Credentials should not be hard-coded — init.php", "", "tempo-quality")
+          and ec.is_credential_task("t", "<code>php:S2068</code>", "tempo-quality") and ec.is_credential_task("t", "secrets:S6703", "tempo-quality")
+          and not ec.is_credential_task("[x] Undefined array key", "php:S1234", "tempo-quality"))
+    src = inspect.getsource(_flow)
+    check("adım bağlamı: tasarım/geliştirme/inceleme adımlarında env bloğu eklenir (iş-değişmezi kuyrukta)",
+          "env_conventions" in src and "CREW_ENV_CONVENTIONS" in src)
+    g = rank.sonar_units([Finding(source="sonar", repo="flo-dashboard", project="EcomBackend:flo-dashboard", file="ru/init.php",
+                                  rule="php:S6437", rule_name="Credentials should not be hard-coded", severity="BLOCKER", itype="VULNERABILITY", lines=[16])])[0]
+    eb = " ".join(render.expected_behavior(g))
+    check("S6437 beklenen davranış: mevcut env adı, .env.example, ad uydurulmaz",
+          ".env.example" in eb and "getenv" in eb and "uydur" in eb, eb)
+    check("S6437 kabul kriteri de env kuralını söyler", ".env.example" in render.acceptance_criteria(g) or "mevcut" in render.acceptance_criteria(g))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -5244,7 +5298,8 @@ def main():
               test_php_modern_take,
               test_php_modern_endpoints,
               test_php_modern_ui,
-              test_quality_sonar_exclude):
+              test_quality_sonar_exclude,
+              test_env_conventions):
         try:
             t()
         except Exception as e:

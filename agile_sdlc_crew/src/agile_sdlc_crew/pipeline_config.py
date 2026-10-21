@@ -464,6 +464,13 @@ SCHEMA: list[dict] = [
         "desc": "Bir Sonar Task'ı en fazla bu kadar dosyaya dokunur (dar plan = güvenilir geliştirici).",
     },
     {
+        "key": "CREW_ENV_CONVENTIONS",
+        "label": "Kalite · ortam değişkeni kuralı bağlamı",
+        "type": "bool",
+        "default": True,
+        "desc": "Sabit kodlu kimlik bilgisi (Sonar S6437/S2068/secrets) işlerinde mimar, geliştirici ve reviewer bağlamına repodaki mevcut ortam değişkeni adları (.env.example + getenv/$_ENV kullanımları, yalnız adlar) ve 'yeni ad uydurma' kuralı eklenir. PR 45061: yalın akışta mimar yalnız parola satırını gördü ve ORKESTRA_RO_DB_PASSWORD'ü uydurdu; repo DB_ORKESTRA_PROD_PASS kullanıyordu. Birkaç KB, yalnız bu işlerde.",
+    },
+    {
         "key": "CREW_QUALITY_SONAR_SKIP_LANGS",
         "label": "Kalite · Sonar hariç kural dilleri",
         "type": "str",

@@ -289,6 +289,17 @@ def _modern_body(g: Group, php_target: str) -> list[str]:
     return parts
 
 
+_CRED_RULE = re.compile(r"(?:^|:)(?:S6437|S2068|S2115|S6418)$", re.I)
+ENV_NAME_RULE = ("Sabit değer koddan kaldırılır ve ORTAM DEĞİŞKENİNDEN okunur; değişken adı repodaki mevcut kurala uyar: "
+                 "önce .env.example ve mevcut getenv()/$_ENV kullanımlarındaki adlara bakılır, aynı değeri tutan ad varsa o "
+                 "kullanılır. Yeni ad uydurulmaz; uygun ad yoksa en yakın adların düzenine uyan bir ad seçilir ve .env.example'a "
+                 "eklenir (üretim değerleri dağıtımdan gelir, ad tutmazsa değer boş okunur).")
+
+
+def is_credential_rule(g: Group) -> bool:
+    return bool(g.findings) and bool(_CRED_RULE.search(g.findings[0].rule or ""))
+
+
 _NULLISH = re.compile(r"on null|of type null|null given|passing null|on value of type null", re.I)
 
 
@@ -313,6 +324,12 @@ def expected_behavior(g: Group) -> list[str]:
         if g.findings and g.findings[0].rule.startswith("secrets:"):
             return ["Secret değeri koddan kaldırılır, ortam değişkeni / gizli yönetiminden okunur.",
                     "Eski değer geçersiz kılınır (rotate) — bu adım insan işidir."]
+        if is_credential_rule(g):
+            # PR 45061: mimar ORKESTRA_RO_DB_PASSWORD'ü uydurdu; repo DB_ORKESTRA_PROD_PASS kullanıyordu
+            return [ENV_NAME_RULE,
+                    "Yalnızca listelenen dosya ve satırlara dokunulur; değer koda geri yazılmaz, fallback parola bırakılmaz.",
+                    "Doğrulama: değişen satırın ortamdan okuduğunu doğrulayan dar bir test; Sonar'da madde kapanır. "
+                    "Eski değerin döndürülmesi (rotate) insan işidir."]
         return ["Kuralın önerdiği düzeltme uygulanır; dış davranış (yanıt, kaydedilen veri) değişmez.",
                 "Yalnızca listelenen dosya ve satırlara dokunulur; ilgisiz yeniden düzenleme yapılmaz.",
                 "Doğrulama: değişen mantık için birim testi; Sonar'da maddeler kapanır."]
@@ -369,6 +386,9 @@ def acceptance_criteria(g: Group) -> str:
         return "Listelenen yerlerde eski yapı kalmaz; testler geçer; dış davranış değişmez."
     if g.findings and g.findings[0].rule.startswith("secrets:"):
         return ("Secret döndürülür (rotate) ve koddan kaldırılır; yeni değer gizli yönetiminden okunur.")
+    if is_credential_rule(g):
+        return ("Değer koddan kaldırılır ve repodaki mevcut ortam değişkeni adıyla (.env.example / getenv kullanımları) okunur; "
+                "uydurulmuş ad kabul edilmez. Sonar'da madde kapanır.")
     return "Listelenen maddeler Sonar'da kapanır; değişen satırlarda yeni madde eklenmez."
 
 
