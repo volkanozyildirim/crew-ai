@@ -224,6 +224,7 @@ class GroupSummary:
     done: int = 0            # bunlardan tamamlanan
     types: dict[str, int] = field(default_factory=dict)  # iş tipi -> adet
     parent_id: int | None = None  # None = parent'sız 'Diğer / Bağımsız İşler'
+    headline: str = ""       # tek cümlelik manşet (alternatif tasarımların kartları)
 
 
 # ------------------------------------------------------------------ data collection
@@ -338,21 +339,22 @@ def summarize_group(group: ParentGroup, contexts: dict[int, str]) -> GroupSummar
     clf_text = title + " " + " ".join(it.title for it in group.items)
     domain = _classify_domain(clf_text)
     if _ai_enabled():
-        bullets = _ai_bullets(group, contexts)
+        headline, bullets = _ai_summary(group, contexts)
         if bullets:
-            return GroupSummary(title, status, bullets, domain=domain, **stats)
+            return GroupSummary(title, status, bullets, domain=domain, headline=headline, **stats)
     # fallback: her WI başlığı bir madde
     bullets = [f"{it.title}" for it in group.items][:8]
     return GroupSummary(title, status, bullets, domain=domain, **stats)
 
 
-def _ai_bullets(group: ParentGroup, contexts: dict[int, str]) -> list[str]:
-    """claude_cli ile SADECE toplanmış bağlamdan 2-4 Türkçe madde. Hata olursa [] döner."""
+def _ai_summary(group: ParentGroup, contexts: dict[int, str]) -> tuple[str, list[str]]:
+    """claude_cli ile SADECE toplanmış bağlamdan tek cümle manşet + 2-4 Türkçe madde.
+    Hata olursa ("", []) döner. Manşet aynı çağrıda gelir — ek maliyet yok."""
     try:
         from agile_sdlc_crew.llm import build_for_agent
     except Exception as e:
         log.warning(f"  AI özet atlandı (LLM import): {e}")
-        return []
+        return "", []
     lines = []
     for it in group.items:
         ctx = contexts.get(it.id, "")
@@ -370,15 +372,29 @@ def _ai_bullets(group: ParentGroup, contexts: dict[int, str]) -> list[str]:
         "- Each bullet: one clear outcome, past tense, no work-item numbers.\n"
         "- Do NOT invent anything not supported by the context; if context is thin, "
         "summarize from the work item titles.\n"
-        'Return ONLY strict JSON: {"bullets": ["...", "..."]}'
+        "Also write ONE headline sentence (max 90 characters, TURKISH, past tense) that "
+        "captures the single most important outcome, for a visual card with no room "
+        "for bullets.\n"
+        'Return ONLY strict JSON: {"headline": "...", "bullets": ["...", "..."]}'
     )
     try:
         llm = build_for_agent("business_analyst")
         resp = llm.call(prompt)
     except Exception as e:
         log.warning(f"  AI özet çağrısı başarısız (grup '{group.parent_title}'): {e}")
-        return []
-    return _parse_bullets(resp)
+        return "", []
+    return _parse_headline(resp), _parse_bullets(resp)
+
+
+def _parse_headline(resp: str) -> str:
+    m = re.search(r"\{.*\}", resp or "", re.DOTALL)
+    if not m:
+        return ""
+    try:
+        h = json.loads(m.group(0)).get("headline")
+    except Exception:
+        return ""
+    return str(h).strip() if isinstance(h, str) else ""
 
 
 def _parse_bullets(resp: str) -> list[str]:
@@ -1394,13 +1410,21 @@ def generate_sprint_report(
     db=None,
     vector_store=None,
     report_id: str = "",
+    design: str = "",
 ) -> dict:
-    """Sprint için .pptx üret. {file_path, group_count, item_count, ai} döner."""
+    """Sprint için .pptx üret. {file_path, group_count, item_count, ai, design} döner.
+
+    `design`: 'klasik' (FLO şablonu) ya da `sprint_report_designs.DESIGNS` anahtarı;
+    boş/bilinmeyen -> CREW_SPRINT_REPORT_DESIGN -> klasik."""
+    from agile_sdlc_crew import sprint_report_designs as designs
+
+    design = designs.resolve(design)
     if _env("CREW_SPRINT_REPORT", "0") in ("0", "false", "False", ""):
         raise RuntimeError("CREW_SPRINT_REPORT kapalı")
 
     tmpl = template_path()
-    if not os.path.exists(tmpl):
+    # şablon yalnız klasik tasarım için şart; diğerleri sıfırdan çizer (logo varsa alır)
+    if design == "klasik" and not os.path.exists(tmpl):
         raise FileNotFoundError(
             f"Sunum şablonu bulunamadı: {tmpl} (CREW_SPRINT_REPORT_TEMPLATE ile ayarla)"
         )
@@ -1457,13 +1481,19 @@ def generate_sprint_report(
             log.warning(f"  Velocity verisi alınamadı: {e}")
 
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", f"{team}_{sprint_name}").strip("_")
-    fname = f"sprint_report_{safe}_{report_id or 'out'}.pptx"
+    fname = f"sprint_report_{safe}_{design}_{report_id or 'out'}.pptx"
     out_path = os.path.join(output_dir(), fname)
 
-    build_pptx(
-        title_line, _pretty_sprint(sprint_name), date_range, summaries, tmpl, out_path,
-        burndown=burndown, velocity=velocity,
-    )
+    if design == "klasik":
+        build_pptx(
+            title_line, _pretty_sprint(sprint_name), date_range, summaries, tmpl, out_path,
+            burndown=burndown, velocity=velocity,
+        )
+    else:
+        designs.build_designed_pptx(
+            design, title_line, _pretty_sprint(sprint_name), date_range, summaries, out_path,
+            burndown=burndown, velocity=velocity,
+        )
 
     return {
         "file_path": out_path,
@@ -1472,4 +1502,5 @@ def generate_sprint_report(
         "item_count": len(items),
         "ai": _ai_enabled(),
         "sprint_name": sprint_name,
+        "design": design,
     }

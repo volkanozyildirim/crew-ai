@@ -3426,12 +3426,30 @@ async function loadSrConfig(){
     const d=await r.json();
     const on=v=>v?'<span style="color:#5AC878">✓</span>':'<span style="color:#e06666">✗</span>';
     const base=p=>(p||'').split('/').pop();
+    srFillDesigns(d.designs||[], d.default_design||'klasik');
     el.innerHTML=
       '<b style="color:var(--text)">⚙️ Aktif ayarlar</b><br>'+
       `AI özet ${on(d.ai_summary)} · Görseller ${on(d.visuals)} · Azure grafikleri ${on(d.azure_charts)}<br>`+
-      `Ayrı slayt eşiği: <b>&gt;%${d.min_pct}</b> · Diğer Çalışmalar: <b>${d.digest_per_slide}</b>/slayt · Velocity: son <b>${d.velocity_sprints}</b> sprint<br>`+
+      `Ayrı slayt eşiği: <b>≥${d.min_items}</b> iş · Diğer Çalışmalar: <b>${d.digest_per_slide}</b>/slayt · Velocity: son <b>${d.velocity_sprints}</b> sprint<br>`+
       `Şablon: <span title="${esc(d.template)}">${esc(base(d.template))}</span> · Ekip görseli: <span title="${esc(d.team_image)}">${esc(base(d.team_image))}</span>`;
   }catch(e){ el.textContent='Ayarlar alınamadı.'; }
+}
+let _srDesigns=[];
+function srFillDesigns(list, def){
+  _srDesigns=list;
+  const sel=document.getElementById('srDesign'); if(!sel)return;
+  let saved=''; try{ saved=localStorage.getItem('tempo_sr_design')||''; }catch(e){}
+  const pick=list.some(x=>x.key===saved)?saved:def;
+  sel.innerHTML=list.map(x=>`<option value="${esc(x.key)}"${x.key===pick?' selected':''}>${esc(x.label)}</option>`).join('');
+  srDesignChanged();
+}
+function srDesignChanged(){
+  const sel=document.getElementById('srDesign'), info=document.getElementById('srDesignInfo');
+  if(!sel||!info)return;
+  const x=_srDesigns.find(o=>o.key===sel.value); if(!x){info.innerHTML='';return;}
+  try{ localStorage.setItem('tempo_sr_design',x.key); }catch(e){}
+  const sw=(x.swatch||[]).map(c=>`<span style="width:14px;height:14px;border-radius:50%;background:${esc(c)};border:1px solid var(--border);display:inline-block"></span>`).join('');
+  info.innerHTML=`<span style="display:inline-flex;gap:4px">${sw}</span><span>${esc(x.description||'')}</span>`;
 }
 function closeSprintReport(){
   document.getElementById('sprintReportModal').style.display='none';
@@ -3441,10 +3459,11 @@ async function startSprintReport(){
   if(srGetActive()){ alert('Zaten bir rapor üretiliyor. Bitmesini bekleyin.'); return; }
   const team=document.getElementById('srTeam').textContent;
   const iteration_path=(document.getElementById('sprintSel')||{}).value||'';
+  const design=(document.getElementById('srDesign')||{}).value||'';
   const started=Date.now();
   srShowRunning(started);
   try{
-    const r=await fetch('/api/sprint-report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team,iteration_path})});
+    const r=await fetch('/api/sprint-report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team,iteration_path,design})});
     const d=await r.json();
     // 202 (yeni) veya 409 (zaten çalışıyor) -> ikisinde de report_id gelir, ona bağlan
     if(!d.report_id){ srStopTimers(); document.getElementById('srStatus').textContent='Hata: '+(d.error||r.status); document.getElementById('srStartBtn').style.display=''; return; }
@@ -3694,10 +3713,13 @@ async function adoptRetroRule(btn,i){
       <div style="margin-bottom:6px;font-size:13px">Takım: <b id="srTeam">-</b></div>
       <div style="margin-bottom:12px;font-size:13px">Sprint: <b id="srSprint">-</b></div>
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">
-        Sprintteki işler parent'a (Epic/Feature) göre gruplanıp FLO şablonlu bir <b>.pptx</b> üretilir:
-        en çok efor (SP) alan projeler domain rozetiyle ayrı slaytta, kalanlar "Diğer Çalışmalar" özetinde.
-        Burndown ve son 6 sprint velocity grafikleri Azure'dan <b>otomatik</b> çizilir.
+        Sprintteki işler parent'a (Epic/Feature) göre gruplanıp bir <b>.pptx</b> üretilir:
+        "Bir Bakışta" özeti, en çok işi olan projeler ayrı slaytta, kalanlar "Diğer Çalışmalar"da.
+        Burndown ve son sprintlerin velocity grafikleri Azure'dan <b>otomatik</b> çizilir.
       </div>
+      <label for="srDesign" style="display:block;font-size:12px;font-weight:600;margin-bottom:6px">Tasarım</label>
+      <select class="sprint-select" id="srDesign" onchange="srDesignChanged()" style="width:100%;height:32px;margin-bottom:8px"></select>
+      <div id="srDesignInfo" style="display:flex;align-items:center;gap:10px;font-size:12px;color:var(--text-dim);margin-bottom:14px;min-height:22px"></div>
       <div id="srConfig" style="font-size:11px;color:var(--text-dim);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;line-height:1.7"></div>
       <div id="srStatus" style="font-size:13px;min-height:20px;margin-bottom:12px"></div>
       <div style="display:flex;gap:8px;align-items:center">

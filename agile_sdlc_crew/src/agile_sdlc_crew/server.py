@@ -134,6 +134,7 @@ class BackfillRequest(BaseModel):
 class SprintReportRequest(BaseModel):
     team: str = ""
     iteration_path: str = ""
+    design: str = ""  # klasik | sprint_report_designs.DESIGNS anahtarı; boş = varsayılan
 
 
 class SprintQueueRequest(BaseModel):
@@ -1684,6 +1685,7 @@ async def sprint_report_start(req: SprintReportRequest):
                 team=req.team,
                 iteration_path=iteration_path,
                 report_id=report_id,
+                design=req.design,
             )
             with _sprint_report_lock:
                 _sprint_reports[report_id] = {"status": "done", "team": req.team, **res}
@@ -1719,12 +1721,15 @@ async def sprint_report_status(report_id: str = ""):
 async def sprint_report_config():
     """Popup'ta gösterilecek aktif sprint raporu ayarları (env'den)."""
     from agile_sdlc_crew import sprint_report as sr
+    from agile_sdlc_crew import sprint_report_designs as sd
     return JSONResponse({
         "enabled": _sprint_report_enabled(),
         "ai_summary": sr._ai_enabled(),
         "visuals": sr._visuals_enabled(),
         "azure_charts": sr._azure_charts_enabled(),
-        "min_pct": sr._min_pct(),
+        "min_items": sr._min_items(),
+        "designs": sd.design_options(),
+        "default_design": sd.resolve(""),
         "digest_per_slide": sr._digest_per_slide(),
         "velocity_sprints": sr._velocity_sprints(),
         "template": sr.template_path(),

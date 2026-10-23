@@ -5320,6 +5320,93 @@ def test_sprint_report_no_sp():
                 os.environ[k] = v
 
 
+def test_sprint_report_designs():
+    """Alternatif tasarımlar (dashboard dropdown'u): her tasarım şablonsuz sıfırdan
+    çizilir, SP içermez, proje başına madde listesi yerine tek cümle manşet taşır;
+    bilinmeyen tasarım klasiğe düşer; config uç noktası listeyi verir."""
+    print("\n[sprint raporu: alternatif tasarımlar]")
+    import asyncio
+    import os
+
+    try:
+        from pptx import Presentation
+    except ImportError:
+        skip("sprint raporu tasarımları", "python-pptx yok")
+        return
+    from agile_sdlc_crew import sprint_report as sr
+    from agile_sdlc_crew import sprint_report_designs as sd
+
+    keys = ("CREW_SPRINT_REPORT_ICON_DIR", "CREW_SPRINT_REPORT_TEMPLATE",
+            "CREW_SPRINT_REPORT_TEAM_IMAGE", "CREW_SPRINT_REPORT_DESIGN")
+    saved = {k: os.environ.get(k) for k in keys}
+    orig_icon = sr._ai_svg_icon
+    tmp = tempfile.mkdtemp()
+    try:
+        os.environ.update({"CREW_SPRINT_REPORT_ICON_DIR": tmp,
+                           "CREW_SPRINT_REPORT_TEMPLATE": os.path.join(tmp, "yok.pptx"),
+                           "CREW_SPRINT_REPORT_TEAM_IMAGE": os.path.join(tmp, "yok.png")})
+        os.environ.pop("CREW_SPRINT_REPORT_DESIGN", None)
+        sr._ai_svg_icon = lambda concept: ""
+
+        check("bilinmeyen/boş tasarım klasiğe düşer",
+              sd.resolve("") == "klasik" and sd.resolve("uydurma") == "klasik"
+              and sd.resolve("GECE") == "gece")
+        os.environ["CREW_SPRINT_REPORT_DESIGN"] = "pastel"
+        check("boş tasarım env varsayılanını alır", sd.resolve("") == "pastel")
+        os.environ.pop("CREW_SPRINT_REPORT_DESIGN", None)
+        opts = sd.design_options()
+        check("dropdown: klasik ilk, her seçenekte ad/açıklama/renk örneği",
+              opts[0]["key"] == "klasik" and len(opts) == 1 + len(sd.DESIGNS)
+              and all(o["label"] and o["description"] and len(o["swatch"]) == 4 for o in opts))
+
+        check("AI manşeti JSON'dan okunur, yoksa boş",
+              sr._parse_headline('x {"headline": "Kargo akışı yenilendi.", "bullets": ["a"]}')
+              == "Kargo akışı yenilendi." and sr._parse_headline('{"bullets": ["a"]}') == "")
+
+        mk = lambda pid, t, n, dn: [sr.SprintItem(id=pid * 10 + j, title=f"iş {j}", type="Task",
+                                                  state="Done" if j < dn else "Active",
+                                                  parent_id=pid, parent_title=t) for j in range(n)]
+        items = mk(1, "Kargo entegrasyonu", 4, 3) + mk(2, "Stok raporu", 1, 1) + mk(3, "İade", 2, 0)
+        sums = [sr.summarize_group(g, {}) for g in sr.group_by_parent(items)]
+        sums[0].headline = "Kargo entegrasyonu canlıya alındı."
+        burn = {"labels": ["01.10", "02.10"], "remaining": [5, 2], "total": [5, 5], "ideal": [5, 0]}
+        for key in sd.DESIGNS:
+            out = os.path.join(tmp, f"{key}.pptx")
+            sd.build_designed_pptx(key, "Takım", "21. Sprint", "01.10 – 14.10", sums, out,
+                                   burndown=burn)
+            deck = Presentation(out)
+            texts = [" ".join(sh.text_frame.text for sh in s.shapes if sh.has_text_frame)
+                     for s in deck.slides]
+            joined = " | ".join(texts)
+            # kapak, bir bakışta, burndown, 1 kart slaytı (2 proje), diğer çalışmalar, kapanış
+            check(f"{key}: 6 slayt, şablonsuz üretildi", len(texts) == 6, f"{len(texts)} slayt")
+            check(f"{key}: SP yok", not re.search(r"\bSP\b", joined))
+            check(f"{key}: kartta manşet var, madde listesi yok",
+                  "Kargo entegrasyonu canlıya alındı." in joined and "•" not in joined)
+            check(f"{key}: bir bakışta + diğer çalışmalar + kapanış",
+                  "Bir Bakışta" in texts[1] and "Diğer Çalışmalar" in texts[4]
+                  and "Teşekkürler" in texts[5])
+
+        from agile_sdlc_crew import server
+
+        cfg = json.loads(asyncio.run(server.sprint_report_config()).body)
+        check("config uç noktası tasarım listesini ve eşiği verir (eski min_pct değil)",
+              [d["key"] for d in cfg["designs"]][0] == "klasik" and "min_items" in cfg
+              and "min_pct" not in cfg, str(list(cfg)))
+        check("istek modeli tasarımı taşır",
+              server.SprintReportRequest(team="t", iteration_path="p", design="gece").design == "gece")
+        html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+        check("dashboard: tasarım dropdown'u isteğe eklenir",
+              'id="srDesign"' in html and "JSON.stringify({team,iteration_path,design})" in html)
+    finally:
+        sr._ai_svg_icon = orig_icon
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -5399,7 +5486,8 @@ def main():
               test_php_modern_ui,
               test_quality_sonar_exclude,
               test_env_conventions,
-              test_sprint_report_no_sp):
+              test_sprint_report_no_sp,
+              test_sprint_report_designs):
         try:
             t()
         except Exception as e:
