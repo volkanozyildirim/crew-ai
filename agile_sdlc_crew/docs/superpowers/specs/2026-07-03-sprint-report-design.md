@@ -47,9 +47,10 @@ until configured.
 
 - `CREW_SPRINT_REPORT` (default `0`) — master toggle; endpoint + button no-op / hidden when off.
 - `CREW_SPRINT_REPORT_AI_SUMMARY` (default `1`) — AI bullet summarization on/off.
-- `CREW_SPRINT_REPORT_VISUALS` (default `1`) — per-parent slides + domain badges.
+- `CREW_SPRINT_REPORT_VISUALS` (default `1`) — per-parent slides + domain badges, a completion ring per parent, and infographic rows (domain icon + progress bar) on "Diğer Çalışmalar".
+- `CREW_SPRINT_REPORT_OVERVIEW` (default `1`, needs VISUALS) — "Sprint Özeti - Bir Bakışta" slide before the per-parent slides: KPI tiles (total / done / open / projects), a stacked work-status bar per project (top 7 + "Diğer (N proje)"), domain tiles with icon + item count.
 - `CREW_SPRINT_REPORT_AZURE_CHARTS` (default `1`) — auto burndown + velocity charts from Azure Analytics.
-- `CREW_SPRINT_REPORT_MIN_PCT` (default `5`) — parents above this % of sprint SP get their own slide; the rest go to "Diğer Çalışmalar".
+- `CREW_SPRINT_REPORT_MIN_ITEMS` (default `2`) — parents with at least this many work items get their own slide; the rest go to "Diğer Çalışmalar". **The work-summary slides carry no story points** (2026-10-23, user decision): no "(N SP · %X)" suffix, ordering and slide split by work-item count; the old `CREW_SPRINT_REPORT_MIN_PCT` (SP share) is gone. Burndown/velocity are SP-based by nature and stay under `CREW_SPRINT_REPORT_AZURE_CHARTS`.
 - `CREW_SPRINT_REPORT_DIGEST_PER_SLIDE` (default `6`) — rows per "Diğer Çalışmalar" slide.
 - `CREW_SPRINT_REPORT_VELOCITY_SPRINTS` (default `6`) — completed sprints in the velocity chart.
 - `CREW_SPRINT_REPORT_GROUPS_PER_SLIDE` (default `3`) — density when visuals are OFF (legacy layout).

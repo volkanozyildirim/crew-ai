@@ -79,13 +79,18 @@ def _velocity_sprints() -> int:
         return 6
 
 
-def _min_pct() -> float:
-    """Ayrı slayt+rozet için eşik: sprint toplam SP'sinin bu %'sinden FAZLA efor
-    alan parent'lar ayrı slayta; altındakiler 'Diğer Çalışmalar' özetine gider."""
+def _overview_enabled() -> bool:
+    """İçerik slaytlarından önce 'Bir Bakışta' infografik slaytı (sayılar + grafik)."""
+    return _env("CREW_SPRINT_REPORT_OVERVIEW", "1") not in ("0", "false", "False", "")
+
+
+def _min_items() -> int:
+    """Ayrı slayt+rozet için eşik: en az bu kadar işi olan parent'lar ayrı slayta;
+    altındakiler 'Diğer Çalışmalar' özetine gider. (SP'ye bakılmaz — sunumda SP yok.)"""
     try:
-        return float(_env("CREW_SPRINT_REPORT_MIN_PCT", "5"))
+        return max(1, int(_env("CREW_SPRINT_REPORT_MIN_ITEMS", "2")))
     except ValueError:
-        return 5.0
+        return 2
 
 
 def _digest_per_slide() -> int:
@@ -116,6 +121,15 @@ def team_image_path() -> str:
 # Domain sınıfları: anahtar -> (Türkçe etiket, emoji-fallback, ikon konsepti, anahtar kelimeler)
 FLO_ORANGE = "#E97132"
 NAVY = "#0E2841"
+# infografik renkleri: tamamlanan = mavi, devam eden = FLO turuncu (dataviz
+# doğrulayıcısından geçti: normal ΔE 34, CVD ΔE 26); turuncunun zemin kontrastı
+# 3:1'in altında, bu yüzden her grafikte değer etiketi görünür.
+DONE_RGB = (0x2F, 0x6F, 0xD0)
+OPEN_RGB = (0xE9, 0x71, 0x32)
+NAVY_RGB = (0x0E, 0x28, 0x41)
+MUTED_RGB = (0x6B, 0x72, 0x80)
+TRACK_RGB = (0xE5, 0xE7, 0xEB)
+CARD_LINE_RGB = (0xE9, 0x71, 0x32)
 
 DOMAIN_META = {
     "kargo": ("KARGO & TESLİMAT", "🚚", "a delivery truck",
@@ -167,7 +181,6 @@ class SprintItem:
     type: str = ""
     state: str = ""
     assignee: str = ""
-    story_points: float = 0.0
     parent_id: int | None = None
     parent_title: str = ""
     parent_type: str = ""
@@ -188,9 +201,17 @@ class ParentGroup:
         return "Devam Ediyor"
 
     @property
-    def sp_total(self) -> float:
-        """Gruptaki (parent altındaki) toplam tüketilen story point."""
-        return sum(i.story_points or 0.0 for i in self.items)
+    def done_count(self) -> int:
+        return sum(1 for i in self.items if i.state.strip().lower() in DONE_STATES)
+
+    @property
+    def type_counts(self) -> dict[str, int]:
+        """İş tipine göre adet (Task/Bug/...), çoktan aza."""
+        counts: dict[str, int] = {}
+        for i in self.items:
+            t = i.type.strip() or "Diğer"
+            counts[t] = counts.get(t, 0) + 1
+        return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 @dataclass
@@ -198,9 +219,11 @@ class GroupSummary:
     title: str
     status: str
     bullets: list[str]
-    sp: float = 0.0          # bu parent altında tüketilen toplam SP
-    sp_pct: float = 0.0      # sprint toplam SP'si içindeki oran (%)
     domain: str = "diger"    # görsel domain anahtarı (DOMAIN_META)
+    total: int = 0           # parent altındaki iş sayısı
+    done: int = 0            # bunlardan tamamlanan
+    types: dict[str, int] = field(default_factory=dict)  # iş tipi -> adet
+    parent_id: int | None = None  # None = parent'sız 'Diğer / Bağımsız İşler'
 
 
 # ------------------------------------------------------------------ data collection
@@ -216,7 +239,6 @@ def collect_sprint_items(client, iteration_path: str) -> list[SprintItem]:
             type=r.get("type", "") or "",
             state=r.get("state", "") or "",
             assignee=r.get("assignedTo", "") or "",
-            story_points=float(r.get("storyPoints") or 0.0),
         )
         for r in raw
         if r.get("id") is not None
@@ -250,10 +272,10 @@ def group_by_parent(items: list[SprintItem]) -> list[ParentGroup]:
                     it.parent_id, it.parent_title or f"#{it.parent_id}", it.parent_type
                 )
         groups[key].items.append(it)
-    # tüketilen story point'e göre AZALAN; parent'sız 'Diğer' grubu en sonda
+    # iş sayısına göre AZALAN; parent'sız 'Diğer' grubu en sonda
     ordered = sorted(
         groups.values(),
-        key=lambda g: (g.parent_id is None, -g.sp_total, g.parent_title.lower()),
+        key=lambda g: (g.parent_id is None, -len(g.items), g.parent_title.lower()),
     )
     return ordered
 
@@ -310,17 +332,18 @@ def summarize_group(group: ParentGroup, contexts: dict[int, str]) -> GroupSummar
     """Grup için başlık + durum + Türkçe maddeler üret (AI açıksa AI, değilse WI başlıkları)."""
     title = group.parent_title
     status = group.status
-    sp = group.sp_total
+    stats = dict(total=len(group.items), done=group.done_count, types=group.type_counts,
+                 parent_id=group.parent_id)
     # domain: parent başlığı + iş başlıkları üzerinden sınıfla
     clf_text = title + " " + " ".join(it.title for it in group.items)
     domain = _classify_domain(clf_text)
     if _ai_enabled():
         bullets = _ai_bullets(group, contexts)
         if bullets:
-            return GroupSummary(title, status, bullets, sp=sp, domain=domain)
+            return GroupSummary(title, status, bullets, domain=domain, **stats)
     # fallback: her WI başlığı bir madde
     bullets = [f"{it.title}" for it in group.items][:8]
-    return GroupSummary(title, status, bullets, sp=sp, domain=domain)
+    return GroupSummary(title, status, bullets, domain=domain, **stats)
 
 
 def _ai_bullets(group: ParentGroup, contexts: dict[int, str]) -> list[str]:
@@ -580,12 +603,6 @@ def _fill_content_slide(slide, summaries: list[GroupSummary], start_no: int):
         r.text = f"{no}. {s.title} – {s.status}"
         r.font.size = Pt(16)
         r.font.bold = True
-        # SP + sprint toplamı içindeki oran (bold değil, biraz daha küçük)
-        if s.sp:
-            r2 = p.add_run()
-            r2.text = f"   ({s.sp:g} SP · %{int(round(s.sp_pct))})"
-            r2.font.size = Pt(13)
-            r2.font.bold = False
         # maddeler
         for b in s.bullets:
             bp = tf.add_paragraph()
@@ -601,6 +618,7 @@ def _fill_content_slide(slide, summaries: list[GroupSummary], start_no: int):
 
     if do_badge:
         _add_domain_badge(slide, summaries[0])
+        _add_progress_card(slide, summaries[0])
 
 
 def _set_slide_title(slide, text: str):
@@ -617,55 +635,330 @@ def _set_slide_title(slide, text: str):
             return
 
 
-def _fill_digest_slide(slide, summaries: list[GroupSummary]):
-    """'Diğer Çalışmalar' slaytı: her proje = başlık satırı (SP·%) + 1 cümle özet."""
-    from pptx.util import Emu, Inches, Pt
+def _remove_body_lines(slide):
+    """Gövdedeki sabit konumlu ayraç çizgilerini kaldır (değişken içerikle hizasız)."""
+    from pptx.util import Emu
 
-    # ortadaki ayraç çizgilerini kaldır
     for sh in list(slide.shapes):
         try:
-            if sh.shape_type == 9 and Emu(sh.top).inches > 1.3:
+            if sh.shape_type == 9 and Emu(sh.top).inches > 1.3:  # LINE
                 sh._element.getparent().remove(sh._element)
         except Exception:
             pass
 
+
+def _remove_content_textbox(slide):
     box = _content_textbox(slide)
-    if box is None:
+    if box is not None:
+        box._element.getparent().remove(box._element)
+
+
+def _clip(text: str, n: int) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
+def _pct(done: int, total: int) -> int:
+    return int(round(100.0 * done / total)) if total else 0
+
+
+def _types_line(types: dict[str, int], limit: int = 3) -> str:
+    """'3 Task · 1 Bug' — en çok görülen tipler, kalanı '+N'."""
+    parts = [f"{n} {t}" for t, n in list(types.items())[:limit]]
+    rest = sum(list(types.values())[limit:])
+    if rest:
+        parts.append(f"+{rest}")
+    return " · ".join(parts)
+
+
+def _textbox(slide, left, top, width, height, text, size, *, bold=False,
+             rgb=NAVY_RGB, align=None, wrap=True, anchor=None):
+    """Tek paragraflı metin kutusu (infografik etiketleri için)."""
+    from pptx.dml.color import RGBColor
+    from pptx.util import Pt
+
+    tb = slide.shapes.add_textbox(left, top, width, height)
+    tf = tb.text_frame
+    tf.word_wrap = wrap
+    for side in ("margin_left", "margin_right", "margin_top", "margin_bottom"):
+        setattr(tf, side, 0)
+    if anchor is not None:
+        tf.vertical_anchor = anchor
+    p = tf.paragraphs[0]
+    if align is not None:
+        p.alignment = align
+    r = p.add_run()
+    r.text = text
+    r.font.size = Pt(size)
+    r.font.bold = bold
+    r.font.color.rgb = RGBColor(*rgb)
+    return tb
+
+
+def _card(slide, left, top, width, height, *, line_rgb=TRACK_RGB, fill_rgb=(0xFF, 0xFF, 0xFF)):
+    """Beyaz, ince kenarlı yuvarlak köşe kart."""
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Pt
+
+    card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
+    card.adjustments[0] = 0.08
+    card.fill.solid()
+    card.fill.fore_color.rgb = RGBColor(*fill_rgb)
+    card.line.color.rgb = RGBColor(*line_rgb)
+    card.line.width = Pt(1)
+    try:
+        card.shadow.inherit = False
+    except Exception:
+        pass
+    return card
+
+
+def _bar(slide, left, top, width, height, frac: float):
+    """Yatay ilerleme çubuğu: gri iz + mavi dolu kısım."""
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+
+    def rect(w, rgb):
+        sh = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, w, height)
+        sh.adjustments[0] = 0.5
+        sh.fill.solid()
+        sh.fill.fore_color.rgb = RGBColor(*rgb)
+        sh.line.fill.background()
+        try:
+            sh.shadow.inherit = False
+        except Exception:
+            pass
+        return sh
+
+    rect(width, TRACK_RGB)
+    frac = max(0.0, min(1.0, frac))
+    if frac > 0:
+        rect(max(int(width * frac), height), DONE_RGB)  # en az bir yuvarlak uç
+
+
+def _add_progress_ring(slide, left, top, size, done: int, total: int):
+    """Tamamlanma halkası: doughnut (tamamlanan mavi / kalan gri) + ortada yüzde."""
+    from pptx.chart.data import CategoryChartData
+    from pptx.dml.color import RGBColor
+    from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+    from pptx.oxml.ns import qn
+    from pptx.util import Inches
+
+    cd = CategoryChartData()
+    cd.categories = ["Tamamlandı", "Devam Ediyor"]
+    cd.add_series("İş", (done, max(total - done, 0)))
+    gf = slide.shapes.add_chart(XL_CHART_TYPE.DOUGHNUT, left, top, size, size, cd)
+    ch = gf.chart
+    ch.has_title = False
+    ch.has_legend = False
+    plot = ch.plots[0]
+    hole = plot._element.find(qn("c:holeSize"))
+    if hole is not None:
+        hole.set("val", "72")
+    pts = plot.series[0].points
+    for idx, rgb in ((0, DONE_RGB), (1, TRACK_RGB)):
+        pts[idx].format.fill.solid()
+        pts[idx].format.fill.fore_color.rgb = RGBColor(*rgb)
+        pts[idx].format.line.fill.background()
+    pad = Inches(0.35)
+    _textbox(
+        slide, left + pad, top + pad, size - 2 * pad, size - 2 * pad,
+        f"%{_pct(done, total)}", 26, bold=True, align=PP_ALIGN.CENTER,
+        anchor=MSO_ANCHOR.MIDDLE,
+    )
+    return ch
+
+
+def _add_progress_card(slide, summary: GroupSummary):
+    """Rozetin altına: tamamlanma halkası + 'x / y iş tamamlandı' + iş tipi dağılımı."""
+    from pptx.enum.text import PP_ALIGN
+    from pptx.util import Inches
+
+    if not summary.total:
         return
-    box.left = Inches(1.5)  # içerik slaytlarıyla aynı hiza
-    box.top = Inches(1.3)
-    box.width = Inches(11.6)
-    tf = box.text_frame
-    tf.clear()
-    tf.word_wrap = True
-    first = True
-    for s in summaries:
-        if first:
-            p = tf.paragraphs[0]
-            first = False
-        else:
-            sp = tf.add_paragraph()  # gruplar arası küçük boşluk
-            sp.level = 0
-            p = tf.add_paragraph()
-        p.level = 0
-        r = p.add_run()
-        r.text = f"{s.title} – {s.status}"
-        r.font.size = Pt(14)
-        r.font.bold = True
-        if s.sp:
-            r2 = p.add_run()
-            r2.text = f"   ({s.sp:g} SP · %{int(round(s.sp_pct))})"
-            r2.font.size = Pt(11)
-            r2.font.bold = False
-        # tek cümlelik özet (ilk madde)
+    left, top, w, h = Inches(10.45), Inches(3.2), Inches(2.55), Inches(3.1)
+    _card(slide, left, top, w, h, line_rgb=CARD_LINE_RGB)
+    ring = Inches(1.95)
+    _add_progress_ring(slide, left + (w - ring) // 2, top + Inches(0.12), ring,
+                       summary.done, summary.total)
+    _textbox(slide, left + Inches(0.1), top + Inches(2.15), w - Inches(0.2), Inches(0.35),
+             f"{summary.done} / {summary.total} iş tamamlandı", 13, bold=True,
+             align=PP_ALIGN.CENTER)
+    types = _types_line(summary.types)
+    if types:
+        _textbox(slide, left + Inches(0.1), top + Inches(2.6), w - Inches(0.2), Inches(0.7),
+                 types, 11, rgb=MUTED_RGB, align=PP_ALIGN.CENTER)
+
+
+def _fill_digest_slide(slide, summaries: list[GroupSummary]):
+    """'Diğer Çalışmalar' slaytı: her proje sabit yükseklikte bir satır —
+    domain ikonu · başlık + durum + tek cümle özet · ilerleme çubuğu (x / y iş)."""
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+    from pptx.util import Inches, Pt
+
+    _remove_body_lines(slide)
+    _remove_content_textbox(slide)
+    if not summaries:
+        return
+    top0, area = Inches(1.15), Inches(5.75)
+    row_h = int(area / max(len(summaries), _digest_per_slide()))
+    for i, s in enumerate(summaries):
+        y = top0 + i * row_h
+        if i:
+            ln = slide.shapes.add_connector(1, Inches(1.75), y, Inches(13.0), y)
+            ln.line.color.rgb = RGBColor(*TRACK_RGB)
+            ln.line.width = Pt(0.75)
+        icon_sz = Inches(0.55)
+        icon = _domain_icon_png(s.domain) if _visuals_enabled() else None
+        if icon:
+            slide.shapes.add_picture(icon, Inches(1.8), y + (row_h - icon_sz) // 2, height=icon_sz)
+        tb = _textbox(slide, Inches(2.6), y + Inches(0.1), Inches(7.6), row_h - Inches(0.15),
+                      f"{_clip(s.title, 80)} – {s.status}", 14, bold=True)
         line = s.bullets[0] if s.bullets else ""
         if line:
-            bp = tf.add_paragraph()
-            bp.level = 1
-            br = bp.add_run()
-            br.text = line
-            br.font.size = Pt(12)
-            br.font.bold = False
+            p = tb.text_frame.add_paragraph()
+            p.space_before = Pt(3)
+            r = p.add_run()
+            r.text = _clip(line, 200)
+            r.font.size = Pt(11)
+            r.font.color.rgb = RGBColor(*MUTED_RGB)
+        if s.total:
+            bx, bw = Inches(10.55), Inches(2.3)
+            _textbox(slide, bx, y + Inches(0.18), bw, Inches(0.3),
+                     f"{s.done} / {s.total} iş", 11, bold=True, align=PP_ALIGN.RIGHT)
+            _bar(slide, bx, y + Inches(0.52), bw, Inches(0.13), s.done / s.total)
+
+
+def _add_kpi_tile(slide, left, top, w, h, value: str, label: str, accent=NAVY_RGB):
+    from pptx.enum.text import PP_ALIGN
+    from pptx.util import Inches
+
+    _card(slide, left, top, w, h)
+    _textbox(slide, left, top + Inches(0.12), w, Inches(0.6), value, 30, bold=True,
+             rgb=accent, align=PP_ALIGN.CENTER)
+    _textbox(slide, left, top + Inches(0.72), w, Inches(0.3), label, 12, rgb=MUTED_RGB,
+             align=PP_ALIGN.CENTER)
+
+
+def _add_project_status_chart(slide, left, top, w, h, summaries: list[GroupSummary],
+                              limit: int = 8):
+    """Projelere göre iş durumu: yatay yığılmış çubuk (Tamamlandı / Devam Ediyor).
+    `limit`'ten fazla proje 'Diğer (N proje)' satırında toplanır — 9. renk/satır üretilmez."""
+    from pptx.chart.data import CategoryChartData
+    from pptx.dml.color import RGBColor
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+    from pptx.util import Pt
+
+    rows = [(_clip(s.title, 34), s.done, s.total - s.done) for s in summaries if s.total]
+    if len(rows) > limit:
+        head, tail = rows[: limit - 1], rows[limit - 1:]
+        rows = head + [(f"Diğer ({len(tail)} proje)",
+                        sum(r[1] for r in tail), sum(r[2] for r in tail))]
+    if not rows:
+        return None
+    cd = CategoryChartData()
+    cd.categories = [r[0] for r in rows]
+    cd.add_series("Tamamlandı", [r[1] for r in rows])
+    cd.add_series("Devam Ediyor", [r[2] for r in rows])
+    gf = slide.shapes.add_chart(XL_CHART_TYPE.BAR_STACKED, left, top, w, h, cd)
+    ch = gf.chart
+    ch.has_title = False
+    ch.has_legend = True
+    ch.legend.position = XL_LEGEND_POSITION.BOTTOM
+    ch.legend.include_in_layout = False
+    ch.legend.font.size = Pt(11)
+    plot = ch.plots[0]
+    plot.gap_width = 55
+    plot.overlap = 100
+    plot.has_data_labels = True
+    dl = plot.data_labels
+    dl.number_format = "0;;;"  # sıfır değerli dilimin etiketi görünmesin
+    dl.number_format_is_linked = False
+    dl.font.size = Pt(10)
+    dl.font.bold = True
+    dl.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    for ser, rgb in zip(plot.series, (DONE_RGB, OPEN_RGB)):
+        ser.format.fill.solid()
+        ser.format.fill.fore_color.rgb = RGBColor(*rgb)
+        ser.format.line.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)  # bitişik dilimler arası boşluk
+        ser.format.line.width = Pt(1.5)
+    cat = ch.category_axis
+    cat.reverse_order = True  # en çok işi olan proje en üstte
+    cat.tick_labels.font.size = Pt(10)
+    cat.format.line.fill.background()
+    cat.has_major_gridlines = False
+    val = ch.value_axis
+    val.visible = False
+    val.has_major_gridlines = False
+    return ch
+
+
+def _add_domain_tiles(slide, left, top, w, h, summaries: list[GroupSummary]):
+    """İş alanları: alan başına ikon + etiket + iş sayısı kartı (3 sütunlu ızgara)."""
+    from pptx.enum.text import PP_ALIGN
+    from pptx.util import Inches
+
+    counts: dict[str, int] = {}
+    for s in summaries:
+        counts[s.domain] = counts.get(s.domain, 0) + s.total
+    doms = [d for d, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])) if n]
+    if not doms:
+        return
+    cols = 3
+    rows = min(3, (len(doms) + cols - 1) // cols)
+    doms = doms[: cols * rows]
+    gap = Inches(0.15)
+    tw = int((w - gap * (cols - 1)) / cols)
+    th = int((h - gap * (rows - 1)) / rows)
+    th = min(th, Inches(1.55))
+    for i, d in enumerate(doms):
+        x = left + (i % cols) * (tw + gap)
+        y = top + (i // cols) * (th + gap)
+        _card(slide, x, y, tw, th)
+        meta = DOMAIN_META.get(d, DOMAIN_META["diger"])
+        icon_sz = Inches(0.55)
+        icon = _domain_icon_png(d)
+        if icon:
+            slide.shapes.add_picture(icon, x + (tw - icon_sz) // 2, y + Inches(0.1), height=icon_sz)
+        else:
+            _textbox(slide, x, y + Inches(0.05), tw, icon_sz, meta[1], 24, align=PP_ALIGN.CENTER)
+        _textbox(slide, x, y + Inches(0.68), tw, Inches(0.36), str(counts[d]), 18, bold=True,
+                 align=PP_ALIGN.CENTER)
+        _textbox(slide, x + Inches(0.05), y + Inches(1.03), tw - Inches(0.1), Inches(0.4),
+                 meta[0], 9, bold=True, rgb=MUTED_RGB, align=PP_ALIGN.CENTER)
+
+
+def _fill_overview_slide(slide, summaries: list[GroupSummary]):
+    """'Sprint Özeti - Bir Bakışta': KPI kutuları + projelere göre durum + iş alanları."""
+    from pptx.util import Inches
+
+    _set_slide_title(slide, "Sprint Özeti - Bir Bakışta")
+    _remove_body_lines(slide)
+    _remove_content_textbox(slide)
+
+    total = sum(s.total for s in summaries)
+    done = sum(s.done for s in summaries)
+    projects = sum(1 for s in summaries if s.parent_id is not None)
+    tiles = [
+        (str(total), "Toplam İş", NAVY_RGB),
+        (str(done), f"Tamamlanan · %{_pct(done, total)}", DONE_RGB),
+        (str(total - done), "Devam Eden", OPEN_RGB),
+        (str(projects), "Proje", NAVY_RGB),
+    ]
+    x0, tw, gap = Inches(1.8), Inches(2.65), Inches(0.2)
+    for i, (val, label, rgb) in enumerate(tiles):
+        _add_kpi_tile(slide, x0 + i * (tw + gap), Inches(1.15), tw, Inches(1.1), val, label, rgb)
+
+    _textbox(slide, Inches(1.8), Inches(2.5), Inches(6.6), Inches(0.3),
+             "Projelere Göre İş Durumu", 13, bold=True)
+    _add_project_status_chart(slide, Inches(1.7), Inches(2.85), Inches(6.8), Inches(4.05),
+                              summaries)
+    _textbox(slide, Inches(8.75), Inches(2.5), Inches(4.25), Inches(0.3),
+             "İş Alanları", 13, bold=True)
+    _add_domain_tiles(slide, Inches(8.75), Inches(2.9), Inches(4.25), Inches(3.95), summaries)
 
 
 def _add_burndown_chart(slide, data: dict):
@@ -762,7 +1055,8 @@ def _set_team_image(prs, image_path: str):
         return
     for slide in prs.slides:
         t = _slide_text(slide)
-        if "Ekip" not in t or "Neler Yaptık" in t or "Diğer Çalışmalar" in t or "Teşekkür" in t:
+        if ("Ekip" not in t or "Neler Yaptık" in t or "Diğer Çalışmalar" in t
+                or "Bir Bakışta" in t or "Teşekkür" in t):
             continue
         box = None
         for sh in list(slide.shapes):
@@ -832,7 +1126,8 @@ def _renumber_pages(prs):
 
 
 def _reorder_slides(prs):
-    """Slaytları kanonik sıraya diz: başlık, burndown, içerik*, 3-aylık, ekip, teşekkürler."""
+    """Slaytları kanonik sıraya diz: başlık, burndown, bir bakışta, içerik*, 3-aylık,
+    ekip, teşekkürler."""
 
     def rank(slide):
         t = _slide_text(slide)
@@ -840,15 +1135,17 @@ def _reorder_slides(prs):
             return 0
         if "Burndown" in t:
             return 1
-        if "Neler Yaptık" in t or "Diğer Çalışmalar" in t:
+        if "Bir Bakışta" in t:
             return 2
-        if "değerlendirme" in t or "Son 3 ayl" in t:
+        if "Neler Yaptık" in t or "Diğer Çalışmalar" in t:
             return 3
-        if "Teşekkürler" in t:
-            return 5
-        if "Ekip" in t:
+        if "değerlendirme" in t or "Son 3 ayl" in t:
             return 4
-        return 6
+        if "Teşekkürler" in t:
+            return 6
+        if "Ekip" in t:
+            return 5
+        return 7
 
     sldIdLst = prs.slides._sldIdLst
     id_els = list(sldIdLst)
@@ -858,6 +1155,29 @@ def _reorder_slides(prs):
         sldIdLst.remove(el)
     for i in order:
         sldIdLst.append(id_els[i])
+
+
+def plan_slides(summaries: list[GroupSummary]) -> list[tuple[str, list[GroupSummary]]]:
+    """Özet slaytlarının görev listesi: [(tür, gruplar)], tür ∈ overview/top/digest.
+
+    Görseller açıkken: önce 'Bir Bakışta' infografiği, sonra en az MIN_ITEMS işi olan
+    her parent kendi (rozetli) slaytında, kalanlar 'Diğer Çalışmalar' satırlarında.
+    Kapalıyken eski yoğun düzen (slayt başına GROUPS_PER_SLIDE grup). SP kullanılmaz."""
+    if not _visuals_enabled():
+        per = _groups_per_slide()
+        return [("top", summaries[i : i + per]) for i in range(0, len(summaries), per)] or [
+            ("top", [])
+        ]
+    tasks: list[tuple[str, list[GroupSummary]]] = []
+    if _overview_enabled() and summaries:
+        tasks.append(("overview", list(summaries)))
+    min_items = _min_items()
+    tasks += [("top", [s]) for s in summaries if s.total >= min_items]
+    rest = [s for s in summaries if s.total < min_items]
+    per_dig = _digest_per_slide()
+    for i in range(0, len(rest), per_dig):
+        tasks.append(("digest", rest[i : i + per_dig]))
+    return tasks or [("top", [])]
 
 
 def build_pptx(
@@ -889,25 +1209,7 @@ def build_pptx(
     content_slides = [all_slides[i] for i in content_idx]
     src = content_slides[0]
 
-    # Slayt görevleri: görseller açıkken, sprint toplam SP'sinin %MIN_PCT'inden
-    # FAZLA efor alan parent'lar ayrı slayt (rozetli); kalanlar 'Diğer Çalışmalar'.
-    # Aksi halde eski davranış (grup/slayt).
-    total_sp = sum(s.sp for s in summaries) or 1.0
-    min_pct = _min_pct()
-    if _visuals_enabled():
-        indiv = [s for s in summaries if 100.0 * s.sp / total_sp > min_pct]
-        rest = [s for s in summaries if 100.0 * s.sp / total_sp <= min_pct]
-        tasks = [("top", [s]) for s in indiv]
-        per_dig = _digest_per_slide()
-        for i in range(0, len(rest), per_dig):
-            tasks.append(("digest", rest[i : i + per_dig]))
-        if not tasks:
-            tasks = [("top", [])]
-    else:
-        per = _groups_per_slide()
-        tasks = [("top", summaries[i : i + per]) for i in range(0, len(summaries), per)] or [
-            ("top", [])
-        ]
+    tasks = plan_slides(summaries)
 
     # fazladan kalan şablon içerik slaytlarını sldIdLst'ten çıkar
     if len(tasks) < len(content_slides):
@@ -922,7 +1224,9 @@ def build_pptx(
 
     start_no = 1
     for (kind, chunk), slide in zip(tasks, used):
-        if kind == "digest":
+        if kind == "overview":
+            _fill_overview_slide(slide, chunk)
+        elif kind == "digest":
             _set_slide_title(slide, "Diğer Çalışmalar")
             _fill_digest_slide(slide, chunk)
         else:
@@ -1132,12 +1436,6 @@ def generate_sprint_report(
             it.id: _stored_context_for_item(it, db, repo_decisions, client) for it in g.items
         }
         summaries.append(summarize_group(g, contexts))
-
-    # sprint toplam SP'si içindeki oranlar
-    total_sp = sum(s.sp for s in summaries)
-    if total_sp > 0:
-        for s in summaries:
-            s.sp_pct = round(100.0 * s.sp / total_sp)
 
     meta = _sprint_meta(client, iteration_path, team)
     sprint_name = meta.get("name", iteration_path)

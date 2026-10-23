@@ -5219,6 +5219,105 @@ def test_env_conventions():
     check("S6437 beklenen davranış: mevcut env adı, .env.example, ad uydurulmaz",
           ".env.example" in eb and "getenv" in eb and "uydur" in eb, eb)
     check("S6437 kabul kriteri de env kuralını söyler", ".env.example" in render.acceptance_criteria(g) or "mevcut" in render.acceptance_criteria(g))
+def test_sprint_report_no_sp():
+    """Sprint sunumu: iş özeti slaytlarında SP yok, sıralama/bölme iş sayısıyla,
+    özet infografiklerle (Bir Bakışta + tamamlanma halkası + satır çubukları).
+
+    Kullanıcı kararı (2026-10-23): "(25 SP · %23)" ekleri ve SP payına göre
+    slayt bölme kaldırıldı. Şablon git'te olmadığı için sentetik bir şablon
+    kurulur; ikon üretimi (LLM) devre dışı bırakılır."""
+    print("\n[sprint raporu: SP yok, infografik özet]")
+    import os
+
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches
+    except ImportError:
+        skip("sprint raporu", "python-pptx yok")
+        return
+    from agile_sdlc_crew import sprint_report as sr
+
+    keys = ("CREW_SPRINT_REPORT_AI_SUMMARY", "CREW_SPRINT_REPORT_VISUALS",
+            "CREW_SPRINT_REPORT_OVERVIEW", "CREW_SPRINT_REPORT_MIN_ITEMS",
+            "CREW_SPRINT_REPORT_ICON_DIR")
+    saved = {k: os.environ.get(k) for k in keys}
+    orig_icon = sr._ai_svg_icon
+    tmp = tempfile.mkdtemp()
+    try:
+        os.environ.update({"CREW_SPRINT_REPORT_AI_SUMMARY": "0",
+                           "CREW_SPRINT_REPORT_VISUALS": "1",
+                           "CREW_SPRINT_REPORT_OVERVIEW": "1",
+                           "CREW_SPRINT_REPORT_ICON_DIR": tmp})
+        os.environ.pop("CREW_SPRINT_REPORT_MIN_ITEMS", None)
+        sr._ai_svg_icon = lambda concept: ""  # emoji yedeği, LLM çağrısı yok
+
+        def it(i, pid, title, state, typ="Task"):
+            return sr.SprintItem(id=i, title=f"iş {i}", type=typ, state=state,
+                                 parent_id=pid, parent_title=title)
+
+        items = [it(1, 10, "Küçük proje", "Done"),
+                 it(2, 20, "Kargo entegrasyonu", "Done"),
+                 it(3, 20, "Kargo entegrasyonu", "Active", "Bug"),
+                 it(4, 20, "Kargo entegrasyonu", "Resolved"),
+                 it(5, None, "", "Active")]
+        groups = sr.group_by_parent(items)
+        check("gruplar iş sayısına göre azalan, parent'sız en sonda",
+              [g.parent_id for g in groups] == [20, 10, None],
+              str([g.parent_id for g in groups]))
+        sums = [sr.summarize_group(g, {}) for g in groups]
+        kargo = sums[0]
+        check("özet iş sayılarını taşır (Resolved tamamlanmış sayılır)",
+              (kargo.total, kargo.done, kargo.types) == (3, 2, {"Task": 2, "Bug": 1}),
+              f"{kargo.total}/{kargo.done}/{kargo.types}")
+        check("GroupSummary'de SP alanı yok",
+              not any(hasattr(kargo, a) for a in ("sp", "sp_pct")))
+
+        kinds = [(k, [s.parent_id for s in c]) for k, c in sr.plan_slides(sums)]
+        check("plan: bir bakışta → ≥2 işli parent kendi slaytında → kalanlar özet satırı",
+              kinds == [("overview", [20, 10, None]), ("top", [20]), ("digest", [10, None])],
+              str(kinds))
+
+        tpl = os.path.join(tmp, "tpl.pptx")
+        prs = Presentation()
+        prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+        blank = prs.slide_layouts[6]
+        s1 = prs.slides.add_slide(blank)
+        s1.shapes.add_textbox(Inches(1), Inches(1), Inches(10), Inches(1)).name = "Metin kutusu 2"
+        s2 = prs.slides.add_slide(blank)
+        title = s2.shapes.add_textbox(Inches(2.4), Inches(0.3), Inches(10), Inches(0.4))
+        title.name = "Başlık"  # varsayılan ad 'TextBox N' gövde kutusuyla çakışır
+        title.text_frame.text = "Sprint Özeti - Neler Yaptık"
+        s2.shapes.add_textbox(Inches(1.5), Inches(1.3), Inches(8), Inches(5)).name = "TextBox 1"
+        s3 = prs.slides.add_slide(blank)
+        s3.shapes.add_textbox(Inches(0), Inches(3), Inches(13), Inches(0.5)).text_frame.text = (
+            "Teşekkürler.")
+        prs.save(tpl)
+
+        out = os.path.join(tmp, "out.pptx")
+        sr.build_pptx("Takım", "21. Sprint", "", sums, tpl, out)
+        deck = Presentation(out)
+        texts = [" ".join(sh.text_frame.text for sh in s.shapes if sh.has_text_frame)
+                 for s in deck.slides]
+        check("hiçbir slaytta SP yok",
+              not any(re.search(r"\bSP\b", t) for t in texts),
+              str([t[:80] for t in texts if re.search(r"\bSP\b", t)]))
+        order = [("Bir Bakışta" in t, "Neler Yaptık" in t, "Diğer Çalışmalar" in t) for t in texts]
+        check("sıra: başlık, bir bakışta, içerik, diğer çalışmalar, teşekkürler",
+              order[1:4] == [(True, False, False), (False, True, False), (False, False, True)],
+              str(order))
+        charts = [sum(1 for sh in s.shapes if sh.has_chart) for s in deck.slides]
+        check("bir bakışta: KPI + proje durum grafiği; içerik slaytı: tamamlanma halkası",
+              charts[1] == 1 and charts[2] == 1 and "Toplam İş" in texts[1]
+              and "2 / 3 iş tamamlandı" in texts[2], f"charts={charts}")
+        check("diğer çalışmalar satırı ilerleme metni taşır",
+              "1 / 1 iş" in texts[3] and "0 / 1 iş" in texts[3], texts[3][:200])
+    finally:
+        sr._ai_svg_icon = orig_icon
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def main():
@@ -5299,7 +5398,8 @@ def main():
               test_php_modern_endpoints,
               test_php_modern_ui,
               test_quality_sonar_exclude,
-              test_env_conventions):
+              test_env_conventions,
+              test_sprint_report_no_sp):
         try:
             t()
         except Exception as e:
