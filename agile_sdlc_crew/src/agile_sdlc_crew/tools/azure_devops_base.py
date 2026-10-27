@@ -5,6 +5,72 @@ import re
 import requests
 
 
+# Azure DevOps PR yorumlarında markdown ":/", ":(", ":D" gibi ifadeleri emojiye
+# çevirir. Reviewer bir değeri tırnak içinde yazınca (PR #44918: "host olmayan
+# canonical için ':/' ve '://en'") metin "'😕/'" olarak göründü ve anlam
+# kayboldu. Kod dışındaki bu tür sözcükler satır içi koda alınır — kodda
+# dönüşüm yapılmaz; URL'ler (harften sonra gelen ':/') etkilenmez.
+_EMOTICON_TOKEN = re.compile(r"[^\s`|]*(?<![A-Za-z0-9\-|]):[/\\()DPpOo][^\s`|]*")
+_TRAIL_PUNCT = ",.;!?)"
+
+
+def _defuse_segment(seg: str) -> str:
+    def wrap(m: re.Match) -> str:
+        tok = m.group(0)
+        core = tok.rstrip(_TRAIL_PUNCT) if tok.rstrip(_TRAIL_PUNCT) else tok
+        return f"`{core}`{tok[len(core):]}"
+    return _EMOTICON_TOKEN.sub(wrap, seg)
+
+
+def defuse_emoticons(md: str) -> str:
+    """Kod blokları ve satır içi kod hariç, emojiye dönüşecek sözcükleri koda al."""
+    if not md or ":" not in md:
+        return md or ""
+    out = []
+    for i, block in enumerate(re.split(r"(```.*?```)", md, flags=re.S)):
+        if i % 2:
+            out.append(block)
+            continue
+        parts = re.split(r"(`[^`]*`)", block)
+        out.append("".join(p if j % 2 else _defuse_segment(p) for j, p in enumerate(parts)))
+    return "".join(out)
+
+
+_TS_PREFIX = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ?")
+_LOG_NOISE = re.compile(
+    r"^(##\[(section|command|group|endgroup)\]|={10,}|Task\s+:|Description\s+:|Version\s+:|"
+    r"Author\s+:|Help\s+:|Generating script|Evaluating:|Expanded:|Result:)")
+_LOG_ERROR = re.compile(
+    r"(\.(go|php|py|js|ts|tsx|java|cs|rb)[:(]\d+|--- FAIL|^FAIL\b|panic:|Fatal error|"
+    r"\b[Ee]rror\b|Exception|AssertionError|Failures?:|undefined|cannot |not found|exit code)")
+_PKG_FAIL = re.compile(r"^FAIL\s+\S+\s+\[build failed\]$")
+
+
+def extract_build_errors(log_text: str, max_lines: int = 80) -> str:
+    """CI Task logundan geliştiriciye gereken kısım: zaman damgası ve şablon
+    gürültüsü atılır, hata satırları (dosya:satır, FAIL, panic, Error…) bir satır
+    bağlamla önce gelir, `FAIL pkg [build failed]` yığını tek satıra iner, sonra
+    kuyruk. #248'de derleyici hataları logun BAŞINDAYDI, kuyrukta yalnız 60 paketlik
+    FAIL listesi vardı."""
+    lines = [_TS_PREFIX.sub("", ln.rstrip()) for ln in (log_text or "").splitlines()]
+    lines = [ln for ln in lines if ln.strip() and not _LOG_NOISE.match(ln)]
+    pkg_fail = [ln for ln in lines if _PKG_FAIL.match(ln)]
+    body = [ln for ln in lines if not _PKG_FAIL.match(ln)]
+    keep: list[int] = []
+    for i, ln in enumerate(body):
+        if _LOG_ERROR.search(ln):
+            keep += [j for j in (i - 1, i, i + 1) if 0 <= j < len(body)]
+    picked = [body[i] for i in dict.fromkeys(keep)][:max_lines]
+    out = picked
+    if pkg_fail:
+        out.append(f"({len(pkg_fail)} paket 'build failed': {', '.join(l.split()[1] for l in pkg_fail[:5])}"
+                   + (", …" if len(pkg_fail) > 5 else "") + ")")
+    tail = [ln for ln in body[-15:] if ln not in picked]
+    if tail:
+        out += ["--- son satırlar ---", *tail]
+    return "\n".join(out)
+
+
 class AzureDevOpsClient:
     """Azure DevOps REST API icin paylasilan HTTP istemcisi."""
 
@@ -258,9 +324,11 @@ class AzureDevOpsClient:
         path: str = "/",
         branch: str | None = None,
         recursion_level: str = "oneLevel",
+        project: str | None = None,
     ) -> list[dict]:
-        """Bir repoda belirtilen dizindeki dosya/klasorleri listeler."""
-        url = f"{self._repo_api_url(repo_id_or_name)}/items"
+        """Bir repoda belirtilen dizindeki dosya/klasorleri listeler.
+        project: repo AZURE_DEVOPS_REPO_PROJECTS disindaysa (ör. FLODevOps)."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/items"
         params: dict = {
             "scopePath": path,
             "recursionLevel": recursion_level,
@@ -283,9 +351,10 @@ class AzureDevOpsClient:
         repo_id_or_name: str,
         file_path: str,
         branch: str | None = None,
+        project: str | None = None,
     ) -> str:
         """Bir repodaki dosyanin icerigini (text) dondurur."""
-        url = f"{self._repo_api_url(repo_id_or_name)}/items"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/items"
         params: dict = {
             "path": file_path,
             "includeContent": "true",
@@ -399,6 +468,7 @@ class AzureDevOpsClient:
         changes formati:
         [
             {"changeType": "add"|"edit", "path": "/src/file.py", "content": "..."},
+            {"changeType": "delete", "path": "/src/old.py"},   # icerik yok
             ...
         ]
         """
@@ -417,11 +487,12 @@ class AzureDevOpsClient:
             item = {
                 "changeType": change["changeType"],
                 "item": {"path": change["path"]},
-                "newContent": {
+            }
+            if change["changeType"] != "delete":
+                item["newContent"] = {
                     "content": change["content"],
                     "contentType": "rawtext",
-                },
-            }
+                }
             formatted_changes.append(item)
 
         url = f"{self._repo_api_url(repo_id_or_name)}/pushes"
@@ -539,7 +610,7 @@ class AzureDevOpsClient:
         url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}/threads"
         params = {"api-version": self.API_VERSION}
         thread: dict = {
-            "comments": [{"content": content, "commentType": "text"}],
+            "comments": [{"content": defuse_emoticons(content), "commentType": "text"}],
             "status": "active",
         }
         if file_path:
@@ -567,7 +638,7 @@ class AzureDevOpsClient:
             f"{pull_request_id}/threads/{thread_id}/comments"
         )
         params = {"api-version": self.API_VERSION}
-        body = {"content": content, "commentType": "text"}
+        body = {"content": defuse_emoticons(content), "commentType": "text"}
         resp = requests.post(url, headers=self._headers, json=body, params=params, timeout=30)
         resp.raise_for_status()
         return resp.json()
@@ -737,13 +808,15 @@ class AzureDevOpsClient:
                         i.get("message", "")[:300] for i in issues if i.get("type") == "error"
                     )[:1500]
                     parts.append(f"FAILED [{rec.get('type')}] {nm}" + (f": {errs}" if errs else ""))
+                    # Yalnız TASK logu: Phase/Job logu ajanın hazırlık YAML'ı
+                    # (#248: "Unit Tests" Phase'i dekoratör şablonunu verdi, asıl
+                    # `undefined: webanalytics` satırları Task logundaydı).
                     log_url = (rec.get("log") or {}).get("url")
-                    if log_url and "test" in nm.lower():
+                    if log_url and rec.get("type") == "Task":
                         try:
                             lr = requests.get(log_url, headers=self._headers, timeout=30)
                             if lr.ok:
-                                tail = "\n".join(lr.text.splitlines()[-60:])
-                                parts.append(f"--- {nm} log (son satirlar) ---\n{tail}")
+                                parts.append(f"--- {nm} log ---\n{extract_build_errors(lr.text)}")
                         except Exception:
                             pass
         except Exception:
@@ -763,6 +836,18 @@ class AzureDevOpsClient:
             pass
         out = "\n".join(parts).strip()
         return out[:max_chars]
+
+    def get_build_issue_tasks(self, project: str, build_id: int) -> list[dict]:
+        """failed / succeededWithIssues biten Task'lar: [{name, result}]."""
+        url = f"{self.org_url}/{project}/_apis/build/builds/{build_id}/timeline"
+        resp = requests.get(url, headers=self._headers,
+                            params={"api-version": self.API_VERSION}, timeout=30)
+        resp.raise_for_status()
+        return [
+            {"name": r.get("name", ""), "result": r.get("result", "")}
+            for r in resp.json().get("records", [])
+            if r.get("type") == "Task" and r.get("result") in ("failed", "succeededWithIssues")
+        ]
 
     # ── Sprint / Iteration API'leri ──
 

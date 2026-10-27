@@ -1,0 +1,405 @@
+# PHP modernleştirme kataloğu — Teknik borç aşama 2a.
+# Kural metni kullanıcıya (sekme) ve Task açıklamasına aynen gider; Türkçe.
+# since: özelliğin geldiği PHP sürümü; yalnız since ≤ hedef sürüm olan kurallar önerilir.
+# kind: deprecation (hedefte uyarı/hata) | mechanical (davranış aynı, otonom) | structural (tasarım kararı, needs-human) | report (iş açılmaz)
+# unit: file (dosya başına birim, paketlenir) | module (kaynak kökünden 2 dizin, paketlenmez)
+version: 2
+rules:
+  # ── deprecation: hedef sürümde uyarı / hata üretir ──
+  - key: implicit_nullable
+    since: "8.4"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Örtük nullable parametre (Type $x = null)"
+    summary: "Tipli bir parametreye varsayılan null verilmiş ama tip ?Type yazılmamış. PHP 8.4 bunu deprecation olarak loglar, PHP 9'da hata olur."
+    advantages:
+      - "Üretim logundaki deprecation gürültüsü kesilir; New Relic'te gerçek hatalar görünür kalır."
+      - "PHP 9 geçişinin en yaygın kırılma noktası şimdiden kapanır."
+      - "İmza niyeti açık: parametre gerçekten null olabilir."
+    risks:
+      - "Yok — davranış birebir aynı; yalnız imza değişir."
+    before: "function find(string $sku = null, array $opts = null)"
+    after: "function find(?string $sku = null, ?array $opts = null)"
+    ref: "https://wiki.php.net/rfc/deprecate-implicitly-nullable-types"
+    rector: "Rector\\Php84\\Rector\\Param\\ExplicitNullableParamTypeRector"
+  - key: utf8_encode
+    since: "8.2"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "utf8_encode / utf8_decode"
+    summary: "Yalnız ISO-8859-1 ↔ UTF-8 çeviren ve adı yanıltıcı olan bu fonksiyonlar 8.2'de deprecated; 9'da kaldırılacak."
+    advantages:
+      - "Deprecation logu kesilir."
+      - "mb_convert_encoding ile kaynak kodlama açıkça yazılır; Türkçe karakter bozulmalarının bir sınıfı ortadan kalkar."
+    risks:
+      - "Kaynak kodlama gerçekten ISO-8859-1 değilse eski kod zaten yanlış çeviriyordu; değişiklik bunu görünür kılabilir."
+    before: "$s = utf8_encode($raw);"
+    after: "$s = mb_convert_encoding($raw, 'UTF-8', 'ISO-8859-1');"
+    ref: "https://wiki.php.net/rfc/remove_utf8_decode_and_utf8_encode"
+    rector: "Rector\\Php82\\Rector\\FuncCall\\Utf8DecodeEncodeToMbConvertEncodingRector"
+  - key: string_interp_brace
+    since: "8.2"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "\"${var}\" string içi değişken"
+    summary: "Çift tırnak içinde ${var} ve ${expr} biçimi 8.2'de deprecated."
+    advantages:
+      - "Deprecation logu kesilir."
+      - "{$var} biçimi tek ve okunur standart olur."
+    risks:
+      - "Yok — çıktı aynı."
+    before: "\"Sipariş ${orderNo} hazır\""
+    after: "\"Sipariş {$orderNo} hazır\""
+    ref: "https://wiki.php.net/rfc/deprecate_dollar_brace_string_interpolation"
+    rector: "Rector\\Php82\\Rector\\Encapsed\\VariableInStringInterpolationFixerRector"
+  - key: filter_sanitize_string
+    since: "8.1"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "FILTER_SANITIZE_STRING"
+    summary: "Etiket soyup tırnakları HTML entity yapan bu filtre 8.1'de deprecated; ne yaptığı belirsiz olduğu için kaldırılıyor."
+    advantages:
+      - "Deprecation logu kesilir."
+      - "Niyet açık hale gelir: htmlspecialchars (çıktıda kaçış) ya da strip_tags (girdiyi temizleme)."
+    risks:
+      - "İki fonksiyon aynı şeyi yapmaz; çağrı yerine göre doğru olan seçilmeli (yapısal karar olan yerler insana bırakılır)."
+    before: "filter_var($q, FILTER_SANITIZE_STRING)"
+    after: "htmlspecialchars($q, ENT_QUOTES)"
+    ref: "https://wiki.php.net/rfc/deprecations_php_8_1#filter_sanitize_string"
+  - key: removed_functions
+    since: "8.0"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "8.0'da kaldırılan fonksiyonlar (each, create_function, money_format)"
+    summary: "Bu çağrılar 8.0'dan beri yok: ulaşıldığında Fatal error üretir. Üretimde kalmışsa o yol ya hiç çalışmıyor ya da ölü kod."
+    advantages:
+      - "Gizli bir Fatal error kaynağı kapanır ya da ölü kod silinir."
+    risks:
+      - "Yol gerçekten kullanılıyorsa bugüne kadar patlıyordu; düzeltme davranışı görünür kılar."
+    before: "while (list($k, $v) = each($arr)) { … }"
+    after: "foreach ($arr as $k => $v) { … }"
+    ref: "https://www.php.net/manual/en/migration80.incompatible.php"
+
+  # ── mechanical: davranış aynı, dönüşüm yerel ──
+  - key: str_contains
+    since: "8.0"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "strpos(...) !== false → str_contains()"
+    summary: "Alt dize var mı kontrolü strpos'un dönüşünü false ile karşılaştırarak yapılıyor."
+    advantages:
+      - "Niyet okunur: 'içeriyor mu' sorusu tek fonksiyon."
+      - "Klasik 0 / false tuzağı (== false, !strpos) biter — bu tuzak gerçek bug üretir."
+      - "Aynı aile: str_starts_with / str_ends_with."
+    risks:
+      - "Yok — tarayıcı yalnız iki argümanlı, sıkı (=== / !==) karşılaştırmalı strpos/mb_strpos çağrılarını önerir; stripos (harf duyarsız), offset'li çağrılar ve gevşek (== false) karşılaştırmalar eşdeğer olmadığı için önerilmez."
+    before: "if (strpos($uri, '/api/') !== false)"
+    after: "if (str_contains($uri, '/api/'))"
+    ref: "https://wiki.php.net/rfc/str_contains"
+    rector: "Rector\\Php80\\Rector\\NotIdentical\\StrContainsRector"
+  - key: str_starts_with
+    since: "8.0"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "substr($s, 0, n) === … / strpos() === 0 → str_starts_with()"
+    summary: "Önek kontrolü substr uzunluğu elle sayılarak ya da strpos === 0 ile yapılıyor."
+    advantages:
+      - "Elle sayılan uzunluk (yaygın off-by-one kaynağı) kalkar."
+      - "Okunabilirlik: str_starts_with($sku, 'FLO-')."
+    risks:
+      - "Yok — tarayıcı yalnız uzunluğu literal'in uzunluğuna eşit olan substr($s, 0, N) === 'literal' biçimini önerir."
+    before: "if (substr($sku, 0, 4) === 'FLO-')"
+    after: "if (str_starts_with($sku, 'FLO-'))"
+    ref: "https://wiki.php.net/rfc/add_str_starts_with_and_ends_with_functions"
+    rector: "Rector\\Php80\\Rector\\Identical\\StrStartsWithRector"
+  - key: null_coalesce
+    since: "7.0"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "isset($a) ? $a : $b → $a ?? $b"
+    summary: "Null birleştirme operatörü varken isset'li üçlü operatör kullanılıyor."
+    advantages:
+      - "İfade bir kez yazılır; kopyala-yapıştır farkı (isset($a['x']) ? $a['y'] : …) biter."
+      - "Undefined array key uyarısı üretmeden güvenli okuma — New Relic'teki 'Undefined array key' hatalarının önleyici biçimi."
+    risks:
+      - "Yok — ?? tam olarak isset semantiğidir."
+    before: "$city = isset($addr['city']) ? $addr['city'] : null;"
+    after: "$city = $addr['city'] ?? null;"
+    ref: "https://wiki.php.net/rfc/isset_ternary"
+    rector: "Rector\\Php70\\Rector\\Ternary\\TernaryToNullCoalescingRector"
+  - key: nullsafe
+    since: "8.0"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "$a ? $a->b() : null → $a?->b()"
+    summary: "Nesne null olabildiğinde üye erişimi üçlü operatörle korunuyor."
+    advantages:
+      - "Zincir kısalır, koşul ve erişim tek yerde; 'null üzerinde metot çağrısı' hatasının önleyici biçimi."
+    risks:
+      - "$a falsy ama null değilse (0, '', false) eski kod null dönerdi, ?-> Error fırlatır — bu yüzden tarayıcı truthiness biçimini ($a ? $a->b : null) ÖNERMEZ; yalnız `$a !== null ? $a->b : null` ve `!is_null($a) ? $a->b : null` biçimlerini, then dalı tam olarak tek üye erişimi/çağrısı olduğunda önerir."
+    before: "$name = $order->getCustomer() ? $order->getCustomer()->getName() : null;"
+    after: "$name = $order->getCustomer()?->getName();"
+    ref: "https://wiki.php.net/rfc/nullsafe_operator"
+    rector: "Rector\\Php80\\Rector\\Ternary\\TernaryToNullsafeOperatorRector"
+  - key: array_destructuring
+    since: "7.1"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "list($a, $b) = … → [$a, $b] = …"
+    summary: "Eski list() sözdizimi."
+    advantages:
+      - "Kısa biçim; anahtarlı yıkım (['id' => $id] = $row) ve foreach içinde kullanım aynı sözdizimiyle."
+    risks:
+      - "Yok."
+    before: "list($code, $message) = explode(':', $line, 2);"
+    after: "[$code, $message] = explode(':', $line, 2);"
+    ref: "https://wiki.php.net/rfc/short_list_syntax"
+    rector: "Rector\\Php71\\Rector\\List_\\ListToArrayDestructRector"
+  - key: match
+    since: "8.0"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Her dalı tek değer döndüren switch → match"
+    summary: "switch'in her case'i aynı değişkene atama ya da return yapıyor; break unutma riski taşıyor."
+    advantages:
+      - "Strict (===) karşılaştırma: '1' == 1 tuzağı biter."
+      - "Eşleşmeyen değer sessizce geçmez, UnhandledMatchError fırlatır — eksik dal testte görünür."
+      - "İfade olduğu için doğrudan return/atama; break yok, düşme (fall-through) hatası yok."
+    risks:
+      - "Eski switch'te eşleşmeyen değer sessizce geçer, match UnhandledMatchError fırlatır; switch gevşek (==), match sıkı (===) karşılaştırır. Tarayıcı bu yüzden yalnız default'u olan, etiketleri string literal olan ve düşme (fall-through) içermeyen switch'leri önerir."
+    before: |
+      switch ($status) {
+          case 'paid': $label = 'Ödendi'; break;
+          case 'refund': $label = 'İade'; break;
+          default: $label = 'Bilinmiyor';
+      }
+    after: |
+      $label = match ($status) {
+          'paid' => 'Ödendi',
+          'refund' => 'İade',
+          default => 'Bilinmiyor',
+      };
+    ref: "https://wiki.php.net/rfc/match_expression_v2"
+    rector: "Rector\\Php80\\Rector\\Switch_\\ChangeSwitchToMatchRector"
+  - key: first_class_callable
+    since: "8.1"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "[$this, 'metot'] / 'fonksiyon' → metot(...)"
+    summary: "array_map, usort, array_filter gibi çağrılara callable dizi ya da string olarak veriliyor."
+    advantages:
+      - "Statik analiz ve IDE metodu görür; yeniden adlandırma kırmaz (string içindeki ad bulunamazdı)."
+      - "Yanlış yazılmış metot adı çalışma zamanında değil, analizde yakalanır."
+    risks:
+      - "Yok."
+    before: "array_map([$this, 'normalize'], $rows)"
+    after: "array_map($this->normalize(...), $rows)"
+    ref: "https://wiki.php.net/rfc/first_class_callable_syntax"
+    rector: "Rector\\Php81\\Rector\\Array_\\FirstClassCallableRector"
+  - key: ctor_promotion
+    since: "8.0"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Yalnız $this->x = $x yapan constructor → constructor promotion"
+    summary: "Property tanımı, constructor parametresi ve atama üç ayrı yerde tekrar ediyor."
+    advantages:
+      - "Her bağımlılık tek satır; sınıf gövdesi kısalır, yeni bağımlılık eklemek tek yer."
+      - "Tip property'ye de yazılır (örtük typed property kazancı)."
+    risks:
+      - "Property'nin docblock'unda sınıf dışından okunan bir ek açıklama varsa taşınmalı. Tarayıcı yalnız property adı parametre adıyla aynı olan, callable tipli ya da variadic olmayan atamaları önerir; property üst sınıftan geliyorsa promotion derleme hatası verir — uygulamadan önce kontrol edilir."
+    before: |
+      private $client;
+      public function __construct(HttpClient $client) { $this->client = $client; }
+    after: |
+      public function __construct(private HttpClient $client) {}
+    ref: "https://wiki.php.net/rfc/constructor_promotion"
+    rector: "Rector\\Php80\\Rector\\Class_\\ClassPropertyAssignToConstructorPromotionRector"
+
+  # ── structural: tasarım kararı, insan onayı ──
+  - key: typed_properties
+    since: "7.4"
+    kind: structural
+    unit: module
+    auto: false
+    sp_unit: 5
+    title: "Tipsiz property'ler → tipli property"
+    summary: "Sınıf alanları tip olmadan tanımlı; tip yalnız docblock'ta ya da hiç yok. Yanlış tipte atama sessizce kabul ediliyor."
+    advantages:
+      - "Yanlış tip atandığı anda TypeError: hata üretildiği yerde yakalanır, 3 çağrı sonra 'Undefined array key' olarak değil."
+      - "IDE ve PHPStan/Sonar sınıfı anlar; otomatik tamamlama ve ölü kod analizi çalışır."
+      - "Opcache/JIT tipli property'de daha az tür denetimi yapar."
+      - "Sonraki adımların (readonly, promotion, property hooks) ön koşulu."
+    risks:
+      - "null atanan yerler ?Type ister; başlangıç değeri verilmeyen tipli property okunursa 'must not be accessed before initialization' hatası — her sınıfta atama yolları incelenmeli. Bu yüzden insan kararı."
+    before: |
+      class Order {
+          public $id;
+          protected $lines = [];
+          private $total;
+      }
+    after: |
+      class Order {
+          public int $id;
+          /** @var OrderLine[] */
+          protected array $lines = [];
+          private ?Money $total = null;
+      }
+    ref: "https://wiki.php.net/rfc/typed_properties_v2"
+    rector: "Rector\\TypeDeclaration\\Rector\\Property\\TypedPropertyFromAssignsRector"
+  - key: enum
+    since: "8.1"
+    kind: structural
+    unit: module
+    auto: false
+    sp_unit: 5
+    title: "Sabit grubu sınıfı → backed enum"
+    summary: "Durum/tip değerleri bir sınıftaki const'larla tutuluyor; metot imzaları string/int alıyor, geçersiz değer derleme zamanında yakalanmıyor."
+    advantages:
+      - "Parametre tipi Status olur: geçersiz değer fonksiyona giremez, string typo biter."
+      - "match ile eksiksizlik: yeni bir durum eklendiğinde ele alınmayan yer UnhandledMatchError ile görünür."
+      - "Status::from('paid') / tryFrom() ile DB/API değerleri tek yerden doğrulanır."
+      - "Davranış enum'a taşınır (label(), isFinal()) — dağınık if/switch toplanır."
+    risks:
+      - "Dış API/DB string bekler: ->value ile geçiş, tüm çağrı noktaları güncellenmeli. Sabit sınıfı başka repolardan kullanılıyorsa geçiş adım adım (önce enum + eski sabitler korunur)."
+    before: |
+      class OrderStatus {
+          const PAID = 'paid';
+          const REFUND = 'refund';
+      }
+      function label(string $status): string { … }
+    after: |
+      enum OrderStatus: string {
+          case Paid = 'paid';
+          case Refund = 'refund';
+          public function label(): string { return match($this) { self::Paid => 'Ödendi', self::Refund => 'İade' }; }
+      }
+      function label(OrderStatus $status): string { return $status->label(); }
+    ref: "https://wiki.php.net/rfc/enumerations"
+  - key: dto_from_array
+    since: "8.1"
+    kind: structural
+    unit: module
+    auto: false
+    sp_unit: 5
+    title: "Dizi şekli döndüren metotlar → readonly DTO / value object"
+    summary: "Metotlar ['id' => …, 'status' => …] gibi anahtarlı dizi döndürüyor; sözleşme docblock'ta bile yok. Tüketen taraf anahtar adını tahmin ediyor."
+    advantages:
+      - "'Undefined array key' sınıfı hataların kök nedeni kalkar: alan yoksa derleme/analiz hatası, çalışma zamanı uyarısı değil. (New Relic'ten açılan son kalite işlerinin tamamı bu sınıftandı.)"
+      - "IDE alanları gösterir; yeniden adlandırma güvenli."
+      - "readonly ile değiştirilemezlik: dizi yolda sessizce mutasyona uğramaz."
+      - "Serileştirme tek yerde (toArray/JsonSerializable)."
+    risks:
+      - "Tüketen tüm yerler değişir; JSON çıktısı korunmalı (JsonSerializable). Büyük iş — modül başına kademeli, insan kapsam belirler."
+    before: |
+      /** @return array */
+      public function toRow(): array { return ['id' => $this->id, 'status' => $this->status, 'total' => $this->total]; }
+    after: |
+      final readonly class OrderRow implements \JsonSerializable {
+          public function __construct(public int $id, public OrderStatus $status, public Money $total) {}
+          public function jsonSerialize(): array { return ['id' => $this->id, 'status' => $this->status->value, 'total' => $this->total->amount]; }
+      }
+      public function toRow(): OrderRow { … }
+    ref: "https://wiki.php.net/rfc/readonly_properties_v2"
+  - key: property_hooks
+    since: "8.4"
+    kind: structural
+    unit: module
+    auto: false
+    sp_unit: 5
+    title: "Getter/setter çiftleri → property hooks"
+    summary: "Private alan + getX()/setX() çiftleri gövdesi basit (döndür / ata / küçük doğrulama)."
+    advantages:
+      - "Sınıf başına onlarca satır boilerplate kalkar; alan doğrudan $obj->x olarak okunur, doğrulama hook'ta kalır."
+      - "Arayüzde property tanımlanabilir (interface'te public string $x { get; })."
+    risks:
+      - "Public API değişir ($o->getX() → $o->x); çağrı noktaları ve alt sınıflar güncellenmeli. Framework (ORM/serializer) getter bekliyorsa uygulanmaz — insan kararı."
+    before: |
+      private string $sku;
+      public function getSku(): string { return $this->sku; }
+      public function setSku(string $v): void { $this->sku = strtoupper($v); }
+    after: |
+      public string $sku { set => strtoupper($value); }
+    ref: "https://wiki.php.net/rfc/property-hooks"
+  - key: asymmetric_visibility
+    since: "8.4"
+    kind: structural
+    unit: module
+    auto: false
+    sp_unit: 3
+    title: "private alan + public getter (setter yok) → public private(set)"
+    summary: "Alan dışarıdan yalnız okunuyor; bunun için getter yazılmış."
+    advantages:
+      - "Getter silinir, alan doğrudan okunur, yazma hâlâ sınıf içinde kalır."
+      - "readonly'den esnek: sınıf içi yeniden atama serbest."
+    risks:
+      - "Public API değişir; property_hooks ile aynı kapsam kararı."
+    before: |
+      private int $count;
+      public function getCount(): int { return $this->count; }
+    after: |
+      public private(set) int $count;
+    ref: "https://wiki.php.net/rfc/asymmetric-visibility-v2"
+  - key: attributes
+    since: "8.0"
+    kind: structural
+    unit: module
+    auto: false
+    sp_unit: 3
+    title: "Docblock anotasyonları → attribute"
+    summary: "Yönlendirme, doğrulama, test sağlayıcı gibi meta veriler yorum satırında (@Route, @Assert, @dataProvider)."
+    advantages:
+      - "Derleyici doğrular: yanlış yazılmış anotasyon sessizce yok sayılmaz."
+      - "IDE 'kullanımları bul' ve yeniden adlandırma çalışır."
+      - "PHPUnit 10+ docblock anotasyonlarını kaldırıyor (#[DataProvider], #[Test])."
+    risks:
+      - "Kullanılan framework/kütüphane sürümünün attribute desteği doğrulanmalı; aksi halde anotasyon işlevini kaybeder."
+    before: |
+      /** @dataProvider skuProvider */
+      public function testNormalize(string $in): void
+    after: |
+      #[DataProvider('skuProvider')]
+      public function testNormalize(string $in): void
+    ref: "https://wiki.php.net/rfc/attributes_v2"
+
+  # ── report-only: iş açılmaz, repo kartında gösterilir ──
+  - key: strict_types
+    since: "7.0"
+    kind: report
+    unit: file
+    auto: false
+    sp_unit: 0
+    title: "declare(strict_types=1) kapsamı"
+    summary: "Dosya başında strict_types yoksa skaler tipler sessizce dönüştürülür ('12abc' → 12)."
+    advantages:
+      - "Yanlış tip çağrı anında TypeError; tipli property/parametre kazanımı ancak bununla tamamlanır."
+    risks:
+      - "Repo genelinde geriye dönük açmak kırıcıdır; politika: yeni dosyalarda zorunlu, eski dosyalarda modül bazlı. İş olarak değil politika kararı olarak sunulur."
+    before: "<?php\nnamespace App;"
+    after: "<?php\ndeclare(strict_types=1);\nnamespace App;"
+    ref: "https://wiki.php.net/rfc/scalar_type_hints_v5"

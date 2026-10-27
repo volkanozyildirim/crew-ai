@@ -76,6 +76,22 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     INDEX idx_job (job_id),
     INDEX idx_job_agent (job_id, agent)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS quality_items (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    fingerprint VARCHAR(512) NOT NULL,
+    source VARCHAR(32) NOT NULL,
+    repo VARCHAR(128) DEFAULT '',
+    story_id INT NULL,
+    wi_id INT NULL,
+    job_id INT NULL,
+    sp DECIMAL(4,1) DEFAULT 0,
+    score DOUBLE DEFAULT 0,
+    needs_human TINYINT(1) DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_fp (fingerprint(191)),
+    INDEX idx_wi (wi_id)
+) ENGINE=InnoDB;
 """
 
 STEP_DEFINITIONS = [
@@ -122,6 +138,15 @@ def init_db():
         # Mevcut kurulumlarda jobs.status ENUM'una 'needs_human' ekle (idempotent).
         # 'failed' DEGIL: pipeline kullanilabilir is uretip kendi kapisini
         # gecemediginde kullanilir — PR acik kalir, sayimlarda basarisiz gorunmez.
+        # quality_items.source ENUM('sonar','newrelic') idi: yeni kaynak (manual,
+        # sonar_smell…) insert'i hata verip yalnız warning'e düşüyordu, geçmiş kaybolurdu.
+        try:
+            cur.execute("SHOW COLUMNS FROM quality_items LIKE 'source'")
+            _qrow = cur.fetchone()
+            if _qrow and "enum" in (_qrow.get("Type") or "").lower():
+                cur.execute("ALTER TABLE quality_items MODIFY source VARCHAR(32) NOT NULL")
+        except Exception:
+            pass
         try:
             cur.execute("SHOW COLUMNS FROM jobs LIKE 'status'")
             _row = cur.fetchone()
@@ -149,6 +174,9 @@ def init_db():
         _ensure_column(cur, "jobs", "total_turns", "INT DEFAULT 0")
         _ensure_column(cur, "jobs", "estimate_sp", "TINYINT NULL")
         _ensure_column(cur, "jobs", "job_kind", "VARCHAR(20) NOT NULL DEFAULT 'pipeline'")
+        # WI yaşam döngüsü: kuyruğa alınırken WI In Progress'e taşınır; sorun
+        # olursa dönülecek durum burada (NULL = henüz işaretlenmedi).
+        _ensure_column(cur, "jobs", "wi_state_before", "VARCHAR(64) NULL")
         _ensure_column(cur, "job_steps", "cost_usd", "DECIMAL(12,6) DEFAULT 0")
         _ensure_column(cur, "job_steps", "tool_calls", "INT DEFAULT 0")
         _ensure_column(cur, "job_steps", "turns", "INT DEFAULT 0")
@@ -236,6 +264,28 @@ def get_next_queued_job() -> dict | None:
         cur = conn.cursor()
         cur.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY id LIMIT 1")
         return cur.fetchone()
+
+
+def list_unmarked_queued_jobs() -> list[dict]:
+    """Kuyruktaki, WI durumu henüz işaretlenmemiş pipeline işleri."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, work_item_id FROM jobs WHERE status='queued' AND dry_run=0 "
+            "AND kickoff_only=0 AND job_kind='pipeline' AND wi_state_before IS NULL ORDER BY id")
+        return list(cur.fetchall() or [])
+
+
+def set_wi_state_before(job_id: int, state: str):
+    with get_conn() as conn:
+        conn.cursor().execute("UPDATE jobs SET wi_state_before=%s WHERE id=%s", (state[:64], job_id))
+
+
+def list_running_jobs() -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, work_item_id, wi_state_before FROM jobs WHERE status='running'")
+        return list(cur.fetchall() or [])
 
 
 def delete_job(job_id: int):
@@ -456,6 +506,29 @@ def clear_cached_step_output(step_key: str, work_item_id: str) -> int:
             (step_key, work_item_id),
         )
         return cur.rowcount
+
+
+def record_quality_item(*, fingerprint: str, source: str, repo: str, story_id: int | None,
+                        wi_id: int | None, job_id: int | None, sp: float, score: float,
+                        needs_human: bool) -> None:
+    """Kalite alımının geçmiş kaydı (dashboard). Dedup buna DEĞİL board'a bakar."""
+    with get_conn() as conn:
+        conn.cursor().execute(
+            "INSERT INTO quality_items (fingerprint, source, repo, story_id, wi_id, job_id, sp, score, "
+            "needs_human) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (fingerprint[:512], source, repo[:128], story_id, wi_id, job_id, sp, score, int(bool(needs_human))))
+
+
+def list_quality_items(limit: int = 30) -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, fingerprint, source, repo, story_id, wi_id, job_id, sp, score, needs_human, "
+                    "created_at FROM quality_items ORDER BY id DESC LIMIT %s", (int(limit),))
+        rows = cur.fetchall() or []
+    for r in rows:
+        r["sp"] = float(r.get("sp") or 0)
+        r["created_at"] = str(r.get("created_at") or "")
+    return rows
 
 
 def record_llm_call(rec: dict) -> None:

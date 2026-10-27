@@ -134,12 +134,32 @@ class BackfillRequest(BaseModel):
 class SprintReportRequest(BaseModel):
     team: str = ""
     iteration_path: str = ""
+    design: str = ""  # klasik | sprint_report_designs.DESIGNS anahtarı; boş = varsayılan
 
 
 class SprintQueueRequest(BaseModel):
     """Sprint planından seçilen WI satırları: [{id, title}] (faz 4)."""
     rows: list[dict] = []
     use_hal: bool = False
+
+
+class TechdebtQueueRequest(BaseModel):
+    ids: list[int] = []
+    team: str = ""
+
+
+class TechdebtModernTakeRequest(BaseModel):
+    repo: str
+    group_ids: list[str] = []
+    team: str = ""
+
+
+class QualityTakeRequest(BaseModel):
+    source: str
+    sp: int = 10
+    story_id: int | None = None
+    team: str = ""
+    repos: list[str] = []
 
 
 # ── API Routes ──
@@ -405,6 +425,8 @@ async def delete_job(job_id: int, force: bool = False):
         )
     if job["status"] == "running":
         db.fail_job(job_id, "Kullanıcı tarafından iptal edildi")
+    if job["status"] in ("queued", "running"):
+        _wi_revert_async(job["work_item_id"], job.get("wi_state_before") or "", f"iş #{job_id} silindi")
     db.delete_job(job_id)
     return JSONResponse({"status": "ok", "message": f"Job #{job_id} silindi"})
 
@@ -1665,6 +1687,7 @@ async def sprint_report_start(req: SprintReportRequest):
                 team=req.team,
                 iteration_path=iteration_path,
                 report_id=report_id,
+                design=req.design,
             )
             with _sprint_report_lock:
                 _sprint_reports[report_id] = {"status": "done", "team": req.team, **res}
@@ -1700,12 +1723,15 @@ async def sprint_report_status(report_id: str = ""):
 async def sprint_report_config():
     """Popup'ta gösterilecek aktif sprint raporu ayarları (env'den)."""
     from agile_sdlc_crew import sprint_report as sr
+    from agile_sdlc_crew import sprint_report_designs as sd
     return JSONResponse({
         "enabled": _sprint_report_enabled(),
         "ai_summary": sr._ai_enabled(),
         "visuals": sr._visuals_enabled(),
         "azure_charts": sr._azure_charts_enabled(),
-        "min_pct": sr._min_pct(),
+        "min_items": sr._min_items(),
+        "designs": sd.design_options(),
+        "default_design": sd.resolve(""),
         "digest_per_slide": sr._digest_per_slide(),
         "velocity_sprints": sr._velocity_sprints(),
         "template": sr.template_path(),
@@ -1845,6 +1871,216 @@ async def sprint_plan_queue(req: SprintQueueRequest):
         return JSONResponse(res, status_code=202 if res.get("queued") else 200)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _quality_guard(source: str, sp: int | None = None):
+    """Ortak kapı: anahtar kapalı → 403, kaynak/SP geçersiz → 400. None = geçti."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    if not _pc.get("CREW_QUALITY_INTAKE"):
+        return JSONResponse({"error": "Kalite işi alımı kapalı (CREW_QUALITY_INTAKE)"}, status_code=403)
+    if source not in ("newrelic", "sonar"):
+        return JSONResponse({"error": "source 'newrelic' ya da 'sonar' olmalı"}, status_code=400)
+    if sp is not None and not 1 <= int(sp) <= 40:
+        return JSONResponse({"error": "sp 1 ile 40 arasında olmalı"}, status_code=400)
+    return None
+
+
+def _quality_error(e: Exception) -> JSONResponse:
+    from agile_sdlc_crew.quality import intake as _qi
+    from agile_sdlc_crew.quality.model import QualitySourceError
+    if isinstance(e, QualitySourceError):
+        return JSONResponse({"error": str(e)}, status_code=502)
+    if isinstance(e, (_qi.Busy, _qi.NoSprint)):
+        return JSONResponse({"error": str(e)}, status_code=409)
+    if isinstance(e, ValueError):
+        return JSONResponse({"error": str(e)}, status_code=400)
+    pipeline_log.exception("Kalite alımı hatası")
+    return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/quality/preview")
+async def quality_preview(source: str = "newrelic", sp: int = 10, team: str = "", repos: str = ""):
+    """Kalite alımının seçimini hiçbir şey yazmadan döndürür. repos: virgülle ayrılmış proje (repo) seçimi."""
+    from agile_sdlc_crew.quality import intake as _qi
+    bad = _quality_guard(source, sp)
+    if bad:
+        return bad
+    sel = [r.strip() for r in repos.split(",") if r.strip()]
+    try:
+        return JSONResponse(await asyncio.to_thread(_qi.preview, AzureDevOpsClient(), source, sp, team=team,
+                                                    repos=sel or None))
+    except Exception as e:  # noqa: BLE001
+        return _quality_error(e)
+
+
+@app.post("/api/quality/take")
+async def quality_take(req: QualityTakeRequest):
+    """Tam otonom: seç → story bul/aç → child Task'lar → kuyruk. needs_human Task kuyruğa girmez."""
+    from agile_sdlc_crew.quality import intake as _qi
+    bad = _quality_guard(req.source, req.sp)
+    if bad:
+        return bad
+    try:
+        res = await asyncio.to_thread(_qi.take, AzureDevOpsClient(), req.source, req.sp,
+                                      story_id=req.story_id, team=req.team, repos=req.repos or None)
+        if any(t.get("job_id") for t in res.get("tasks") or []):
+            _ensure_worker()
+        return JSONResponse(res, status_code=201 if res.get("story") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _quality_error(e)
+
+
+@app.get("/api/quality/projects")
+async def quality_projects(source: str = "sonar"):
+    """Proje seçimi için: bu kaynakta bulgusu olan repolar ve bulgu sayıları (yazma yok)."""
+    from agile_sdlc_crew.quality import intake as _qi
+    bad = _quality_guard(source)
+    if bad:
+        return bad
+    try:
+        return JSONResponse(await asyncio.to_thread(_qi.projects, AzureDevOpsClient(), source))
+    except Exception as e:  # noqa: BLE001
+        return _quality_error(e)
+
+
+@app.get("/api/quality/unmapped")
+async def quality_unmapped(source: str = "newrelic"):
+    """Eşlenemeyen NR uygulamaları / kapsam dışı Sonar projeleri."""
+    from agile_sdlc_crew.quality import intake as _qi
+    bad = _quality_guard(source)
+    if bad:
+        return bad
+    try:
+        return JSONResponse(await asyncio.to_thread(_qi.unmapped, AzureDevOpsClient(), source))
+    except Exception as e:  # noqa: BLE001
+        return _quality_error(e)
+
+
+@app.get("/api/quality/recent")
+async def quality_recent(limit: int = 30):
+    """Kartın görünürlüğü + son alımlar. Kapalıyken DB'ye dokunmaz."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    if not _pc.get("CREW_QUALITY_INTAKE"):
+        return JSONResponse({"enabled": False, "items": []})
+    try:
+        items = await asyncio.to_thread(db.list_quality_items, max(1, min(int(limit or 30), 200)))
+        return JSONResponse({"enabled": True, "items": items})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"enabled": True, "items": [], "error": str(e)})
+
+
+def _techdebt_off():
+    from agile_sdlc_crew import pipeline_config as _pc
+    if not _pc.get("CREW_TECHDEBT"):
+        return JSONResponse({"error": "Teknik borç kapalı (CREW_TECHDEBT)"}, status_code=403)
+    return None
+
+
+def _techdebt_error(e: Exception) -> JSONResponse:
+    import requests as _rq
+    if isinstance(e, ValueError):
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if isinstance(e, _rq.RequestException):
+        return JSONResponse({"error": f"Azure hatası: {e}"}, status_code=502)
+    return _quality_error(e)
+
+
+@app.get("/api/techdebt")
+async def techdebt_list(team: str = ""):
+    """Takımın açık tech-debt etiketli WI'ları (yazma yok)."""
+    from agile_sdlc_crew.quality import techdebt as _td
+    bad = _techdebt_off()
+    if bad:
+        return bad
+    if not team.strip():
+        return JSONResponse({"enabled": True, "items": [], "message": "Takım seçin — liste takımın alanıyla sınırlı"})
+    try:
+        res = await asyncio.to_thread(_td.list_items, AzureDevOpsClient(), team=team)
+        return JSONResponse({"enabled": True, **res})
+    except ValueError as e:
+        return JSONResponse({"enabled": True, "error": str(e)}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"enabled": True, "error": f"Azure okunamadı: {e}"}, status_code=502)
+
+
+@app.post("/api/techdebt/queue")
+async def techdebt_queue(req: TechdebtQueueRequest):
+    """Listeden seçilen tech-debt WI'larını kuyruğa al (insan işi ve liste dışı reddedilir)."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew.quality import techdebt as _td
+    bad = _techdebt_off()
+    if bad:
+        return bad
+    if not req.ids:
+        return JSONResponse({"error": "Seçili iş yok"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_td.queue, AzureDevOpsClient(), req.ids, team=req.team,
+                                      max_queue=int(_pc.get("CREW_TECHDEBT_MAX_QUEUE") or 5))
+        if res.get("queued"):
+            _ensure_worker()
+        return JSONResponse(res, status_code=202 if res.get("queued") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+def _modern_off():
+    from agile_sdlc_crew import pipeline_config as _pc
+    bad = _techdebt_off()
+    if bad:
+        return bad
+    if not _pc.get("CREW_TECHDEBT_PHP_MODERN"):
+        return JSONResponse({"error": "PHP modernleştirme kapalı (CREW_TECHDEBT_PHP_MODERN)"}, status_code=403)
+    return None
+
+
+@app.get("/api/techdebt/modern/repos")
+async def techdebt_modern_repos():
+    """Yerel PHP repoları + FLODevOps imajından hedef PHP sürümü (yazma yok)."""
+    from agile_sdlc_crew.quality import php_modern as _pm
+    bad = _modern_off()
+    if bad:
+        return bad
+    try:
+        res = await asyncio.to_thread(_pm.repos, AzureDevOpsClient())
+        return JSONResponse({"enabled": True, **res})
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.get("/api/techdebt/modern/scan")
+async def techdebt_modern_scan(repo: str = "", team: str = "", force: bool = False):
+    """Repoyu tara (önbellekli): kural özeti + otomatik / insan grupları + dedup. Yazma yok."""
+    from agile_sdlc_crew.quality import php_modern as _pm
+    bad = _modern_off()
+    if bad:
+        return bad
+    if not repo.strip():
+        return JSONResponse({"error": "repo seçin"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_pm.scan, AzureDevOpsClient(), repo.strip(), team=team, force=bool(force))
+        return JSONResponse(res)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.post("/api/techdebt/modern/take")
+async def techdebt_modern_take(req: TechdebtModernTakeRequest):
+    """Seçilen grupları 'Teknik borç — <sprint>' story'si altında Task olarak aç; mekanik olanları kuyruğa al."""
+    from agile_sdlc_crew.quality import php_modern as _pm
+    bad = _modern_off()
+    if bad:
+        return bad
+    if not req.repo.strip():
+        return JSONResponse({"error": "repo seçin"}, status_code=400)
+    if not req.group_ids:
+        return JSONResponse({"error": "Seçili öneri yok"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_pm.take, AzureDevOpsClient(), req.repo.strip(), req.group_ids, team=req.team)
+        if any(t.get("job_id") for t in res.get("tasks") or []):
+            _ensure_worker()
+        return JSONResponse(res, status_code=201 if res.get("story") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
 
 
 @app.get("/api/daily")
@@ -2032,9 +2268,62 @@ if WEB_DIR.exists():
 
 # ── Queue Worker ──
 
+_wi_mark_lock = threading.Lock()
+
+
+def _wi_lifecycle_on() -> bool:
+    from agile_sdlc_crew import pipeline_config as _pc
+    try:
+        return bool(_pc.get("CREW_WI_LIFECYCLE"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wi_mark_queued_jobs():
+    """Kuyruğa alınan pipeline işlerinin WI'ını In Progress'e taşı, önceki durumu
+    jobs.wi_state_before'a yaz (sorun olursa oraya dönülür). Kullanıcı kararı:
+    kart kuyruğa atıldığı anda ilerlemeli, işin sırası gelince değil."""
+    if not _wi_lifecycle_on() or not _wi_mark_lock.acquire(blocking=False):
+        return
+    try:
+        from agile_sdlc_crew import wi_lifecycle as _wl
+        from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+        rows = db.list_unmarked_queued_jobs()
+        client = AzureDevOpsClient() if rows else None
+        for r in rows:
+            try:
+                before = _wl.mark_queued(client, r["work_item_id"], logger=pipeline_log.info)
+            except Exception as e:  # noqa: BLE001
+                pipeline_log.warning(f"  🗂️ Kuyruk: WI #{r['work_item_id']} durumu taşınamadı: {e}")
+                before = ""
+            db.set_wi_state_before(r["id"], before or "")
+    except Exception as e:  # noqa: BLE001
+        pipeline_log.warning(f"  🗂️ Kuyruk WI işaretleme hatası: {e}")
+    finally:
+        _wi_mark_lock.release()
+
+
+def _wi_revert_async(work_item_id: str, initial: str, why: str):
+    """Kuyruktan silinen / sunucu restart'ında yarım kalan iş: WI'ı geri al."""
+    if not (_wi_lifecycle_on() and (initial or "").strip()):
+        return
+
+    def _run():
+        try:
+            from agile_sdlc_crew import wi_lifecycle as _wl
+            from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+            if _wl.revert_to(AzureDevOpsClient(), work_item_id, initial, logger=pipeline_log.info):
+                pipeline_log.info(f"  🗂️ WI #{work_item_id} geri alındı ({why})")
+        except Exception as e:  # noqa: BLE001
+            pipeline_log.warning(f"  🗂️ WI #{work_item_id} geri alınamadı ({why}): {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _ensure_worker():
     """Worker thread yoksa baslat."""
     global _worker_thread
+    threading.Thread(target=_wi_mark_queued_jobs, daemon=True).start()
     with _worker_lock:
         if _worker_thread and _worker_thread.is_alive():
             return
@@ -2094,7 +2383,13 @@ def _queue_worker():
 async def startup():
     db.init_db()
     # Orphan running job'lari temizle (sunucu restart oncesinde takili kalmislar)
+    try:
+        _orphan_rows = db.list_running_jobs()
+    except Exception:  # noqa: BLE001
+        _orphan_rows = []
     orphan = db.fail_orphan_running_jobs()
+    for _r in _orphan_rows:
+        _wi_revert_async(_r["work_item_id"], _r.get("wi_state_before") or "", "sunucu yeniden başladı")
     if orphan:
         pipeline_log.info(f"Sunucu baslatildi: {orphan} takili kalmis is failed olarak isaretlendi")
 

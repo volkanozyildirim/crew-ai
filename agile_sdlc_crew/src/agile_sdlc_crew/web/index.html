@@ -53,6 +53,12 @@ header {
 .logo h1 { display:inline-flex; align-items:center; font-size:19px; font-weight:700; letter-spacing:-0.03em; line-height:1; }
 .logo h1 svg { margin-left:1px; margin-top:3px; }
 .tabs { display:flex; gap:2px; margin-left:6px; }
+.tabs { flex-shrink:0; } .tab { white-space:nowrap; }
+.td-field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-dim); }
+.td-field input, .td-field textarea, .td-field select { background:var(--bg-card); border:1px solid var(--border); color:var(--text);
+  border-radius:8px; padding:7px 10px; font-size:13px; font-family:inherit; outline:none; width:100%; box-sizing:border-box; }
+.td-field textarea { resize:vertical; min-height:64px; }
+.td-field input:focus, .td-field textarea:focus, .td-field select:focus { border-color:var(--accent); }
 .tab {
   height:32px; padding:0 12px; border-radius:8px; display:inline-flex; align-items:center; gap:6px;
   font-size:13px; font-weight:500; color:var(--text-dim); background:none; border:none; cursor:pointer; font-family:inherit; white-space:nowrap;
@@ -63,9 +69,24 @@ header {
 .tab .badge:empty { display:none; }
 .header-right { display:flex; align-items:center; gap:8px; margin-left:auto; flex-wrap:nowrap; justify-content:flex-end; min-width:0; }
 .header-time { font-family:'Geist Mono',Menlo,monospace; font-size:12px; color:var(--text-dim); }
-@media(max-width:1700px){ .header-time{display:none} }
+@media(max-width:1900px){ .header-time{display:none} }
+/* Teknik borç sekmesiyle 7 sekme: sağ blok (sabit nowrap) sekmelerin üstüne taşmasın */
+@media(max-width:1850px){ .sprint-info{display:none} }
 @media(max-width:1400px){ .sprint-info{display:none} .tabs{margin-left:0} .tab{padding:0 9px} }
 .crumb { display:flex; align-items:center; gap:4px; }
+.ctl-input { background:var(--bg-card); border:1px solid var(--border); color:var(--text); height:32px; padding:0 10px;
+  border-radius:8px; font-size:13px; font-weight:600; font-family:inherit; outline:none; box-sizing:border-box; }
+.ctl-input::placeholder { color:var(--faint); font-weight:500; }
+.ctl-input:focus { border-color:var(--accent); }
+.ctl-label { font-size:12px; color:var(--text-dim); font-weight:600; }
+.qproj { position:relative; }
+.qproj summary { list-style:none; cursor:pointer; display:flex; align-items:center; white-space:nowrap; }
+.qproj summary::-webkit-details-marker { display:none; }
+.qproj-menu { position:absolute; right:0; top:38px; z-index:30; background:var(--bg-card); border:1px solid var(--border); border-radius:10px;
+  padding:8px; min-width:280px; max-height:340px; overflow:auto; box-shadow:0 10px 28px rgba(0,0,0,.14); font-size:13px; }
+.qproj-menu label { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:6px; cursor:pointer; }
+.qproj-menu label:hover { background:var(--bg); }
+.qproj-menu .n { margin-left:auto; color:var(--text-dim); font-family:'Geist Mono',Menlo,monospace; font-size:12px; }
 .sprint-select {
   background:var(--bg-card); border:1px solid var(--border); color:var(--text);
   height:32px; padding:0 30px 0 10px; border-radius:8px; font-size:13px; font-weight:600; font-family:inherit; outline:none; cursor:pointer;
@@ -99,7 +120,7 @@ header {
 .sm-btn.ghost { background:var(--bg-card); color:var(--text); border:1px solid var(--border); }
 .sm-btn.ghost:hover { border-color:var(--accent); color:var(--accent-light); filter:none; }
 .sm-btn.icon { width:30px; padding:0; justify-content:center; color:var(--text-dim); }
-.sm-btn.settings-btn { background:var(--bg-card); color:var(--text-dim); border:1px solid var(--border); width:30px; padding:0; justify-content:center; }
+.sm-btn.settings-btn { background:var(--bg-card); color:var(--text); border:1px solid var(--border); padding:0 10px; gap:6px; justify-content:center; font-weight:600; }
 .sm-btn.settings-btn:hover { color:var(--accent-light); border-color:var(--accent); }
 .sm-btn.small { height:26px; padding:0 10px; font-size:12px; }
 
@@ -419,6 +440,7 @@ header {
     <button class="tab" data-tab="retro" onclick="showTab('retro')">Retro</button>
     <button class="tab" data-tab="refine" onclick="showTab('refine')">Refinement <span class="badge" id="tabRefineBadge"></span></button>
     <button class="tab" data-tab="cost" onclick="showTab('cost')">Maliyet</button>
+    <button class="tab" data-tab="techdebt" id="tabTechdebt" style="display:none" onclick="showTab('techdebt')">Teknik borç</button>
   </nav>
   <div class="header-right">
     <div class="crumb">
@@ -434,10 +456,10 @@ header {
       <label class="hal-toggle" title="HAL planlama yolu (CrewAI yerine)"><input type="checkbox" id="halMode" /> HAL</label>
       <button class="sm-btn small" onclick="triggerRun()">Başlat</button>
     </div>
-    <button class="sm-btn ghost icon" onclick="openKickoffDebug()" title="Kickoff Debug: sadece kickoff çalıştır, sonucu değerlendir, onayla veya iyileştir"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.5"/><path d="M8 2v2M8 12v2M2 8h2M12 8h2"/></svg></button>
+    <button class="sm-btn ghost icon" onclick="openKickoffDebug()" title="Kickoff Debug: sadece kickoff çalıştır, sonucu değerlendir, onayla veya iyileştir"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v7.5a2 2 0 0 1-.2.9L4.7 20.5a1 1 0 0 0 .9 1.5h12.8a1 1 0 0 0 .9-1.5l-5.1-10.1a2 2 0 0 1-.2-.9V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg></button>
     <button class="sm-btn ghost icon" onclick="resetDashboard()" title="Durum panelini sıfırla"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5v3h3"/><path d="M8 5.5V8l2 1.5"/></svg></button>
-    <button class="sm-btn ghost icon" id="themeBtn" onclick="toggleTheme()" title="Tema: sistem / açık / koyu"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3.5"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg></button>
-    <button class="sm-btn settings-btn" onclick="openSettings()" title="Pipeline ayarları (ajanlar, görevler, LLM, env)"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg></button>
+    <button class="sm-btn ghost icon" id="themeBtn" onclick="toggleTheme()" title="Tema: sistem / açık / koyu"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></button>
+    <button class="sm-btn settings-btn" onclick="openSettings()" title="Pipeline ayarları (ajanlar, görevler, LLM, env)" data-icon="gear"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg><span>Ayarlar</span></button>
     <span class="header-time" id="clock">--:--</span>
   </div>
 </header>
@@ -467,6 +489,9 @@ header {
       <div class="card" id="ovStuckCard" style="display:none;flex-direction:column;overflow:hidden">
         <div class="card-head"><span class="h">Takılan işler</span><span id="ovStuckCount" class="chip dim"></span><span style="flex:1"></span><a href="#" onclick="showTab('board');return false" style="font-size:12px;font-weight:600;text-decoration:none">Board sekmesi</a></div>
         <div id="ovStuck"></div>
+      </div>
+      <div class="card" id="ovTechdebtLink" style="display:none;padding:10px 14px;font-size:13px">
+        Kalite alımı ve teknik borç <a href="#" onclick="showTab('techdebt');return false" style="font-weight:600;text-decoration:none">Teknik borç</a> sekmesinde.
       </div>
       <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
         <div class="card-head"><span class="h">Sprint performansı · ekip üyeleri</span><span style="flex:1"></span><span class="perf-legend"><i style="background:var(--success)"></i>Tamamlandı<i style="background:var(--warning)"></i>Test / kabul<i style="background:var(--run)"></i>Geliştirme<i style="background:var(--border)"></i>Başlanmadı</span></div>
@@ -522,6 +547,44 @@ header {
   <section class="pane" id="paneRetro"></section>
 
   <!-- Maliyet analizi -->
+  <section class="pane" id="paneTechdebt">
+    <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
+      <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:visible;position:relative;z-index:2">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
+          <select class="sprint-select" id="qSource" title="Kaynak" onchange="qProjReset()"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
+          <details class="qproj" id="qProj" ontoggle="if(this.open)loadQualityProjects()"><summary class="ctl-input" id="qProjLbl" title="Yalnız seçilen projelere (repo) bak; boş = hepsi">Projeler: tümü</summary><div class="qproj-menu" id="qProjMenu"></div></details>
+          <label class="ctl-label" for="qSp">SP</label><input class="ctl-input" id="qSp" type="number" min="1" max="40" value="10" style="width:64px" title="SP bütçesi (1–40)">
+          <input class="ctl-input" id="qStory" type="number" placeholder="Story ID (ops.)" style="width:140px" title="Boşsa takımın sonraki sprintinde story bulunur/açılır (aktif sprinte dokunulmaz)">
+          <button class="sm-btn ghost small" onclick="qualityRun(false)">Önizle</button>
+          <button class="sm-btn small" onclick="qualityRun(true)">Al</button>
+        </div>
+        <div id="qResult" style="padding:0 14px"></div>
+        <div id="qRecent" style="padding:8px 14px 12px;font-size:12px;color:var(--text-dim)"></div>
+      </div>
+      <div class="card" id="tdListCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Teknik borç</span><span id="tdCount" class="chip dim"></span><span style="flex:1"></span>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="tdOnlyQ" onchange="renderTechdebt()">Yalnız kuyruklanabilir</label>
+          <button class="sm-btn ghost small" onclick="loadTechdebt()">Yenile</button>
+          <button class="sm-btn small" id="tdQueueBtn" onclick="techdebtQueue(null)">Seçilenleri kuyruğa al</button>
+        </div>
+        <div id="tdMsg" style="padding:0 14px;font-size:12px"></div>
+        <div id="tdList" style="padding:0 14px 12px"></div>
+      </div>
+      <div class="card" id="tdModernCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Modernleştirme (PHP)</span>
+          <span class="chip dim" id="tdmTarget" title="Hedef PHP sürümü: FLODevOps imajından (birden çok imaj varsa en düşük)"></span><span style="flex:1"></span>
+          <select class="sprint-select" id="tdmRepo" title="Yerel PHP repoları" onchange="_tdmRepoChanged()"><option>Yükleniyor…</option></select>
+          <button class="sm-btn ghost small" id="tdmScan" onclick="modernScan(false)">Tara</button>
+          <button class="sm-btn ghost small" id="tdmRescan" onclick="modernScan(true)" title="Önbelleği atla, yeniden tara">Yeniden tara</button>
+          <button class="sm-btn small" id="tdmTake" onclick="modernTake()">Seçilenleri iş olarak aç</button>
+        </div>
+        <div id="tdmAdoption" style="padding:0 14px;font-size:12px;color:var(--text-dim)"></div>
+        <div id="tdmMsg" style="padding:0 14px;font-size:12px"></div>
+        <div id="tdmResult" style="padding:0 14px 12px"></div>
+      </div>
+    </div>
+  </section>
+
   <section class="pane" id="paneCost">
     <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
       <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
@@ -619,7 +682,7 @@ header {
       <button class="cfg-tab" data-cfg="env" onclick="switchCfgTab('env')">Ortam Değişkenleri</button>
     </div>
     <div style="flex:1;overflow:auto;position:relative">
-      <textarea id="cfgEditor" spellcheck="false" style="width:100%;height:100%;background:var(--bg);color:#e6db74;border:none;padding:16px 20px;font-family:'Geist Mono',Menlo,monospace;font-size:13px;line-height:1.6;resize:none;outline:none;tab-size:2"></textarea>
+      <textarea id="cfgEditor" spellcheck="false" style="width:100%;height:100%;background:var(--bg);color:var(--text);caret-color:var(--accent);border:none;padding:16px 20px;font-family:'Geist Mono',Menlo,monospace;font-size:13px;line-height:1.6;resize:none;outline:none;tab-size:2"></textarea>
       <div id="cfgEnvView" style="display:none;padding:16px 20px"></div>
       <div id="cfgLlmView" style="display:none;padding:16px 20px"></div>
       <div id="cfgEmbedView" style="display:none;padding:16px 20px"></div>
@@ -787,7 +850,7 @@ function renderLog(log){
 
 // ── Jobs ──
 async function fetchJobs(){
-  try{const r=await fetch('/api/jobs?t='+Date.now());if(r.ok){const jobs=await r.json();updateJobsByWi(jobs);renderJobs(jobs)}}catch(e){}
+  try{const r=await fetch('/api/jobs?t='+Date.now());if(r.ok){const jobs=await r.json();updateJobsByWi(jobs);renderJobs(jobs);refreshBoardPipelines()}}catch(e){}
 }
 function renderJobs(jobs){
   const list=document.getElementById('jobList'),st=document.getElementById('qStats');
@@ -1035,6 +1098,8 @@ function showTab(name){
   if(name==='retro'&&typeof openRetro==='function')openRetro();
   if(name==='refine'&&typeof loadRefinement==='function'&&!_rf)loadRefinement();
   if(name==='cost'&&typeof loadCosts==='function'&&!_cost)loadCosts();
+  if(name==='techdebt'&&typeof loadTechdebt==='function')loadTechdebt();
+  if(name==='techdebt'&&typeof loadModernRepos==='function')loadModernRepos();
 }
 
 // ── Maliyet analizi (salt okunur; /api/costs) ──
@@ -1155,10 +1220,21 @@ function rfSummarize(rows){
   rows.forEach(r=>r.gaps.forEach(g=>{s.gap_counts[g.code]=(s.gap_counts[g.code]||0)+1}));return s;
 }
 // Tema: sistem → açık → koyu
+// Tema butonu GÜNCEL modu gösterir: güneş = açık, ay = koyu, ekran = sistem.
+// (Eskiden sabit bir güneşti; ayarlar butonu da benzer bir dişli/güneşti — ikisi
+// ayırt edilemiyordu.)
+const THEME_ICONS={
+  light:'<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>',
+  dark:'<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>',
+  system:'<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
+};
 function applyTheme(){
   let t='system';try{t=localStorage.getItem('tempo_theme')||'system'}catch(e){}
   if(t==='system')document.documentElement.removeAttribute('data-theme');else document.documentElement.setAttribute('data-theme',t);
-  const b=document.getElementById('themeBtn');if(b)b.title='Tema: '+({system:'sistem',light:'açık',dark:'koyu'}[t])+' (tıkla: değiştir)';
+  const b=document.getElementById('themeBtn');
+  if(b){const nx={system:'açık',light:'koyu',dark:'sistem'}[t];
+    b.innerHTML=THEME_ICONS[t]||THEME_ICONS.system;
+    b.title='Tema: '+({system:'sistem',light:'açık',dark:'koyu'}[t])+' — tıkla: '+nx;}
 }
 function toggleTheme(){
   let t='system';try{t=localStorage.getItem('tempo_theme')||'system'}catch(e){}
@@ -1316,6 +1392,242 @@ function renderOvStuck(){
       <span class="stuck-days ${a.level}">${a.days}g</span></a>`;}).join('')
     +(rows.length>8?`<div class="stuck-row" style="color:var(--text-dim);cursor:default">+${rows.length-8} iş daha</div>`:'');
 }
+// Genel bakis · kalite isi alimi (New Relic / Sonar). Kart yalnizca
+// CREW_QUALITY_INTAKE aciksa gorunur; secim, SP ve dedup kurallari sunucuda.
+// İnsan işi (needs-human): Task açılır ama pipeline kuyruğuna ALINMAZ. Çıplak
+// "insan" etiketi anlaşılmıyordu; sebep üzerine gelince görünür.
+function humanChip(reason){
+  const tip='İnsan işi: Task açılır, pipeline kuyruğuna alınmaz.'+(reason?' Sebep: '+reason:'');
+  return `<span class="chip human" title="${esc(tip)}">İnsan işi · kuyruğa alınmaz</span>`
+    +(reason?`<div style="font-size:11px;color:var(--text-dim);margin-top:2px">${esc(reason)}</div>`:'');
+}
+async function loadQuality(){
+  const card=document.getElementById('ovQualityCard');if(!card)return;
+  try{
+    const r=await (await fetch('/api/quality/recent')).json();
+    if(!r.enabled){card.style.display='none';_tdTabShow();return}
+    card.style.display='flex';_tdTabShow();
+    const uniq=[...new Map((r.items||[]).filter(i=>i.wi_id).map(i=>[i.wi_id,i])).values()].slice(0,10);
+    document.getElementById('qRecent').innerHTML=uniq.length
+      ?'Son alımlar: '+uniq.map(i=>`${wiLink(i.wi_id)} ${esc(i.source)} · ${i.sp} SP${i.job_id?` · iş #${i.job_id}`:''}${i.needs_human?' · İnsan işi':''}`).join(' &nbsp;·&nbsp; ')
+      :'Henüz alım yok.';
+  }catch(e){card.style.display='none'}
+}
+// Proje (repo) seçimi: yalnız seçilenlere bak; boş = hepsi. Liste kaynağa göre
+// sunucudan (bulgusu olan repolar); seçim kaynak değişince sıfırlanır.
+const _qProj={source:null,items:[],sel:new Set()};
+document.addEventListener('click',e=>{const d=document.getElementById('qProj');if(d&&d.open&&!d.contains(e.target))d.open=false});
+function _qProjLabel(){
+  const n=_qProj.sel.size;document.getElementById('qProjLbl').textContent=n?`Projeler: ${n} seçili`:'Projeler: tümü';
+}
+function qProjReset(){_qProj.source=null;_qProj.items=[];_qProj.sel.clear();_qProjLabel();
+  const d=document.getElementById('qProj');if(d&&d.open)loadQualityProjects();}
+async function loadQualityProjects(){
+  const source=document.getElementById('qSource').value,menu=document.getElementById('qProjMenu');
+  if(_qProj.source===source&&_qProj.items.length){_renderQProj();return}
+  menu.innerHTML=`<div style="padding:6px;color:var(--text-dim)">Yükleniyor…${source==='newrelic'?' (New Relic ~40 sn)':''}</div>`;
+  try{
+    const resp=await fetch('/api/quality/projects?source='+encodeURIComponent(source));const r=await resp.json();
+    if(!resp.ok){menu.innerHTML=`<div style="padding:6px;color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</div>`;return}
+    _qProj.source=source;_qProj.items=r.items||[];_renderQProj();
+  }catch(e){menu.innerHTML=`<div style="padding:6px;color:var(--danger)">${esc(String(e))}</div>`}
+}
+function _renderQProj(){
+  const menu=document.getElementById('qProjMenu');
+  if(!_qProj.items.length){menu.innerHTML='<div style="padding:6px;color:var(--text-dim)">Bulgusu olan proje yok.</div>';return}
+  menu.innerHTML=`<div style="display:flex;justify-content:space-between;padding:2px 6px 6px;font-size:12px;color:var(--text-dim)"><span>Boş bırakılırsa tüm projeler</span><a href="#" onclick="_qProj.sel.clear();_renderQProj();_qProjLabel();return false">Temizle</a></div>`
+    +_qProj.items.map(i=>`<label><input type="checkbox" value="${esc(i.repo)}" ${_qProj.sel.has(i.repo)?'checked':''} onchange="this.checked?_qProj.sel.add(this.value):_qProj.sel.delete(this.value);_qProjLabel()"><span>${esc(i.repo)}</span><span class="n">${i.findings}</span></label>`).join('');
+}
+async function qualityRun(take){
+  const repos=[..._qProj.sel];
+  const box=document.getElementById('qResult');
+  const source=document.getElementById('qSource').value;
+  const sp=parseInt(document.getElementById('qSp').value||'10',10);
+  const story=parseInt(document.getElementById('qStory').value||'0',10)||null;
+  const team=(document.getElementById('teamSel')||{}).value||'';
+  box.innerHTML=`<div class="board-empty" style="padding:12px 0">${take?'İşler açılıyor…':'Seçim hesaplanıyor…'}</div>`;
+  try{
+    const resp=take
+      ?await fetch('/api/quality/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,sp,story_id:story,team,repos:repos})})
+      :await fetch(`/api/quality/preview?source=${encodeURIComponent(source)}&sp=${sp}&team=${encodeURIComponent(team)}&repos=${encodeURIComponent(repos.join(','))}`);
+    const r=await resp.json();
+    if(!resp.ok){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(r.error||('HTTP '+resp.status))}</div>`;return}
+    const row=t=>`<tr><td>${t.id?wiLink(t.id):'—'}</td><td>${esc(t.title)}</td><td class="num">${t.sp}</td><td>${t.needs_human?humanChip(t.human_reason):(t.job_id?`<span class="chip dim">Kuyrukta · iş #${t.job_id}</span>`:(t.error?`<span style="color:var(--danger)">${esc(t.error)}</span>`:(t.id?'':'<span class="chip dim" title="Al denince Task açılır ve pipeline kuyruğuna alınır">Pipeline kuyruğuna alınır</span>')))}</td></tr>`;
+    const tbl=list=>`<table class="perf"><tr><th>WI</th><th>İş</th><th class="num">SP</th><th>Durum</th></tr>${list.map(row).join('')}</table>`;
+    const auto=r.tasks||[],hum=r.human_tasks||[];
+    const head=r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'';
+    const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
+    const sec=(title,sub)=>`<div style="font-size:12px;font-weight:700;margin:12px 0 4px">${title} <span style="font-weight:400;color:var(--text-dim)">${sub}</span></div>`;
+    // Bütçe yalnız otomatik işlere; insan işleri ayrı grup, bütçeden düşmez (sunucu kuralı)
+    box.innerHTML=`<div style="font-size:12px;padding:6px 0">${head}Otomatik: ${auto.length} Task · ${r.total_sp}/${r.budget_sp} SP · İnsan işi: ${hum.length}${sk?` · atlanan — ${sk}`:''}</div>`
+      +(r.cap_note?`<div style="font-size:12px;color:var(--warning);padding:2px 0">${esc(r.cap_note)}</div>`:'')
+      +sec('Otomatik işler','— pipeline kuyruğuna alınır, SP bütçesinden düşer')
+      +(auto.length?tbl(auto):`<div class="board-empty" style="padding:8px 0">${esc(r.message||'Bütçeye uyan otomatik iş yok.')}</div>`)
+      +(hum.length?sec('İnsan işi gerektiren önemli maddeler',`— Task açılır, kuyruğa alınmaz, bütçeden düşmez${r.human_candidates>hum.length?` (en önemli ${hum.length} / ${r.human_candidates})`:''}`)+tbl(hum):'');
+    if(take)loadQuality();
+  }catch(e){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(String(e))}</div>`}
+}
+// Teknik borç sekmesi: takımın tech-debt etiketli işleri (Azure tek kayıt
+// kaynağı) ve çoklu seçimle kuyruğa alma. Kurallar sunucuda.
+let _td=null;
+function _tdTabShow(){
+  const on=(document.getElementById('ovQualityCard')||{}).style?.display==='flex'||!!_td;
+  const tab=document.getElementById('tabTechdebt');if(tab)tab.style.display=on?'':'none';
+  const ln=document.getElementById('ovTechdebtLink');if(ln)ln.style.display=on?'block':'none';
+}
+// Seçili takım; takım listesi yüklenirken seçenek "Yükleniyor..." (value özniteliği
+// yok → .value metni döner) — o durumda takım yok sayılır.
+function _tdTeam(){
+  const s=document.getElementById('teamSel');const o=s&&s.selectedOptions&&s.selectedOptions[0];
+  return o&&o.hasAttribute('value')?o.value:'';
+}
+async function loadTechdebt(){
+  const team=_tdTeam();
+  const lc=document.getElementById('tdListCard');
+  try{
+    const resp=await fetch('/api/techdebt?team='+encodeURIComponent(team));
+    if(resp.status===403){_td=null;lc.style.display='none';_tdTabShow();return}
+    const r=await resp.json();
+    lc.style.display='flex';
+    const msgEl=document.getElementById('tdMsg');
+    if(!resp.ok){_td=[];renderTechdebt();msgEl.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;_tdTabShow();return}
+    msgEl.textContent=r.message||'';_td=r.items||[];renderTechdebt();
+  }catch(e){document.getElementById('tdMsg').textContent=String(e)}
+  _tdTabShow();
+}
+function renderTechdebt(){
+  const box=document.getElementById('tdList');if(!box||!_td)return;
+  const onlyQ=document.getElementById('tdOnlyQ').checked;
+  const rows=_td.filter(i=>!onlyQ||i.queueable);
+  document.getElementById('tdCount').textContent=rows.length+' iş';
+  if(!rows.length){box.innerHTML='<div class="board-empty" style="padding:12px 0">Teknik borç kaydı yok. Takımın Azure\'da <code>tech-debt</code> etiketli Task / Bug / Improvement\'ları burada listelenir.</div>';return}
+  box.innerHTML='<table class="perf"><tr><th></th><th>WI</th><th>İş</th><th>Repo</th><th class="num">SP</th><th>Durum</th><th>Sprint</th><th>Pipeline</th><th></th></tr>'
+    +rows.map(i=>`<tr><td>${i.queueable?`<input type="checkbox" class="tdSel" value="${i.id}">`:''}</td><td>${wiLink(i.id)}</td><td>${esc(i.title)}${i.needs_human?' '+humanChip('Azure\'da needs-human etiketli — pipeline\'a verilmez'):''}</td><td>${esc(i.repo||'—')}</td>
+            <td class="num">${i.sp??'—'}</td><td>${esc(i.state)}</td><td>${esc(i.iteration)}</td>
+      <td>${i.job?`iş #${i.job.id} · ${esc(i.job.status)}`:'—'}</td>
+      <td>${i.queueable?`<button class="sm-btn ghost small tdRowBtn" onclick="techdebtQueue([${i.id}])">Kuyruğa al</button>`:''}</td></tr>`).join('')+'</table>';
+}
+async function techdebtQueue(ids){
+  ids=ids||[...document.querySelectorAll('.tdSel:checked')].map(x=>parseInt(x.value,10));
+  const msg=document.getElementById('tdMsg');
+  if(!ids.length){msg.textContent='Seçili iş yok.';return}
+  const team=_tdTeam();
+  msg.textContent='Kuyruğa alınıyor…';
+  // İstek sürerken butonlar kilitli: çift tıklama aynı WI için iki iş açmasın
+  const btns=[document.getElementById('tdQueueBtn'),...document.querySelectorAll('.tdRowBtn')].filter(Boolean);
+  btns.forEach(b=>b.disabled=true);
+  try{
+    const resp=await fetch('/api/techdebt/queue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,team})});
+    const r=await resp.json();
+    if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    msg.innerHTML=`${(r.queued||[]).length} iş kuyruğa alındı`+((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>`#${esc(s.wi)} ${esc(s.reason)}`).join(', '):'');
+    loadTechdebt();
+  }catch(e){msg.textContent=String(e)}
+  finally{btns.forEach(b=>b.disabled=false)}
+}
+// Modernleştirme (PHP): repo FLODevOps imajındaki hedef sürüme göre token tabanlı
+// taranır (LLM yok); hedefin sunduğu ama kodun kullanmadığı yapılar katalogdan
+// ayrıntı / avantaj / risk / önce-sonra ile listelenir. Seçilenler "Teknik borç —
+// <sprint>" story'si altında Task olur; mekanik → kuyruk, yapısal → needs-human.
+let _tdm={repos:[],scan:null,loaded:false};
+function _tdmRepoChanged(){
+  const sel=document.getElementById('tdmRepo');const r=_tdm.repos.find(x=>x.repo===sel.value);
+  const chip=document.getElementById('tdmTarget');
+  chip.textContent=r?(r.version?`Hedef PHP ${r.version}`:'hedef sürüm bilinmiyor'):'';
+  chip.title=r&&r.images&&r.images.length?r.images.join('\n'):'Hedef PHP sürümü: FLODevOps imajından (birden çok imaj varsa en düşük)';
+  document.getElementById('tdmScan').disabled=document.getElementById('tdmRescan').disabled=!(r&&r.version);
+  _tdm.scan=null;document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';
+  document.getElementById('tdmMsg').textContent=r&&!r.version?'Bu repo için hedef PHP sürümü bulunamadı (FLODevOps imajı / composer.json) — tarama yapılmaz.':'';
+}
+async function loadModernRepos(){
+  const card=document.getElementById('tdModernCard');if(!card)return;
+  if(_tdm.loaded){return}
+  try{
+    const resp=await fetch('/api/techdebt/modern/repos');
+    if(resp.status===403){card.style.display='none';return}
+    const r=await resp.json();
+    card.style.display='flex';
+    if(!resp.ok){document.getElementById('tdmMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    _tdm.repos=r.items||[];_tdm.loaded=true;
+    const sel=document.getElementById('tdmRepo');
+    sel.innerHTML=_tdm.repos.length?_tdm.repos.map(i=>`<option value="${esc(i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${i.version?'PHP '+esc(i.version):'hedef sürüm bilinmiyor'}</option>`).join('')
+      :'<option value="">Yerel PHP reposu yok</option>';
+    const first=_tdm.repos.find(i=>i.version);if(first)sel.value=first.repo;
+    _tdmRepoChanged();
+  }catch(e){document.getElementById('tdmMsg').textContent=String(e)}
+}
+function _tdmKindChip(k){
+  const m={deprecation:['Deprecation','var(--warning)','var(--human-soft)'],mechanical:['Mekanik','var(--accent)','var(--accent-soft)'],structural:['Yapısal','var(--warning)','var(--human-soft)'],report:['Rapor','var(--text-dim)','var(--bg)']}[k]||[k,'var(--text-dim)','var(--bg)'];
+  return `<span class="chip" style="background:${m[2]};color:${m[1]}">${m[0]}</span>`;
+}
+async function modernScan(force,keepMsg){
+  const repo=document.getElementById('tdmRepo').value;const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
+  if(!repo){msg.textContent='Repo seçin.';return}
+  const team=_tdTeam();
+  box.innerHTML='<div class="board-empty" style="padding:12px 0">Taranıyor…</div>';if(!keepMsg)msg.textContent='';
+  const btns=[document.getElementById('tdmScan'),document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
+  btns.forEach(b=>b.disabled=true);
+  try{
+    const resp=await fetch(`/api/techdebt/modern/scan?repo=${encodeURIComponent(repo)}&team=${encodeURIComponent(team)}${force?'&force=1':''}`);
+    const r=await resp.json();
+    if(!resp.ok){box.innerHTML='';msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    _tdm.scan=r;renderModern();
+  }catch(e){box.innerHTML='';msg.textContent=String(e)}
+  finally{btns.forEach(b=>b.disabled=false)}
+}
+function renderModern(){
+  const r=_tdm.scan;const box=document.getElementById('tdmResult');if(!r||!box)return;
+  const ad=r.adoption||{};const tp=(ad.typed_props||0),up=(ad.untyped_props||0);
+  const pct=tp+up?Math.round(100*tp/(tp+up)):null;
+  document.getElementById('tdmAdoption').innerHTML=`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya`;
+  const rules=Object.entries(r.rules||{}).sort((a,b)=>b[1].count-a[1].count);
+  const chips=rules.map(([k,v])=>`<span class="chip dim" title="${esc(v.title)} (PHP ${esc(v.since)})">${esc(v.title.split(' → ')[0].slice(0,34))} <b>${v.count}</b></span>`).join(' ');
+  const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
+  const row=(t,human)=>{
+    const loc=(t.locations||[]).map(l=>`<li><code>${esc(l.file)}:${l.line}</code>${l.text?` — <code>${esc(l.text)}</code>`:''}</li>`).join('');
+    const where=t.module?`${esc(t.module)} · ${t.files.length} dosya`:(t.files.length===1?esc(t.files[0]):`${esc(t.files[0])} +${t.files.length-1}`);
+    return `<tr><td><input type="checkbox" class="tdmSel" value="${esc(t.gid)}"></td>
+      <td><details><summary style="cursor:pointer">${esc(t.rule_title)} <span class="chip dim">PHP ${esc(t.since)}</span></summary>
+        <div style="font-size:12px;margin:6px 0 4px;color:var(--text)"><b>Ne:</b> ${esc(t.summary)}</div>
+        <div style="font-size:12px;color:var(--text)"><b>Avantajlar:</b><ul style="margin:2px 0 4px 18px">${(t.advantages||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>
+        <div style="font-size:12px;color:var(--text)"><b>Riskler:</b><ul style="margin:2px 0 4px 18px">${(t.risks||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px"><div style="flex:1;min-width:220px"><b>Önce</b><pre style="margin:2px 0;white-space:pre-wrap;color:var(--text)">${esc(t.before)}</pre></div><div style="flex:1;min-width:220px"><b>Sonra</b><pre style="margin:2px 0;white-space:pre-wrap;color:var(--text)">${esc(t.after)}</pre></div></div>
+        <div style="font-size:12px;color:var(--text)"><b>Bulunan yerler (${t.count}):</b><ul style="margin:2px 0 4px 18px">${loc}${t.count>(t.locations||[]).length?`<li>+${t.count-(t.locations||[]).length} yer daha</li>`:''}</ul></div>
+        ${t.ref?`<div style="font-size:12px"><b>Kaynak:</b> <a href="${esc(t.ref)}" target="_blank" rel="noopener">${esc(t.ref)}</a></div>`:''}
+      </details></td>
+      <td>${where}</td><td class="num">${t.count}</td><td class="num">${t.sp}</td>
+      <td>${_tdmKindChip(t.kind)} ${human?humanChip(t.human_reason):(t.recurring_of?`<span class="chip dim">tekrar · önceki #${t.recurring_of}</span>`:'<span class="chip dim" title="İş olarak açılınca pipeline kuyruğuna alınır">Kuyruğa alınır</span>')}</td></tr>`;
+  };
+  const tbl=(list,human)=>`<table class="perf"><tr><th></th><th>Öneri</th><th>Yer</th><th class="num">Adet</th><th class="num">SP</th><th>Durum</th></tr>${list.map(t=>row(t,human)).join('')}</table>`;
+  const sec=(title,sub)=>`<div style="font-size:12px;font-weight:700;margin:12px 0 4px">${title} <span style="font-weight:400;color:var(--text-dim)">${sub}</span></div>`;
+  const auto=r.auto||[],hum=r.human||[];
+  const errs=(r.errors||[]).length?`<div style="color:var(--warning);margin-top:4px">${(r.errors||[]).length} dosya taranamadı — liste eksik olabilir (${esc((r.errors||[]).slice(0,3).join('; '))})</div>`:'';
+  box.innerHTML=`<div style="font-size:12px;padding:6px 0">${chips||'<span style="color:var(--text-dim)">Öneri yok.</span>'}${sk?`<div style="color:var(--text-dim);margin-top:4px">atlanan — ${sk}</div>`:''}${errs}</div>`
+    +(r.message?`<div class="board-empty" style="padding:8px 0">${esc(r.message)}</div>`:'')
+    +(auto.length?sec('Otomatik işler','— Task açılır ve pipeline kuyruğuna alınır'):'')+(auto.length?tbl(auto,false):'')
+    +(hum.length?sec('İnsan kararı gerektiren yapısal işler','— Task needs-human açılır; kapsamı insan belirler, etiket kalkınca kuyruğa alınabilir')+tbl(hum,true):'');
+}
+async function modernTake(){
+  const repo=document.getElementById('tdmRepo').value;const msg=document.getElementById('tdmMsg');
+  const ids=[...document.querySelectorAll('.tdmSel:checked')].map(x=>x.value);
+  if(!ids.length){msg.textContent='Seçili öneri yok.';return}
+  const team=_tdTeam();
+  const btns=[document.getElementById('tdmScan'),document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
+  btns.forEach(b=>b.disabled=true);msg.textContent='İşler açılıyor…';
+  try{
+    const resp=await fetch('/api/techdebt/modern/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,group_ids:ids,team})});
+    const r=await resp.json();
+    if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    const t=(r.tasks||[]),h=(r.human_tasks||[]);
+    msg.innerHTML=(r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'')
+      +`${t.length} iş kuyruğa alındı (${r.total_sp||0} SP) · ${h.length} yapısal Task insan bekliyor (${r.human_sp||0} SP)`
+      +(t.concat(h).filter(x=>x.id).length?' — '+t.concat(h).filter(x=>x.id).map(x=>wiLink(x.id)).join(', '):'')
+      +((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>esc(s.reason)).join(', '):'');
+    if(typeof loadTechdebt==='function')loadTechdebt();
+    await modernScan(false,true);  // sonuç satırı korunur; butonlar yeniden tarama bitince açılır
+  }catch(e){msg.textContent=String(e)}
+  finally{btns.forEach(b=>b.disabled=false)}
+}
 function renderOvSprint(){
   renderOvPerf();renderOvStuck();
   const box=document.getElementById('ovSprint'),title=document.getElementById('ovSprintTitle'),badge=document.getElementById('ovSprintBadge');
@@ -1373,6 +1685,8 @@ document.addEventListener('DOMContentLoaded',()=>{
   if(rm&&pr)pr.appendChild(rm);
   let t='overview';try{t=localStorage.getItem('tempo_tab')||'overview'}catch(e){}
   if(!document.getElementById('pane'+t.charAt(0).toUpperCase()+t.slice(1)))t='overview';
+  loadQuality();
+  loadTechdebt();
   showTab(t);
 });
 
@@ -1391,6 +1705,33 @@ function updateJobsByWi(jobs){
   }
 }
 function getJobForWi(wiId){return _jobsByWi[String(wiId)]||null}
+// Kartlar yalnız loadBoard'da çiziliyordu: iş ilerlerken şerit ve sütun donuk kalıyordu.
+// Şerit her fetchJobs'ta yerinde güncellenir; iş durumu ya da PR değişince (pipeline WI
+// durumunu yazmış olabilir) board sessizce yeniden çekilir, seçim korunur.
+let _boardJobSig=null;
+function refreshBoardPipelines(){
+  if(!items||!items.length)return;
+  document.querySelectorAll('.wi-pl[data-wi]').forEach(el=>{
+    const h=wiPipelineBadge(el.dataset.wi);
+    if(el.innerHTML!==h)el.innerHTML=h;
+  });
+  const sig=items.map(it=>{const j=getJobForWi(it.id);return j?`${it.id}:${j.id}:${j.status}:${j.pr_url?1:0}`:''}).join('|');
+  if(_boardJobSig!==null&&sig!==_boardJobSig)reloadBoardQuiet();
+  _boardJobSig=sig;
+}
+async function reloadBoardQuiet(){
+  const p=document.getElementById('sprintSel').value;
+  if(!p)return;
+  try{
+    const r=await fetch('/api/board/workitems?iteration_path='+encodeURIComponent(p)+'&t='+Date.now());
+    const fresh=await r.json();
+    if(fresh.error||document.getElementById('sprintSel').value!==p)return;
+    const sel=new Set([...document.querySelectorAll('.wi-check:checked')].map(cb=>cb.dataset.id));
+    items=fresh;renderBoardBody();
+    document.querySelectorAll('.wi-check').forEach(cb=>{if(sel.has(cb.dataset.id)){cb.checked=true;cb.closest('.wi-card').classList.add('selected')}});
+    updSel();
+  }catch(e){}
+}
 
 // ── Agile Board ──
 let teams=[],sprints=[],items=[];
@@ -1424,6 +1765,7 @@ async function onTeamChange(){
   localStorage.setItem('sdlc_team',t);
   // Takim degistiyse saved sprint'i temizle — yeni takim icin aktif sprint'e dus
   if(teamChanged) localStorage.removeItem('sdlc_sprint');
+  if(typeof loadTechdebt==='function')loadTechdebt();  // liste takım alanıyla sınırlı
   document.getElementById('sprintInfo').innerHTML='';document.getElementById('summary').style.display='none';
   document.getElementById('kanban').innerHTML='<div class="board-empty">Sprint seçin...</div>';
   if(!t){document.getElementById('sprintSel').innerHTML='<option>Önce takım seçin...</option>';return}
@@ -1445,6 +1787,7 @@ async function onTeamChange(){
 async function loadBoard(){
   const p=document.getElementById('sprintSel').value,c=document.getElementById('kanban'),info=document.getElementById('sprintInfo'),sum=document.getElementById('summary');
   localStorage.setItem('sdlc_sprint',p);
+  _boardJobSig=null;
   if(!p){c.innerHTML='<div class="board-empty">Sprint seçin...</div>';info.innerHTML='';sum.style.display='none';return}
   const sp=sprints.find(s=>s.path===p);
   if(sp){const sd=sp.startDate?new Date(sp.startDate).toLocaleDateString('tr-TR'):'?',ed=sp.finishDate?new Date(sp.finishDate).toLocaleDateString('tr-TR'):'?',tf=sp.timeFrame||'past';
@@ -1528,7 +1871,7 @@ function wiCard(it){
     <div class="wi-footer">
       <div class="wi-assignee"><span class="wi-assignee-dot">${ini}</span>${esc(it.assignedTo||'—')}</div>
       ${tags.length?`<div class="wi-tags">${tags.slice(0,2).map(t=>`<span class="wi-tag">${esc(t)}</span>`).join('')}</div>`:''}
-    </div>${wiPipelineBadge(it.id)}</div>`;
+    </div><div class="wi-pl" data-wi="${it.id}">${wiPipelineBadge(it.id)}</div></div>`;
 }
 function wiPipelineBadge(wiId){
   const j=getJobForWi(wiId);
@@ -2288,7 +2631,7 @@ async function loadPipeline(){
       _pipelineSaved[f.key]=JSON.stringify(f.value);
       const src=f.source||'default';
       const srcStyle=`background:${sourceColor[src]||'var(--bg-elevated)'};color:#000;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600`;
-      const envHint=f.env_present?` <span style="font-size:10px;color:#f9c74f" title="Env degeri var">[env]</span>`:'';
+      const envHint=f.env_present?` <span style="font-size:10px;color:var(--warning)" title="Env degeri var">[env]</span>`:'';
       let inputHtml='';
       if(f.type==='bool'){
         const checked=f.value?' checked':'';
@@ -2594,7 +2937,7 @@ async function koLoadList(silent){
       el.innerHTML=runs.map(r=>{
         const sel=r.id===_koSelectedId?'background:rgba(108,92,231,0.18);border-left:3px solid var(--accent)':'border-left:3px solid transparent';
         const approved=r.kickoff_approved?'<span title="Onaylandı" style="color:#10b981;margin-left:6px">✓</span>':'';
-        const fb=r.kickoff_feedback?` <span title="Feedback ile" style="color:#fbbf24">💬</span>`:'';
+        const fb=r.kickoff_feedback?` <span title="Feedback ile" style="color:var(--warning)">💬</span>`:'';
         const parent=r.parent_job_id?`<span style="font-size:10px;color:var(--text-dim)" title="Parent">↳#${r.parent_job_id}</span>`:'';
         return `<div onclick="koShowDetail(${r.id})" style="padding:8px 10px;margin-bottom:4px;border-radius:6px;cursor:pointer;${sel};transition:background .12s" onmouseover="if(${r.id}!==_koSelectedId)this.style.background='rgba(255,255,255,0.04)'" onmouseout="if(${r.id}!==_koSelectedId)this.style.background='transparent'">
           <div style="display:flex;justify-content:space-between;gap:8px">
@@ -2711,12 +3054,12 @@ function koRenderDetail(d){
 
   if(j.kickoff_feedback){
     html+=`<div style="padding:10px 12px;border-radius:8px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);margin-bottom:14px">
-      <div style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Bu calistirma icin kullanici feedback'i</div>
+      <div style="font-size:11px;font-weight:700;color:var(--warning);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Bu calistirma icin kullanici feedback'i</div>
       <div style="font-size:13px;white-space:pre-wrap">${escHtml(j.kickoff_feedback)}</div>
     </div>`;
   }
   if(j.error_message){
-    html+=`<div style="padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#fca5a5;margin-bottom:14px;font-size:12px">
+    html+=`<div style="padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--danger);margin-bottom:14px;font-size:12px">
       <b>Hata:</b> ${escHtml(j.error_message)}
     </div>`;
   }
@@ -2740,11 +3083,11 @@ function koRenderDetail(d){
       if(attempts.length){
         hist='<div style="margin-top:8px;font-size:11px"><details><summary style="cursor:pointer;color:var(--text-dim)">Grade gecmisi (${attempts.length} deneme)</summary><div style="margin-top:6px;padding-left:8px;border-left:2px solid var(--border)">';
         for(const at of attempts){
-          const sc=at.score, sk=at.skipped?' <span style="color:#fbbf24">(grader skipped)</span>':'';
+          const sc=at.score, sk=at.skipped?' <span style="color:var(--warning)">(grader skipped)</span>':'';
           hist+=`<div style="margin-bottom:7px">
             <div><b>Deneme #${at.attempt}:</b> <span style="color:${sc>=8?'#10b981':sc>=5?'#fbbf24':'#ef4444'}">${sc}/10</span>${sk}</div>
             <div style="color:var(--text-dim);margin-top:2px">${escHtml(at.reasoning||'')}</div>
-            ${(at.weaknesses||[]).length?'<div style="margin-top:3px"><b style="color:#fca5a5">Zayıflıklar:</b><ul style="margin:2px 0 0 18px">'+(at.weaknesses||[]).map(w=>'<li>'+escHtml(w)+'</li>').join('')+'</ul></div>':''}
+            ${(at.weaknesses||[]).length?'<div style="margin-top:3px"><b style="color:var(--danger)">Zayıflıklar:</b><ul style="margin:2px 0 0 18px">'+(at.weaknesses||[]).map(w=>'<li>'+escHtml(w)+'</li>').join('')+'</ul></div>':''}
             ${(at.suggestions||[]).length?'<div style="margin-top:3px"><b style="color:#7dd3fc">Öneriler:</b><ul style="margin:2px 0 0 18px">'+(at.suggestions||[]).map(s=>'<li>'+escHtml(s)+'</li>').join('')+'</ul></div>':''}
           </div>`;
         }
@@ -2775,7 +3118,7 @@ function koRenderDetail(d){
         <button onclick="koToggleRefine()" class="sm-btn ghost" style="font-size:12px">İyileştir</button>
       </div>
       <div id="koRefineBox" style="display:none;border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:12px;background:rgba(251,191,36,.04)">
-        <div style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">İyileştirme yönergesi</div>
+        <div style="font-size:11px;font-weight:700;color:var(--warning);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">İyileştirme yönergesi</div>
         <textarea id="koRefineText" rows="4" placeholder="Agentlara ne eksik / yanlis oldugunu, ne yapmalari gerektigini yaz..." style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;resize:vertical;font-family:inherit"></textarea>
         <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-size:12px">
           <input type="checkbox" id="koLearnGlobally" />
@@ -3051,14 +3394,18 @@ async function fetchBackfill(){
 function renderBackfill(p){
   const total=p.total||0, scanned=p.scanned||0;
   const pct=total?Math.round(100*scanned/total):0;
+  const running=!!p.running, logs=p.log||[], started=running||total>0||logs.length>0;
+  // Hiç çalışmamışsa çubuk/sayaç/log yerine açıklama (boş siyah kutular yerine)
+  document.getElementById('bfHint').style.display=started?'none':'';
+  document.getElementById('bfTrack').style.display=started?'':'none';
   document.getElementById('bfBar').style.width=pct+'%';
-  document.getElementById('bfStats').textContent=
+  document.getElementById('bfStats').textContent=started?
     `taranan ${scanned}/${total} | indekslenen ${p.indexed||0} | PR'lı ${p.with_pr||0} | atlanan ${p.skipped||0} | hata ${p.errors||0}`+
-    (p.current_wi?` | şu an WI#${p.current_wi}`:'');
+    (p.current_wi?` | şu an WI#${p.current_wi}`:''):'';
   const logEl=document.getElementById('bfLog');
-  logEl.textContent=(p.log||[]).map(l=>`${l.time}  ${l.message}`).join('\n');
+  logEl.style.display=logs.length?'':'none';
+  logEl.textContent=logs.map(l=>`${l.time}  ${l.message}`).join('\n');
   logEl.scrollTop=logEl.scrollHeight;
-  const running=!!p.running;
   document.getElementById('bfStartBtn').style.display=running?'none':'';
   document.getElementById('bfCancelBtn').style.display=running?'':'none';
   if(!running&&_bfPoll){clearInterval(_bfPoll);_bfPoll=null;}
@@ -3107,12 +3454,30 @@ async function loadSrConfig(){
     const d=await r.json();
     const on=v=>v?'<span style="color:#5AC878">✓</span>':'<span style="color:#e06666">✗</span>';
     const base=p=>(p||'').split('/').pop();
+    srFillDesigns(d.designs||[], d.default_design||'klasik');
     el.innerHTML=
       '<b style="color:var(--text)">⚙️ Aktif ayarlar</b><br>'+
       `AI özet ${on(d.ai_summary)} · Görseller ${on(d.visuals)} · Azure grafikleri ${on(d.azure_charts)}<br>`+
-      `Ayrı slayt eşiği: <b>&gt;%${d.min_pct}</b> · Diğer Çalışmalar: <b>${d.digest_per_slide}</b>/slayt · Velocity: son <b>${d.velocity_sprints}</b> sprint<br>`+
+      `Ayrı slayt eşiği: <b>≥${d.min_items}</b> iş · Diğer Çalışmalar: <b>${d.digest_per_slide}</b>/slayt · Velocity: son <b>${d.velocity_sprints}</b> sprint<br>`+
       `Şablon: <span title="${esc(d.template)}">${esc(base(d.template))}</span> · Ekip görseli: <span title="${esc(d.team_image)}">${esc(base(d.team_image))}</span>`;
   }catch(e){ el.textContent='Ayarlar alınamadı.'; }
+}
+let _srDesigns=[];
+function srFillDesigns(list, def){
+  _srDesigns=list;
+  const sel=document.getElementById('srDesign'); if(!sel)return;
+  let saved=''; try{ saved=localStorage.getItem('tempo_sr_design')||''; }catch(e){}
+  const pick=list.some(x=>x.key===saved)?saved:def;
+  sel.innerHTML=list.map(x=>`<option value="${esc(x.key)}"${x.key===pick?' selected':''}>${esc(x.label)}</option>`).join('');
+  srDesignChanged();
+}
+function srDesignChanged(){
+  const sel=document.getElementById('srDesign'), info=document.getElementById('srDesignInfo');
+  if(!sel||!info)return;
+  const x=_srDesigns.find(o=>o.key===sel.value); if(!x){info.innerHTML='';return;}
+  try{ localStorage.setItem('tempo_sr_design',x.key); }catch(e){}
+  const sw=(x.swatch||[]).map(c=>`<span style="width:14px;height:14px;border-radius:50%;background:${esc(c)};border:1px solid var(--border);display:inline-block"></span>`).join('');
+  info.innerHTML=`<span style="display:inline-flex;gap:4px">${sw}</span><span>${esc(x.description||'')}</span>`;
 }
 function closeSprintReport(){
   document.getElementById('sprintReportModal').style.display='none';
@@ -3122,10 +3487,11 @@ async function startSprintReport(){
   if(srGetActive()){ alert('Zaten bir rapor üretiliyor. Bitmesini bekleyin.'); return; }
   const team=document.getElementById('srTeam').textContent;
   const iteration_path=(document.getElementById('sprintSel')||{}).value||'';
+  const design=(document.getElementById('srDesign')||{}).value||'';
   const started=Date.now();
   srShowRunning(started);
   try{
-    const r=await fetch('/api/sprint-report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team,iteration_path})});
+    const r=await fetch('/api/sprint-report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team,iteration_path,design})});
     const d=await r.json();
     // 202 (yeni) veya 409 (zaten çalışıyor) -> ikisinde de report_id gelir, ona bağlan
     if(!d.report_id){ srStopTimers(); document.getElementById('srStatus').textContent='Hata: '+(d.error||r.status); document.getElementById('srStartBtn').style.display=''; return; }
@@ -3347,11 +3713,12 @@ async function adoptRetroRule(btn,i){
     </div>
     <div style="padding:16px 20px">
       <div style="margin-bottom:12px;font-size:13px">Takım: <b id="bfTeam">-</b></div>
-      <div style="background:#222;border-radius:6px;height:18px;overflow:hidden;margin-bottom:8px">
-        <div id="bfBar" style="height:100%;width:0%;background:#6c5ce7;transition:width .3s"></div>
+      <div id="bfHint" style="font-size:13px;color:var(--text-dim);line-height:1.55;margin-bottom:8px">Takımın geçmiş iş kalemleri Azure DevOps'tan taranır; PR'ı olan işler, yeni işlerde repo önerisi için geçmiş iş indeksine eklenir. Başlatınca ilerleme ve log burada görünür.</div>
+      <div id="bfTrack" style="display:none;background:var(--border);border-radius:6px;height:8px;overflow:hidden;margin-bottom:8px">
+        <div id="bfBar" style="height:100%;width:0%;background:var(--accent);transition:width .3s"></div>
       </div>
       <div id="bfStats" style="font-size:13px;color:var(--text-dim);margin-bottom:8px"></div>
-      <div id="bfLog" style="font-family:monospace;font-size:12px;background:#111;border-radius:6px;padding:8px;height:200px;overflow:auto;white-space:pre-wrap;color:var(--text-dim)"></div>
+      <div id="bfLog" style="display:none;font-family:'Geist Mono',Menlo,monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:220px;overflow:auto;white-space:pre-wrap;color:var(--text)"></div>
       <div style="margin-top:12px;display:flex;gap:8px">
         <button id="bfStartBtn" onclick="startBackfill()" class="sm-btn">Başlat</button>
         <button id="bfCancelBtn" onclick="cancelBackfill()" class="sm-btn" style="display:none;background:var(--danger)">İptal</button>
@@ -3374,11 +3741,14 @@ async function adoptRetroRule(btn,i){
       <div style="margin-bottom:6px;font-size:13px">Takım: <b id="srTeam">-</b></div>
       <div style="margin-bottom:12px;font-size:13px">Sprint: <b id="srSprint">-</b></div>
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">
-        Sprintteki işler parent'a (Epic/Feature) göre gruplanıp FLO şablonlu bir <b>.pptx</b> üretilir:
-        en çok efor (SP) alan projeler domain rozetiyle ayrı slaytta, kalanlar "Diğer Çalışmalar" özetinde.
-        Burndown ve son 6 sprint velocity grafikleri Azure'dan <b>otomatik</b> çizilir.
+        Sprintteki işler parent'a (Epic/Feature) göre gruplanıp bir <b>.pptx</b> üretilir:
+        "Bir Bakışta" özeti, en çok işi olan projeler ayrı slaytta, kalanlar "Diğer Çalışmalar"da.
+        Burndown ve son sprintlerin velocity grafikleri Azure'dan <b>otomatik</b> çizilir.
       </div>
-      <div id="srConfig" style="font-size:11px;color:var(--text-dim);background:#111;border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;line-height:1.7"></div>
+      <label for="srDesign" style="display:block;font-size:12px;font-weight:600;margin-bottom:6px">Tasarım</label>
+      <select class="sprint-select" id="srDesign" onchange="srDesignChanged()" style="width:100%;height:32px;margin-bottom:8px"></select>
+      <div id="srDesignInfo" style="display:flex;align-items:center;gap:10px;font-size:12px;color:var(--text-dim);margin-bottom:14px;min-height:22px"></div>
+      <div id="srConfig" style="font-size:11px;color:var(--text-dim);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;line-height:1.7"></div>
       <div id="srStatus" style="font-size:13px;min-height:20px;margin-bottom:12px"></div>
       <div style="display:flex;gap:8px;align-items:center">
         <button id="srStartBtn" onclick="startSprintReport()" class="sm-btn">Oluştur</button>

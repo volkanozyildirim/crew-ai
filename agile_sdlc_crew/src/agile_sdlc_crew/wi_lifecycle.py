@@ -195,6 +195,7 @@ def evaluate_dod(
     pushed_files: list[str],
     require_tests: bool,
     pr_id: str,
+    uat_skipped: bool = False,
 ) -> DodResult:
     items: list[DodItem] = []
 
@@ -225,7 +226,12 @@ def evaluate_dod(
 
     # 4. UAT kabul
     uat = parse_uat(uat_text)
-    if uat["overall"] is None and not uat["items"]:
+    if uat_skipped:
+        # Yalın akış (kalite işi) UAT'ı bilerek atlar — "parse edilemedi" yanlış izlenim
+        # veriyordu. Bayrak flow'dan gelir, UAT METNİNDEN DEĞİL: LLM çıktısı "Atlandı"
+        # ile başlayabilir ve reddedilmiş bir UAT'ı kapıdan geçirirdi.
+        items.append(DodItem("uat", "UAT kabul etti", None, "atlandı (kalite işi — yalın akış)"))
+    elif uat["overall"] is None and not uat["items"]:
         items.append(DodItem("uat", "UAT kabul etti", None, "UAT raporu parse edilemedi"))
     else:
         ok = uat["overall"] == "ACCEPTED" and uat["fail"] == 0
@@ -322,6 +328,29 @@ def apply_state(client, work_item_id: str, target: str, logger=None) -> bool:
     except Exception as e:  # noqa: BLE001
         _l(f"  🗂️ WI durumu yazilamadi ({target}): {e}")
         return False
+
+
+def mark_queued(client, work_item_id: str, logger=None) -> str:
+    """İş kuyruğa alındı → WI In Progress (sahiplik aralığındaysa). Geri dönülecek
+    durumu (taşımadan ÖNCEKİ hâl) döndürür; okunamazsa ''."""
+    info = load_wi_context(client, work_item_id)
+    before = info["wi_state"]
+    target = plan_transition(before, info["wi_states"], "start")
+    if target:
+        apply_state(client, work_item_id, target, logger=logger)
+    return before
+
+
+def revert_to(client, work_item_id: str, initial: str, logger=None) -> str | None:
+    """Sorunlu bitiş (silinen kuyruk işi, sunucu restart'ında yarım kalan iş):
+    pipeline'ın taşıdığı WI'ı `initial`e geri al. Yazılan hedef ya da None."""
+    if not (initial or "").strip():
+        return None
+    info = load_wi_context(client, work_item_id)
+    target = plan_revert(info["wi_state"], initial, info["wi_states"], pr_exists=False)
+    if target and apply_state(client, work_item_id, target, logger=logger):
+        return target
+    return None
 
 
 def assign_if_empty(client, work_item_id: str, current_assignee: str, logger=None) -> str:

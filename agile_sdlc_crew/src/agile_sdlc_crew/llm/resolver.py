@@ -118,12 +118,53 @@ def _normalize_inline_spec(raw) -> dict | None:
     return None
 
 
+# ── İş kapsamlı geçersiz kılma ────────────────────────────────────────────
+# Bir işe özel model seçimi (ör. kalite işleri: mimar Sonnet, rapor Haiku).
+# run_pipeline flow'u job_llm_scope() içinde koşturur; kapsam bir dict
+# taşıyan ContextVar'dır. Flow adımları bağlamı KOPYALAR ama dict aynı nesne
+# olduğu için _wi_begin'in yazdığı eşleme sonraki adımlarda görülür; kapsam
+# dışındaki işler (eşzamanlı pr_review, sonraki iş) onu görmez.
+import contextlib as _ctxlib  # noqa: E402
+import contextvars as _ctxvars  # noqa: E402
+
+_job_overrides: _ctxvars.ContextVar = _ctxvars.ContextVar("crew_job_llm_overrides", default=None)
+
+
+@_ctxlib.contextmanager
+def job_llm_scope():
+    token = _job_overrides.set({})
+    try:
+        yield
+    finally:
+        _job_overrides.reset(token)
+
+
+def has_job_override(agent_key: str) -> bool:
+    holder = _job_overrides.get()
+    return bool(holder) and agent_key in holder
+
+
+def set_job_llm_overrides(mapping: dict) -> bool:
+    """{agent_key: profile_adı}. Kapsam yoksa hiçbir şey yapmaz (False)."""
+    holder = _job_overrides.get()
+    if holder is None:
+        return False
+    holder.clear()
+    holder.update(mapping or {})
+    return True
+
+
 def resolve_spec_with_source(agent_key: str) -> tuple[dict, str]:
     """Agent icin LLM spec'i (provider/model/max_tokens) + kaynagini dondurur.
 
     Source: 'env' | 'dashboard' | 'agents.yaml' | 'backwards_compat' | 'default'
     Spec'in icinde '_profile' alani olabilir (profile referansiyla geldiyse).
     """
+    # 0. İş kapsamlı geçersiz kılma (job_llm_scope + set_job_llm_overrides)
+    holder = _job_overrides.get()
+    if holder and agent_key in holder:
+        return _profile_to_spec(holder[agent_key]), "job"
+
     # 1. Per-agent env override (profile name)
     env_key = f"CREW_LLM_PROFILE_{agent_key.upper()}"
     env_val = os.environ.get(env_key)

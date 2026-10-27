@@ -446,6 +446,19 @@ def _resolve_php_binary(repo_name: str = "") -> str:
 _php_binary_cache: dict[str, str] = {}
 
 
+_LINT_NOISE = re.compile(r"^\s*(PHP\s+)?(Deprecated|Notice|Warning):", re.I)
+
+
+def _lint_issue_lines(output: str) -> list[str]:
+    """Linter çıktısından gerçek hata satırları. Yerel PHP yeni sürüm olduğu için
+    eski koddaki `(double)` cast'leri onlarca 'Deprecated' satırı basıyor; sonuç
+    (dönüş kodu) doğru ama log'a ve düzeltme isteğine ilk 3 satır olarak bu gürültü
+    gidiyordu — job #229'da asıl 'Parse error' 50 Deprecated satırının altında kaldı."""
+    lines = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
+    real = [ln for ln in lines if not _LINT_NOISE.match(ln)]
+    return real or lines[-3:]
+
+
 def _lint_with_native(code: str, ext: str, repo_name: str = "") -> dict | None:
     """Dile gore native linter calistir. None = dil desteklenmiyor.
     PHP icin repo'nun gerektirdigi versiyonu kullanir."""
@@ -469,8 +482,8 @@ def _lint_with_native(code: str, ext: str, repo_name: str = "") -> dict | None:
             result = subprocess.run([php_bin, "-l", tmp_path], capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 return {"valid": True, "issues": []}
-            errors = result.stdout.strip() or result.stderr.strip()
-            return {"valid": False, "issues": [errors]}
+            return {"valid": False, "issues": _lint_issue_lines(
+                (result.stdout or "") + "\n" + (result.stderr or ""))}
 
         elif ext == "py":
             result = subprocess.run(
@@ -923,13 +936,15 @@ def run_pipeline(
     flow._tracker = tracker
 
     try:
-        flow.kickoff(inputs={
-            "work_item_id": str(work_item_id),
-            "use_hal": use_hal,
-            "job_id": job_id,
-            "kickoff_only": bool(kickoff_only),
-            "kickoff_feedback": kickoff_feedback or "",
-        })
+        from agile_sdlc_crew.llm.resolver import job_llm_scope
+        with job_llm_scope():  # iş kapsamlı model seçimi (kalite işleri)
+            flow.kickoff(inputs={
+                "work_item_id": str(work_item_id),
+                "use_hal": use_hal,
+                "job_id": job_id,
+                "kickoff_only": bool(kickoff_only),
+                "kickoff_feedback": kickoff_feedback or "",
+            })
         tracker.finish()
 
         _log(f"\n{'='*60}")
