@@ -512,13 +512,20 @@ _QE_SECRET_KV = re.compile(
     re.I)
 
 
+_QE_SECRET_BARE = re.compile(
+    r"(?im)^(\s*(?:export\s+)?[\w.-]*(?:key|secret|token|passw(?:or)?d|pwd|credential)[\w.-]*\s*[:=]\s*)(?![\"'\s])(\S+)")
+_QE_KEY_FILES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
+
+
 def _qe_mask(text: str) -> str:
     """Kanıt bir secret işinden gelebilir (#244: servis hesabı JSON'u) — değer
-    modele gitmez; yapı ve anahtar adları kalır."""
+    modele gitmez; yapı ve anahtar adları kalır. Tırnaksız `KEY=değer` (.env,
+    .ini, .properties) da maskelenir."""
     # render.mask_secrets'in key=value kuralı PHP'nin `=>`'unu bozuyor
     # ('apiKey'=***'***'); burada yalnız uzun/sır-benzeri token kuralı alınır.
     from agile_sdlc_crew.quality.render import _LONG, _secretish
     s = _QE_SECRET_KV.sub(lambda m: f"{m.group(1)}{m.group(3)}***{m.group(3)}", text or "")
+    s = _QE_SECRET_BARE.sub(lambda m: f"{m.group(1)}***", s)
     return _LONG.sub(lambda m: "***" if _secretish(m.group(0)) else m.group(0), s)
 
 
@@ -585,6 +592,9 @@ def _quality_evidence(root, desc_html: str, max_files: int = 4) -> str:
         if not text:
             continue
         found.append(path)
+        if Path(path).suffix.lower() in _QE_KEY_FILES:
+            add(f"/{path} (anahtar dosyası — içerik modele gönderilmez)", "(gizli)")
+            continue
         lines = text.splitlines()
         if len(text) <= 6000:
             add(f"/{path} (tamamı, {len(lines)} satır; kanıt satırı {', '.join(map(str, lns))})", text)
@@ -1133,6 +1143,15 @@ def _changed_symbols(changed_files) -> set:
             out.add(stem[5:])
     return {s for s in out if len(s) >= 3}
 
+
+# Plan (LLM) bir dosyayı silebilir — yanlış silme sessiz ve geniş zarar verir.
+# Silme yalnız WI/Task metninde adı geçen, korunan olmayan dosyalarda ve iş başına
+# sınırlı sayıda yapılır.
+_DELETE_PROTECTED = re.compile(
+    r"(^|/)(\.github/|\.gitlab-ci|azure-pipelines|Jenkinsfile|Dockerfile|docker-compose|Makefile$|"
+    r"go\.(mod|sum)$|composer\.(json|lock)$|package(-lock)?\.json$|yarn\.lock$|pnpm-lock|"
+    r"requirements[^/]*\.txt$|pyproject\.toml$|phpunit\.xml|helm/|charts/|\.gitignore$)", re.I)
+MAX_DELETES_PER_JOB = 3
 
 _TEST_TASK = re.compile(r"test|phpunit|pytest|jest|mocha|spec\b|unit", re.I)
 
@@ -3735,7 +3754,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         — ham review_text -> _amend_plan -> tum plan dosyalarini yeniden yaz -> tam
         acik-uctu re-review."""
         from agile_sdlc_crew.main import _extract_code_from_output, _validate_code, _add_wi_comment
-        from agile_sdlc_crew.pipeline import push_file, delete_file
+        from agile_sdlc_crew.pipeline import push_file
         from agile_sdlc_crew.tools import claude_cli_llm as _cli_rr
         from agile_sdlc_crew import pipeline_config as _pc_rr
 
@@ -3869,11 +3888,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  Retry implement [{i+1}/{len(changes_to_fix)}]: {file_path}")
 
             if change.get("change_type") == "delete":
-                del_result = delete_file(
-                    repo_name, branch, file_path,
-                    f"fix: review feedback - dosya silindi (WI #{self.state.work_item_id})",
-                    repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
-                )
+                del_result = self._guarded_delete(
+                    file_path, f"fix: review feedback - dosya silindi (WI #{self.state.work_item_id})")
                 if del_result.get("success"):
                     _log(f"    🗑️ Silindi ({del_result.get('note') or 'push'})")
                     pushed_any = pushed_any or del_result.get("note") != "already absent"
@@ -6325,7 +6341,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
     def step6_implement_code(self):
         """Adim 6: Kod Gelistirme - dosya dongusu."""
         from agile_sdlc_crew.main import _extract_code_from_output, _validate_code
-        from agile_sdlc_crew.pipeline import push_file, delete_file
+        from agile_sdlc_crew.pipeline import push_file
         from agile_sdlc_crew.tools import claude_cli_llm as _cli_impl
         import os.path as _osp
 
@@ -6446,11 +6462,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
             # Silme: icerigi yok, developer'a gitmez — dogrudan delete push.
             if change_type == "delete":
-                del_result = delete_file(
-                    repo_name, branch_name, file_path,
-                    f"#{self.state.work_item_id}: {description[:80] or 'dosya silindi'}",
-                    repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
-                )
+                del_result = self._guarded_delete(
+                    file_path, f"#{self.state.work_item_id}: {description[:80] or 'dosya silindi'}")
                 if del_result.get("success"):
                     _log(f"    🗑️ Silindi ({del_result.get('note') or 'push #' + str(del_result.get('push_id', '?'))})")
                     all_pushes.append(del_result)
@@ -7911,6 +7924,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log("  🔎 Düzeltme sonrası doğrulama geçti")
         else:
             _log(f"  🔎 Düzeltme sonrası hâlâ {len(again['issues'])} hata satırı — PR açılacak, CI gösterecek")
+
+    def _delete_allowed(self, file_path: str) -> tuple[bool, str]:
+        rel = _norm_path(file_path)
+        if _DELETE_PROTECTED.search(rel):
+            return False, "korunan yol (CI/bağımlılık/derleme dosyası)"
+        if getattr(self, "_deletes_done", 0) >= MAX_DELETES_PER_JOB:
+            return False, f"iş başına silme sınırı ({MAX_DELETES_PER_JOB})"
+        text = " ".join([self.state.requirements_text or "", getattr(self, "_quality_desc", "") or "",
+                         getattr(self.state, "wi_comments_text", "") or "", self.state.wi_title or ""])
+        if Path(rel).name not in text:
+            return False, "dosya adı WI/Task metninde geçmiyor"
+        return True, ""
+
+    def _guarded_delete(self, file_path: str, message: str) -> dict:
+        from agile_sdlc_crew.pipeline import delete_file
+        ok, why = self._delete_allowed(file_path)
+        if not ok:
+            _log(f"    ⛔ Silme reddedildi ({why}): {file_path}")
+            return {"success": False, "error": f"silme reddedildi: {why}", "refused": True}
+        res = delete_file(self.state.repo_name, self.state.branch_name, file_path, message,
+                          repo_mgr=self._repo_mgr, dry_run=self.state.dry_run)
+        if res.get("success") and res.get("note") != "already absent":
+            self._deletes_done = getattr(self, "_deletes_done", 0) + 1
+        return res
 
     def _plan_deleted_paths(self) -> set:
         return {

@@ -5452,6 +5452,7 @@ def test_review_retry_delete_and_no_progress():
                                   "problem": "p", "required_fix": "r", "status": "open",
                                   "fix_targets": [_norm_path("/secret.json")]}]
         f._envelope = {"retries": 3}
+        f.state.requirements_text = "Kanıt: secret.json:5 — dosya repodan silinir"
         f._client = _Client()
         f._db = None
         calls = {"verify": [], "code": []}
@@ -5851,6 +5852,55 @@ def test_pre_pr_verify_and_build_fix():
     check("kalite doğrudan akış: build-fix en fazla 1 tur", "max_retries = min(max_retries, 1)" in src)
 
 
+def test_security_hardening():
+    """Güvenlik incelemesi (commit 07bac9738): doğrulayıcılar repo kodunu içe
+    aktarmasın / sunucu sırlarını devralmasın; kanıtta tırnaksız sırlar ve anahtar
+    dosyaları modele gitmesin; plan (LLM) keyfi dosya silemesin."""
+    print("\n[güvenlik sertleştirme]")
+    import os
+    from agile_sdlc_crew import verify as vf
+    from agile_sdlc_crew.flow import _qe_mask, _quality_evidence
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        marker = root / "PWNED"
+        (root / "py_compile.py").write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+        (root / "ok.py").write_text("x = 1\n")
+        r = vf.verify(root, ["ok.py"])
+        check("python: repo kökündeki py_compile.py içe aktarılmaz", r["ok"] and not marker.exists(), str(r))
+        (root / "-v.json").write_text("{}")
+        check("'-' ile başlayan yol bayrak sayılmaz", vf._arg("-v.json") == "./-v.json")
+    os.environ["AZURE_DEVOPS_PAT"] = os.environ.get("AZURE_DEVOPS_PAT", "x")
+    env = vf._env({"GOFLAGS": "-mod=vendor"})
+    check("doğrulayıcı ortamı sırları taşımaz", "AZURE_DEVOPS_PAT" not in env and "PATH" in env
+          and env.get("GOTOOLCHAIN") == "local" and env.get("GOFLAGS") == "-mod=vendor")
+
+    m = _qe_mask("DB_PASSWORD=hunter2xyz\nexport API_TOKEN=abc123\nAPP_NAME=shop\n")
+    check("kanıt: tırnaksız KEY=değer maskelenir", "hunter2xyz" not in m and "abc123" not in m and "APP_NAME=shop" in m, m)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "r"
+        root.mkdir()
+        g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        (root / "server.pem").write_text("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----\n")
+        g("add", "-A"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i")
+        ev = _quality_evidence(root, "<li>server.pem:1</li>")
+        check("kanıt: anahtar dosyasının içeriği gönderilmez", "BEGIN PRIVATE" not in ev and "MIIE" not in ev
+              and "anahtar dosyası" in ev, ev)
+
+    f = AgileSDLCFlow()
+    f.state.requirements_text = "mpModerationAiAuth.json silinir; azure-pipelines.yml de geçiyor"
+    ok, _ = f._delete_allowed("/mpModerationAiAuth.json")
+    check("silme: WI'da adı geçen dosya serbest", ok)
+    ok, why = f._delete_allowed("/app/Controller/Order.php")
+    check("silme: WI'da geçmeyen dosya reddedilir", not ok and "geçmiyor" in why, why)
+    ok, why = f._delete_allowed("/azure-pipelines.yml")
+    check("silme: korunan yol reddedilir (adı geçse bile)", not ok and "korunan" in why, why)
+    f._deletes_done = 3
+    ok, why = f._delete_allowed("/mpModerationAiAuth.json")
+    check("silme: iş başına sınır", not ok and "sınır" in why, why)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -5937,7 +5987,8 @@ def main():
               test_quality_direct_flow,
               test_resume_skips_discarded_work,
               test_wi_lifecycle_on_queue,
-              test_pre_pr_verify_and_build_fix):
+              test_pre_pr_verify_and_build_fix,
+              test_security_hardening):
         try:
             t()
         except Exception as e:

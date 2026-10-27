@@ -572,7 +572,7 @@ SCHEMA: list[dict] = [
         "label": "PR öncesi derleme/lint doğrulaması",
         "type": "bool",
         "default": True,
-        "desc": "Implement bitince, PR açılmadan önce branch'in son hâli yerel klona bindirilip reponun dilinin doğrulayıcısı çalışır: Go `go build ./...` + değişen paketlerde `go vet`, PHP `php -l`, Python `py_compile`, JS `node --check`, TS (yerel tsc varsa) `tsc --noEmit`, JSON/YAML ayrıştırma. Hata varsa tek hedefli developer çağrısı (dosyalar yerinde düzenlenir, tek commit), sonra bir kez daha doğrulama; yine geçmezse PR açılır, CI gösterir. Ölçüm (#248): eksik Go import'u `go build` ile 3 saniyede yakalanırdı; CI'a gitti ve build-fix turları $4.4 tuttu. LLM'siz, yerel araçla; araç yoksa o dil atlanır.",
+        "desc": "Implement bitince, PR açılmadan önce branch'in son hâli yerel klona bindirilip reponun dilinin doğrulayıcısı çalışır: Go `go build ./...` + değişen paketlerde `go vet`, PHP `php -l`, Python `compile()` (süreç içi), JS `node --check`, TS (yerel tsc varsa) `tsc --noEmit`, JSON/YAML ayrıştırma. Hata varsa tek hedefli developer çağrısı (dosyalar yerinde düzenlenir, tek commit), sonra bir kez daha doğrulama; yine geçmezse PR açılır, CI gösterir. Ölçüm (#248): eksik Go import'u `go build` ile 3 saniyede yakalanırdı; CI'a gitti ve build-fix turları $4.4 tuttu. LLM'siz, yerel araçla; araç yoksa o dil atlanır.",
     },
     {
         "key": "CREW_QUALITY_DIRECT_FLOW",

@@ -7,7 +7,7 @@ CI'da çıktı ve build-fix turları $4.4'e mal oldu. `go build` aynı hatayı y
 klonda 3 saniyede veriyor.
 
 Doğrulayıcılar: Go `go build ./...` + değişen paketlerde `go vet` (testleri de
-derler), PHP `php -l`, Python `py_compile`, JS `node --check`, TS (yerel `tsc`
+derler), PHP `php -l`, Python `compile()` (süreç içi), JS `node --check`, TS (yerel `tsc`
 varsa) `tsc --noEmit`, JSON/YAML ayrıştırma. Araç yoksa dil atlanır — doğrulama
 yapılamadı demek, geçti demek değil.
 """
@@ -15,6 +15,7 @@ yapılamadı demek, geçti demek değil.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -28,8 +29,27 @@ MAX_ISSUES = 25
 _LOC = re.compile(r"((?:[\w.@-]+/)*[\w.@-]+\.(?:go|php|py|js|mjs|cjs|ts|tsx|json|ya?ml))[:(](\d+)")
 
 
-def _run(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str]:
-    r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+# Doğrulayıcılar repo kodunu ÇALIŞTIRMAZ (derler/ayrıştırır) ama araçlar sunucunun
+# ortamını devralıyordu (Azure PAT, Sonar token…). Yalnız gerekli değişkenler
+# geçer; Go toolchain indirmez, go.mod'u değiştirmez.
+_ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "GOPATH", "GOCACHE", "GOMODCACHE",
+             "GOROOT", "GOPRIVATE", "GONOSUMDB", "GONOPROXY", "GOPROXY")
+
+
+def _env(extra: dict | None = None) -> dict:
+    env = {k: v for k, v in os.environ.items() if k in _ENV_KEEP}
+    env["GOTOOLCHAIN"] = "local"
+    env.update(extra or {})
+    return env
+
+
+def _arg(p: str) -> str:
+    """Planın (LLM) verdiği yol '-' ile başlayıp araç bayrağı sayılmasın."""
+    return "./" + p.lstrip("/")
+
+
+def _run(cmd: list[str], cwd: Path, timeout: int, env: dict | None = None) -> tuple[int, str]:
+    r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, env=_env(env))
     return r.returncode, ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
 
 
@@ -93,12 +113,15 @@ def verify(root, changed: list[str], *, php_bin: str = "php", timeout: int = 300
         if not (root / "go.mod").is_file():
             skipped.append(("go", "go.mod yok"))
         else:
+            # vendor/ varsa onu kullan (deps install oluşturur); yoksa go.mod'a dokunma
+            go_env = {"GOFLAGS": "-mod=vendor" if (root / "vendor" / "modules.txt").is_file() else "-mod=readonly"}
+
             def _go():
-                rc, out = _run(["go", "build", "./..."], root, timeout)
+                rc, out = _run(["go", "build", "./..."], root, timeout, go_env)
                 if rc != 0:
                     return _issue_lines(out, root)
-                pkgs = sorted({"./" + str(Path(p).parent) for p in by_lang["go"]})
-                rc, out = _run(["go", "vet", *pkgs], root, timeout)
+                pkgs = sorted({_arg(str(Path(p).parent)) for p in by_lang["go"]})
+                rc, out = _run(["go", "vet", *pkgs], root, timeout, go_env)
                 return _issue_lines(out, root) if rc != 0 else []
             tool("go", _go)
 
@@ -106,7 +129,7 @@ def verify(root, changed: list[str], *, php_bin: str = "php", timeout: int = 300
         def _php():
             out: list[str] = []
             for p in by_lang["php"]:
-                rc, o = _run([php_bin, "-l", p], root, 30)
+                rc, o = _run([php_bin, "-l", _arg(p)], root, 30)
                 if rc != 0:
                     out += _issue_lines(o, root)
             return out
@@ -114,15 +137,22 @@ def verify(root, changed: list[str], *, php_bin: str = "php", timeout: int = 300
 
     if "python" in by_lang:
         def _py():
-            rc, o = _run(["python3", "-m", "py_compile", *by_lang["python"]], root, 60)
-            return _issue_lines(o, root) if rc != 0 else []
+            # Süreç içinde: `python3 -m py_compile` repo kökünde koşunca kökteki
+            # bir py_compile.py modülü İÇE AKTARILIR (kod çalıştırma). compile() çalıştırmaz.
+            out: list[str] = []
+            for p in by_lang["python"]:
+                try:
+                    compile((root / p).read_bytes(), p, "exec", dont_inherit=True)
+                except SyntaxError as e:
+                    out.append(f"{p}:{e.lineno or 1}: {e.msg}")
+            return out
         tool("python", _py)
 
     if "js" in by_lang:
         def _js():
             out: list[str] = []
             for p in by_lang["js"]:
-                rc, o = _run(["node", "--check", p], root, 30)
+                rc, o = _run(["node", "--check", _arg(p)], root, 30)
                 if rc != 0:
                     out += _issue_lines(o, root)
             return out
