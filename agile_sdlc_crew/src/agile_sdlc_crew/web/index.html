@@ -850,7 +850,7 @@ function renderLog(log){
 
 // ── Jobs ──
 async function fetchJobs(){
-  try{const r=await fetch('/api/jobs?t='+Date.now());if(r.ok){const jobs=await r.json();updateJobsByWi(jobs);renderJobs(jobs)}}catch(e){}
+  try{const r=await fetch('/api/jobs?t='+Date.now());if(r.ok){const jobs=await r.json();updateJobsByWi(jobs);renderJobs(jobs);refreshBoardPipelines()}}catch(e){}
 }
 function renderJobs(jobs){
   const list=document.getElementById('jobList'),st=document.getElementById('qStats');
@@ -1705,6 +1705,33 @@ function updateJobsByWi(jobs){
   }
 }
 function getJobForWi(wiId){return _jobsByWi[String(wiId)]||null}
+// Kartlar yalnız loadBoard'da çiziliyordu: iş ilerlerken şerit ve sütun donuk kalıyordu.
+// Şerit her fetchJobs'ta yerinde güncellenir; iş durumu ya da PR değişince (pipeline WI
+// durumunu yazmış olabilir) board sessizce yeniden çekilir, seçim korunur.
+let _boardJobSig=null;
+function refreshBoardPipelines(){
+  if(!items||!items.length)return;
+  document.querySelectorAll('.wi-pl[data-wi]').forEach(el=>{
+    const h=wiPipelineBadge(el.dataset.wi);
+    if(el.innerHTML!==h)el.innerHTML=h;
+  });
+  const sig=items.map(it=>{const j=getJobForWi(it.id);return j?`${it.id}:${j.id}:${j.status}:${j.pr_url?1:0}`:''}).join('|');
+  if(_boardJobSig!==null&&sig!==_boardJobSig)reloadBoardQuiet();
+  _boardJobSig=sig;
+}
+async function reloadBoardQuiet(){
+  const p=document.getElementById('sprintSel').value;
+  if(!p)return;
+  try{
+    const r=await fetch('/api/board/workitems?iteration_path='+encodeURIComponent(p)+'&t='+Date.now());
+    const fresh=await r.json();
+    if(fresh.error||document.getElementById('sprintSel').value!==p)return;
+    const sel=new Set([...document.querySelectorAll('.wi-check:checked')].map(cb=>cb.dataset.id));
+    items=fresh;renderBoardBody();
+    document.querySelectorAll('.wi-check').forEach(cb=>{if(sel.has(cb.dataset.id)){cb.checked=true;cb.closest('.wi-card').classList.add('selected')}});
+    updSel();
+  }catch(e){}
+}
 
 // ── Agile Board ──
 let teams=[],sprints=[],items=[];
@@ -1760,6 +1787,7 @@ async function onTeamChange(){
 async function loadBoard(){
   const p=document.getElementById('sprintSel').value,c=document.getElementById('kanban'),info=document.getElementById('sprintInfo'),sum=document.getElementById('summary');
   localStorage.setItem('sdlc_sprint',p);
+  _boardJobSig=null;
   if(!p){c.innerHTML='<div class="board-empty">Sprint seçin...</div>';info.innerHTML='';sum.style.display='none';return}
   const sp=sprints.find(s=>s.path===p);
   if(sp){const sd=sp.startDate?new Date(sp.startDate).toLocaleDateString('tr-TR'):'?',ed=sp.finishDate?new Date(sp.finishDate).toLocaleDateString('tr-TR'):'?',tf=sp.timeFrame||'past';
@@ -1843,7 +1871,7 @@ function wiCard(it){
     <div class="wi-footer">
       <div class="wi-assignee"><span class="wi-assignee-dot">${ini}</span>${esc(it.assignedTo||'—')}</div>
       ${tags.length?`<div class="wi-tags">${tags.slice(0,2).map(t=>`<span class="wi-tag">${esc(t)}</span>`).join('')}</div>`:''}
-    </div>${wiPipelineBadge(it.id)}</div>`;
+    </div><div class="wi-pl" data-wi="${it.id}">${wiPipelineBadge(it.id)}</div></div>`;
 }
 function wiPipelineBadge(wiId){
   const j=getJobForWi(wiId);
