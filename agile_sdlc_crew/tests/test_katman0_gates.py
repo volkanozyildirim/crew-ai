@@ -1031,7 +1031,9 @@ def test_build_fix_single_commit():
     import inspect
     from agile_sdlc_crew.flow import AgileSDLCFlow
 
-    src = inspect.getsource(AgileSDLCFlow._fix_failing_build)
+    # Tek commit gönderimi ortak yardımcıya taşındı (build-fix + PR öncesi doğrulama)
+    src = (inspect.getsource(AgileSDLCFlow._fix_failing_build)
+           + inspect.getsource(AgileSDLCFlow._push_single_commit))
     check("düzeltmeler biriktiriliyor", "pending.append" in src)
     check("tek commit API'si kullanılıyor", "push_changes" in src)
     # Dosya döngüsü içinde artık push YOK — döngü pending'e yazıp bitiyor
@@ -1692,26 +1694,26 @@ def test_wi_lifecycle_flow_hooks():
         check("review → Code Review", f._wi_transition("review") == "Code Review" and f._client.ops[-1][2] == "Code Review")
         check("handoff → QA To Do", f._wi_transition("handoff") == "QA To Do")
         check("QA To Do'dan sonra start = dokunma (sahiplik dışı)", f._wi_transition("start") is None and len(f._client.ops) == 3)
+        # Sorun olursa Blocked değil başlangıç durumu; PR açık olsa bile geri alınır.
 
         f = mk()
         f._wi_begin(f._client.fields)
         f.wi_lifecycle_on_exception(NeedsMoreInfo("eksik detay"))
-        check("needs_info → Blocked", f._client.ops[-1][2] == "Blocked", str(f._client.ops))
+        check("needs_info → başlangıç durumuna (To Do) geri", f._client.ops[-1] == ("state", 73121, "To Do"), str(f._client.ops))
         f = mk()
         f._wi_begin(f._client.fields)
         f.wi_lifecycle_on_exception(_NHR("review kapanmadı"))
-        check("needs_human → Blocked", f._client.ops[-1][2] == "Blocked")
+        check("needs_human → başlangıç durumuna (To Do) geri", f._client.ops[-1] == ("state", 73121, "To Do"), str(f._client.ops))
         f = mk()
         f._wi_begin(f._client.fields)
         f.wi_lifecycle_on_exception(RuntimeError("patladı"))
         check("genel hata, PR yok → To Do'ya geri", f._client.ops[-1] == ("state", 73121, "To Do"), str(f._client.ops))
         f = mk()
         f._wi_begin(f._client.fields)
-        f._wi_transition("review")
         f.state.pr_id = "42951"
-        n = len(f._client.ops)
         f.wi_lifecycle_on_exception(RuntimeError("patladı"))
-        check("genel hata, PR VAR → Code Review'da kalır", len(f._client.ops) == n and f.state.wi_state_current == "Code Review")
+        check("genel hata, PR VAR → yine To Do'ya geri (yarım iş incelemeye alınmaz)",
+              f._client.ops[-1] == ("state", 73121, "To Do") and f.state.wi_state_current == "To Do", str(f._client.ops))
 
         f = mk(state="QA To Do")
         f._wi_begin(f._client.fields)
@@ -1759,9 +1761,12 @@ def test_wi_lifecycle_flow_hooks():
     i_hook, i_fail = src_main.find("flow.wi_lifecycle_on_exception(e)"), src_main.find("_db.fail_job(job_id, str(e))")
     check("main.run_pipeline: yaşam döngüsü kancası fail_job'dan ÖNCE", 0 < i_hook < i_fail)
     src_flow = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
-    check("step11: DoD → yorum → enforce → handoff sırası",
+    check("step11: DoD → yorum → enforce → Code Review sırası",
           0 < src_flow.find("_wl_dod.evaluate_dod(") < src_flow.find('f"{_dod_md}\\n\\n"')
-          < src_flow.find("raise NeedsHumanReview(_msg_dod)") < src_flow.find('self._wi_transition("handoff")'))
+          < src_flow.find("raise NeedsHumanReview(_msg_dod)") < src_flow.rfind('self._wi_transition("review")'))
+    check("Code Review yalnız iş sonunda: PR açılınca geçiş yok, handoff yok",
+          src_flow.count('self._wi_transition("review")') == 1 and 'self._wi_transition("handoff")' not in src_flow
+          and src_flow.find('self._wi_transition("review")') > src_flow.find("raise NeedsHumanReview(_msg_dod)"))
     check("build gate her çıkışta build_status yazar (6 yol)",
           src_flow.count("self.state.build_status = ") >= 7)
 
@@ -2006,7 +2011,7 @@ def test_estimate_flow_hooks():
 
     src_flow = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
     check("plan kesinleşen 3 yolda da _after_plan_finalized (normal/resume/HAL)", src_flow.count("self._after_plan_finalized()") == 3)
-    check("step6'da 3 push yolunda _complete_child_task", src_flow.count("self._complete_child_task(file_path)") == 3)
+    check("step6'da 4 push yolunda _complete_child_task (resume/skip/silme/push)", src_flow.count("self._complete_child_task(file_path)") == 4)
     check("step1: requirements sonrası kaba tahmin", 'self._estimate("requirements")' in src_flow)
     src_db = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/db.py").read_text()
     check("db: estimate_sp kolonu + whitelist", '"estimate_sp"' in src_db and 'ensure_column(cur, "jobs", "estimate_sp"' in src_db)
@@ -5407,6 +5412,445 @@ def test_sprint_report_designs():
                 os.environ[k] = v
 
 
+def test_review_retry_delete_and_no_progress():
+    """Job #244 ($3.19): (1) plan bir dosyanın SİLİNMESİNİ istiyordu ama tek push
+    yolu içerik aldığı için developer boş döndü, push iptal edildi; (2) "ilerleme
+    yok, erken durduruluyor" sayaca ham CREW_REVIEW_MAX_RETRIES yazdı, tavan zarftan
+    (3) geldiği için sayaç her turda 2'ye döndü — döngü hiç bitmedi."""
+    print("\n[review retry: dosya silme + erken durdurma]")
+    import agile_sdlc_crew.pipeline as _pl
+    import agile_sdlc_crew.main as _mn
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.flow import NeedsHumanReview as _NHR
+
+    knobs = {"CREW_STRUCTURED_REVIEW": True, "CREW_REVIEW_RETRY_REPLAN": False,
+             "CREW_REVIEW_MAX_RETRIES": 1, "CREW_CONTRACT_GATE": False}
+    _orig = (pc.get, _pl.delete_file, _pl.push_file, _mn._add_wi_comment)
+    pc.get = lambda k: knobs[k] if k in knobs else _orig[0](k)
+    _mn._add_wi_comment = lambda *a, **k: None
+
+    class _Crew:
+        def __init__(self, raw, log):
+            self.raw, self.log = raw, log
+        def kickoff(self, inputs=None):
+            self.log.append(inputs)
+            return SimpleNamespace(raw=self.raw, token_usage=None)
+
+    class _Client:
+        def get_file_content(self, *a, **k):
+            return "<?php\n" + "echo 1;\n" * 40
+        def add_pr_comment(self, *a, **k):
+            return {}
+
+    def mk(change_type):
+        f = AgileSDLCFlow()
+        f.state.work_item_id, f.state.repo_name, f.state.branch_name = "76578", "marketplace", "feature/76578"
+        f.state.pr_id, f.state.pr_url = "45479", "https://example/pr/45479"
+        f.state.plan = {"changes": [{"file_path": "/secret.json", "change_type": change_type,
+                                     "description": "x", "current_code": "", "new_code": ""}]}
+        f.state.review_issues = [{"id": "R1", "file": "/secret.json", "severity": "blocker",
+                                  "problem": "p", "required_fix": "r", "status": "open",
+                                  "fix_targets": [_norm_path("/secret.json")]}]
+        f._envelope = {"retries": 3}
+        f._client = _Client()
+        f._db = None
+        calls = {"verify": [], "code": []}
+        verify_raw = 'REVIEW_VERIFY_JSON: {"results": [{"id": "R1", "status": "open"}], "new_findings": []}'
+        f._agile_crew = SimpleNamespace(
+            create_verify_review_crew=lambda: _Crew(verify_raw, calls["verify"]),
+            create_code_crew=lambda: _Crew("<?php\n" + "echo 2;\n" * 40, calls["code"]),
+        )
+        for name in ("_enable_impl_repo_tools", "_restore_worktree_file", "_stage_worktree_file",
+                     "_track_and_check_budget", "_step_done"):
+            setattr(f, name, lambda *a, **k: None)
+        f._build_step_context = lambda *a, **k: ""
+        f._prefetch_pr_changes_context = lambda *a, **k: ""
+        f._test_requirement_note = lambda *a, **k: ""
+        f._prefer_worktree_edit = lambda repo, fp, new, old: new
+        return f, calls
+
+    try:
+        # ── silme: ilk tur siler, ikinci turda dosya zaten yok → ilerleme yok ──
+        deletes = []
+        def _fake_delete(repo, br, fp, msg, repo_mgr=None, dry_run=False):
+            deletes.append(fp)
+            return ({"success": True, "change_type": "delete", "file": fp, "push_id": 7}
+                    if len(deletes) == 1 else
+                    {"success": True, "change_type": "delete", "file": fp, "note": "already absent"})
+        _pl.delete_file = _fake_delete
+        f, calls = mk("delete")
+        try:
+            f._review_retry_loop()
+            raised = False
+        except _NHR:
+            raised = True
+        check("silme: developer'a hiç gidilmedi", calls["code"] == [], str(len(calls["code"])))
+        check("silme: dosya delete_file ile silindi", deletes[:1] == ["/secret.json"], str(deletes))
+        check("silme: push olmayan turda doğrulama çağrılmadı (1 verify)", len(calls["verify"]) == 1,
+              str(len(calls["verify"])))
+        check("silme: ilerleme yok → needs_human (sonsuz döngü yok)", raised and len(deletes) == 2,
+              f"raised={raised} deletes={len(deletes)}")
+
+        # ── düzenleme: push her turda başarılı ama madde kapanmıyor ──
+        pushes = []
+        _pl.push_file = lambda *a, **k: (pushes.append(a[2]) or {"success": True, "change_type": "edit", "file": a[2]})
+        f, calls = mk("edit")
+        try:
+            f._review_retry_loop()
+            raised = False
+        except _NHR:
+            raised = True
+        check("erken durdurma: aynı açık madde iki turda → durur (zarf 3, ham knob 1)",
+              raised and len(calls["verify"]) == 2, f"raised={raised} verify={len(calls['verify'])}")
+    finally:
+        pc.get, _pl.delete_file, _pl.push_file, _mn._add_wi_comment = _orig
+
+
+def test_delete_push_payload():
+    """Azure push'ta silme değişikliği içerik taşımaz; dry-run'da git rm + commit."""
+    print("\n[silme: Azure push gövdesi + dry-run]")
+    from agile_sdlc_crew.tools import azure_devops_base as _azb
+    from agile_sdlc_crew.tools.local_repo import LocalRepoManager
+
+    sent = {}
+    class _Resp:
+        def __init__(self, data): self._d = data; self.text = "x"; self.status_code = 201
+        def raise_for_status(self): pass
+        def json(self): return self._d
+    class _C(_azb.AzureDevOpsClient):
+        _headers = {}
+    c = _C.__new__(_C)
+    c.list_branches = lambda repo: [{"name": "refs/heads/b", "objectId": "abc"}]
+    c._repo_api_url = lambda repo, project=None: "https://x/repo"
+    c.API_VERSION = "7.1"
+    _orig_post = _azb.requests.post
+    _azb.requests.post = lambda url, headers=None, json=None, params=None, timeout=None: (sent.update(body=json) or _Resp({"pushId": 9}))
+    try:
+        c.push_changes("r", "b", [{"changeType": "delete", "path": "/a.json"},
+                                  {"changeType": "edit", "path": "/b.php", "content": "x"}], "m")
+    finally:
+        _azb.requests.post = _orig_post
+    ch = sent["body"]["commits"][0]["changes"]
+    check("push: delete değişikliğinde newContent yok", "newContent" not in ch[0] and ch[0]["changeType"] == "delete")
+    check("push: edit değişikliği içeriğini korur", ch[1]["newContent"]["content"] == "x")
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td) / "r"
+        repo.mkdir()
+        g = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        (repo / "a.json").write_text("{}")
+        g("add", "."); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i")
+        mgr = LocalRepoManager.__new__(LocalRepoManager)
+        mgr._get_repo_dir = lambda name: repo
+        mgr.checkout = lambda name, br: g("checkout", "-q", "-B", br)
+        mgr._git = lambda args, cwd=None: subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        r1 = mgr.delete_and_commit_local("r", "feature/x", "/a.json", "sil")
+        r2 = mgr.delete_and_commit_local("r", "feature/x", "/a.json", "sil")
+        check("dry-run: dosya silinip commit edildi", r1.get("success") and not (repo / "a.json").exists()
+              and "sil" in g("log", "-1", "--format=%s").stdout, str(r1))
+        check("dry-run: zaten yoksa no-op başarı", r2.get("success") and "already absent" in r2.get("note", ""), str(r2))
+
+
+def test_quality_direct_flow():
+    """Job #244: Task dosyayı ve satırı söylüyordu; BA + mimar keşfi + araçlı amend
+    $1.54 tuttu. Doğrudan akış: analiz Task'tan, kanıt + okuyan kod Python'da."""
+    print("\n[kalite doğrudan akış]")
+    from agile_sdlc_crew.flow import _quality_evidence, _quality_requirements_json, _requirement_ids
+    from agile_sdlc_crew import pipeline_config as pc
+
+    req = _quality_requirements_json(
+        "[marketplace] Google Cloud service accounts keys should not be disclosed",
+        "<p>Kanıt: mpModerationAiAuth.json:5</p>",
+        "<ul><li>Secret koddan kaldırılır</li><li>Yeni değer gizli yönetiminden okunur</li></ul>")
+    ids = _requirement_ids(req)
+    check("analiz: FR/TR + Task'taki iki kabul kriteri", {"FR1", "TR1", "AC1", "AC2"} <= set(ids), str(ids))
+    check("analiz: az gereksinim (zarf büyümez)", len(ids) <= 5, str(ids))
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "repo"
+        root.mkdir()
+        g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        (root / "auth.json").write_text('{\n  "type": "service_account",\n  "private_key": "-----BEGIN KEY-----abc",\n'
+                                        '  "client_email": "x@y.iam.gserviceaccount.com"\n}\n')
+        (root / "app").mkdir()
+        (root / "app" / "Svc.php").write_text("<?php\nclass Svc {\n  function __construct() {\n"
+                                              "    $p = __DIR__ . '/../auth.json';\n  }\n}\n")
+        (root / "app" / "Big.php").write_text("<?php\n" + "".join(f"// line {i} {'x' * 30}\n" for i in range(2, 400))
+                                              + "$apiKey = 'AIzaSyD1234567890abcdefghijkLMNOP';\n")
+        (root / "vendor").mkdir()
+        (root / "vendor" / "lib.php").write_text("<?php // auth.json\n")
+        g("add", "-A"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i")
+        ev = _quality_evidence(root, "<li>auth.json:3</li><li>app/Big.php:400</li> api.flo.com.tr:443")
+        check("kanıt: veri dosyası bağlamda", "## /auth.json (tamamı" in ev, ev[:300])
+        check("kanıt: dosyayı okuyan kod eklendi", "/app/Svc.php — `auth.json`" in ev, ev[:600])
+        check("kanıt: vendor okuyucu alınmaz", "vendor/lib.php" not in ev)
+        check("kanıt: büyük dosyada yalnız satır penceresi", "/app/Big.php (satır 360–" in ev and "// line 10 " not in ev, ev[-500:])
+        check("kanıt: repoda olmayan yol (alan adı:port) elenir", "api.flo.com.tr" not in ev)
+        check("kanıt: sır değerleri modele gitmez", "BEGIN KEY" not in ev and "AIzaSy" not in ev
+              and '"private_key": "***"' in ev, ev[:400])
+        check("kanıt: repoda yoksa boş", _quality_evidence(root, "<li>nope.json:1</li>") == "")
+
+    # Akış kancaları: knob kapalıysa normal akış, açıkken zarf S ve keşif kapalı
+    f = AgileSDLCFlow()
+    f.state.wi_tags = "tempo-quality; tempo-src-sonar"
+    knobs = {"CREW_QUALITY_DIRECT_FLOW": True, "CREW_VARIABLE_ENVELOPE": True}
+    _orig = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _orig(k)
+    try:
+        f.state.requirements_text = req
+        f._apply_envelope("requirements")
+        f._apply_envelope("plan")
+        check("zarf: doğrudan akışta S/$5/1 tur", getattr(f, "_envelope", None) == {"class": "S", "budget": 5.0, "retries": 1},
+              str(getattr(f, "_envelope", None)))
+        knobs["CREW_QUALITY_DIRECT_FLOW"] = False
+        check("knob kapalı: doğrudan akış yok", not f._quality_direct_flow())
+        f2 = AgileSDLCFlow()
+        f2.state.wi_tags = "backend"
+        knobs["CREW_QUALITY_DIRECT_FLOW"] = True
+        check("kalite etiketi yoksa doğrudan akış yok", not f2._quality_direct_flow())
+    finally:
+        pc.get = _orig
+
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("step1: doğrudan akışta BA crew ve SM review çağrılmaz",
+          "requirements_text = _quality_requirements_json(" in src
+          and '(True, "") if _direct else self._scrum_review("Is Analizi"' in src)
+    check("step4: doğrudan akışta Faz A keşfi kapalı",
+          src.find("if self._quality_direct_flow() and _repo_dirs:") < src.find("plan, raw_output, need_explore = self._architect_emit_json("))
+    check("amend: doğrudan akışta repo araçları açılmaz", "and not self._quality_direct_flow()):" in src)
+    check("kanıt yalnız teknik tasarım bağlamına girer", 'if step_key == "technical_design_task":\n                try:\n                    ev_ctx = self._quality_evidence_block()' in src)
+
+
+def test_resume_skips_discarded_work():
+    """Job #246: önceki işin PR'ı kapatılmış, branch'i silinmişti; resume yine de
+    BA'yı, planı, branch'i ve KAPALI PR'ı geri yükleyip review'a geçti."""
+    print("\n[resume: atılmış önceki iş]")
+
+    class _C:
+        def __init__(self, status=None, branches=(), boom=False):
+            self.status, self.branches, self.boom = status, branches, boom
+        def get_pull_request(self, repo, pr):
+            if self.boom:
+                raise RuntimeError("503")
+            return {"status": self.status}
+        def list_branches(self, repo):
+            return [{"name": b} for b in self.branches]
+
+    def mk(art, client):
+        f = AgileSDLCFlow()
+        f._prior_art_cache = art
+        f._client = client
+        return f
+
+    art_pr = {"repo_name": "marketplace", "branch_name": "feature/76578", "pr_id": "45479"}
+    check("PR abandoned → resume yok", mk(art_pr, _C("abandoned"))._prior_work_discarded())
+    check("PR merge edilmiş → resume yok", mk(art_pr, _C("completed"))._prior_work_discarded())
+    check("PR aktif → resume serbest", not mk(art_pr, _C("active"))._prior_work_discarded())
+    art_br = {"repo_name": "marketplace", "branch_name": "feature/76578", "pr_id": ""}
+    check("PR yok, branch silinmiş → resume yok", mk(art_br, _C(branches=["refs/heads/main"]))._prior_work_discarded())
+    check("PR yok, branch duruyor → resume serbest",
+          not mk(art_br, _C(branches=["refs/heads/feature/76578"]))._prior_work_discarded())
+    check("durum okunamazsa resume engellenmez", not mk(art_pr, _C(boom=True))._prior_work_discarded())
+    check("önceki iş yoksa engel yok", not mk({}, _C("abandoned"))._prior_work_discarded())
+
+
+def test_wi_lifecycle_on_queue():
+    """Kullanıcı kararı: kart kuyruğa atıldığı anda In Progress'e geçer; sorun olursa
+    kuyruk anındaki duruma (To Do) döner — iş başlarken okunan In Progress'e değil."""
+    print("\n[yaşam döngüsü: kuyruğa alınınca]")
+    from agile_sdlc_crew import wi_lifecycle as wl
+    from agile_sdlc_crew import pipeline_config as pc
+
+    c = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "To Do"})
+    before = wl.mark_queued(c, "76578")
+    check("kuyruk: To Do → In Progress, önceki durum döner", before == "To Do" and c.ops == [("state", 76578, "In Progress")], str(c.ops))
+    c2 = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "QA To Do"})
+    check("kuyruk: sahiplik dışı (QA) → dokunmaz", wl.mark_queued(c2, "1") == "QA To Do" and c2.ops == [])
+    check("geri al: In Progress → To Do", wl.revert_to(c, "76578", "To Do") == "To Do" and c.ops[-1] == ("state", 76578, "To Do"))
+    check("geri al: başlangıç boşsa dokunmaz", wl.revert_to(c, "76578", "") is None)
+
+    knobs = {"CREW_WI_LIFECYCLE": True, "CREW_WI_ASSIGN_IF_EMPTY": False}
+    _orig = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _orig(k)
+    try:
+        f = AgileSDLCFlow()
+        f.state.work_item_id, f.state.job_id = "76578", 247
+        f._client = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "In Progress"})
+        f._db = SimpleNamespace(get_job=lambda jid: {"id": jid, "wi_state_before": "To Do"})
+        f._wi_begin(f._client.fields)
+        check("iş başlarken: başlangıç = kuyruk anındaki durum", f.state.wi_state_initial == "To Do"
+              and f._client.ops == [], f"{f.state.wi_state_initial} {f._client.ops}")
+        f.wi_lifecycle_on_exception(RuntimeError("x"))
+        check("sorun → kuyruk anındaki duruma (To Do) döner", f._client.ops[-1] == ("state", 76578, "To Do"), str(f._client.ops))
+    finally:
+        pc.get = _orig
+
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/server.py").read_text()
+    check("server: her kuyruğa almada işaretleme (_ensure_worker)", "threading.Thread(target=_wi_mark_queued_jobs" in src)
+    check("server: silinen kuyruk işi ve restart'ta yarım kalan iş geri alınır",
+          'f"iş #{job_id} silindi"' in src and '"sunucu yeniden başladı"' in src)
+
+
+def test_pre_pr_verify_and_build_fix():
+    """Job #248 ($5.44): eksik Go import'u CI'a kadar gitti; build hata özeti
+    hazırlık YAML'ıydı; build-fix dosya başına Opus çağrısı yaptı ve silinmiş
+    analytics.json'a düzyazı yazdı; test dışı Sonar uyarısı ikinci turu açtı."""
+    print("\n[PR öncesi doğrulama + build-fix]")
+    import shutil
+    from agile_sdlc_crew import verify as vf
+    from agile_sdlc_crew.tools.azure_devops_base import extract_build_errors
+    from agile_sdlc_crew.flow import _build_issues_block
+    from agile_sdlc_crew import pipeline_config as pc
+
+    # ── build log özeti ──
+    log = "\n".join([
+        "2026-10-27T11:23:33.1Z ##[section]Starting: Run Tests",
+        "2026-10-27T11:23:33.1Z Task         : Command line",
+        "2026-10-27T11:23:33.1Z Evaluating: eq('true', variables['system.debugContext'])",
+        "2026-10-27T11:25:01.0Z Dumping database schema",
+        "2026-10-27T11:25:02.0Z # gocrons/pkg/sorting",
+        "2026-10-27T11:25:02.0Z pkg/sorting/a.go:8:2: \"os\" imported and not used",
+        "2026-10-27T11:25:02.0Z pkg/sorting/a.go:392:15: undefined: webanalytics",
+    ] + [f"2026-10-27T11:25:03.0Z FAIL\tgocrons/pkg/p{i} [build failed]" for i in range(40)]
+      + ["2026-10-27T11:25:04.0Z ##[error]Bash exited with code '1'."])
+    ex = extract_build_errors(log)
+    check("log: derleyici hataları önde, zaman damgasız", ex.startswith("# gocrons/pkg/sorting\npkg/sorting/a.go:8:2"), ex[:120])
+    check("log: şablon gürültüsü atılır", "Evaluating:" not in ex and "Task         :" not in ex)
+    check("log: FAIL paket yığını tek satır", "(40 paket 'build failed'" in ex and ex.count("[build failed]") == 0, ex[-300:])
+
+    # ── kısmi başarı ──
+    check("kısmi başarı: yalnız Sonar uyarısı → bloklamaz",
+          not _build_issues_block([{"name": "Run SonarQube Analysis", "result": "succeededWithIssues"}]))
+    check("kısmi başarı: test adımı uyarılı → bloklar",
+          _build_issues_block([{"name": "Run Tests", "result": "succeededWithIssues"}]))
+    check("kısmi başarı: herhangi bir Task failed → bloklar",
+          _build_issues_block([{"name": "Lint", "result": "failed"}]))
+
+    # ── dil doğrulayıcıları ──
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "bad.json").write_text('{"a": 1,}')
+        (root / "ok.yaml").write_text("a: 1\n")
+        (root / "bad.py").write_text("def f(:\n")
+        r = vf.verify(root, ["/bad.json", "/ok.yaml", "/bad.py", "/gone.php"])
+        check("doğrulayıcı: JSON/Python hataları dosya:satır ile", not r["ok"]
+              and any(i.startswith("bad.json:") for i in r["issues"]) and any("bad.py" in i for i in r["issues"]), str(r))
+        check("doğrulayıcı: diskte olmayan dosya atlanır", "php" not in r["ran"])
+        check("hata satırından dosya çıkarımı", "bad.json" in vf.referenced_files(r["issues"]))
+        if shutil.which("go"):
+            g = root / "gomod"
+            (g / "pkg" / "a").mkdir(parents=True)
+            (g / "go.mod").write_text("module m\n\ngo 1.21\n")
+            (g / "pkg" / "a" / "a.go").write_text('package a\n\nimport "os"\n\nfunc F() string { return strings.ToUpper("x") }\n')
+            rg = vf.verify(g, ["pkg/a/a.go"])
+            check("go: eksik import ve kullanılmayan import yakalanır (#248)", not rg["ok"]
+                  and any("undefined: strings" in i for i in rg["issues"])
+                  and any('"os" imported and not used' in i for i in rg["issues"]), str(rg))
+        else:
+            skip("go doğrulayıcı", "go yok")
+
+    # ── tek çağrıda çok dosyalı düzeltme ──
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        repo = base / "r"
+        (repo / "pkg").mkdir(parents=True)
+        g = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        for n in ("a.go", "b.go"):
+            (repo / "pkg" / n).write_text(f"package pkg // {n} main\n")
+        (repo / "secret.json").write_text("{}")
+        g("add", "-A"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i")
+
+        branch = {"/pkg/a.go": "package pkg // a branch broken\n", "/pkg/b.go": "package pkg // b branch broken\n",
+                  "/pkg/new.go": "package pkg // new broken\n"}
+        pushes = []
+
+        class _Cl:
+            def get_file_content(self, repo_name, fp, br):
+                if fp in branch:
+                    return branch[fp]
+                raise RuntimeError("404 Not Found")
+            def push_changes(self, repo_name, br, changes, msg):
+                pushes.append((msg, [c["path"] for c in changes]))
+                for c in changes:
+                    branch[c["path"]] = c["content"]
+                return {"pushId": 1}
+
+        calls = []
+
+        class _Crew:
+            def kickoff(self, inputs=None):
+                calls.append(inputs)
+                for n in ("a.go", "new.go"):
+                    p = repo / "pkg" / n
+                    p.write_text(p.read_text().replace("broken", "fixed"))
+                return SimpleNamespace(raw="tamam", token_usage=None, pydantic=None)
+
+        f = AgileSDLCFlow()
+        f.state.work_item_id, f.state.repo_name, f.state.branch_name = "76575", "r", "feature/76575"
+        f.state.plan = {"changes": [{"file_path": "/secret.json", "change_type": "delete"}]}
+        f._client = _Cl()
+        f._repo_mgr = SimpleNamespace(base_dir=base, _git=lambda args, cwd=None: subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True))
+        f._agile_crew = SimpleNamespace(create_code_crew=lambda: _Crew())
+        f._enable_impl_repo_tools = lambda: True
+        f._track_and_check_budget = lambda *a, **k: None
+        f._build_step_context = lambda *a, **k: ""
+        n = f._multi_file_fix(["pkg/a.go", "/pkg/b.go", "/pkg/new.go", "/secret.json"], "undefined: x", "build_fix", "HATA")
+        check("çok dosyalı düzeltme: TEK developer çağrısı", len(calls) == 1, str(len(calls)))
+        check("çok dosyalı düzeltme: silinecek dosya hedefe girmez", "secret.json" not in calls[0]["change_description"])
+        check("çok dosyalı düzeltme: yalnız değişen dosyalar, TEK commit",
+              n == 2 and len(pushes) == 1 and sorted(pushes[0][1]) == ["/pkg/a.go", "/pkg/new.go"], str(pushes))
+        check("çok dosyalı düzeltme: klon geri alındı (main hâli, PR'ın yeni dosyası kalmaz)",
+              (repo / "pkg" / "a.go").read_text() == "package pkg // a.go main\n" and not (repo / "pkg" / "new.go").exists())
+
+        # ── PR öncesi doğrulama kapısı ──
+        knobs = {"CREW_PRE_PR_VERIFY": True}
+        _orig = pc.get
+        pc.get = lambda k: knobs[k] if k in knobs else _orig(k)
+        import agile_sdlc_crew.verify as _vfm
+        _orig_verify = _vfm.verify
+        seen = []
+
+        def _fake_verify(root, changed, **kw):
+            seen.append({fp: (Path(root) / fp.lstrip("/")).read_text() for fp in changed
+                         if (Path(root) / fp.lstrip("/")).exists()})
+            bad = any("broken" in t for t in seen[-1].values())
+            return {"ok": not bad, "ran": ["go"], "skipped": [],
+                    "issues": ["pkg/b.go:1:1: undefined: y"] if bad else []}
+        _vfm.verify = _fake_verify
+        try:
+            branch["/pkg/b.go"] = "package pkg // b branch broken\n"
+            calls.clear(); pushes.clear()
+
+            class _Crew2:
+                def kickoff(self, inputs=None):
+                    calls.append(inputs)
+                    p = repo / "pkg" / "b.go"
+                    p.write_text(p.read_text().replace("broken", "fixed"))
+                    return SimpleNamespace(raw="", token_usage=None, pydantic=None)
+            f._agile_crew = SimpleNamespace(create_code_crew=lambda: _Crew2())
+            f.state.all_pushes = [{"file": "/pkg/b.go", "success": True, "change_type": "edit"},
+                                  {"file": "/secret.json", "success": True, "change_type": "delete"}]
+            f._pre_pr_verify()
+            check("doğrulama: branch hâli klona bindirilip doğrulanır", "broken" in seen[0].get("/pkg/b.go", ""), str(seen[:1]))
+            check("doğrulama: hata → tek hedefli düzeltme + tekrar doğrulama geçer",
+                  len(calls) == 1 and len(pushes) == 1 and len(seen) == 2 and "fixed" in seen[1]["/pkg/b.go"], f"{len(calls)} {pushes} {seen}")
+            check("doğrulama sonrası klon temiz, silinen dosya geri geldi",
+                  (repo / "pkg" / "b.go").read_text() == "package pkg // b.go main\n" and (repo / "secret.json").exists())
+        finally:
+            _vfm.verify = _orig_verify
+            pc.get = _orig
+
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("build-fix: silinecek dosyalar hedeften çıkarılır, tek çağrı yolu önce denenir",
+          "fix_files = [f for f in fix_files if _norm_path(f) not in _deleted]" in src
+          and 'self._multi_file_fix(fix_files, failure_summary, "build_fix"' in src)
+    check("kalite doğrudan akış: build-fix en fazla 1 tur", "max_retries = min(max_retries, 1)" in src)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -5487,7 +5931,13 @@ def main():
               test_quality_sonar_exclude,
               test_env_conventions,
               test_sprint_report_no_sp,
-              test_sprint_report_designs):
+              test_sprint_report_designs,
+              test_review_retry_delete_and_no_progress,
+              test_delete_push_payload,
+              test_quality_direct_flow,
+              test_resume_skips_discarded_work,
+              test_wi_lifecycle_on_queue,
+              test_pre_pr_verify_and_build_fix):
         try:
             t()
         except Exception as e:

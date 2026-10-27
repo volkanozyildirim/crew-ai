@@ -174,6 +174,9 @@ def init_db():
         _ensure_column(cur, "jobs", "total_turns", "INT DEFAULT 0")
         _ensure_column(cur, "jobs", "estimate_sp", "TINYINT NULL")
         _ensure_column(cur, "jobs", "job_kind", "VARCHAR(20) NOT NULL DEFAULT 'pipeline'")
+        # WI yaşam döngüsü: kuyruğa alınırken WI In Progress'e taşınır; sorun
+        # olursa dönülecek durum burada (NULL = henüz işaretlenmedi).
+        _ensure_column(cur, "jobs", "wi_state_before", "VARCHAR(64) NULL")
         _ensure_column(cur, "job_steps", "cost_usd", "DECIMAL(12,6) DEFAULT 0")
         _ensure_column(cur, "job_steps", "tool_calls", "INT DEFAULT 0")
         _ensure_column(cur, "job_steps", "turns", "INT DEFAULT 0")
@@ -261,6 +264,28 @@ def get_next_queued_job() -> dict | None:
         cur = conn.cursor()
         cur.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY id LIMIT 1")
         return cur.fetchone()
+
+
+def list_unmarked_queued_jobs() -> list[dict]:
+    """Kuyruktaki, WI durumu henüz işaretlenmemiş pipeline işleri."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, work_item_id FROM jobs WHERE status='queued' AND dry_run=0 "
+            "AND kickoff_only=0 AND job_kind='pipeline' AND wi_state_before IS NULL ORDER BY id")
+        return list(cur.fetchall() or [])
+
+
+def set_wi_state_before(job_id: int, state: str):
+    with get_conn() as conn:
+        conn.cursor().execute("UPDATE jobs SET wi_state_before=%s WHERE id=%s", (state[:64], job_id))
+
+
+def list_running_jobs() -> list[dict]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, work_item_id, wi_state_before FROM jobs WHERE status='running'")
+        return list(cur.fetchall() or [])
 
 
 def delete_job(job_id: int):

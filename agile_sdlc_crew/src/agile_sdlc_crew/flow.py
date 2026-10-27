@@ -8,6 +8,7 @@ deklaratif olarak tanimlanir.
 import json as _json
 import logging
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -493,6 +494,156 @@ def _ec_evidence_lines(root, desc: str, limit: int = 6) -> list[str]:
 
 def _is_quality_wi(tags: str) -> bool:
     return "tempo-quality" in {t.strip().lower() for t in (tags or "").split(";")}
+
+
+# ── Kalite doğrudan akışı (CREW_QUALITY_DIRECT_FLOW) ──────────────────────
+# Sonar/New Relic Task'ı dosyayı ve satırı zaten söylüyor. Job #244 yine de
+# BA analizi + mimar keşfi (8 tur git log/show) + yol-kapısı amend'i ile
+# $1.54 harcadı; keşfin bulduğu tek yararlı bilgi (dosyayı GeminiService
+# okuyor) bir grep'ti. Bu yardımcılar o bilgiyi Python'da toplar.
+
+_QE_PATH_RE = re.compile(r"((?:[\w.@-]+/)*[\w.@-]+\.[A-Za-z0-9]{1,8}):(\d+)")
+_QE_DATA_EXT = {".json", ".yml", ".yaml", ".env", ".ini", ".xml", ".pem", ".key", ".p12", ".conf", ".properties"}
+_QE_MAX_CHARS = 16000
+
+
+_QE_SECRET_KV = re.compile(
+    r"""((["']?)[\w.-]*(?:key|secret|token|passw(?:or)?d|pwd|credential)[\w.-]*\2\s*(?:=>|[:=])\s*)(["'])(?:\\.|(?!\3).)*\3""",
+    re.I)
+
+
+def _qe_mask(text: str) -> str:
+    """Kanıt bir secret işinden gelebilir (#244: servis hesabı JSON'u) — değer
+    modele gitmez; yapı ve anahtar adları kalır."""
+    # render.mask_secrets'in key=value kuralı PHP'nin `=>`'unu bozuyor
+    # ('apiKey'=***'***'); burada yalnız uzun/sır-benzeri token kuralı alınır.
+    from agile_sdlc_crew.quality.render import _LONG, _secretish
+    s = _QE_SECRET_KV.sub(lambda m: f"{m.group(1)}{m.group(3)}***{m.group(3)}", text or "")
+    return _LONG.sub(lambda m: "***" if _secretish(m.group(0)) else m.group(0), s)
+
+
+def _qe_plain(desc_html: str) -> str:
+    import html as _html
+    return _html.unescape(re.sub(r"<[^>]+>", " ", desc_html or ""))
+
+
+def _qe_git(root, *args) -> str:
+    try:
+        r = subprocess.run(["git", *args], cwd=str(root), capture_output=True, text=True, timeout=30)
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _qe_ref(root) -> str:
+    """Yerel klon main'de geride kalabiliyor (#244: 61 commit) — kanıt uzak
+    varsayılan dalın içeriğinden okunur."""
+    for ref in ("origin/HEAD", "origin/main", "origin/master", "HEAD"):
+        if _qe_git(root, "rev-parse", "--verify", "--quiet", ref).strip():
+            return ref
+    return "HEAD"
+
+
+def _qe_window(lines: list[str], centers: list[int], radius: int) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for c in sorted(set(centers)):
+        a, b = max(1, c - radius), min(len(lines), c + radius)
+        if spans and a <= spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], b))
+        else:
+            spans.append((a, b))
+    return spans
+
+
+def _quality_evidence(root, desc_html: str, max_files: int = 4) -> str:
+    """Task'taki `yol:satır` kanıtlarının çevresi + veri/yapılandırma dosyalarını
+    okuyan kod. Repoda olmayan yollar (URI, alan adı:port) elenir."""
+    root = Path(root)
+    if not root.is_dir():
+        return ""
+    ref = _qe_ref(root)
+    hits: dict[str, list[int]] = {}
+    for m in _QE_PATH_RE.finditer(_qe_plain(desc_html)):
+        p = m.group(1).lstrip("/")
+        if p in hits or len(hits) < max_files:
+            hits.setdefault(p, []).append(int(m.group(2)))
+    parts: list[str] = []
+    used = 0
+
+    def add(title: str, body: str) -> bool:
+        nonlocal used
+        block = f"\n## {title}\n```\n{_qe_mask(body)}\n```"
+        if used + len(block) > _QE_MAX_CHARS:
+            return False
+        parts.append(block)
+        used += len(block)
+        return True
+
+    found: list[str] = []
+    for path, lns in hits.items():
+        text = _qe_git(root, "show", f"{ref}:{path}")
+        if not text:
+            continue
+        found.append(path)
+        lines = text.splitlines()
+        if len(text) <= 6000:
+            add(f"/{path} (tamamı, {len(lines)} satır; kanıt satırı {', '.join(map(str, lns))})", text)
+            continue
+        for a, b in _qe_window(lines, lns, 40):
+            if not add(f"/{path} (satır {a}–{b}; kanıt satırı {', '.join(map(str, lns))})",
+                       "\n".join(lines[a - 1:b])):
+                break
+    if not found:
+        return ""
+    for path in found:
+        if Path(path).suffix.lower() not in _QE_DATA_EXT:
+            continue
+        name = Path(path).name
+        out = _qe_git(root, "grep", "-n", "-F", name, ref, "--",
+                      ".", ":!vendor", ":!node_modules", ":!*.min.js", ":!*.lock")
+        users: dict[str, list[int]] = {}
+        for row in out.splitlines():
+            # ref:yol:satır:metin
+            seg = row.split(":", 3)
+            if len(seg) < 4 or seg[1] == path:
+                continue
+            if seg[1] in users or len(users) < 3:
+                users.setdefault(seg[1], []).append(int(seg[2]))
+        for upath, ulns in users.items():
+            ulines = _qe_git(root, "show", f"{ref}:{upath}").splitlines()
+            for a, b in _qe_window(ulines, ulns, 25):
+                add(f"/{upath} — `{name}` dosyasını okuyan kod (satır {a}–{b})",
+                    "\n".join(ulines[a - 1:b]))
+    if not parts:
+        return ""
+    return (
+        "\n\n# KALİTE KANITI (Task'taki dosya:satır — repodan okundu, keşif gerekmez)\n"
+        "Değişecek yer aşağıda. Veri/yapılandırma dosyalarını okuyan kod da eklendi; "
+        "dosya silinecekse o kodu da plana al. Repoda arama YAPMA, planı bundan üret."
+        + "".join(parts)
+    )
+
+
+def _quality_requirements_json(title: str, desc_html: str, ac_html: str) -> str:
+    """BA çağrısı yerine Task'tan deterministik analiz: kalite Task'ı ne
+    olduğunu, kanıtı ve kabul cümlesini zaten taşıyor. Az gereksinim → küçük zarf."""
+    acs = [_qe_plain(x).strip() for x in re.findall(r"<li[^>]*>(.*?)</li>", ac_html or "", re.S | re.I)]
+    acs = [re.sub(r"\s+", " ", a) for a in acs if a.strip()]
+    if not acs:
+        plain = re.sub(r"\s+", " ", _qe_plain(ac_html)).strip()
+        acs = [plain] if plain else [f"Bulgu giderilir: {title}"]
+    desc = re.sub(r"\s+", " ", _qe_plain(desc_html)).strip()
+    data = {
+        "summary": title,
+        "functional_requirements": [{"id": "FR1", "desc": f"Task'taki bulgu giderilir: {title}"}],
+        "technical_requirements": [{"id": "TR1", "desc": "Yalnız kanıttaki dosya/satırlara ve onları "
+                                                         "doğrudan etkileyen koda dokunulur; dış davranış değişmez."}],
+        "acceptance_criteria": [{"id": f"AC{i + 1}", "desc": a[:500]} for i, a in enumerate(acs[:5])],
+        "out_of_scope": ["Kanıtta olmayan dosyalarda yeniden düzenleme"],
+        "assumptions": [], "open_questions": [],
+        "task_text": desc[:3000],
+    }
+    return "```json\n" + _json.dumps(data, ensure_ascii=False, indent=2) + "\n```"
 
 
 QUALITY_BUILD_FIX_RULE = (
@@ -983,6 +1134,15 @@ def _changed_symbols(changed_files) -> set:
     return {s for s in out if len(s) >= 3}
 
 
+_TEST_TASK = re.compile(r"test|phpunit|pytest|jest|mocha|spec\b|unit", re.I)
+
+
+def _build_issues_block(tasks: list[dict]) -> bool:
+    """Kısmi başarılı build'de kapıyı düşüren adım var mı: başarısız biten
+    herhangi bir Task ya da uyarıyla biten bir TEST adımı."""
+    return any(t.get("result") == "failed" or _TEST_TASK.search(t.get("name") or "") for t in tasks)
+
+
 def _build_fix_regressions(old_content: str, new_content: str) -> list:
     """Build-fix ciktisi kabul edilebilir mi? Kabul EDILMEMESI gereken sinif.
 
@@ -1161,7 +1321,7 @@ def _coalesce_plan_changes(changes: list) -> list:
             continue
         descs = [c.get("description", "") for c in grp if c.get("description")]
         types = {c.get("change_type", "edit") for c in grp}
-        ctype = "add" if types == {"add"} else "edit"
+        ctype = "add" if types == {"add"} else ("delete" if types == {"delete"} else "edit")
         out.append({
             "file_path": fp,
             "change_type": ctype,
@@ -1478,6 +1638,13 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 env_ctx = ""
             if env_ctx:
                 tail.append(env_ctx)
+            if step_key == "technical_design_task":
+                try:
+                    ev_ctx = self._quality_evidence_block()
+                except Exception:  # noqa: BLE001
+                    ev_ctx = ""
+                if ev_ctx:
+                    tail.append(ev_ctx)
 
         # Kabul kriterleri — BA analizinden sonra belirlenir, pipeline boyunca
         # baglayici tek kaynak: tasarim, gelistirme, inceleme ve UAT buna gore yapilir.
@@ -1618,6 +1785,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
             enabled = False
         if not enabled:
             return None
+        _disc = getattr(self, "_prior_work_discarded", None)  # testler sahte self ile çağırıyor
+        if _disc and _disc():
+            return None
         try:
             cached = self._db.get_cached_step_output(step_key, self.state.work_item_id)
             # UZUNLUK ESIGI YOK. Onceden `len(cached.strip()) > 20` sarti vardi ve
@@ -1634,6 +1804,35 @@ class AgileSDLCFlow(Flow[PipelineState]):
         except Exception:
             pass
         return None
+
+    def _prior_work_discarded(self) -> bool:
+        """Onceki isin PR'i artik aktif degilse (abandoned/merge) ya da branch'i
+        silinmisse o isin ciktilari resume EDILMEZ — insan o sonucu atti.
+        Job #246: PR 45479 kapatilip branch silinmisti; resume yine de BA'yi,
+        plani, branch'i ve KAPALI PR'i geri yukleyip review'a gecti ($0, ama
+        ise yaramaz bir kosu). Durum okunamazsa resume engellenmez."""
+        cached = getattr(self, "_prior_discarded_cache", None)
+        if cached is not None:
+            return cached
+        discarded = False
+        art = self._prior_artifacts() or {}
+        repo, pr, br = art.get("repo_name"), str(art.get("pr_id") or ""), art.get("branch_name")
+        client = getattr(self, "_client", None)
+        try:
+            if repo and client is not None and pr.isdigit():
+                st = (client.get_pull_request(repo, int(pr)) or {}).get("status") or ""
+                if st and st != "active":
+                    discarded = True
+                    _log(f"  ⏩ Resume yok: önceki işin PR #{pr}'ı '{st}' — sonuçları atılmış sayılır")
+            elif repo and br and client is not None:
+                names = {b.get("name") for b in (client.list_branches(repo) or [])}
+                if f"refs/heads/{br}" not in names:
+                    discarded = True
+                    _log(f"  ⏩ Resume yok: önceki işin branch'i ({br}) silinmiş")
+        except Exception as e:  # noqa: BLE001
+            _log(f"  Önceki iş durumu okunamadı ({e}) — resume kuralı değişmedi")
+        self._prior_discarded_cache = discarded
+        return discarded
 
     def _resume_step(self, step_key: str, cached_output: str):
         """Cache'ten gelen ciktiyi loglayip step'i tamamlanmis olarak isaretle."""
@@ -1763,7 +1962,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
     # Gecisler surecten bagimsiz tercih listesiyle secilir ve YALNIZCA sahiplik
     # araligindan (Proposed + In Progress/Code Review/Blocked) yapilir — QA/UAT/
     # Done'daki bir WI'a dokunulmaz. Hatalar yutulur: WI durumu yazilamamasi
-    # pipeline'i asla durdurmaz.
+    # pipeline'i asla durdurmaz. Akis: basla → In Progress; is sorunsuz bitti →
+    # Code Review; sorun (hata/needs_info/needs_human) → baslangic durumu.
 
     def _wi_lifecycle_enabled(self) -> bool:
         from agile_sdlc_crew import pipeline_config as _pc_wl
@@ -1792,6 +1992,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.wi_type = info["wi_type"]
         self.state.wi_state_initial = info["wi_state"]
         self.state.wi_state_current = info["wi_state"]
+        # Kuyruğa alınırken WI zaten In Progress'e taşındıysa (server
+        # _wi_mark_queued_jobs) dönülecek durum o anki hâldir, şimdiki değil.
+        try:
+            _before = ((self._db.get_job(self.state.job_id) if (self._db and self.state.job_id) else None)
+                       or {}).get("wi_state_before")
+            if _before:
+                self.state.wi_state_initial = _before
+        except Exception:  # noqa: BLE001
+            pass
         self.state.wi_states = info["wi_states"]
         self.state.wi_assigned_to = info["wi_assigned_to"]
         self.state.wi_story_points = info.get("wi_story_points")
@@ -1845,18 +2054,16 @@ class AgileSDLCFlow(Flow[PipelineState]):
         return None
 
     def wi_lifecycle_on_exception(self, exc: BaseException) -> None:
-        """main.run_pipeline except'inden cagrilir: NeedsMoreInfo/NeedsHumanReview
-        → 'wait' (Blocked); diger hata → PR YOKSA baslangic durumuna geri al
-        (PR varsa Code Review'da kalir, insan karar verir)."""
+        """main.run_pipeline except'inden cagrilir: is sorunsuz bitmediyse
+        (hata, needs_info, needs_human) WI baslangic durumuna (Backlog/To Do)
+        geri alinir — PR acik olsa bile. Code Review yalnizca basarili bitisin
+        durumu; yarim is incelemeye alinmaz, Blocked'a da tasinmaz."""
         from agile_sdlc_crew import wi_lifecycle as _wl
         if not self._wi_lifecycle_enabled() or not self.state.wi_states:
             return
         try:
-            if isinstance(exc, NeedsHumanReview):
-                self._wi_transition("wait")
-                return
             target = _wl.plan_revert(self.state.wi_state_current, self.state.wi_state_initial,
-                                     self.state.wi_states, pr_exists=bool(self.state.pr_id))
+                                     self.state.wi_states, pr_exists=False)
             if target and _wl.apply_state(self._client, self.state.work_item_id, target, logger=_log):
                 self.state.wi_state_current = target
         except Exception as e:
@@ -2646,7 +2853,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
         )
         _repo_dirs = []
         try:
-            if _pc_ap.get("CREW_CLI_REPO_TOOLS") and self.state.repo_name:
+            if (_pc_ap.get("CREW_CLI_REPO_TOOLS") and self.state.repo_name
+                    and not self._quality_direct_flow()):
                 _d = self._repo_mgr.base_dir / self.state.repo_name
                 if _d.exists():
                     _repo_dirs = [str(_d)]
@@ -3001,6 +3209,12 @@ class AgileSDLCFlow(Flow[PipelineState]):
         ($10) bogulmustu — $9.60'ta review'da oldu."""
         from agile_sdlc_crew import pipeline_config as _pc_env
         if not _pc_env.get("CREW_VARIABLE_ENVELOPE"):
+            return
+        # self yerine state: testler bu metodu sahte bir self ile de çağırıyor
+        if _is_quality_wi(getattr(self.state, "wi_tags", "")) and _pc_env.get("CREW_QUALITY_DIRECT_FLOW"):
+            if not getattr(self, "_envelope", None):
+                self._envelope = {"class": "S", "budget": 5.0, "retries": 1}
+                _log(f"  📐 Zarf [{stage}]: S — bütçe $5, review retry 1 (kalite doğrudan akış)")
             return
         n_req = len(_requirement_ids(self.state.requirements_text or ""))
         changes = (self.state.plan or {}).get("changes") or []
@@ -3521,7 +3735,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         — ham review_text -> _amend_plan -> tum plan dosyalarini yeniden yaz -> tam
         acik-uctu re-review."""
         from agile_sdlc_crew.main import _extract_code_from_output, _validate_code, _add_wi_comment
-        from agile_sdlc_crew.pipeline import push_file
+        from agile_sdlc_crew.pipeline import push_file, delete_file
         from agile_sdlc_crew.tools import claude_cli_llm as _cli_rr
         from agile_sdlc_crew import pipeline_config as _pc_rr
 
@@ -3649,9 +3863,23 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         self._enable_impl_repo_tools()
 
+        pushed_any = False
         for i, change in enumerate(changes_to_fix):
             file_path = change.get("file_path", "")
             _log(f"  Retry implement [{i+1}/{len(changes_to_fix)}]: {file_path}")
+
+            if change.get("change_type") == "delete":
+                del_result = delete_file(
+                    repo_name, branch, file_path,
+                    f"fix: review feedback - dosya silindi (WI #{self.state.work_item_id})",
+                    repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
+                )
+                if del_result.get("success"):
+                    _log(f"    🗑️ Silindi ({del_result.get('note') or 'push'})")
+                    pushed_any = pushed_any or del_result.get("note") != "already absent"
+                else:
+                    _log(f"    Silme hatasi: {del_result.get('error', '?')}")
+                continue
 
             existing_content = ""
             try:
@@ -3753,6 +3981,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             )
             if push_result.get("success"):
                 _log(f"    Push OK: {file_path}")
+                pushed_any = True
                 self._restore_worktree_file(repo_name, file_path)
             else:
                 _log(f"    Push HATA: {push_result.get('error', '?')}")
@@ -3762,9 +3991,18 @@ class AgileSDLCFlow(Flow[PipelineState]):
         for (_r, _fp) in list((getattr(self, "_staged_worktree", None) or {}).keys()):
             if _r == repo_name:
                 self._restore_worktree_file(repo_name, _fp)
-        _log("  Review retry: dosyalar guncellendi, dogrulama yapiliyor")
 
-        if not structured:
+        # Hicbir sey push edilmediyse PR degismedi: dogrulamak ayni sonucu verir
+        # (job #244: 5 bos turda 5 dogrulama, ~$2.1) — dogrulamadan eskale et.
+        no_progress = False
+        if not pushed_any:
+            _log("  ⚠️ Review retry: bu turda hicbir dosya push edilmedi — dogrulama atlanıyor, ilerleme yok")
+            no_progress = True
+            still_rejected = True
+            remaining_summary = (_format_issues_md(open_issues) if structured
+                                 else (self.state.review_text or "")[:2000])
+        elif not structured:
+            _log("  Review retry: dosyalar guncellendi, dogrulama yapiliyor")
             # ── LEGACY re-review (tam acik-uctu, degismedi) ──
             ctx = self._build_step_context("review_pr_task")
             ctx += self._prefetch_pr_changes_context()
@@ -3786,6 +4024,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             remaining_summary = self.state.review_text[:2000]
         else:
             # ── YAPISAL verify: madde-madde kapanma + dar blocker-regresyon taramasi ──
+            _log("  Review retry: dosyalar guncellendi, dogrulama yapiliyor")
             for i in open_issues:
                 self._review_item_attempts[i["id"]] = self._review_item_attempts.get(i["id"], 0) + 1
 
@@ -3848,13 +4087,16 @@ class AgileSDLCFlow(Flow[PipelineState]):
             cur_ids = {i["id"] for i in still_open}
             if still_rejected and self._review_prev_open_ids is not None and cur_ids == self._review_prev_open_ids:
                 _log("  ⚠️ Review retry: bu turda hicbir madde kapanmadi — ilerleme yok, erken durduruluyor")
-                self._review_attempt = _pc_rr.get("CREW_REVIEW_MAX_RETRIES")
+                no_progress = True
             self._review_prev_open_ids = cur_ids
 
         if still_rejected:
             review_attempt = getattr(self, "_review_attempt", 0)
             max_review_retries = self._envelope_retries(_pc_rr.get("CREW_REVIEW_MAX_RETRIES"))
-            if review_attempt < max_review_retries:
+            # Erken durdurma sayaci DEGIL bayragi kullanir: sayaca ham
+            # CREW_REVIEW_MAX_RETRIES yaziliyordu ama tavan zarftan (3) geliyor —
+            # sayac her turda 2'ye donup dongu hic bitmedi (job #244, $3.19).
+            if not no_progress and review_attempt < max_review_retries:
                 self._review_attempt = review_attempt + 1
                 _log(f"  🔄 Hala acik blocking madde var — tekrar (deneme {self._review_attempt}/{max_review_retries})")
                 self._review_retry_loop()
@@ -3864,19 +4106,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
             # PR ACIK KALIR; ne denendigi ve neden kapanmadigi PR + WI'ya yazilir.
             # Job #178+#179'da $16.21 harcandi ve geriye TESHISSIZ iki yetim PR
             # kaldi — tek sebep "reviewer razi olmadi = job oldu" denklemiydi.
-            _log(f"  🙋 {max_review_retries} deneme sonrasi hala acik madde — "
+            _rounds = (f"{review_attempt} düzeltme turu"
+                       + (" (son turda ilerleme yok)" if no_progress else ""))
+            _log(f"  🙋 {_rounds} sonrasi hala acik madde — "
                  f"insan mudahalesine devredildi (PR acik kaliyor)")
             _tried = _format_issues_md([
                 i for i in self.state.review_issues if i.get("status") == "closed"
             ])
             _diag = (
-                f"## 🙋 İnsan İncelemesi Gerekli — {max_review_retries} Otomatik Düzeltme Yetmedi\n\n"
+                f"## 🙋 İnsan İncelemesi Gerekli — Otomatik Düzeltme Yetmedi ({_rounds})\n\n"
                 f"PR: [#{self.state.pr_id}]({self.state.pr_url}) — **açık bırakıldı**, "
                 f"kod incelemeye hazır.\n\n"
                 f"### Kapanmayan maddeler\n{remaining_summary}\n\n"
                 f"### Bu turda kapatılan/düşürülen maddeler\n{_tried}\n\n"
                 f"### Neden otomatik kapatılamadı\n"
-                f"Pipeline {max_review_retries} düzeltme turu denedi; kalan maddeler "
+                f"Pipeline {_rounds} denedi; kalan maddeler "
                 f"ya aynı hâlde tekrarladı (ilerleme yok) ya da düzeltme kapsamı "
                 f"dışında. Kararı size bırakıyor.\n\n"
                 f"---\n*Tempo — insan müdahalesi (job `needs_human`)*"
@@ -3890,20 +4134,20 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._step_done(
                 "review_pr_task",
                 (f"REVIEW_DECISION: NEEDS_HUMAN\n"
-                 f"İnsan müdahalesi gerekli — {max_review_retries} deneme sonrası "
+                 f"İnsan müdahalesi gerekli — {_rounds} sonrası "
                  f"kapanmayan madde:\n{remaining_summary}")[:3000],
             )
             if self._db and self.state.job_id:
                 try:
                     self._db.needs_human_job(
                         self.state.job_id,
-                        f"Review: {max_review_retries} deneme sonrasi kapanmayan madde "
+                        f"Review: {_rounds} sonrasi kapanmayan madde "
                         f"— PR acik, insan incelemesi bekliyor",
                     )
                 except Exception as _e_nh:
                     _log(f"  needs_human durumu yazilamadi: {_e_nh}")
             raise NeedsHumanReview(
-                f"{max_review_retries} deneme sonrasi kapanmayan review maddesi "
+                f"{_rounds} sonrasi kapanmayan review maddesi "
                 f"— PR #{self.state.pr_id} acik, insan incelemesi bekliyor"
             )
 
@@ -4366,6 +4610,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
         wi_ac_plain = ""
         wi_title_raw = ""
         wi_desc_clean = ""
+        wi_fields: dict = {}
         try:
             wi_full = self._client.get_work_item(int(self.state.work_item_id))
             wi_fields = wi_full.get("fields", {}) if wi_full else {}
@@ -4556,13 +4801,20 @@ class AgileSDLCFlow(Flow[PipelineState]):
             except Exception as e:
                 _log(f"  WI media analizi hatasi (atlaniyor): {e}")
 
-        req_crew = self._agile_crew.create_requirements_crew()
-        req_result = req_crew.kickoff(inputs={
-            "work_item_id": self.state.work_item_id,
-            "previous_context": ctx,
-            "scrum_master_feedback": "",
-        })
-        requirements_text = req_result.raw or ""
+        _direct = self._quality_direct_flow()
+        if _direct:
+            requirements_text = _quality_requirements_json(
+                wi_title_raw, getattr(self, "_quality_desc", "") or wi_desc_clean,
+                (wi_fields or {}).get("Microsoft.VSTS.Common.AcceptanceCriteria", "") or "")
+            _log("  🎯 Kalite doğrudan akış: iş analizi Task'tan üretildi (LLM yok)")
+        else:
+            req_crew = self._agile_crew.create_requirements_crew()
+            req_result = req_crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "previous_context": ctx,
+                "scrum_master_feedback": "",
+            })
+            requirements_text = req_result.raw or ""
 
         # 🚨 INSUFFICIENCY CHECK — Python-first.
         # We no longer ask the agent "say INSUFFICIENT" (small LLMs copy
@@ -4599,7 +4851,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             ).lstrip()
 
         # SM Review
-        approved, feedback = self._scrum_review("Is Analizi", requirements_text)
+        approved, feedback = (True, "") if _direct else self._scrum_review("Is Analizi", requirements_text)
         if not approved:
             _log("  SM iyilestirme istedi, tekrar calistiriliyor...")
             req_crew = self._agile_crew.create_requirements_crew()
@@ -5667,6 +5919,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 if (self._repo_mgr.base_dir / r).exists()
             ]
 
+        if self._quality_direct_flow() and _repo_dirs:
+            _log("  🎯 Kalite doğrudan akış: mimar repo keşfi (Faz A) kapalı — kanıt bağlamda")
+            _repo_dirs = []
+
         # ── SPIKE (faz 5): kod yok, arastirma raporu var ─────────────────
         # Tip/etiket/baslik acikca spike diyorsa plan uretilmez: bir kez
         # repo-tool'lu kesif → Turkce rapor WI yorumuna → kalan adimlar
@@ -6069,7 +6325,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
     def step6_implement_code(self):
         """Adim 6: Kod Gelistirme - dosya dongusu."""
         from agile_sdlc_crew.main import _extract_code_from_output, _validate_code
-        from agile_sdlc_crew.pipeline import push_file
+        from agile_sdlc_crew.pipeline import push_file, delete_file
         from agile_sdlc_crew.tools import claude_cli_llm as _cli_impl
         import os.path as _osp
 
@@ -6186,6 +6442,21 @@ class AgileSDLCFlow(Flow[PipelineState]):
                         self._client.get_file_content(repo_name, file_path, branch_name) or "")[:3000]
                 except Exception:
                     pass
+                continue
+
+            # Silme: icerigi yok, developer'a gitmez — dogrudan delete push.
+            if change_type == "delete":
+                del_result = delete_file(
+                    repo_name, branch_name, file_path,
+                    f"#{self.state.work_item_id}: {description[:80] or 'dosya silindi'}",
+                    repo_mgr=self._repo_mgr, dry_run=self.state.dry_run,
+                )
+                if del_result.get("success"):
+                    _log(f"    🗑️ Silindi ({del_result.get('note') or 'push #' + str(del_result.get('push_id', '?'))})")
+                    all_pushes.append(del_result)
+                    self._complete_child_task(file_path)
+                else:
+                    _log(f"    Silme hatasi: {del_result.get('error')}")
                 continue
 
             # Skip: branch'te bu dosya bu job'da zaten push edilmis ise atla.
@@ -6521,6 +6792,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"  Sözleşme yorumu hatasi (kritik degil): {_e_cg}")
 
         self.state.all_pushes = all_pushes
+        try:
+            self._pre_pr_verify()
+        except Exception as _e_vf:  # noqa: BLE001 — doğrulayıcı hatası işi durdurmaz
+            _log(f"  🔎 PR öncesi doğrulama hatası (atlandı): {_e_vf}")
         self._step_done("implement_change_task", f"{len(all_pushes)} dosya push edildi"
                         + (f", {len(_contract_failures)} sözleşme ihlali engellendi"
                            if _contract_failures else ""))
@@ -6622,7 +6897,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
             _log(f"  ⏩ Branch'te zaten aktif PR var: #{existing_pr_id}, yeniden kullaniliyor")
             self.state.pr_id = str(existing_pr_id)
             self.state.pr_url = existing_url
-            self._wi_transition("review")
             self._step_done("create_pr_task", f"PR #{self.state.pr_id} (mevcut): {self.state.pr_url}")
             if self.state.job_id:
                 self._db.update_job(self.state.job_id, pr_id=self.state.pr_id, pr_url=self.state.pr_url)
@@ -6688,7 +6962,6 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         self.state.pr_id = str(pr_result["pr_id"])
         self.state.pr_url = pr_result["url"]
-        self._wi_transition("review")
         _log(f"  PR #{self.state.pr_id}: {self.state.pr_url}")
         self._step_done("create_pr_task", f"PR #{self.state.pr_id}: {self.state.pr_url}")
         if self.state.job_id:
@@ -7022,6 +7295,8 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         _log("\n-- ADIM 8.5: PR build/test gate --")
         max_retries = int(_pc.get("CREW_PR_BUILD_MAX_RETRIES"))
+        if self._quality_direct_flow():
+            max_retries = min(max_retries, 1)  # kalite işi: tek build-fix turu
         poll_timeout = int(_pc.get("CREW_PR_BUILD_POLL_TIMEOUT"))
         poll_interval = int(_pc.get("CREW_PR_BUILD_POLL_INTERVAL"))
 
@@ -7090,6 +7365,19 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 _log(f"  ↳ Son sansta build bitti: {(build or {}).get('result')}")
             # outcome == "completed"
             result = (build or {}).get("result")
+            if result == "partiallySucceeded":
+                # Test adımları geçtiyse test dışı bir adımın (#248: SonarQube
+                # Analysis 'succeededWithIssues') uyarısı kapıyı düşürmez — ikinci
+                # build-fix turu testleri yeşil bir PR için $0.92 harcamıştı.
+                try:
+                    _iss = self._client.get_build_issue_tasks(build.get("project"), build.get("build_id"))
+                except Exception as _e_it:
+                    _iss = None
+                    _log(f"  Build adım listesi alinamadi ({_e_it}) — kısmi başarı hata sayılıyor")
+                if _iss is not None and not _build_issues_block(_iss):
+                    _log("  ✅ Build kısmi başarılı ama testler geçti — test dışı uyarı: "
+                         + ", ".join(f"{t['name']} ({t['result']})" for t in _iss))
+                    result = "succeeded"
             if result == "succeeded":
                 _log(f"  ✅ PR build BASARILI ({build.get('definition')}, build {build.get('build_id')})")
                 _add_wi_comment(self._client, self.state.work_item_id,
@@ -7158,7 +7446,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
         try:
             (getattr(self, "_staged_worktree", None) or {}).pop((repo_name, file_path.lstrip("/")), None)
             repo_dir = self._repo_mgr.base_dir / repo_name
-            self._repo_mgr._git(["checkout", "--", file_path.lstrip("/")], cwd=repo_dir)
+            rel = file_path.lstrip("/")
+            r = self._repo_mgr._git(["checkout", "--", rel], cwd=repo_dir)
+            # HEAD'de olmayan dosya (PR'ın eklediği) checkout ile geri alınamaz;
+            # hazırlanan kopya ortak klonda izsiz dosya olarak kalmasın.
+            if r.returncode != 0 and self._repo_mgr._git(
+                    ["cat-file", "-e", f"HEAD:{rel}"], cwd=repo_dir).returncode != 0:
+                p = repo_dir / rel
+                if p.is_file() and not p.is_symlink() and p.resolve().is_relative_to(repo_dir.resolve()):
+                    p.unlink()
         except Exception:
             pass
 
@@ -7166,6 +7462,32 @@ class AgileSDLCFlow(Flow[PipelineState]):
         """tempo-quality işinde repo keşfi / test planlama / UAT atlanır."""
         from agile_sdlc_crew import pipeline_config as _pc
         return _is_quality_wi(self.state.wi_tags) and bool(_pc.get("CREW_QUALITY_LEAN_FLOW"))
+
+    def _quality_direct_flow(self) -> bool:
+        """tempo-quality işinde BA LLM'siz, mimar keşifsiz, zarf S."""
+        from agile_sdlc_crew import pipeline_config as _pc
+        return _is_quality_wi(self.state.wi_tags) and bool(_pc.get("CREW_QUALITY_DIRECT_FLOW"))
+
+    def _quality_evidence_block(self) -> str:
+        """Doğrudan akışta Task kanıtının repodaki hâli (iş boyunca sabit)."""
+        cached = getattr(self, "_quality_evidence_cache", None)
+        if cached is not None:
+            return cached
+        block = ""
+        if self._quality_direct_flow():
+            repo = getattr(self, "_quality_repo", "") or self.state.repo_name or ""
+            base = getattr(getattr(self, "_repo_mgr", None), "base_dir", None)
+            if repo and base and (Path(base) / repo / ".git").exists():
+                # Bağlam, adımın tazelik fetch'inden ÖNCE kuruluyor — kanıt bayat
+                # main'den okunmasın.
+                self._freshen_target_repo(repo)
+                block = _quality_evidence(Path(base) / repo, getattr(self, "_quality_desc", ""))
+                if block:
+                    _log(f"  🎯 Kalite kanıtı bağlama eklendi ({len(block)} karakter, keşif yok)")
+            elif repo:
+                return ""  # klon henüz yok — sonraki çağrı yeniden denesin
+        self._quality_evidence_cache = block
+        return block
 
     def _env_conventions_block(self) -> str:
         """Sabit kodlu kimlik bilgisi işi (Sonar S6437/S2068/secrets) ise repodaki env
@@ -7409,10 +7731,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
             limit=_limit, log=_log,
         )
 
+        # Plan'da SİLİNEN dosya düzeltme hedefi olamaz: #248'de silinmiş
+        # analytics.json hedefe girdi, developer "bu dosya silinmeli" diye
+        # yazdı ve o düzyazı dosyanın içeriği olarak commit edildi.
+        _deleted = self._plan_deleted_paths()
+        fix_files = [f for f in fix_files if _norm_path(f) not in _deleted]
         if not fix_files:
             _log("  Düzeltilecek dosya çözümlenemedi — atlaniyor")
             return
         _log(f"  Düzeltilecek dosya: {len(fix_files)} — {', '.join(fix_files)}")
+
+        _bf_header = (
+            "PR BUILD TEST HATASI (DÜZELT)\n"
+            "Aşağıdaki CI build hatası testlerin kırıldığını gösteriyor. Kodu/testleri hatayı "
+            "giderecek şekilde düzelt; mevcut davranışı koru, değişen davranış için test ekle/güncelle. "
+            "Ortama bağlı kontrol yazma: kırılan test toplanan uyarı/deprecation listesinin boş olmasını, "
+            "PHP sürümünü ya da saati assert ediyorsa o kontrolü kaldırıp dönen değeri doğrula — CI'daki "
+            "PHP ilgisiz dosyalardan deprecation basabilir."
+        )
+        _bf_rule = QUALITY_BUILD_FIX_RULE if _is_quality_wi(self.state.wi_tags) else ""
+        # Tek çağrı: #248'de beş dosya için beş ayrı Opus çağrısı ($3.46) yapıldı,
+        # her biri aynı hatayı baştan aradı.
+        if self._multi_file_fix(fix_files, failure_summary, "build_fix", _bf_header, _bf_rule) is not None:
+            _log("  Build-fix tamam — build yeniden tetiklenecek")
+            return
 
         # Part B: developer repoyu --add-dir ile görsün (test dosyasini okuyabilsin)
         _repo_tools = False
@@ -7494,41 +7836,198 @@ class AgileSDLCFlow(Flow[PipelineState]):
         if not pending:
             _log("  Build-fix: push edilecek degisiklik yok")
             return
-        # Tek commit → tek build tetigi → tek bekleme
-        _log(f"  📦 {len(pending)} dosya TEK commit'te push ediliyor (1 build tetigi)")
-        if self.state.dry_run:
-            for fp, content in pending:
-                push_file(repo_name, branch, fp, content, "fix: PR build (dry-run)",
-                          repo_mgr=self._repo_mgr, dry_run=True)
-        else:
-            changes = []
-            for fp, content in pending:
-                p = "/" + _norm_path(fp)
-                try:
-                    self._client.get_file_content(repo_name, p, branch)
-                    ct = "edit"
-                except Exception:
-                    ct = "add"
-                changes.append({"changeType": ct, "path": p, "content": content})
-            names = ", ".join(fp.rsplit("/", 1)[-1] for fp, _ in pending)
-            try:
-                self._client.push_changes(
-                    repo_name, branch, changes,
-                    f"fix: PR build test hatasi - {names} (WI #{self.state.work_item_id})",
-                )
-                _log(f"    Push OK (tek commit, {len(changes)} dosya)")
-            except Exception as e:
-                _log(f"    Push HATA (tek commit): {e} — dosya bazli push'a dusuluyor")
-                for fp, content in pending:
-                    r = push_file(
-                        repo_name, branch, fp, content,
-                        f"fix: PR build test hatasi - {fp.rsplit('/',1)[-1]} (WI #{self.state.work_item_id})",
-                        repo_mgr=self._repo_mgr, dry_run=False,
-                    )
-                    _log(f"      {'OK' if r.get('success') else 'HATA'}: {fp}")
+        self._push_single_commit(pending, "fix: PR build test hatasi")
         for fp, _ in pending:
             self._restore_worktree_file(repo_name, fp)
         _log("  Build-fix tamam — build yeniden tetiklenecek")
+
+    def _verify_branch_state(self) -> dict | None:
+        """Branch'in son hâlini klona bindirip reponun diline göre derle/lint et,
+        sonra klonu geri al. None = doğrulanacak dosya yok."""
+        from agile_sdlc_crew import verify as _vf
+        from agile_sdlc_crew.main import _resolve_php_binary
+        repo_name, branch = self.state.repo_name, self.state.branch_name
+        repo_dir = self._repo_mgr.base_dir / repo_name
+        pushes = [p for p in (self.state.all_pushes or []) if p.get("file")]
+        deleted = [p["file"] for p in pushes if p.get("change_type") == "delete"]
+        changed = [p["file"] for p in pushes if p.get("change_type") != "delete"]
+        if not _vf.languages(changed):
+            return None
+        staged, removed = [], []
+        try:
+            if not self.state.dry_run:  # dry-run'da branch zaten diskte
+                for fp in changed:
+                    try:
+                        content = self._client.get_file_content(repo_name, fp, branch) or ""
+                    except Exception:
+                        continue
+                    self._stage_worktree_file(repo_name, fp, content)
+                    staged.append(fp)
+                for fp in deleted:
+                    p = repo_dir / fp.lstrip("/")
+                    if p.is_file() and p.resolve().is_relative_to(repo_dir.resolve()):
+                        p.unlink()
+                        removed.append(fp)
+            return _vf.verify(repo_dir, changed, php_bin=_resolve_php_binary(repo_name))
+        finally:
+            for fp in staged + removed:
+                self._restore_worktree_file(repo_name, fp)
+
+    def _pre_pr_verify(self) -> None:
+        """PR açılmadan önce reponun dilinin doğrulayıcısı (CREW_PRE_PR_VERIFY).
+        Hata varsa TEK hedefli developer çağrısı, sonra bir kez daha doğrulama.
+        Job #248: eksik Go import'u CI'a kadar gitti, build-fix $4.4 tuttu."""
+        from agile_sdlc_crew import pipeline_config as _pc
+        from agile_sdlc_crew import verify as _vf
+        if not _pc.get("CREW_PRE_PR_VERIFY") or not self.state.repo_name:
+            return
+        res = self._verify_branch_state()
+        if res is None:
+            return
+        for lang, why in res["skipped"]:
+            _log(f"  🔎 Doğrulayıcı atlandı [{lang}]: {why}")
+        if res["ok"]:
+            if res["ran"]:
+                _log(f"  🔎 PR öncesi doğrulama geçti ({', '.join(res['ran'])})")
+            return
+        _log(f"  🔎 PR öncesi doğrulama HATA ({', '.join(res['ran'])}): {len(res['issues'])} satır")
+        for ln in res["issues"][:6]:
+            _log(f"      {ln}")
+        repo_dir = self._repo_mgr.base_dir / self.state.repo_name
+        changed = [p["file"] for p in (self.state.all_pushes or [])
+                   if p.get("file") and p.get("change_type") != "delete"]
+        targets = list(dict.fromkeys(
+            ["/" + _norm_path(f) for f in _vf.referenced_files(res["issues"])
+             if (repo_dir / f).is_file()] or changed))[:6]
+        header = ("DERLEME / LINT HATASI (DÜZELT)\n"
+                  "Bu PR'ın değişiklikleri reponun doğrulayıcısından geçmedi. Yalnız hatayı "
+                  "gider (eksik import, kullanılmayan değişken, imza uyuşmazlığı…); davranışı değiştirme.")
+        n = self._multi_file_fix(targets, "\n".join(res["issues"]), "pre_pr_verify", header)
+        if not n:
+            _log("  🔎 Doğrulama hatası düzeltilemedi — PR yine açılacak, CI gösterecek")
+            return
+        again = self._verify_branch_state() or {"ok": True, "issues": []}
+        if again["ok"]:
+            _log("  🔎 Düzeltme sonrası doğrulama geçti")
+        else:
+            _log(f"  🔎 Düzeltme sonrası hâlâ {len(again['issues'])} hata satırı — PR açılacak, CI gösterecek")
+
+    def _plan_deleted_paths(self) -> set:
+        return {
+            _norm_path(c.get("file_path")) for c in (self.state.plan or {}).get("changes", [])
+            if c.get("change_type") == "delete" and c.get("file_path")
+        }
+
+    def _push_single_commit(self, pending: list, message: str) -> None:
+        """Düzeltmeleri TEK commit'te gönder: her push CI'ı yeniden tetikliyor ve
+        Azure uçuştaki build'i iptal ediyor (job #183: PR 41840 için 5 iptal)."""
+        from agile_sdlc_crew.pipeline import push_file
+        repo_name, branch = self.state.repo_name, self.state.branch_name
+        names = ", ".join(fp.rsplit("/", 1)[-1] for fp, _ in pending)
+        msg = f"{message} - {names} (WI #{self.state.work_item_id})"
+        _log(f"  📦 {len(pending)} dosya TEK commit'te push ediliyor (1 build tetigi)")
+        if self.state.dry_run:
+            for fp, content in pending:
+                push_file(repo_name, branch, fp, content, f"{message} (dry-run)",
+                          repo_mgr=self._repo_mgr, dry_run=True)
+            return
+        changes = []
+        for fp, content in pending:
+            p = "/" + _norm_path(fp)
+            try:
+                self._client.get_file_content(repo_name, p, branch)
+                ct = "edit"
+            except Exception:
+                ct = "add"
+            changes.append({"changeType": ct, "path": p, "content": content})
+        try:
+            self._client.push_changes(repo_name, branch, changes, msg)
+            _log(f"    Push OK (tek commit, {len(changes)} dosya)")
+        except Exception as e:
+            _log(f"    Push HATA (tek commit): {e} — dosya bazli push'a dusuluyor")
+            for fp, content in pending:
+                r = push_file(repo_name, branch, fp, content,
+                              f"{message} - {fp.rsplit('/', 1)[-1]} (WI #{self.state.work_item_id})",
+                              repo_mgr=self._repo_mgr, dry_run=False)
+                _log(f"      {'OK' if r.get('success') else 'HATA'}: {fp}")
+
+    def _multi_file_fix(self, files: list, error_text: str, label: str,
+                        header: str, extra_rule: str = "") -> int | None:
+        """Kırılan dosyaları TEK developer çağrısında düzelt: dosyaların branch hâli
+        diske yazılır, developer repo araçlarıyla hepsini yerinde düzenler (gerekirse
+        derleyiciyi kendisi çalıştırır), değişenler tek commit'te push edilir.
+        Repo araçları kapalıysa None döner — çağıran dosya başına yola düşer.
+        Dönen: push edilen dosya sayısı."""
+        repo_name, branch = self.state.repo_name, self.state.branch_name
+        deleted = self._plan_deleted_paths()
+        files = [f for f in dict.fromkeys("/" + _norm_path(f) for f in files if f)
+                 if _norm_path(f) not in deleted]
+        if not files:
+            return 0
+        if not self._enable_impl_repo_tools():
+            return None
+        from agile_sdlc_crew.tools import claude_cli_llm as _cli
+        bases: dict = {}
+        pending: list = []
+        try:
+            for fp in files:
+                base = ""
+                if not self.state.dry_run:
+                    try:
+                        base = self._client.get_file_content(repo_name, fp, branch) or ""
+                    except Exception:
+                        base = ""
+                base = base or self._read_worktree_file(repo_name, fp)
+                bases[fp] = base
+                if base:
+                    self._stage_worktree_file(repo_name, fp, base)
+            repo_dir = self._repo_mgr.base_dir / repo_name
+            listing = "\n".join(f"- {repo_dir / fp.lstrip('/')}" for fp in files)
+            ctx = self._build_step_context("implement_change_task")
+            ctx += f"\n\n# {header}\n```\n{(error_text or '')[:4000]}\n```" + extra_rule
+            desc = (
+                "Fix the error above in ONE session. Edit these files IN PLACE with your file "
+                "tools (all of them that need it); do not touch any other file and do not "
+                "print file contents back:\n" + listing + "\n"
+                "If a compiler/linter is available, run it once at the end to confirm."
+            )
+            code_crew = self._agile_crew.create_code_crew()
+            res = code_crew.kickoff(inputs={
+                "work_item_id": self.state.work_item_id,
+                "target_repo": repo_name,
+                "target_file": str(repo_dir / files[0].lstrip("/")),
+                "change_description": desc,
+                "current_code": "",
+                "new_code": "",
+                "full_content": "",
+                "previous_context": ctx,
+            })
+            self._track_and_check_budget(res, label)
+            for fp in files:
+                disk = self._read_worktree_file(repo_name, fp)
+                base = bases.get(fp, "")
+                if not disk or disk.strip() == base.strip():
+                    continue
+                if base and len(base.strip()) > 500 and len(disk.strip()) < len(base.strip()) * 0.5:
+                    _log(f"    🚨 GÜVENLİK: {fp} >%50 küçüldü — push İPTAL")
+                    continue
+                _regr = _build_fix_regressions(base, disk)
+                if _regr:
+                    for _r in _regr:
+                        _log(f"    🚨 GÜVENLİK: {_r}")
+                    _log(f"    push İPTAL: {fp}")
+                    continue
+                pending.append((fp, disk))
+                _log(f"    ✔ Düzeltildi: {fp}")
+        finally:
+            _cli.clear_repo_ctx()
+            for fp in files:
+                self._restore_worktree_file(repo_name, fp)
+        if not pending:
+            _log(f"  {label}: developer hiçbir dosyayı değiştirmedi — push yok")
+            return 0
+        self._push_single_commit(pending, f"fix: {label}")
+        return len(pending)
 
     @listen(pr_build_gate)
     def step9_test_planning(self):
@@ -7864,8 +8363,10 @@ class AgileSDLCFlow(Flow[PipelineState]):
                     _log(f"  needs_human durumu yazilamadi: {_e_nh}")
             raise NeedsHumanReview(_msg_dod)
 
-        # DoD gecti (ya da zorlama kapali) → WI'i QA'ya devret
-        self._wi_transition("handoff")
+        # Is sorunsuz bitti → Code Review. PR acilinca degil burada: PR'dan sonra
+        # review/build/test turlari hala basarisiz olabilir ve insan yarim isi
+        # incelemeye almamali. QA'ya devir insanin karari (eskiden 'handoff').
+        self._wi_transition("review")
 
         # Geçmiş-iş repo indeksine yaz — yalnızca başarılı PR (buraya ulaşmak
         # PR oluştu + review onayladı demek; dry-run bu metodun başında döner).

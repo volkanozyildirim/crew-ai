@@ -425,6 +425,8 @@ async def delete_job(job_id: int, force: bool = False):
         )
     if job["status"] == "running":
         db.fail_job(job_id, "Kullanıcı tarafından iptal edildi")
+    if job["status"] in ("queued", "running"):
+        _wi_revert_async(job["work_item_id"], job.get("wi_state_before") or "", f"iş #{job_id} silindi")
     db.delete_job(job_id)
     return JSONResponse({"status": "ok", "message": f"Job #{job_id} silindi"})
 
@@ -2266,9 +2268,62 @@ if WEB_DIR.exists():
 
 # ── Queue Worker ──
 
+_wi_mark_lock = threading.Lock()
+
+
+def _wi_lifecycle_on() -> bool:
+    from agile_sdlc_crew import pipeline_config as _pc
+    try:
+        return bool(_pc.get("CREW_WI_LIFECYCLE"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wi_mark_queued_jobs():
+    """Kuyruğa alınan pipeline işlerinin WI'ını In Progress'e taşı, önceki durumu
+    jobs.wi_state_before'a yaz (sorun olursa oraya dönülür). Kullanıcı kararı:
+    kart kuyruğa atıldığı anda ilerlemeli, işin sırası gelince değil."""
+    if not _wi_lifecycle_on() or not _wi_mark_lock.acquire(blocking=False):
+        return
+    try:
+        from agile_sdlc_crew import wi_lifecycle as _wl
+        from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+        rows = db.list_unmarked_queued_jobs()
+        client = AzureDevOpsClient() if rows else None
+        for r in rows:
+            try:
+                before = _wl.mark_queued(client, r["work_item_id"], logger=pipeline_log.info)
+            except Exception as e:  # noqa: BLE001
+                pipeline_log.warning(f"  🗂️ Kuyruk: WI #{r['work_item_id']} durumu taşınamadı: {e}")
+                before = ""
+            db.set_wi_state_before(r["id"], before or "")
+    except Exception as e:  # noqa: BLE001
+        pipeline_log.warning(f"  🗂️ Kuyruk WI işaretleme hatası: {e}")
+    finally:
+        _wi_mark_lock.release()
+
+
+def _wi_revert_async(work_item_id: str, initial: str, why: str):
+    """Kuyruktan silinen / sunucu restart'ında yarım kalan iş: WI'ı geri al."""
+    if not (_wi_lifecycle_on() and (initial or "").strip()):
+        return
+
+    def _run():
+        try:
+            from agile_sdlc_crew import wi_lifecycle as _wl
+            from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+            if _wl.revert_to(AzureDevOpsClient(), work_item_id, initial, logger=pipeline_log.info):
+                pipeline_log.info(f"  🗂️ WI #{work_item_id} geri alındı ({why})")
+        except Exception as e:  # noqa: BLE001
+            pipeline_log.warning(f"  🗂️ WI #{work_item_id} geri alınamadı ({why}): {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _ensure_worker():
     """Worker thread yoksa baslat."""
     global _worker_thread
+    threading.Thread(target=_wi_mark_queued_jobs, daemon=True).start()
     with _worker_lock:
         if _worker_thread and _worker_thread.is_alive():
             return
@@ -2328,7 +2383,13 @@ def _queue_worker():
 async def startup():
     db.init_db()
     # Orphan running job'lari temizle (sunucu restart oncesinde takili kalmislar)
+    try:
+        _orphan_rows = db.list_running_jobs()
+    except Exception:  # noqa: BLE001
+        _orphan_rows = []
     orphan = db.fail_orphan_running_jobs()
+    for _r in _orphan_rows:
+        _wi_revert_async(_r["work_item_id"], _r.get("wi_state_before") or "", "sunucu yeniden başladı")
     if orphan:
         pipeline_log.info(f"Sunucu baslatildi: {orphan} takili kalmis is failed olarak isaretlendi")
 

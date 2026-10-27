@@ -175,6 +175,44 @@ def push_file(
         return {"success": False, "error": error_str}
 
 
+def delete_file(
+    repo_name: str, branch: str, file_path: str, message: str,
+    repo_mgr=None, dry_run: bool = False,
+) -> dict:
+    """Delete a file on a branch. A deletion has no content, so it never goes
+    through the developer: job #244 spent $3.19 in a review loop because the
+    only push path took file content and an empty one was cancelled as unsafe.
+    A file already absent on the branch counts as done (idempotent retry)."""
+    if dry_run:
+        if repo_mgr is None:
+            from agile_sdlc_crew.tools.local_repo import LocalRepoManager
+            repo_mgr = LocalRepoManager()
+        return repo_mgr.delete_and_commit_local(repo_name, branch, file_path, message)
+
+    client = AzureDevOpsClient()
+    try:
+        client.get_file_content(repo_name, file_path, branch)
+    except Exception as e:
+        if "404" in str(e) or "not found" in str(e).lower():
+            # Branch'in kendisi yoksa da 404 gelir — o "dosya zaten yok" değildir.
+            try:
+                names = {b.get("name") for b in client.list_branches(repo_name)}
+            except Exception as e2:
+                return {"success": False, "error": f"branch listesi okunamadı: {e2}"}
+            if f"refs/heads/{branch}" not in names:
+                return {"success": False, "error": f"branch yok: {branch}"}
+            return {"success": True, "change_type": "delete", "file": file_path,
+                    "note": "already absent"}
+        return {"success": False, "error": f"dosya durumu okunamadı: {e}"}
+    try:
+        result = client.push_changes(
+            repo_name, branch, [{"changeType": "delete", "path": file_path}], message)
+        return {"success": True, "push_id": result.get("pushId", "?"),
+                "change_type": "delete", "file": file_path}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def create_pull_request(repo_name: str, branch: str, work_item_id: str, title: str, description: str) -> dict:
     client = AzureDevOpsClient()
     try:

@@ -36,6 +36,41 @@ def defuse_emoticons(md: str) -> str:
     return "".join(out)
 
 
+_TS_PREFIX = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ?")
+_LOG_NOISE = re.compile(
+    r"^(##\[(section|command|group|endgroup)\]|={10,}|Task\s+:|Description\s+:|Version\s+:|"
+    r"Author\s+:|Help\s+:|Generating script|Evaluating:|Expanded:|Result:)")
+_LOG_ERROR = re.compile(
+    r"(\.(go|php|py|js|ts|tsx|java|cs|rb)[:(]\d+|--- FAIL|^FAIL\b|panic:|Fatal error|"
+    r"\b[Ee]rror\b|Exception|AssertionError|Failures?:|undefined|cannot |not found|exit code)")
+_PKG_FAIL = re.compile(r"^FAIL\s+\S+\s+\[build failed\]$")
+
+
+def extract_build_errors(log_text: str, max_lines: int = 80) -> str:
+    """CI Task logundan geliştiriciye gereken kısım: zaman damgası ve şablon
+    gürültüsü atılır, hata satırları (dosya:satır, FAIL, panic, Error…) bir satır
+    bağlamla önce gelir, `FAIL pkg [build failed]` yığını tek satıra iner, sonra
+    kuyruk. #248'de derleyici hataları logun BAŞINDAYDI, kuyrukta yalnız 60 paketlik
+    FAIL listesi vardı."""
+    lines = [_TS_PREFIX.sub("", ln.rstrip()) for ln in (log_text or "").splitlines()]
+    lines = [ln for ln in lines if ln.strip() and not _LOG_NOISE.match(ln)]
+    pkg_fail = [ln for ln in lines if _PKG_FAIL.match(ln)]
+    body = [ln for ln in lines if not _PKG_FAIL.match(ln)]
+    keep: list[int] = []
+    for i, ln in enumerate(body):
+        if _LOG_ERROR.search(ln):
+            keep += [j for j in (i - 1, i, i + 1) if 0 <= j < len(body)]
+    picked = [body[i] for i in dict.fromkeys(keep)][:max_lines]
+    out = picked
+    if pkg_fail:
+        out.append(f"({len(pkg_fail)} paket 'build failed': {', '.join(l.split()[1] for l in pkg_fail[:5])}"
+                   + (", …" if len(pkg_fail) > 5 else "") + ")")
+    tail = [ln for ln in body[-15:] if ln not in picked]
+    if tail:
+        out += ["--- son satırlar ---", *tail]
+    return "\n".join(out)
+
+
 class AzureDevOpsClient:
     """Azure DevOps REST API icin paylasilan HTTP istemcisi."""
 
@@ -433,6 +468,7 @@ class AzureDevOpsClient:
         changes formati:
         [
             {"changeType": "add"|"edit", "path": "/src/file.py", "content": "..."},
+            {"changeType": "delete", "path": "/src/old.py"},   # icerik yok
             ...
         ]
         """
@@ -451,11 +487,12 @@ class AzureDevOpsClient:
             item = {
                 "changeType": change["changeType"],
                 "item": {"path": change["path"]},
-                "newContent": {
+            }
+            if change["changeType"] != "delete":
+                item["newContent"] = {
                     "content": change["content"],
                     "contentType": "rawtext",
-                },
-            }
+                }
             formatted_changes.append(item)
 
         url = f"{self._repo_api_url(repo_id_or_name)}/pushes"
@@ -771,13 +808,15 @@ class AzureDevOpsClient:
                         i.get("message", "")[:300] for i in issues if i.get("type") == "error"
                     )[:1500]
                     parts.append(f"FAILED [{rec.get('type')}] {nm}" + (f": {errs}" if errs else ""))
+                    # Yalnız TASK logu: Phase/Job logu ajanın hazırlık YAML'ı
+                    # (#248: "Unit Tests" Phase'i dekoratör şablonunu verdi, asıl
+                    # `undefined: webanalytics` satırları Task logundaydı).
                     log_url = (rec.get("log") or {}).get("url")
-                    if log_url and "test" in nm.lower():
+                    if log_url and rec.get("type") == "Task":
                         try:
                             lr = requests.get(log_url, headers=self._headers, timeout=30)
                             if lr.ok:
-                                tail = "\n".join(lr.text.splitlines()[-60:])
-                                parts.append(f"--- {nm} log (son satirlar) ---\n{tail}")
+                                parts.append(f"--- {nm} log ---\n{extract_build_errors(lr.text)}")
                         except Exception:
                             pass
         except Exception:
@@ -797,6 +836,18 @@ class AzureDevOpsClient:
             pass
         out = "\n".join(parts).strip()
         return out[:max_chars]
+
+    def get_build_issue_tasks(self, project: str, build_id: int) -> list[dict]:
+        """failed / succeededWithIssues biten Task'lar: [{name, result}]."""
+        url = f"{self.org_url}/{project}/_apis/build/builds/{build_id}/timeline"
+        resp = requests.get(url, headers=self._headers,
+                            params={"api-version": self.API_VERSION}, timeout=30)
+        resp.raise_for_status()
+        return [
+            {"name": r.get("name", ""), "result": r.get("result", "")}
+            for r in resp.json().get("records", [])
+            if r.get("type") == "Task" and r.get("result") in ("failed", "succeededWithIssues")
+        ]
 
     # ── Sprint / Iteration API'leri ──
 

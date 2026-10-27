@@ -1102,6 +1102,44 @@ class LocalRepoManager:
             "local_path": str(full_path),
         }
 
+    def delete_and_commit_local(
+        self, repo_name: str, branch: str, file_path: str, message: str,
+    ) -> dict:
+        """Dry-run path of a file deletion: git rm + local commit, no push."""
+        repo_dir = self._get_repo_dir(repo_name)
+        try:
+            self.checkout(repo_name, branch)
+        except Exception:
+            self._git(["checkout", "-B", branch], cwd=repo_dir)
+
+        clean_path = file_path.lstrip("/")
+        if not (repo_dir / clean_path).exists():
+            return {
+                "success": True, "dry_run": True, "file": file_path,
+                "change_type": "delete", "note": "no-op (already absent)",
+            }
+        rm = self._git(["rm", "-q", "--", clean_path], cwd=repo_dir)
+        if rm.returncode != 0:
+            return {
+                "success": False, "dry_run": True, "file": file_path,
+                "error": rm.stderr or rm.stdout or "git rm failed",
+            }
+        commit = self._git(
+            ["-c", "user.name=Agile SDLC Crew (dry-run)",
+             "-c", "user.email=dry-run@local",
+             "commit", "-m", message],
+            cwd=repo_dir,
+        )
+        if commit.returncode != 0:
+            return {
+                "success": False, "dry_run": True, "file": file_path,
+                "error": commit.stderr or commit.stdout or "git commit failed",
+            }
+        return {
+            "success": True, "dry_run": True, "file": file_path,
+            "change_type": "delete", "local_path": str(repo_dir / clean_path),
+        }
+
     def get_diff(self, repo_name: str, branch: str, base: str = "main") -> str:
         """Return `git diff base..branch` output for review/report."""
         repo_dir = self._get_repo_dir(repo_name)

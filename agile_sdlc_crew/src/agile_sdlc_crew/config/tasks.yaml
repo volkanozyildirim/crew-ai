@@ -546,6 +546,9 @@ technical_design_task:
     ```
 
     RULES:
+    - `change_type` is one of `edit`, `add`, `delete`. To remove a file
+      use `delete` with empty `current_code` and `new_code` — the pipeline
+      deletes it directly, no code is written for it
     - `current_code` MUST be read from the real file, not invented
     - `new_code` MUST be compilable/runnable
     - Each change MUST link to at least one FR/TR/AC id (covers_requirements)

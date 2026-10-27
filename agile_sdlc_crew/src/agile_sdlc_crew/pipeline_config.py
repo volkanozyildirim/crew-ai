@@ -348,7 +348,7 @@ SCHEMA: list[dict] = [
         "label": "WI Yaşam Döngüsü (board durum geçişleri)",
         "type": "bool",
         "default": False,
-        "desc": "Pipeline iş kaydının System.State alanını takımın süreciyle senkron taşır: iş alındı → In Progress (Active), PR açıldı → Code Review, needs_info/needs_human → Blocked, DoD geçti → QA To Do (User Story'de QA). Durum adları sabit değil: tipin süreç durum listesinden tercih sırasıyla seçilir; süreçte yoksa geçiş yapılmaz. GÜVENLİK: yalnızca Proposed (Backlog/To Do) + In Progress/Code Review/Blocked'taki WI'lara dokunur — QA, UAT, Preprod, Ready for Production, Done'daki (insanın ilerlettiği) WI asla geri çekilmez. Genel hatada PR yoksa başlangıç durumuna geri alınır; PR varsa Code Review'da kalır. Done'a hiç taşınmaz (prod kararı insanın). Bugüne kadar hiç yazılmıyordu: 73121'i (job #189 PR + review + build yeşil) insanlar elle 'Ready for Production'a taşıdı. Takımın board'una yazdığı için varsayılan KAPALI; dry-run ve kickoff-only'de her zaman kapalı.",
+        "desc": "Pipeline iş kaydının System.State alanını takımın süreciyle senkron taşır: iş kuyruğa alındı → In Progress (Active; önceki durum jobs.wi_state_before'a yazılır, kuyruktan silinirse ya da sunucu restart'ında yarım kalırsa oraya dönülür), iş sorunsuz bitti → Code Review, sorun olursa (hata, needs_info, needs_human) → başlangıç durumu (Backlog/To Do) — PR açık olsa bile. PR açıldığında Code Review'a geçilmez: review/build/test turları hâlâ başarısız olabilir, yarım iş incelemeye alınmaz. Durum adları sabit değil: tipin süreç durum listesinden tercih sırasıyla seçilir; süreçte yoksa geçiş yapılmaz. GÜVENLİK: yalnızca Proposed (Backlog/To Do) + In Progress/Code Review/Blocked'taki WI'lara dokunur — QA, UAT, Preprod, Ready for Production, Done'daki (insanın ilerlettiği) WI asla geri çekilmez. QA'ya ve Done'a hiç taşınmaz (insanın kararı). Bugüne kadar hiç yazılmıyordu: 73121'i (job #189 PR + review + build yeşil) insanlar elle 'Ready for Production'a taşıdı. Takımın board'una yazdığı için varsayılan KAPALI; dry-run ve kickoff-only'de her zaman kapalı.",
     },
     {
         "key": "CREW_WI_ASSIGN_IF_EMPTY",
@@ -369,7 +369,7 @@ SCHEMA: list[dict] = [
         "label": "DoD Geçilemezse needs_human",
         "type": "bool",
         "default": False,
-        "desc": "DoD'da zorunlu bir madde açıkça ❌ ise iş `completed` yerine `needs_human` olur (PR açık kalır, WI Yaşam Döngüsü açıksa Blocked). ⚪ doğrulanamayan maddeler bloklamaz. Varsayılan kapalı: UAT ajanı yalnızca PR diff'ini görüyor — #189'daki AC2 FAIL, reviewer R1 gibi yanlış pozitif olabilir (ru_RU anahtarları repoda zaten vardı). Önce birkaç koşuda tabloyu izleyin, sonra açın.",
+        "desc": "DoD'da zorunlu bir madde açıkça ❌ ise iş `completed` yerine `needs_human` olur (PR açık kalır, WI Yaşam Döngüsü açıksa başlangıç durumuna döner). ⚪ doğrulanamayan maddeler bloklamaz. Varsayılan kapalı: UAT ajanı yalnızca PR diff'ini görüyor — #189'daki AC2 FAIL, reviewer R1 gibi yanlış pozitif olabilir (ru_RU anahtarları repoda zaten vardı). Önce birkaç koşuda tabloyu izleyin, sonra açın.",
     },
     # ── Scrum islevleri — Faz 2: tahminleme + alt is kayitlari ──
     {
@@ -566,6 +566,20 @@ SCHEMA: list[dict] = [
         "type": "bool",
         "default": True,
         "desc": "tempo-quality etiketli işlerde repo keşfi (repo Task açıklamasında yazılı), test planlama ve UAT atlanır. Ölçüm (#228, #230): bu üç adım iş başına ~$2.1 (toplamın %40'ı) — tek satırlık null/isset düzeltmesinde test planı ve UAT raporu karar üretmiyor; PR'daki birim testi + yeşil build + review kapısı kalıyor. Normal pipeline işleri etkilenmez.",
+    },
+    {
+        "key": "CREW_PRE_PR_VERIFY",
+        "label": "PR öncesi derleme/lint doğrulaması",
+        "type": "bool",
+        "default": True,
+        "desc": "Implement bitince, PR açılmadan önce branch'in son hâli yerel klona bindirilip reponun dilinin doğrulayıcısı çalışır: Go `go build ./...` + değişen paketlerde `go vet`, PHP `php -l`, Python `py_compile`, JS `node --check`, TS (yerel tsc varsa) `tsc --noEmit`, JSON/YAML ayrıştırma. Hata varsa tek hedefli developer çağrısı (dosyalar yerinde düzenlenir, tek commit), sonra bir kez daha doğrulama; yine geçmezse PR açılır, CI gösterir. Ölçüm (#248): eksik Go import'u `go build` ile 3 saniyede yakalanırdı; CI'a gitti ve build-fix turları $4.4 tuttu. LLM'siz, yerel araçla; araç yoksa o dil atlanır.",
+    },
+    {
+        "key": "CREW_QUALITY_DIRECT_FLOW",
+        "label": "Kalite · doğrudan akış",
+        "type": "bool",
+        "default": True,
+        "desc": "tempo-quality işlerinde Task dosyayı ve satırı zaten söylüyor: BA analizi LLM'siz Task'tan üretilir, mimar repo keşfi (Faz A) ve araçlı amend yapılmaz — kanıttaki dosyaların ilgili satırları ve veri/yapılandırma dosyalarını okuyan kod Python'da toplanıp tek tool'suz plan çağrısına verilir; zarf S (bütçe $5, 1 review düzeltme turu). Ölçüm (#244, $6.68): BA + keşif + amend $1.54, keşfin tek yararlı bulgusu bir grep'ti; 3 tur hakkı boş döngüyü $3.19'a taşıdı. Normal pipeline işleri etkilenmez.",
     },
     {
         "key": "CREW_QUALITY_LEAN_MODELS",
