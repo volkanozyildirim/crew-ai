@@ -1873,9 +1873,18 @@ function wiCard(it){
       ${tags.length?`<div class="wi-tags">${tags.slice(0,2).map(t=>`<span class="wi-tag">${esc(t)}</span>`).join('')}</div>`:''}
     </div><div class="wi-pl" data-wi="${it.id}">${wiPipelineBadge(it.id)}</div></div>`;
 }
+// WI'nin Azure ilişkilerindeki PR'lar (pipeline işi olmadan açılanlar dahil)
+function wiPrLinks(wiId,exceptUrl){
+  const it=(items||[]).find(x=>String(x.id)===String(wiId));
+  const prs=((it&&it.prs)||[]).filter(p=>!exceptUrl||!String(exceptUrl).endsWith('/'+p.id));
+  return prs.map(p=>`<a href="${esc(p.url)}" target="_blank" onclick="event.stopPropagation()">PR ${p.id}</a>`).join(' ');
+}
 function wiPipelineBadge(wiId){
   const j=getJobForWi(wiId);
-  if(!j)return '';
+  if(!j){
+    const l=wiPrLinks(wiId,'');
+    return l?`<div class="wi-pipeline"><span class="wi-pipeline-step">Pipeline dışı</span><span class="wi-pipeline-pr">${l}</span></div>`:'';
+  }
   const idx=STEP_KEYS.indexOf(j.current_step);
   const seg=STEP_KEYS.map((k,i)=>{
     let c='';
@@ -1887,7 +1896,10 @@ function wiPipelineBadge(wiId){
   if(j.status==='running'&&j.current_step)info=stepLabel(j.current_step);
   else if((j.status==='failed'||j.status==='needs_human'||j.status==='needs_info')&&j.current_step)info=info+' · '+stepLabel(j.current_step);
   if(Number(j.dry_run)===1)info='Dry run · '+info;
-  const pr=(j.pr_url&&!Number(j.dry_run))?`<span class="wi-pipeline-pr"><a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()">PR</a></span>`:'';
+  const jobPr=(j.pr_url&&!Number(j.dry_run))?`<a href="${esc(j.pr_url)}" target="_blank" onclick="event.stopPropagation()">PR${j.pr_id?' '+esc(String(j.pr_id)):''}</a>`:'';
+  // İşin PR'ı varsa o otoritedir (WI ilişkilerinde kapatılmış eski PR'lar da durur)
+  const other=jobPr?'':wiPrLinks(wiId,'');
+  const pr=(jobPr||other)?`<span class="wi-pipeline-pr">${[jobPr,other].filter(Boolean).join(' ')}</span>`:'';
   return `<div class="wi-seg" title="${esc(info)}">${seg}</div><div class="wi-pipeline ${j.status}" onclick="event.stopPropagation();viewJob(${j.id})" style="cursor:pointer" title="İş detayını aç">
     <span class="sd ${j.status}" style="width:6px;height:6px;box-shadow:none;animation:none"></span>
     <span class="wi-pipeline-step">${esc(info)}</span>

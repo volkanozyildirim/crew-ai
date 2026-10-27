@@ -921,8 +921,22 @@ class AzureDevOpsClient:
                 "changedDate": fields.get("System.ChangedDate", ""),
                 "createdDate": fields.get("System.CreatedDate", ""),
                 "url": wi_url,
+                # WI'ye bağlı PR'lar (ilişkilerden; elle ya da başkasının açtığı
+                # PR'lar da). Board kartı PR'ı yalnız pipeline işinden okuyordu.
+                "prs": self._pr_links(item.get("relations") or []),
             })
         return result
+
+    _PR_REL = re.compile(r"PullRequestId/([0-9a-f-]+)%2F([0-9a-f-]+)%2F(\d+)", re.I)
+
+    def _pr_links(self, relations: list) -> list[dict]:
+        out: list[dict] = []
+        for r in relations:
+            m = self._PR_REL.search(r.get("url") or "")
+            if m and not any(p["id"] == int(m.group(3)) for p in out):
+                out.append({"id": int(m.group(3)),
+                            "url": f"{self.org_url}/{m.group(1)}/_git/{m.group(2)}/pullrequest/{m.group(3)}"})
+        return out
 
     def analytics_query(self, odata_query: str) -> list:
         """Azure DevOps Analytics OData sorgusu calistir (burndown/velocity icin).
