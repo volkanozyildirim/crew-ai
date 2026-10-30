@@ -6052,14 +6052,23 @@ def test_modern_multilang():
         else:
             skip("Go modernize", "araç yok")
 
-    desc = ("<p>x</p><p><small>tempo-fp: go_modern:gocrons:any:cmd/a.go</small></p>"
-            "<p><small>tempo-fp: go_modern:gocrons:minmax:pkg/b.go</small></p>")
-    check("araç düzeltmesi kapsamı Task'tan", modern_fix.parse_scope(desc) == ("go", "gocrons", {"any": ["cmd/a.go"], "minmax": ["pkg/b.go"]}))
-    try:
-        modern_fix.parse_scope("<p><small>tempo-fp: go_modern:a:any:x.go</small></p><p><small>tempo-fp: py_modern:b:UP006:y.py</small></p>")
-        check("karışık kapsam reddedilir", False)
-    except ValueError:
-        check("karışık kapsam reddedilir", True)
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td); (base / "gocrons" / "cmd").mkdir(parents=True)
+        ok = modern_fix.load_scope('{"lang": "go", "repo": "gocrons", "scope": {"any": ["cmd/a.go"]}}', base)
+        check("araç kapsamı işin kaydından", ok[:3] == ("go", "gocrons", {"any": ["cmd/a.go"]}))
+        bad = ['{"lang": "go", "repo": "../etc", "scope": {"any": ["a.go"]}}',
+               '{"lang": "go", "repo": "gocrons", "scope": {"any": ["../../x.go"]}}',
+               '{"lang": "go", "repo": "gocrons", "scope": {"any": ["/etc/passwd"]}}',
+               '{"lang": "go", "repo": "gocrons", "scope": {"any": ["-rf.go"]}}',
+               '{"lang": "php", "repo": "gocrons", "scope": {"x": ["a.php"]}}', '', '{"lang": "go", "repo": "nope", "scope": {"any": ["a.go"]}}']
+        rej = 0
+        for b in bad:
+            try:
+                modern_fix.load_scope(b, base)
+            except ValueError:
+                rej += 1
+        check("kapsam doğrulaması: kök dışı/mutlak/'-' yol, geçersiz repo/dil, boş kayıt reddedilir", rej == len(bad), f"{rej}/{len(bad)}")
+    check("ruff ikilisi doğrudan çalışır (python -m değil)", "-m" not in modern._ruff_cmd() and modern._ruff_cmd()[0].endswith("ruff"))
 
     grp = Group(source="go_modern", repo="gocrons", title="t", fingerprints=["go_modern:gocrons:any:a.go"],
                 findings=[Finding(source="go_modern", file="a.go", rule="any", lines=[3], uris=["3|interface{}"])])
@@ -6071,7 +6080,8 @@ def test_modern_multilang():
           and "modern_fix.run(job_id, work_item_id)" in srv)
     check("uçlar dil parametresi alır", 'lang: str = "php"' in srv and "_md.scan, AzureDevOpsClient(), repo.strip(), (lang or \"php\")" in srv)
     md = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern.py").read_text()
-    check("iş türü INSERT'te verilir (işçi yarışı yok)", 'job_kind="modern_fix")' in md)
+    check("iş türü ve onaylı kapsam INSERT'te verilir (işçi yarışı yok, WI açıklaması okunmaz)",
+          'job_kind="modern_fix",' in md and "job_payload=payloads.get(title" in md)
     html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
     check("kart çok dilli: başlık, dil:repo seçimi, araç uygular etiketi",
           '<span class="h">Modernleştirme</span>' in html and "function _tdmSel()" in html and "Araç uygular" in html)

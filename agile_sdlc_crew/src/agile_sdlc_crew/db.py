@@ -177,6 +177,8 @@ def init_db():
         # WI yaşam döngüsü: kuyruğa alınırken WI In Progress'e taşınır; sorun
         # olursa dönülecek durum burada (NULL = henüz işaretlenmedi).
         _ensure_column(cur, "jobs", "wi_state_before", "VARCHAR(64) NULL")
+        # İşin onaylanmış kapsamı (araç düzeltmesi: dil/repo/kural × dosya) — WI açıklaması değil
+        _ensure_column(cur, "jobs", "job_payload", "TEXT NULL")
         _ensure_column(cur, "job_steps", "cost_usd", "DECIMAL(12,6) DEFAULT 0")
         _ensure_column(cur, "job_steps", "tool_calls", "INT DEFAULT 0")
         _ensure_column(cur, "job_steps", "turns", "INT DEFAULT 0")
@@ -213,6 +215,7 @@ def create_job(
     parent_job_id: int | None = None,
     dry_run: bool = False,
     job_kind: str = "pipeline",
+    job_payload: str = "",
 ) -> int:
     """Create a new job, add step rows, return job_id.
 
@@ -223,11 +226,12 @@ def create_job(
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO jobs (work_item_id, use_hal, wi_title, kickoff_only, "
-            "kickoff_feedback, parent_job_id, dry_run, job_kind) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            "kickoff_feedback, parent_job_id, dry_run, job_kind, job_payload) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 work_item_id, int(use_hal), wi_title,
                 int(bool(kickoff_only)), kickoff_feedback or "", parent_job_id,
-                int(bool(dry_run)), job_kind,
+                int(bool(dry_run)), job_kind, job_payload or None,
             ),
         )
         job_id = cur.lastrowid

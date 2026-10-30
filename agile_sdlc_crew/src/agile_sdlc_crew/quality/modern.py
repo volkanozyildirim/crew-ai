@@ -49,8 +49,9 @@ def go_modernize_bin() -> str:
 
 
 def _ruff_cmd() -> list[str]:
-    import sys
-    return [sys.executable, "-m", "ruff"]
+    """ruff İKİLİSİ: `python -m ruff` repo kökünde koşunca kökteki bir ruff.py içe aktarılırdı."""
+    from ruff.__main__ import find_ruff_bin
+    return [str(find_ruff_bin())]
 
 
 # ── Katalog ──────────────────────────────────────────────────────────────
@@ -418,6 +419,16 @@ def scan(client, repo: str, lang: str, *, team: str = "", force: bool = False, d
     return out
 
 
+def scope_of(lang: str, repo: str, g) -> dict:
+    """Grubun araç kapsamı: {"lang", "repo", "scope": {kural: [dosya, …]}}."""
+    scope: dict[str, list[str]] = {}
+    for f in g.findings:
+        scope.setdefault(f.rule, [])
+        if f.file not in scope[f.rule]:
+            scope[f.rule].append(f.file)
+    return {"lang": lang, "repo": repo, "scope": scope}
+
+
 def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", deps=None) -> dict:
     """Seçilenleri 'Teknik borç' story'si altında Task olarak aç. Go/Python otomatik işleri
     araç-düzeltme işine (modern_fix), diğerleri pipeline'a kuyruklanır."""
@@ -458,9 +469,14 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", 
                                      lane="techdebt")
         cfg2 = {**cfg, "php_target": f"{tv['version']} ({tv['source']})"}
         if LANGS[lang]["tool_fix"]:
+            # Onaylanan kapsam (dil, repo, kural × dosya) işin kaydına INSERT'te yazılır; çalışırken
+            # düzenlenebilir WI açıklaması değil bu okunur. Tür de INSERT'te: sonradan güncellenirse
+            # işçi işi araya girip pipeline'la koşturabilir.
+            payloads = {intake._row(g)["title"]: json.dumps(scope_of(lang, repo, g)) for g in picked}
+
             def _queue(wid, title):
-                # tür INSERT'te: sonradan güncellenirse işçi işi araya girip pipeline'la koşturabilir
-                return db.create_job(str(wid), False, wi_title=title[:200], job_kind="modern_fix")
+                return db.create_job(str(wid), False, wi_title=title[:200], job_kind="modern_fix",
+                                     job_payload=payloads.get(title, ""))
             deps = deps._replace(queue=_queue)
         rows, added = intake._open_tasks(client, picked, story, cfg2, deps, source=LANGS[lang]["source"],
                                          lane="techdebt", queue=True)

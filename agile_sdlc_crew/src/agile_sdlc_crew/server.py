@@ -406,6 +406,7 @@ async def retry_job(job_id: int):
         job.get("wi_title", ""),
         # araç düzeltmesi yeniden denenince yine araçla koşsun (pipeline'a düşmesin)
         job_kind="modern_fix" if job.get("job_kind") == "modern_fix" else "pipeline",
+        job_payload=(job.get("job_payload") or "") if job.get("job_kind") == "modern_fix" else "",
     )
     _ensure_worker()
     return JSONResponse({

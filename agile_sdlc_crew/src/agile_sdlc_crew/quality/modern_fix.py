@@ -6,37 +6,53 @@ düzeltmeler), PR öncesi doğrulayıcı (verify.py) çalışır, branch + PR a�
 yalnız bir kez inceler (pr_review). Kullanıcı kararı (2026-10-30): "araç uygulasın,
 LLM yalnız incelesin".
 
-Kapsam Task açıklamasındaki `tempo-fp:` satırlarından okunur
-(`<kaynak>:<repo>:<kural>:<dosya>`); araç yalnız o dosyaları değiştirir, başka bir
-dosyada çıkan değişiklik geri alınır.
+Kapsam (dil, repo, kural × dosya) Teknik borçta iş açılırken işin kaydına yazılır
+(`jobs.job_payload`); düzenlenebilir WI açıklaması okunmaz. Araç yalnız o dosyaları
+değiştirir, başka bir dosyada çıkan değişiklik geri alınır.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 
 log = logging.getLogger("agile_sdlc_crew.pipeline")
 
 
-def parse_scope(desc: str) -> tuple[str, str, dict[str, list[str]]]:
-    """(dil, repo, {kural: [dosya, …]}) — tek repo ve tek dil beklenir."""
-    from agile_sdlc_crew.quality import modern, render
-    langs, repos, scope = set(), set(), {}
-    for fp in render.parse_fingerprints(desc):
-        parts = fp.split(":", 3)
-        if len(parts) != 4 or parts[0] not in modern.SOURCE_LANG:
-            continue
-        source, repo, rule, where = parts
-        langs.add(modern.SOURCE_LANG[source])
-        repos.add(repo)
-        scope.setdefault(rule, [])
-        if where not in scope[rule]:
-            scope[rule].append(where)
-    if len(langs) != 1 or len(repos) != 1:
-        raise ValueError(f"Task kapsamı okunamadı (dil {sorted(langs)}, repo {sorted(repos)})")
-    return langs.pop(), repos.pop(), scope
+_REPO = re.compile(r"^[A-Za-z0-9][\w.-]*$")
+
+
+def load_scope(payload: str, base_dir: Path) -> tuple[str, str, dict[str, list[str]], Path]:
+    """İşin kaydındaki onaylı kapsam (take sırasında yazıldı). Repo adı ve her dosya yolu
+    doğrulanır: kök dışına çıkan, mutlak ya da `..` içeren yol reddedilir."""
+    from agile_sdlc_crew.quality import modern
+    try:
+        data = json.loads(payload or "")
+    except ValueError:
+        raise ValueError("İşin kapsam kaydı yok/bozuk — Teknik borç sekmesinden yeniden açın")
+    lang, repo, scope = data.get("lang"), str(data.get("repo") or ""), data.get("scope") or {}
+    if lang not in modern.LANGS or not modern.LANGS[lang]["tool_fix"]:
+        raise ValueError(f"Araç düzeltmesi bu dil için yok: {lang!r}")
+    if not _REPO.match(repo) or ".." in repo:
+        raise ValueError(f"Geçersiz repo adı: {repo!r}")
+    root = (Path(base_dir) / repo).resolve()
+    if not root.is_dir() or not root.is_relative_to(Path(base_dir).resolve()):
+        raise ValueError(f"Repo yerelde yok: {repo!r}")
+    clean: dict[str, list[str]] = {}
+    for rule, files in scope.items():
+        if not re.match(r"^[\w.:-]+$", str(rule)):
+            raise ValueError(f"Geçersiz kural: {rule!r}")
+        for f in files or []:
+            f = str(f)
+            if f.startswith(("/", "-")) or ".." in Path(f).parts or not (root / f).resolve().is_relative_to(root):
+                raise ValueError(f"Kapsam dışı dosya yolu: {f!r}")
+            clean.setdefault(rule, []).append(f)
+    if not clean:
+        raise ValueError("Kapsam boş")
+    return lang, repo, clean, root
 
 
 def _git(root: Path, *args, check: bool = False) -> subprocess.CompletedProcess:
@@ -126,9 +142,9 @@ def run(job_id: int, work_item_id: str) -> dict:
     try:
         fields = client.get_work_item(int(work_item_id)).get("fields") or {}
         title = fields.get("System.Title") or f"WI {work_item_id}"
-        lang, repo, scope = parse_scope(fields.get("System.Description") or "")
         mgr = LocalRepoManager()
-        root = mgr.base_dir / repo
+        # Kapsam işin kaydından (take'te onaylanan); WI açıklaması yalnız görüntü — düzenlenebilir
+        lang, repo, scope, root = load_scope(job.get("job_payload") or "", mgr.base_dir)
         tv = modern.target(client, repo, root, lang, index=modern.build_index(client))
         log.info(f"\n-- ARAÇ DÜZELTMESİ #{job_id}: WI #{work_item_id} · {repo} ({lang} {tv['version']}) · "
                  f"{', '.join(scope)} --")
