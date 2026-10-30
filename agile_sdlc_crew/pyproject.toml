@@ -14,6 +14,7 @@ dependencies = [
     "bm25s>=0.2.0",
     "python-pptx>=1.0.0",
     "cairosvg>=2.7.0",
+    "ruff>=0.17.0",   # Python modernleştirme: UP kuralları tespit + güvenli düzeltme (quality/modern.py)
 ]
 
 [project.scripts]

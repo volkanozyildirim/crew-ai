@@ -571,9 +571,9 @@ header {
         <div id="tdList" style="padding:0 14px 12px"></div>
       </div>
       <div class="card" id="tdModernCard" style="display:none;flex-direction:column;overflow:hidden">
-        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Modernleştirme (PHP)</span>
-          <span class="chip dim" id="tdmTarget" title="Hedef PHP sürümü: FLODevOps imajından (birden çok imaj varsa en düşük)"></span><span style="flex:1"></span>
-          <select class="sprint-select" id="tdmRepo" title="Yerel PHP repoları" onchange="_tdmRepoChanged()"><option>Yükleniyor…</option></select>
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Modernleştirme</span>
+          <span class="chip dim" id="tdmTarget" title="Hedef sürüm: repo dilinin üretimdeki sürümü"></span><span style="flex:1"></span>
+          <select class="sprint-select" id="tdmRepo" title="Yerel repolar (PHP, Go, Python, Next.js)" onchange="_tdmRepoChanged()"><option>Yükleniyor…</option></select>
           <button class="sm-btn ghost small" id="tdmRescan" onclick="modernScan(true)" title="Önbelleği atla, yeniden tara">Yeniden tara</button>
           <button class="sm-btn small" id="tdmTake" onclick="modernTake()">Seçilenleri iş olarak aç</button>
         </div>
@@ -1529,14 +1529,15 @@ async function techdebtQueue(ids){
 // ayrıntı / avantaj / risk / önce-sonra ile listelenir. Seçilenler "Teknik borç —
 // <sprint>" story'si altında Task olur; mekanik → kuyruk, yapısal → needs-human.
 let _tdm={repos:[],scan:null,loaded:false,seq:0};
+function _tdmSel(){const v=document.getElementById('tdmRepo').value;const i=v.indexOf(':');return i<0?{lang:'',repo:''}:{lang:v.slice(0,i),repo:v.slice(i+1)}}
 function _tdmRepoChanged(){
-  const sel=document.getElementById('tdmRepo');const r=_tdm.repos.find(x=>x.repo===sel.value);
+  const k=_tdmSel();const r=_tdm.repos.find(x=>x.repo===k.repo&&(x.lang||'php')===k.lang);
   const chip=document.getElementById('tdmTarget');
-  chip.textContent=r?(r.version?`Hedef PHP ${r.version}`:'hedef sürüm bilinmiyor'):'';
-  chip.title=r&&r.images&&r.images.length?r.images.join('\n'):'Hedef PHP sürümü: FLODevOps imajından (birden çok imaj varsa en düşük)';
+  chip.textContent=r?(r.version?`Hedef ${r.label||'PHP'} ${r.version}`:'hedef sürüm bilinmiyor'):'';
+  chip.title=r?((r.source?`Kaynak: ${r.source}`:'')+(r.images&&r.images.length?'\n'+r.images.join('\n'):'')):'Hedef sürüm: repo dilinin üretimdeki sürümü';
   document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=!(r&&r.version);
   _tdm.scan=null;_tdm.seq++;document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';
-  document.getElementById('tdmMsg').textContent=r&&!r.version?'Bu repo için hedef PHP sürümü bulunamadı (FLODevOps imajı / composer.json) — tarama yapılmaz.':'';
+  document.getElementById('tdmMsg').textContent=r&&!r.version?(r.reason||`Bu repo için hedef ${r.label||''} sürümü bulunamadı — tarama yapılmaz.`):'';
   // Repo seçilince liste kendiliğinden oluşur (ayrı "Tara" adımı yok)
   if(r&&r.version)modernScan(false);
 }
@@ -1551,8 +1552,8 @@ async function loadModernRepos(){
     if(!resp.ok){document.getElementById('tdmMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
     _tdm.repos=r.items||[];_tdm.loaded=true;
     const sel=document.getElementById('tdmRepo');
-    sel.innerHTML=_tdm.repos.length?'<option value="" selected>Repo seçiniz…</option>'+_tdm.repos.map(i=>`<option value="${esc(i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${i.version?'PHP '+esc(i.version):'hedef sürüm bilinmiyor'}</option>`).join('')
-      :'<option value="">Yerel PHP reposu yok</option>';
+    sel.innerHTML=_tdm.repos.length?'<option value="" selected>Repo seçiniz…</option>'+_tdm.repos.map(i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'PHP')} ${i.version?esc(i.version):'— hedef sürüm bilinmiyor'}</option>`).join('')
+      :'<option value="">Yerel repo yok</option>';
     sel.value='';
     _tdmRepoChanged();
   }catch(e){document.getElementById('tdmMsg').textContent=String(e)}
@@ -1562,14 +1563,14 @@ function _tdmKindChip(k){
   return `<span class="chip" style="background:${m[2]};color:${m[1]}">${m[0]}</span>`;
 }
 async function modernScan(force,keepMsg){
-  const repo=document.getElementById('tdmRepo').value;const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
+  const {repo,lang}=_tdmSel();const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
   if(!repo){msg.textContent='Repo seçin.';return}
   const team=_tdTeam();const seq=++_tdm.seq;
   box.innerHTML=`<div class="board-empty" style="padding:12px 0">${esc(repo)} taranıyor…</div>`;if(!keepMsg)msg.textContent='';
   const btns=[document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
   btns.forEach(b=>b.disabled=true);
   try{
-    const resp=await fetch(`/api/techdebt/modern/scan?repo=${encodeURIComponent(repo)}&team=${encodeURIComponent(team)}${force?'&force=1':''}`);
+    const resp=await fetch(`/api/techdebt/modern/scan?repo=${encodeURIComponent(repo)}&lang=${encodeURIComponent(lang)}&team=${encodeURIComponent(team)}${force?'&force=1':''}`);
     const r=await resp.json();
     if(seq!==_tdm.seq)return;  // bu arada başka repo seçildi — eski sonucu yazma
     if(!resp.ok){box.innerHTML='';msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
@@ -1581,49 +1582,78 @@ function renderModern(){
   const r=_tdm.scan;const box=document.getElementById('tdmResult');if(!r||!box)return;
   const ad=r.adoption||{};const tp=(ad.typed_props||0),up=(ad.untyped_props||0);
   const pct=tp+up?Math.round(100*tp/(tp+up)):null;
-  document.getElementById('tdmAdoption').innerHTML=`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya`;
+  document.getElementById('tdmAdoption').innerHTML=(r.lang&&r.lang!=='php')
+    ?`${r.files} dosyada bulgu · hedef ${esc(r.label||'')} ${esc(r.version||'?')} (${esc(r.version_source||'')})`+(r.tool_fix?` · otomatik işleri <b>araç uygular</b> (${r.lang==='go'?'Go modernize':'ruff'}), LLM yalnız inceler`:' · otomatik işleri pipeline developer\'ı uygular')
+    :`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya`;
   const rules=Object.entries(r.rules||{}).sort((a,b)=>b[1].count-a[1].count);
-  const chips=rules.map(([k,v])=>`<span class="chip dim" title="${esc(v.title)} (PHP ${esc(v.since)})">${esc(v.title.split(' → ')[0].slice(0,34))} <b>${v.count}</b></span>`).join(' ');
+  const chips=rules.map(([k,v])=>`<span class="chip dim" title="${esc(v.title)}">${esc(v.title.split(' → ')[0].slice(0,34))} <b>${v.count}</b></span>`).join(' ');
   const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
-  const row=(t,human)=>{
+  // Aynı öneri (kural) tek satır: dosya paketleri (her biri ayrı Task) satırın içinde listelenir.
+  const statusChip=(t,human)=>human?humanChip(t.human_reason):(t.recurring_of?`<span class="chip dim">tekrar · önceki #${t.recurring_of}</span>`:(_tdm.scan&&_tdm.scan.tool_fix?'<span class="chip dim" title="İş olarak açılınca dilin aracı düzeltir, doğrulayıcı çalışır, PR açılır, LLM yalnız inceler">Araç uygular</span>':'<span class="chip dim" title="İş olarak açılınca pipeline kuyruğuna alınır">Kuyruğa alınır</span>'));
+  const unitRow=(t,human)=>{
     const loc=(t.locations||[]).map(l=>`<li><code>${esc(l.file)}:${l.line}</code>${l.text?` — <code>${esc(l.text)}</code>`:''}</li>`).join('');
     const where=t.module?`${esc(t.module)} · ${t.files.length} dosya`:(t.files.length===1?esc(t.files[0]):`${esc(t.files[0])} +${t.files.length-1}`);
-    return `<tr><td><input type="checkbox" class="tdmSel" value="${esc(t.gid)}"></td>
-      <td><details><summary style="cursor:pointer">${esc(t.rule_title)} <span class="chip dim">PHP ${esc(t.since)}</span></summary>
+    return `<li style="list-style:none;margin:4px 0"><label style="display:flex;gap:6px;align-items:flex-start">
+      <input type="checkbox" class="tdmSel" data-rule="${esc(t.rule)}" value="${esc(t.gid)}" onchange="_tdmChildToggle(this)">
+      <span style="flex:1"><details><summary style="cursor:pointer">${where} <span style="color:var(--text-dim)">· ${t.count} yer · ${t.sp} SP</span>${t.recurring_of?` <span class="chip dim">tekrar · #${t.recurring_of}</span>`:''}</summary>
+        <div style="font-size:12px;margin-top:2px"><b>Bulunan yerler (${t.count}):</b></div>
+        <ul style="margin:2px 0 4px 18px">${loc}${t.count>(t.locations||[]).length?`<li>+${t.count-(t.locations||[]).length} yer daha</li>`:''}</ul>
+        ${human&&t.human_reason?`<div style="font-size:11px;color:var(--text-dim)">${esc(t.human_reason)}</div>`:''}</details></span></label></li>`;
+  };
+  const ruleRow=(items,human)=>{
+    const t=items[0];
+    const total=items.reduce((a,x)=>a+(x.count||0),0),sp=items.reduce((a,x)=>a+(x.sp||0),0);
+    const files=new Set(items.flatMap(x=>x.files||[])).size;
+    return `<tr><td><input type="checkbox" class="tdmRule" data-rule="${esc(t.rule)}" onchange="_tdmRuleToggle(this)" title="Bu önerinin bütün işlerini seç"></td>
+      <td><details><summary style="cursor:pointer">${esc(t.rule_title)} ${t.since&&t.since!=='0.0'?`<span class="chip dim">${esc((_tdm.scan&&_tdm.scan.label)||'PHP')} ${esc(t.since)}</span>`:''}</summary>
         <div style="font-size:12px;margin:6px 0 4px;color:var(--text)"><b>Ne:</b> ${esc(t.summary)}</div>
         <div style="font-size:12px;color:var(--text)"><b>Avantajlar:</b><ul style="margin:2px 0 4px 18px">${(t.advantages||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>
         <div style="font-size:12px;color:var(--text)"><b>Riskler:</b><ul style="margin:2px 0 4px 18px">${(t.risks||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px"><div style="flex:1;min-width:220px"><b>Önce</b><pre style="margin:2px 0;white-space:pre-wrap;color:var(--text)">${esc(t.before)}</pre></div><div style="flex:1;min-width:220px"><b>Sonra</b><pre style="margin:2px 0;white-space:pre-wrap;color:var(--text)">${esc(t.after)}</pre></div></div>
-        <div style="font-size:12px;color:var(--text)"><b>Bulunan yerler (${t.count}):</b><ul style="margin:2px 0 4px 18px">${loc}${t.count>(t.locations||[]).length?`<li>+${t.count-(t.locations||[]).length} yer daha</li>`:''}</ul></div>
         ${t.ref?`<div style="font-size:12px"><b>Kaynak:</b> <a href="${esc(t.ref)}" target="_blank" rel="noopener">${esc(t.ref)}</a></div>`:''}
+        <div style="font-size:12px;color:var(--text);margin-top:6px"><b>İşler (${items.length}):</b> <span style="color:var(--text-dim)">her biri ayrı Task; tek tek de seçilebilir</span><ul style="margin:2px 0 4px 0;padding:0">${items.map(x=>unitRow(x,human)).join('')}</ul></div>
       </details></td>
-      <td>${where}</td><td class="num">${t.count}</td><td class="num">${t.sp}</td>
-      <td>${_tdmKindChip(t.kind)} ${human?humanChip(t.human_reason):(t.recurring_of?`<span class="chip dim">tekrar · önceki #${t.recurring_of}</span>`:'<span class="chip dim" title="İş olarak açılınca pipeline kuyruğuna alınır">Kuyruğa alınır</span>')}</td></tr>`;
+      <td>${files} dosya · ${items.length} iş</td><td class="num">${total}</td><td class="num">${sp}</td>
+      <td>${_tdmKindChip(t.kind)} ${statusChip(t,human)}</td></tr>`;
   };
-  const tbl=(list,human)=>`<table class="perf"><tr><th></th><th>Öneri</th><th>Yer</th><th class="num">Adet</th><th class="num">SP</th><th>Durum</th></tr>${list.map(t=>row(t,human)).join('')}</table>`;
+  const tbl=(list,human)=>{
+    const by=new Map();
+    for(const t of list){if(!by.has(t.rule))by.set(t.rule,[]);by.get(t.rule).push(t)}
+    const groups=[...by.values()].sort((a,b)=>b.reduce((s,x)=>s+x.count,0)-a.reduce((s,x)=>s+x.count,0));
+    return `<table class="perf"><tr><th></th><th>Öneri</th><th>Yer</th><th class="num">Adet</th><th class="num">SP</th><th>Durum</th></tr>${groups.map(g=>ruleRow(g,human)).join('')}</table>`;
+  };
   const sec=(title,sub)=>`<div style="font-size:12px;font-weight:700;margin:12px 0 4px">${title} <span style="font-weight:400;color:var(--text-dim)">${sub}</span></div>`;
   const auto=r.auto||[],infra=r.infra||[],hum=r.human||[];
   const errs=(r.errors||[]).length?`<div style="color:var(--warning);margin-top:4px">${(r.errors||[]).length} dosya taranamadı — liste eksik olabilir (${esc((r.errors||[]).slice(0,3).join('; '))})</div>`:'';
   box.innerHTML=`<div style="font-size:12px;padding:6px 0">${chips||'<span style="color:var(--text-dim)">Öneri yok.</span>'}${sk?`<div style="color:var(--text-dim);margin-top:4px">atlanan — ${sk}</div>`:''}${errs}</div>`
     +(r.message?`<div class="board-empty" style="padding:8px 0">${esc(r.message)}</div>`:'')
-    +(auto.length?sec('Otomatik işler','— yalnız kod düzenlemesiyle çözülür; Task açılır ve pipeline kuyruğuna alınır'):'')+(auto.length?tbl(auto,false):'')
+    +(auto.length?sec('Otomatik işler',r.tool_fix?'— yalnız kod düzenlemesiyle çözülür; Task açılır, düzeltmeyi araç uygular, LLM inceler':'— yalnız kod düzenlemesiyle çözülür; Task açılır ve pipeline kuyruğuna alınır'):'')+(auto.length?tbl(auto,false):'')
     +(infra.length?sec('Altyapı (DevOps) gerektiren işler','— kod dışı ön koşul var (ör. PHP eklentisi); Task needs-human açılır, DevOps takımına ayrı iş açılır')+tbl(infra,true):'')
     +(hum.length?sec('İnsan kararı gerektiren yapısal işler','— Task needs-human açılır; kapsamı insan belirler, etiket kalkınca kuyruğa alınabilir')+tbl(hum,true):'');
 }
+function _tdmRuleToggle(el){
+  document.querySelectorAll(`.tdmSel[data-rule="${CSS.escape(el.dataset.rule)}"]`).forEach(c=>c.checked=el.checked);
+  el.indeterminate=false;
+}
+function _tdmChildToggle(el){
+  const kids=[...document.querySelectorAll(`.tdmSel[data-rule="${CSS.escape(el.dataset.rule)}"]`)];
+  const on=kids.filter(c=>c.checked).length;
+  document.querySelectorAll(`.tdmRule[data-rule="${CSS.escape(el.dataset.rule)}"]`).forEach(p=>{p.checked=on===kids.length;p.indeterminate=on>0&&on<kids.length});
+}
 async function modernTake(){
-  const repo=document.getElementById('tdmRepo').value;const msg=document.getElementById('tdmMsg');
+  const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');
   const ids=[...document.querySelectorAll('.tdmSel:checked')].map(x=>x.value);
   if(!ids.length){msg.textContent='Seçili öneri yok.';return}
   const team=_tdTeam();
   const btns=[document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
   btns.forEach(b=>b.disabled=true);msg.textContent='İşler açılıyor…';
   try{
-    const resp=await fetch('/api/techdebt/modern/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,group_ids:ids,team})});
+    const resp=await fetch('/api/techdebt/modern/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,lang,group_ids:ids,team})});
     const r=await resp.json();
     if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
     const t=(r.tasks||[]),h=(r.human_tasks||[]);
     msg.innerHTML=(r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'')
-      +`${t.length} iş kuyruğa alındı (${r.total_sp||0} SP) · ${h.length} Task insan bekliyor (${r.human_sp||0} SP)`
+      +`${t.length} iş ${r.tool_fix?'araç düzeltmesine':'kuyruğa'} alındı (${r.total_sp||0} SP) · ${h.length} Task insan bekliyor (${r.human_sp||0} SP)`
       +((r.devops||[]).filter(d=>d.devops).length?' · DevOps isteği: '+[...new Set((r.devops||[]).filter(d=>d.devops).map(d=>d.devops))].map(id=>wiLink(id)).join(', '):'')
       +(t.concat(h).filter(x=>x.id).length?' — '+t.concat(h).filter(x=>x.id).map(x=>wiLink(x.id)).join(', '):'')
       +((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>esc(s.reason)).join(', '):'');

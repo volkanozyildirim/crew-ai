@@ -1,0 +1,175 @@
+# Python modernleştirme kataloğu — tespit ve düzeltme ruff'ın UP (pyupgrade) kurallarıyla,
+# hedef sürüm `--target-version` ile verilir (FLODevOps imajı → repo Dockerfile →
+# requires-python → .python-version). key = ruff kural kodu. Yalnız ruff'ın GÜVENLİ
+# düzeltmesi olan bulgular otomatik; güvenli düzeltmesi yoksa iş `<kod>:manual` olarak
+# insana gider. Katalogda olmayan kod ruff mesajıyla listelenir.
+version: 1
+rules:
+  - key: UP006
+    since: "3.9"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "typing.List/Dict → list/dict (PEP 585)"
+    summary: "Python 3.9'dan beri yerleşik koleksiyonlar tip parametresi alır; typing takma adları gereksiz."
+    advantages: ["Daha az import, okunur imzalar."]
+    risks: ["Yok — çalışma zamanı davranışı aynı."]
+    before: "def f(x: List[int]) -> Dict[str, int]:"
+    after: "def f(x: list[int]) -> dict[str, int]:"
+    ref: "https://docs.astral.sh/ruff/rules/non-pep585-annotation/"
+  - key: UP007
+    since: "3.10"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Union[X, Y] → X | Y (PEP 604)"
+    summary: "Python 3.10'dan beri birleşim tipleri | ile yazılır."
+    advantages: ["Kısa ve okunur tip ifadeleri."]
+    risks: ["Yok."]
+    before: "def f(x: Union[int, str]):"
+    after: "def f(x: int | str):"
+    ref: "https://docs.astral.sh/ruff/rules/non-pep604-annotation-union/"
+  - key: UP045
+    since: "3.10"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Optional[X] → X | None"
+    summary: "Optional yerine PEP 604 yazımı."
+    advantages: ["Tutarlı tip yazımı."]
+    risks: ["Yok."]
+    before: "def f(x: Optional[int] = None):"
+    after: "def f(x: int | None = None):"
+    ref: "https://docs.astral.sh/ruff/rules/non-pep604-annotation-optional/"
+  - key: UP035
+    since: "3.9"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Kullanımdan kalkmış import (typing → collections.abc)"
+    summary: "typing'deki eski takma adlar (Callable, Iterable…) collections.abc'den içe aktarılır."
+    advantages: ["Gelecek sürümlerde kaldırılacak adlardan kurtulur."]
+    risks: ["Yok."]
+    before: "from typing import Callable, Iterable"
+    after: "from collections.abc import Callable, Iterable"
+    ref: "https://docs.astral.sh/ruff/rules/deprecated-import/"
+  - key: UP032
+    since: "3.6"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "str.format() → f-string"
+    summary: "Basit .format() çağrıları f-string'e çevrilir."
+    advantages: ["Okunur ve daha hızlı."]
+    risks: ["Yok — ruff yalnız eşdeğer çağrıları güvenli düzeltir."]
+    before: "msg = 'Sipariş {} hazır'.format(no)"
+    after: "msg = f'Sipariş {no} hazır'"
+    ref: "https://docs.astral.sh/ruff/rules/f-string/"
+  - key: UP031
+    since: "3.0"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "% biçimlendirme → format / f-string"
+    summary: "printf tarzı % biçimlendirme modern yazıma çevrilir."
+    advantages: ["Tip uyuşmazlığı hataları azalır, okunur."]
+    risks: ["Yok — güvenli olmayanlar insana kalır."]
+    before: "msg = 'x=%s' % x"
+    after: "msg = 'x={}'.format(x)"
+    ref: "https://docs.astral.sh/ruff/rules/printf-string-formatting/"
+  - key: UP008
+    since: "3.0"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "super(Sinif, self) → super()"
+    summary: "Python 3'te argümansız super() yeterli."
+    advantages: ["Sınıf yeniden adlandırılınca kırılmaz."]
+    risks: ["Yok."]
+    before: "super(OrderService, self).__init__()"
+    after: "super().__init__()"
+    ref: "https://docs.astral.sh/ruff/rules/super-call-with-parameters/"
+  - key: UP004
+    since: "3.0"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "class X(object) → class X"
+    summary: "Python 3'te tüm sınıflar object'ten türer."
+    advantages: ["Gürültü azalır."]
+    risks: ["Yok."]
+    before: "class Order(object):"
+    after: "class Order:"
+    ref: "https://docs.astral.sh/ruff/rules/useless-object-inheritance/"
+  - key: UP017
+    since: "3.11"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "datetime.timezone.utc → datetime.UTC"
+    summary: "Python 3.11 datetime.UTC takma adını getirdi."
+    advantages: ["Kısa ve okunur."]
+    risks: ["Yok."]
+    before: "datetime.now(timezone.utc)"
+    after: "datetime.now(UTC)"
+    ref: "https://docs.astral.sh/ruff/rules/datetime-timezone-utc/"
+  - key: UP041
+    since: "3.11"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "asyncio.TimeoutError → TimeoutError"
+    summary: "Python 3.11'de asyncio.TimeoutError yerleşik TimeoutError'ın takma adı oldu."
+    advantages: ["Tek istisna tipi."]
+    risks: ["Yok."]
+    before: "except asyncio.TimeoutError:"
+    after: "except TimeoutError:"
+    ref: "https://docs.astral.sh/ruff/rules/timeout-error-alias/"
+  - key: UP024
+    since: "3.3"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "IOError/EnvironmentError → OSError"
+    summary: "Eski istisna takma adları OSError'a çevrilir."
+    advantages: ["Tek ve doğru istisna tipi."]
+    risks: ["Yok."]
+    before: "except IOError:"
+    after: "except OSError:"
+    ref: "https://docs.astral.sh/ruff/rules/os-error-alias/"
+  - key: UP015
+    since: "3.0"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "open(..., 'r') gereksiz kip"
+    summary: "Varsayılan olan 'r' kipi yazılmaz."
+    advantages: ["Gürültü azalır."]
+    risks: ["Yok."]
+    before: "open(path, 'r')"
+    after: "open(path)"
+    ref: "https://docs.astral.sh/ruff/rules/redundant-open-modes/"
+  - key: UP040
+    since: "3.12"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "TypeAlias → type X = ... (PEP 695)"
+    summary: "Python 3.12 tip takma adları için type deyimini getirdi."
+    advantages: ["Tembel değerlendirme; okunur."]
+    risks: ["Yok."]
+    before: "Ids: TypeAlias = list[int]"
+    after: "type Ids = list[int]"
+    ref: "https://docs.astral.sh/ruff/rules/non-pep695-type-alias/"
+  - key: UP036
+    since: "3.0"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Hedef sürümde ölü sürüm kontrolü bloğu"
+    summary: "sys.version_info ile eski sürümleri kontrol eden bloklar hedef sürümde hiç çalışmaz."
+    advantages: ["Ölü kod kalkar."]
+    risks: ["Yok — hedef sürüm altındaki dal kaldırılır."]
+    before: "if sys.version_info < (3, 8):\n    ..."
+    after: "(blok kaldırılır)"
+    ref: "https://docs.astral.sh/ruff/rules/outdated-version-block/"

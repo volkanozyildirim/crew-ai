@@ -17,7 +17,11 @@ from agile_sdlc_crew.quality.rank import defang, is_undefined_key
 TAG = "tempo-quality"
 HUMAN_TAG = "needs-human"
 FP_PREFIX = "tempo-fp:"
-SOURCE_LABEL = {"newrelic": "New Relic hataları", "sonar": "Sonar bulguları", "php_modern": "PHP modernleştirme"}
+SOURCE_LABEL = {"newrelic": "New Relic hataları", "sonar": "Sonar bulguları", "php_modern": "PHP modernleştirme",
+                "go_modern": "Go modernleştirme", "py_modern": "Python modernleştirme", "next_modern": "Next.js modernleştirme"}
+# Dil sürümüne göre modernleştirme kaynakları (quality/modern.py) — aynı Task metni ve davranış
+MODERN_SOURCES = {"php_modern", "go_modern", "py_modern", "next_modern"}
+MODERN_LANG_LABEL = {"php_modern": "PHP", "go_modern": "Go", "py_modern": "Python", "next_modern": "Next.js"}
 # Hatlar: 'quality' kaynak başına story açar (Kalite: <kaynak> — <sprint>);
 # 'techdebt' sprint başına TEK story (Teknik borç — <sprint>). Teknik borç
 # Task'ları tempo-quality'yi de taşır: yalın akış / ucuz modeller / dar test
@@ -218,9 +222,9 @@ LOC_PER_FILE = 5    # dosya başına en çok satır — her dosya en az bir kez 
 
 
 def _modern_rule(g: Group):
-    from agile_sdlc_crew.quality import php_modern
+    from agile_sdlc_crew.quality import modern
     key = g.findings[0].rule if g.findings else ""
-    return next((r for r in php_modern.load_rules() if r.key == key), None)
+    return next((r for r in modern.rules_for(g.source) if r.key == key), None)
 
 
 def _modern_locations(g: Group) -> list[tuple[str, int, str]]:
@@ -261,12 +265,13 @@ def pick_locations(locs: list[tuple[str, int, str]], per_file: int = LOC_PER_FIL
 def _modern_body(g: Group, php_target: str) -> list[str]:
     r = _modern_rule(g)
     parts: list[str] = []
+    lang = MODERN_LANG_LABEL.get(g.source, "PHP")
     if php_target:
-        parts.append(f"<p><b>Hedef PHP:</b> {_e(php_target)} (FLODevOps imajı)</p>")
+        parts.append(f"<p><b>Hedef {lang}:</b> {_e(php_target)}</p>")
     if r is None:
         parts.append(f"<p><b>Kural:</b> <code>{_e(g.findings[0].rule if g.findings else '')}</code></p>")
     else:
-        parts.append(f"<p><b>Kural:</b> {_e(r.title)} — PHP {_e(r.since_str)}'dan beri "
+        parts.append(f"<p><b>Kural:</b> {_e(r.title)} — {lang} {_e(r.since_str)}'dan beri "
                      f"({'otomatik' if r.auto else 'tasarım kararı'})</p>")
         parts.append(f"<p><b>Ne:</b> {_e(r.summary)}</p>")
         parts.append("<p><b>Avantajlar:</b></p><ul>" + "".join(f"<li>{_e(x)}</li>" for x in r.advantages) + "</ul>")
@@ -308,7 +313,7 @@ def expected_behavior(g: Group) -> list[str]:
     'eksik anahtarda ne olmalı / hangi dosya / nasıl doğrulanır' soruları
     kalite işlerinde hep aynı cevaba sahip — her seferinde insana sormak
     yerine burada sabitlenir."""
-    if g.source == "php_modern":
+    if g.source in MODERN_SOURCES:
         if g.needs_human:
             return ["Bu bir tasarım kararıdır: kapsamı (hangi sınıflar, hangi sırayla, hangi dış API korunacak) "
                     "insan belirler ve Task'ı rafine eder; needs-human etiketi kaldırılınca Teknik borç sekmesinden "
@@ -318,7 +323,7 @@ def expected_behavior(g: Group) -> list[str]:
         return ["Yalnızca 'Bulunan yerler' altında listelenen satırlar katalogdaki Sonra biçimine çevrilir; dış davranış "
                 "(dönen değer, yanıt, kaydedilen veri) değişmez. İlgisiz yeniden düzenleme yapılmaz.",
                 "Doğrulama: değişen her yer için dönen değeri doğrulayan dar bir birim testi (ya da mevcut test). "
-                "Ortama bağlı kontrol yazılmaz: deprecation listesinin boş olması, PHP sürümü gibi şeyler assert edilmez. "
+                "Ortama bağlı kontrol yazılmaz: deprecation listesinin boş olması, dil/çalışma zamanı sürümü gibi şeyler assert edilmez. "
                 "Dar bir test mümkün değilse eklenmez, PR açıklamasında belirtilir."]
     if g.source == "sonar":
         if g.findings and g.findings[0].rule.startswith("secrets:"):
@@ -380,7 +385,7 @@ def acceptance_criteria(g: Group) -> str:
     kapısı (flow._readiness_score) her kalite işinden 15 puan düşer."""
     if g.source == "newrelic":
         return "Bu action'da bu hata sınıfı/mesajı bir daha üretilmez; mevcut davranış korunur."
-    if g.source == "php_modern":
+    if g.source in MODERN_SOURCES:
         if g.needs_human:
             return "Kapsam insan tarafından belirlenir; belirlenen sınıflarda eski yapı kalmaz, testler geçer, dış davranış değişmez."
         return "Listelenen yerlerde eski yapı kalmaz; testler geçer; dış davranış değişmez."
@@ -410,7 +415,7 @@ def task_description(g: Group, *, sonar_url: str = "", nr_days: int = 7, php_tar
     parts.append(UNTRUSTED_NOTE)
     if g.source == "newrelic":
         parts += _nr_body(g, nr_days)
-    elif g.source == "php_modern":
+    elif g.source in MODERN_SOURCES:
         parts += _modern_body(g, php_target)
     else:
         parts += _sonar_body(g, sonar_url)

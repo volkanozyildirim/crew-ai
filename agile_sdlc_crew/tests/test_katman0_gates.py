@@ -5117,14 +5117,14 @@ def test_php_modern_ui():
     html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
     s = html.find('id="paneTechdebt"')
     pane = html[s:html.find("<section", s + 10)] if s >= 0 else ""
-    check("kart Teknik borç sekmesinde, başlangıçta gizli", 'id="tdModernCard"' in pane and "Modernleştirme (PHP)" in pane
+    check("kart Teknik borç sekmesinde, başlangıçta gizli", 'id="tdModernCard"' in pane and '<span class="h">Modernleştirme</span>' in pane
           and 'id="tdModernCard" style="display:none' in pane)
     check("repo seçici, hedef sürüm chip'i, benimseme özeti, Yeniden tara, İş olarak aç",
           all(x in pane for x in ('id="tdmRepo"', 'id="tdmTarget"', 'id="tdmAdoption"', 'id="tdmRescan"', 'id="tdmTake"'))
           and "Seçilenleri iş olarak aç" in pane)
     for fn in ("loadModernRepos", "modernScan", "modernTake", "renderModern"):
         check(f"JS: {fn}", f"function {fn}" in html)
-    js = html[html.find("function loadModernRepos"):html.find("function loadModernRepos") + 9000]
+    js = html[html.find("function loadModernRepos"):html.find("function loadModernRepos") + 16000]
     check("uçlar", "/api/techdebt/modern/repos" in js and "/api/techdebt/modern/scan" in js and "/api/techdebt/modern/take" in js)
     check("iki grup başlığı", "Otomatik işler" in js and "İnsan kararı gerektiren yapısal işler" in js)
     check("satır ayrıntısı: Avantajlar / Riskler / Önce / Sonra / Bulunan yerler / Kaynak", all(x in js for x in ("Avantajlar", "Riskler", "Önce", "Sonra", "Bulunan yerler", "Kaynak")))
@@ -5999,6 +5999,97 @@ def test_devops_requests():
     check("knob'lar", pc.get("CREW_DEVOPS_TEAM") == "DevOps" and isinstance(pc.get("CREW_DEVOPS_REQUESTS"), bool))
 
 
+def test_modern_multilang():
+    """Modernleştirme repo hangi dildeyse o: PHP, Go, Python, Next.js. Go/Python'da
+    düzeltmeyi araç uygular (modernize / ruff), LLM yalnız inceler."""
+    print("\n[modernleştirme: çok dil]")
+    import shutil
+    from agile_sdlc_crew.quality import modern, modern_fix
+    from agile_sdlc_crew.quality.render import MODERN_SOURCES, task_description
+    from agile_sdlc_crew.quality.model import Finding, Group
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        go = base / "goapp"; go.mkdir()
+        (go / "go.mod").write_text("module m\n\ngo 1.24.0\n")
+        py = base / "pyapp"; py.mkdir()
+        (py / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.11"\n')
+        py2 = base / "pyimg"; py2.mkdir()
+        (py2 / "requirements.txt").write_text("fastapi\n")
+        (py2 / "Dockerfile").write_text("FROM python:3.9-slim\n")
+        nx = base / "web"; nx.mkdir()
+        (nx / "package.json").write_text('{"dependencies": {"next": "^15.2.4", "react": "19.0.0"}}')
+        (nx / "app").mkdir()
+        (nx / "app" / "a.tsx").write_text("import { useFormState } from 'react-dom'\n// const c = cookies()\nconst h = headers()\n"
+                                         "const x = <Link href='/a'>\n  <a>git</a></Link>\n")
+        (nx / "middleware.ts").write_text("export function middleware(){}\n")
+        (nx / "node_modules").mkdir(); (nx / "node_modules" / "z.js").write_text("useFormState()\n")
+        check("dil tespiti", modern.detect_langs(go) == ["go"] and modern.detect_langs(py) == ["python"]
+              and modern.detect_langs(nx) == ["nextjs"], str([modern.detect_langs(x) for x in (go, py, nx)]))
+        check("Go hedefi go.mod'dan", modern.target(None, "goapp", go, "go")["version"] == "1.24")
+        check("Python hedefi: FLODevOps imajı repo Dockerfile'ından önce gelir",
+              modern.target(None, "pyimg", py2, "python", index={"pyimg": [{"src": "anatolia/build/x", "images": ["python:3.11"]}]})["version"] == "3.11"
+              and modern.target(None, "pyimg", py2, "python", index={})["version"] == "3.9"
+              and modern.target(None, "pyapp", py, "python", index={})["version"] == "3.11")
+        check("Next.js hedefi package.json'dan", modern.target(None, "web", nx, "nextjs")["version"] == "15.2")
+        hits, _ = modern.next_hits(nx)
+        keys = sorted({(h["rule"], h["file"]) for h in hits})
+        check("Next.js desenleri: useFormState, senkron headers(), <Link><a>, middleware dosyası",
+              ("use_form_state", "app/a.tsx") in keys and ("sync_request_api", "app/a.tsx") in keys
+              and ("link_legacy_anchor", "app/a.tsx") in keys and ("middleware_to_proxy", "middleware.ts") in keys, str(keys))
+        check("Next.js: yorum satırı ve node_modules atlanır",
+              sum(1 for h in hits if h["rule"] == "sync_request_api") == 1 and not any("node_modules" in h["file"] for h in hits))
+
+        if Path(modern.go_modernize_bin()).exists() and shutil.which("go"):
+            (go / "a.go").write_text("package m\n\nfunc F(v interface{}) interface{} { return v }\n")
+            g = lambda *a: subprocess.run(["git", *a], cwd=go, capture_output=True, text=True)
+            g("init", "-q", "-b", "main"); g("add", "-A"); g("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i")
+            gh, errs = modern.go_hits(go)
+            check("Go: modernize bulguları (any)", any(h["rule"] == "any" and h["file"] == "a.go" for h in gh), f"{gh} {errs}")
+            changed = modern_fix.go_apply(go, {"any": ["a.go"]})
+            check("Go: yalnız kapsamdaki düzeltme uygulanır ve gofmt'lanır",
+                  changed == ["a.go"] and "func F(v any) any" in (go / "a.go").read_text(), (go / "a.go").read_text())
+        else:
+            skip("Go modernize", "araç yok")
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td); (base / "gocrons" / "cmd").mkdir(parents=True)
+        ok = modern_fix.load_scope('{"lang": "go", "repo": "gocrons", "scope": {"any": ["cmd/a.go"]}}', base)
+        check("araç kapsamı işin kaydından", ok[:3] == ("go", "gocrons", {"any": ["cmd/a.go"]}))
+        bad = ['{"lang": "go", "repo": "../etc", "scope": {"any": ["a.go"]}}',
+               '{"lang": "go", "repo": "gocrons", "scope": {"any": ["../../x.go"]}}',
+               '{"lang": "go", "repo": "gocrons", "scope": {"any": ["/etc/passwd"]}}',
+               '{"lang": "go", "repo": "gocrons", "scope": {"any": ["-rf.go"]}}',
+               '{"lang": "php", "repo": "gocrons", "scope": {"x": ["a.php"]}}', '', '{"lang": "go", "repo": "nope", "scope": {"any": ["a.go"]}}']
+        rej = 0
+        for b in bad:
+            try:
+                modern_fix.load_scope(b, base)
+            except ValueError:
+                rej += 1
+        check("kapsam doğrulaması: kök dışı/mutlak/'-' yol, geçersiz repo/dil, boş kayıt reddedilir", rej == len(bad), f"{rej}/{len(bad)}")
+    check("ruff ikilisi doğrudan çalışır (python -m değil)", "-m" not in modern._ruff_cmd() and modern._ruff_cmd()[0].endswith("ruff"))
+
+    grp = Group(source="go_modern", repo="gocrons", title="t", fingerprints=["go_modern:gocrons:any:a.go"],
+                findings=[Finding(source="go_modern", file="a.go", rule="any", lines=[3], uris=["3|interface{}"])])
+    d = task_description(grp, php_target="1.24 (go.mod)")
+    check("Task metni: Go hedefi ve Go kataloğu", "Hedef Go:" in d and "interface{} → any" in d and "go_modern" in MODERN_SOURCES)
+
+    srv = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/server.py").read_text()
+    check("işçi: modern_fix işleri araçla koşar (pipeline değil)", 'if (job.get("job_kind") or "pipeline") == "modern_fix":' in srv
+          and "modern_fix.run(job_id, work_item_id)" in srv)
+    check("uçlar dil parametresi alır", 'lang: str = "php"' in srv and "_md.scan, AzureDevOpsClient(), repo.strip(), (lang or \"php\")" in srv)
+    md = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern.py").read_text()
+    check("iş türü ve onaylı kapsam INSERT'te verilir (işçi yarışı yok, WI açıklaması okunmaz)",
+          'job_kind="modern_fix",' in md and "job_payload=payloads.get(title" in md)
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("aynı öneri tek satır: kural başına grup, alt işler tek tek ve toplu seçilir",
+          "const ruleRow=(items,human)=>" in html and "function _tdmRuleToggle" in html and "function _tdmChildToggle" in html
+          and 'class="tdmSel" data-rule=' in html)
+    check("kart çok dilli: başlık, dil:repo seçimi, araç uygular etiketi",
+          '<span class="h">Modernleştirme</span>' in html and "function _tdmSel()" in html and "Araç uygular" in html)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -6087,7 +6178,8 @@ def main():
               test_wi_lifecycle_on_queue,
               test_pre_pr_verify_and_build_fix,
               test_security_hardening,
-              test_devops_requests):
+              test_devops_requests,
+              test_modern_multilang):
         try:
             t()
         except Exception as e:

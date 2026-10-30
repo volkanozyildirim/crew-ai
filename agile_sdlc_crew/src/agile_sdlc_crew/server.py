@@ -152,6 +152,7 @@ class TechdebtModernTakeRequest(BaseModel):
     repo: str
     group_ids: list[str] = []
     team: str = ""
+    lang: str = "php"
 
 
 class QualityTakeRequest(BaseModel):
@@ -403,6 +404,9 @@ async def retry_job(job_id: int):
         job["work_item_id"],
         bool(job.get("use_hal", False)),
         job.get("wi_title", ""),
+        # araç düzeltmesi yeniden denenince yine araçla koşsun (pipeline'a düşmesin)
+        job_kind="modern_fix" if job.get("job_kind") == "modern_fix" else "pipeline",
+        job_payload=(job.get("job_payload") or "") if job.get("job_kind") == "modern_fix" else "",
     )
     _ensure_worker()
     return JSONResponse({
@@ -2029,35 +2033,36 @@ def _modern_off():
     if bad:
         return bad
     if not _pc.get("CREW_TECHDEBT_PHP_MODERN"):
-        return JSONResponse({"error": "PHP modernleştirme kapalı (CREW_TECHDEBT_PHP_MODERN)"}, status_code=403)
+        return JSONResponse({"error": "Modernleştirme kapalı (CREW_TECHDEBT_PHP_MODERN)"}, status_code=403)
     return None
 
 
 @app.get("/api/techdebt/modern/repos")
 async def techdebt_modern_repos():
-    """Yerel PHP repoları + FLODevOps imajından hedef PHP sürümü (yazma yok)."""
-    from agile_sdlc_crew.quality import php_modern as _pm
+    """Yerel repolar × dil (PHP/Go/Python/Next.js) + hedef sürüm (yazma yok)."""
+    from agile_sdlc_crew.quality import modern as _md
     bad = _modern_off()
     if bad:
         return bad
     try:
-        res = await asyncio.to_thread(_pm.repos, AzureDevOpsClient())
+        res = await asyncio.to_thread(_md.repos, AzureDevOpsClient())
         return JSONResponse({"enabled": True, **res})
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
 
 
 @app.get("/api/techdebt/modern/scan")
-async def techdebt_modern_scan(repo: str = "", team: str = "", force: bool = False):
-    """Repoyu tara (önbellekli): kural özeti + otomatik / insan grupları + dedup. Yazma yok."""
-    from agile_sdlc_crew.quality import php_modern as _pm
+async def techdebt_modern_scan(repo: str = "", team: str = "", force: bool = False, lang: str = "php"):
+    """Repoyu kendi dilinin hedef sürümüne göre tara: kural özeti + otomatik / altyapı / insan grupları. Yazma yok."""
+    from agile_sdlc_crew.quality import modern as _md
     bad = _modern_off()
     if bad:
         return bad
     if not repo.strip():
         return JSONResponse({"error": "repo seçin"}, status_code=400)
     try:
-        res = await asyncio.to_thread(_pm.scan, AzureDevOpsClient(), repo.strip(), team=team, force=bool(force))
+        res = await asyncio.to_thread(_md.scan, AzureDevOpsClient(), repo.strip(), (lang or "php").strip(),
+                                      team=team, force=bool(force))
         return JSONResponse(res)
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
@@ -2065,8 +2070,9 @@ async def techdebt_modern_scan(repo: str = "", team: str = "", force: bool = Fal
 
 @app.post("/api/techdebt/modern/take")
 async def techdebt_modern_take(req: TechdebtModernTakeRequest):
-    """Seçilen grupları 'Teknik borç — <sprint>' story'si altında Task olarak aç; mekanik olanları kuyruğa al."""
-    from agile_sdlc_crew.quality import php_modern as _pm
+    """Seçilen grupları 'Teknik borç — <sprint>' story'si altında Task olarak aç; otomatikleri kuyruğa al
+    (Go/Python: araç-düzeltme işi, PHP/Next.js: pipeline)."""
+    from agile_sdlc_crew.quality import modern as _md
     bad = _modern_off()
     if bad:
         return bad
@@ -2075,7 +2081,8 @@ async def techdebt_modern_take(req: TechdebtModernTakeRequest):
     if not req.group_ids:
         return JSONResponse({"error": "Seçili öneri yok"}, status_code=400)
     try:
-        res = await asyncio.to_thread(_pm.take, AzureDevOpsClient(), req.repo.strip(), req.group_ids, team=req.team)
+        res = await asyncio.to_thread(_md.take, AzureDevOpsClient(), req.repo.strip(), (req.lang or "php").strip(),
+                                      req.group_ids, team=req.team)
         if any(t.get("job_id") for t in res.get("tasks") or []):
             _ensure_worker()
         return JSONResponse(res, status_code=201 if res.get("story") else 200)
@@ -2348,6 +2355,14 @@ def _queue_worker():
         try:
             from agile_sdlc_crew.main import run_pipeline
             from agile_sdlc_crew.dashboard import StatusTracker
+
+            if (job.get("job_kind") or "pipeline") == "modern_fix":
+                # Araç düzeltmesi (Go modernize / ruff): LLM developer yok, yalnız inceleme
+                from agile_sdlc_crew.quality import modern_fix
+                db.start_job(job_id)
+                modern_fix.run(job_id, work_item_id)
+                db.complete_job(job_id)
+                continue
 
             db.start_job(job_id)
             tracker = StatusTracker()
