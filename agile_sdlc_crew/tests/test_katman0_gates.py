@@ -4942,7 +4942,8 @@ def test_php_modern_take():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         (root / "webservice").mkdir()
-        (root / "webservice" / "composer.json").write_text('{"require":{"php":"^8.4"}}', encoding="utf-8")
+        # ext-mbstring: utf8_encode düzeltmesi mbstring ister; kanıt yoksa iş altyapı listesine gider
+        (root / "webservice" / "composer.json").write_text('{"require":{"php":"^8.4","ext-mbstring":"*"}}', encoding="utf-8")
         (root / "notphp").mkdir()
         (root / "oldphp").mkdir()
         (root / "oldphp" / "composer.json").write_text('{}', encoding="utf-8")
@@ -5906,6 +5907,98 @@ def test_security_hardening():
     check("silme: iş başına sınır", not ok and "sınır" in why, why)
 
 
+def test_devops_requests():
+    """Kullanıcı kararı (2026-10-30): DevOps'un yapması gereken iş ayrı Task olarak açılır.
+    PR'dan: repoda daha önce okunmayan ortam değişkeni (#247 MP_MODERATION_AI_AUTH_JSON).
+    Teknik borçtan: eklenti ön koşulu kanıtlanamayan iş otomatik değil, DevOps'a gider."""
+    print("\n[DevOps istekleri]")
+    from agile_sdlc_crew import devops_request as dr
+    from agile_sdlc_crew.quality import php_modern as pm
+    from agile_sdlc_crew.quality.model import Finding, Group
+    from agile_sdlc_crew import pipeline_config as pc
+
+    old = "<?php\n$a = getenv('DB_HOST');\n"
+    new = ("<?php\n$a = getenv('DB_HOST');\nconst AUTH_ENV_NAME = 'MP_MODERATION_AI_AUTH_JSON';\n"
+           "$b = Helper::getEnvOrDefault('EXISTING_ELSEWHERE');\n")
+    got = dr.new_env_names(old, new, lambda n: n == "EXISTING_ELSEWHERE")
+    check("env: yalnız PR'ın eklediği ve repoda geçmeyen ad", got == {"MP_MODERATION_AI_AUTH_JSON": 3}, str(got))
+    check("env: Go/JS/Python okumaları", set(dr.env_names(
+        'x := os.Getenv("GA4_JSON")\nprocess.env.NODE_KEY\nos.environ["PY_SECRET"]').keys()) == {"GA4_JSON", "NODE_KEY", "PY_SECRET"})
+    check("silinen dosya içerik sırrı (ad ele vermese de)", dr.looks_like_secret('{"private_key": "-----BEGIN PRIVATE KEY-----x"}')
+          and not dr.looks_like_secret('{"name": "analytics", "enabled": true}'))
+    body = dr.env_request_body(repo="marketplace", names={"MP_X": "app/A.php:3"}, deleted_files=["auth.json"],
+                               deps=[{"devrepo": "anatolia", "service": "marketplace", "secret": "prod-marketplace-secrets",
+                                      "images": ["php-8-2:1.0"]}], pr_url="https://x/pr/1", source_wi="76578")
+    check("istek metni: ad, satır, secret adı, değer yazılmaz notu", all(x in body for x in (
+        "MP_X", "app/A.php:3", "prod-marketplace-secrets", "auth.json", "Değerler bu işte yazılmaz")))
+
+    class _Cl:
+        _base_api_url = "https://x/_apis"
+        def __init__(self, existing=None):
+            self.created, self.updates, self.existing = [], [], existing
+        def get_team_area_path(self, team):
+            return "Boards Management\\DevOps"
+        def query_work_items(self, q, limit=0):
+            return [{"id": self.existing}] if self.existing else []
+        def list_iterations(self, team):
+            return [{"path": "Boards Management\\2026_21_DevOps", "attributes": {"timeFrame": "past"}},
+                    {"path": "Boards Management\\2026_22_DevOps", "attributes": {"timeFrame": "current"}}]
+        def create_work_item(self, t, fields, parent_id=None):
+            self.created.append((t, fields)); return {"id": 90001}
+        def update_work_item(self, wid, ops):
+            self.updates.append((wid, ops)); return {}
+    c = _Cl()
+    r = dr.open_request(c, team="DevOps", title="[m] ENV", body_html="<p>x</p>", source_wi="76578", key="env:m:76578:MP_X",
+                        task_fields={"Custom.ARGEType": "Hayır"})
+    f = c.created[0][1]
+    check("açılış: DevOps alanı, aktif sprint, Task, etiket, anahtar satırı, zorunlu alan",
+          r == {"id": 90001, "created": True} and c.created[0][0] == "Task" and f["System.AreaPath"].endswith("DevOps")
+          and f["System.IterationPath"].endswith("2026_22_DevOps") and f["System.Tags"] == dr.TAG
+          and "tempo-devops-key: env:m:76578:MP_X" in f["System.Description"] and f["Custom.ARGEType"] == "Hayır", str(f))
+    check("açılış: kaynak işe Predecessor bağı", c.updates and c.updates[0][0] == 76578
+          and c.updates[0][1][0]["value"]["rel"] == "System.LinkTypes.Dependency-Reverse")
+    c2 = _Cl(existing=88888)
+    r2 = dr.open_request(c2, team="DevOps", title="t", body_html="b", source_wi="1", key="k")
+    check("aynı istek ikinci kez açılmaz, yeni kaynak yine bağlanır", r2 == {"id": 88888, "created": False}
+          and not c2.created and c2.updates)
+
+    # ── teknik borç: eklenti ön koşulu ──
+    rule = pm.Rule(key="utf8_encode", since=(8, 2), kind="deprecation", title="utf8", summary="", advantages=[],
+                   risks=[], before="", after="", ref="", auto=True, requires=["mbstring"])
+    rf = pm.Rule(key="removed_functions", since=(8, 0), kind="deprecation", title="rm", summary="", advantages=[],
+                 risks=[], before="", after="", ref="", auto=True, requires_if={"money_format": ["intl"]})
+    def g(rule_key, text):
+        return Group(source="php_modern", repo="r", title="t", fingerprints=["fp"],
+                     findings=[Finding(source="php_modern", file="a.php", rule=rule_key, uris=[f"3|{text}"])])
+    check("eklenti kanıtı yoksa eksik listelenir", pm._missing_exts(g("utf8_encode", "utf8_encode($x)"), rule, lambda e: False) == ["mbstring"])
+    check("eklenti repoda kullanılıyorsa otomatik kalır", pm._missing_exts(g("utf8_encode", "utf8_encode($x)"), rule, lambda e: True) == [])
+    check("koşullu eklenti yalnız ilgili fonksiyon geçince", pm._missing_exts(g("removed_functions", "each($a)"), rf, lambda e: False) == []
+          and pm._missing_exts(g("removed_functions", "money_format('%i', $x)"), rf, lambda e: False) == ["intl"])
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        sp = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        sp("init", "-q", "-b", "main")
+        (root / "a.php").write_text("<?php echo strlen('x');\n")
+        sp("add", "-A"); sp("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i")
+        check("kanıt yok → eklenti doğrulanamadı", not pm.ext_available(root, "mbstring"))
+        (root / "b.php").write_text("<?php echo mb_strlen('x');\n")
+        sp("add", "-A"); sp("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "j")
+        check("uygulama kodunda mb_* → mbstring var", pm.ext_available(root, "mbstring"))
+        (root / "composer.json").write_text('{"require": {"ext-intl": "*"}}')
+        check("composer ext-<ad> şartı → var", pm.ext_available(root, "intl"))
+
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/php_modern.py").read_text()
+    check("tarama: otomatik yalnız kodla çözülen; altyapı ayrı liste",
+          '"infra": [_row(g, rules_by_key) for g in groups if g.needs_human and g.infra]' in src
+          and '"auto": [_row(g, rules_by_key) for g in groups if not g.needs_human]' in src)
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("kart: 'Altyapı (DevOps) gerektiren işler' bölümü ve DevOps bağlantısı",
+          "Altyapı (DevOps) gerektiren işler" in html and "DevOps isteği: " in html)
+    fsrc = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("PR açılınca (yeni ve mevcut PR yolu) env isteği kontrol edilir", fsrc.count("self._devops_env_request()") == 2)
+    check("knob'lar", pc.get("CREW_DEVOPS_TEAM") == "DevOps" and isinstance(pc.get("CREW_DEVOPS_REQUESTS"), bool))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -5993,7 +6086,8 @@ def main():
               test_resume_skips_discarded_work,
               test_wi_lifecycle_on_queue,
               test_pre_pr_verify_and_build_fix,
-              test_security_hardening):
+              test_security_hardening,
+              test_devops_requests):
         try:
             t()
         except Exception as e:

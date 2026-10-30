@@ -47,6 +47,7 @@ class Group:
     needs_human: bool = False
     human_reason: str = ""
     recurring_of: int | None = None
+    infra: list[str] = field(default_factory=list)   # kod dışı ön koşul (ör. "ext:mbstring") → DevOps
 
     @property
     def last_seen(self) -> float:

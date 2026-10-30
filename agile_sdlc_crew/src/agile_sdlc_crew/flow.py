@@ -6913,6 +6913,7 @@ class AgileSDLCFlow(Flow[PipelineState]):
             self._step_done("create_pr_task", f"PR #{self.state.pr_id} (mevcut): {self.state.pr_url}")
             if self.state.job_id:
                 self._db.update_job(self.state.job_id, pr_id=self.state.pr_id, pr_url=self.state.pr_url)
+            self._devops_env_request()
             return
 
         wi_title = _get_work_item_title(
@@ -6979,6 +6980,62 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self._step_done("create_pr_task", f"PR #{self.state.pr_id}: {self.state.pr_url}")
         if self.state.job_id:
             self._db.update_job(self.state.job_id, pr_id=self.state.pr_id, pr_url=self.state.pr_url)
+        self._devops_env_request()
+
+    def _devops_env_request(self) -> None:
+        """PR repoda daha önce okunmayan bir ortam değişkeni ekliyorsa DevOps takımına
+        ayrı iş (CREW_DEVOPS_REQUESTS). #244/#247 `MP_MODERATION_AI_AUTH_JSON`'ı
+        ekledi; prod'da tanımlanmadan birleşseydi moderasyon kırılırdı ve bunu
+        yalnız PR yorumu söylüyordu. Hata akışı durdurmaz."""
+        from agile_sdlc_crew import pipeline_config as _pc
+        from agile_sdlc_crew import devops_request as _dr
+        if self.state.dry_run or not self.state.pr_id or not _pc.get("CREW_DEVOPS_REQUESTS"):
+            return
+        try:
+            repo, branch = self.state.repo_name, self.state.branch_name
+            root = self._repo_mgr.base_dir / repo
+            ref = _qe_ref(root)
+            names: dict = {}
+            deleted: list = []
+            for p in self.state.all_pushes or []:
+                fp = p.get("file") or ""
+                rel = fp.lstrip("/")
+                old = _qe_git(root, "show", f"{ref}:{rel}")
+                if p.get("change_type") == "delete":
+                    if _dr.looks_like_secret(old):
+                        deleted.append(rel)
+                    continue
+                try:
+                    new = self._client.get_file_content(repo, fp, branch) or ""
+                except Exception:
+                    continue
+                for n, ln in _dr.new_env_names(old, new, lambda n: _dr.repo_has_name(root, ref, n)).items():
+                    names.setdefault(n, f"{rel}:{ln}")
+            if not names:
+                return
+            from agile_sdlc_crew.quality.intake import load_task_fields
+            team = _pc.get("CREW_DEVOPS_TEAM") or "DevOps"
+            body = _dr.env_request_body(repo=repo, names=names, deleted_files=deleted,
+                                        deps=_dr.deployments(self._client, repo),
+                                        pr_url=self.state.pr_url, source_wi=self.state.work_item_id)
+            res = _dr.open_request(
+                self._client, team=team, title=f"[{repo}] ENV tanımı: {', '.join(sorted(names))}",
+                body_html=body, source_wi=self.state.work_item_id,
+                key=f"env:{repo}:{self.state.work_item_id}:{','.join(sorted(names))}",
+                task_fields=load_task_fields(), logger=_log)
+            if res.get("created"):
+                from agile_sdlc_crew.main import _add_wi_comment
+                note = (f"## 🛠️ DevOps isteği #{res['id']}\n\nBu PR repoda daha önce kullanılmayan ortam "
+                        f"değişkenleri ekliyor: {', '.join('`' + n + '`' for n in sorted(names))}. "
+                        f"**DevOps #{res['id']} tamamlanmadan PR birleştirilmemeli** — değişkenler tanımsızken "
+                        f"kod çalışma anında hata verir.\n\n*Tempo — DevOps isteği*")
+                _add_wi_comment(self._client, self.state.work_item_id, note)
+                try:
+                    self._client.add_pr_comment(repo, int(self.state.pr_id), note)
+                except Exception as _e_pc:
+                    _log(f"  DevOps notu PR'a yazılamadı: {_e_pc}")
+        except Exception as e:  # noqa: BLE001
+            _log(f"  🛠️ DevOps isteği açılamadı (akış sürüyor): {e}")
 
     # ── Faz 3: Dogrulama ────────────────────────────
 
