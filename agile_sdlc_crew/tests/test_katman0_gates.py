@@ -4778,18 +4778,18 @@ def test_php_modern_groups():
     g84, _s, sum84 = pm.build_groups(scan, rules, "8.4", repo="webservice", board_index={}, now=1e9, cfg=cfg)
     check("8.4 hedefte property_hooks grubu var", "property_hooks" in {g.findings[0].rule for g in g84})
     sc = [g for g in groups if g.findings[0].rule == "str_contains"]
-    check("mekanik: dosya başına birim, aynı kural ≤5 dosya / ≤3 SP paket → 12 dosya → 4 paket",
-          len(sc) == 4 and all(g.sp <= 3 and len(g.files) <= 5 for g in sc) and sum(len(g.files) for g in sc) == 12,
-          str([(g.sp, len(g.files)) for g in sc]))
+    # Aynı öneri tek iş (kullanıcı kararı): dosya başına 1 SP toplanmaz (150 dosya 64 SP çıkıyordu)
+    check("mekanik: aynı kural TEK iş, SP yer sayısından → 12 dosya → 1 iş × 1 SP",
+          len(sc) == 1 and sc[0].sp == 1 and len(sc[0].files) == 12, str([(g.sp, len(g.files)) for g in sc]))
     check("paket parmak izleri dosya başına php_modern:<repo>:<kural>:<dosya>",
           all(fp.startswith("php_modern:webservice:str_contains:app/Lib/F") for g in sc for fp in g.fingerprints)
           and sum(len(g.fingerprints) for g in sc) == 12)
     check("aynı dosyada 2 bulgu → tek birim, count 2", any(f.count == 2 and f.file == "app/Lib/F0.php" for g in sc for f in g.findings))
-    check("mekanik grup otonom, SP = dosya başına sp_unit", all(not g.needs_human for g in sc))
+    check("mekanik grup otonom", all(not g.needs_human for g in sc))
     tp = [g for g in groups if g.findings[0].rule == "typed_properties"]
-    check("yapısal: modül başına birim (app/Model, app/Lib) → 2 grup, SP 5, needs_human",
-          len(tp) == 2 and all(g.needs_human and g.sp == 5 for g in tp)
-          and {g.fingerprints[0] for g in tp} == {"php_modern:webservice:typed_properties:app/Model", "php_modern:webservice:typed_properties:app/Lib"},
+    check("yapısal: aynı kural TEK iş, parmak izleri modül başına (app/Model, app/Lib), SP ≤8, needs_human",
+          len(tp) == 1 and tp[0].needs_human and tp[0].sp <= 8
+          and set(tp[0].fingerprints) == {"php_modern:webservice:typed_properties:app/Model", "php_modern:webservice:typed_properties:app/Lib"},
           str([(g.fingerprints, g.sp) for g in tp]))
     check("yapısal neden metni katalog riskinden", all(g.human_reason.startswith("Tasarım kararı") for g in tp))
     dep = next(g for g in groups if g.findings[0].rule == "utf8_encode")
@@ -5007,7 +5007,7 @@ def test_php_modern_take():
               and res["human_tasks"][0]["job_id"] is None, str(res))
         check("bilinmeyen gid atlanan listesinde, tekrar gid tekilleşti", any("tarama" in s_["reason"] for s_ in res["skipped"]) and len(res["skipped"]) == 1)
         check("quality_items kaydı source=php_modern", rec and all(r["source"] == "php_modern" for r in rec))
-        check("story bağlantısı + SP", res["story"]["id"] == 601 and res["total_sp"] == 2 and res["human_sp"] == 5)
+        check("story bağlantısı + SP", res["story"]["id"] == 601 and res["total_sp"] == 2 and res["human_sp"] == 2, str(res.get("total_sp")) + "/" + str(res.get("human_sp")))
         # board'da açık fp → atlanır
         board.clear()
         board[gids_fp := pm.fingerprint("webservice", "str_contains", "app/Lib/A.php")] = {"wi": 700, "state": "Active"}
@@ -6090,6 +6090,29 @@ def test_modern_multilang():
           '<span class="h">Modernleştirme</span>' in html and "function _tdmSel()" in html and "Araç uygular" in html)
 
 
+def test_modern_sp():
+    """Aynı öneri tek iş, SP iş miktarından, en çok 8 (kullanıcı kararı 2026-10-30)."""
+    print("\n[modernleştirme SP]")
+    from agile_sdlc_crew.quality import php_modern as pm
+    from agile_sdlc_crew.quality.model import Finding, Group
+    check("geliştirici: ≤20 yer 1, ≤60 2, ≤150 3, ≤400 5, fazlası 8 SP",
+          [pm.modern_sp(n) for n in (5, 21, 61, 151, 401, 5000)] == [1, 2, 3, 5, 8, 8])
+    check("araç uygulayan dil: ≤200 1, ≤1000 2, ≤3000 3, fazlası 5 SP",
+          [pm.modern_sp(n, True) for n in (150, 900, 2212, 9000)] == [1, 2, 3, 5])
+    check("yapısal: ≤10 2, ≤40 3, ≤150 5, fazlası 8 SP", [pm.structural_sp(n) for n in (4, 19, 135, 956)] == [2, 3, 5, 8])
+    units = [Group(source="go_modern", repo="r", title="any — f%d.go" % i, fingerprints=["go_modern:r:any:f%d.go" % i],
+                   findings=[Finding(source="go_modern", file="f%d.go" % i, rule="any", count=40)]) for i in range(150)]
+    packs = pm.pack_modern(units, source="go_modern", tool_fix=True)
+    check("150 dosyalık aynı öneri → tek iş, SP ≤8, dosya başına parmak izi",
+          len(packs) == 1 and packs[0].sp <= 8 and len(packs[0].fingerprints) == 150 and "150 dosya" in packs[0].title,
+          str([(g.sp, len(g.files), g.title) for g in packs]))
+    infra = Group(source="php_modern", repo="r", title="utf8 — a.php", fingerprints=["php_modern:r:utf8_encode:a.php"],
+                  findings=[Finding(source="php_modern", file="a.php", rule="utf8_encode", count=1)], needs_human=True,
+                  human_reason="Altyapı", infra=["ext:mbstring"])
+    out = pm.pack_modern([infra], source="php_modern")
+    check("altyapı işi ayrı kalır ve ön koşulu korunur", len(out) == 1 and out[0].infra == ["ext:mbstring"] and out[0].needs_human)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -6179,7 +6202,8 @@ def main():
               test_pre_pr_verify_and_build_fix,
               test_security_hardening,
               test_devops_requests,
-              test_modern_multilang):
+              test_modern_multilang,
+              test_modern_sp):
         try:
             t()
         except Exception as e:

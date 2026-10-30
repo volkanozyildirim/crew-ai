@@ -291,7 +291,10 @@ def _units(hits: list[dict], rules_by_key: dict[str, Rule], repo: str, source: s
     for g in by.values():
         r = rules_by_key[g.findings[0].rule]
         g.score = r.weight * (1 + math.log10(max(1, g.total)))
-        g.sp = r.sp_unit if r.unit == "module" else max(1, r.sp_unit)
+        # modül birimi (yapısal): katalogdaki sp_unit TAVAN, küçük modül daha az (her modüle 5 SP
+        # verince channel'da 20 yapısal iş 100 SP çıkıyordu)
+        g.sp = (min(MODERN_SP_MAX, max(1, r.sp_unit), 2 if g.total <= 10 else (3 if g.total <= 40 else r.sp_unit))
+                if r.unit == "module" else max(1, r.sp_unit))
     return list(by.values()), summary
 
 
@@ -378,8 +381,59 @@ def _missing_exts(u, r: Rule, ext_ok) -> list[str]:
     return [e for e in dict.fromkeys(need) if not (ext_ok and ext_ok(e))]
 
 
+# Aynı öneri her yerde aynı düzenleme: TEK iş (Task) — kullanıcı kararı (2026-10-30). Eskiden
+# dosya başına 1 SP toplanıyor ve ≤5 dosyalık paketlere bölünüyordu: webservice'te 150 dosya
+# 64 SP, `strpos → str_contains` tek başına 14 iş / 40 SP. SP iş miktarından (yer sayısı), en
+# çok 8; araç uygulayan dillerde (Go/Python) iş yalnız inceleme olduğu için daha düşük.
+MODERN_SP_MAX = 8
+
+
+def modern_sp(occurrences: int, tool_fix: bool = False) -> int:
+    if tool_fix:
+        steps = ((200, 1), (1000, 2), (3000, 3))
+    else:
+        steps = ((20, 1), (60, 2), (150, 3), (400, 5))
+    for limit, sp in steps:
+        if occurrences <= limit:
+            return sp
+    return MODERN_SP_MAX if not tool_fix else 5
+
+
+def structural_sp(occurrences: int) -> int:
+    """Tasarım kararı gerektiren iş: kapsamı insan belirler; SP yer sayısından, en çok 8."""
+    for limit, sp in ((10, 2), (40, 3), (150, 5)):
+        if occurrences <= limit:
+            return sp
+    return MODERN_SP_MAX
+
+
+def pack_modern(units: list, *, source: str, tool_fix: bool = False) -> list:
+    """Aynı repo + kural (+ insan/altyapı durumu) birimlerini TEK işte topla — dosya birimleri de
+    modül birimleri de. SP yer sayısından, en çok MODERN_SP_MAX. Parmak izleri birim başına kalır
+    (dedup dosya/modül düzeyinde çalışmaya devam eder)."""
+    from agile_sdlc_crew.quality.model import Group
+    buckets: dict[tuple, list] = {}
+    for u in units:
+        buckets.setdefault((u.repo, u.findings[0].rule, u.needs_human, tuple(u.infra)), []).append(u)
+    out = []
+    for (repo, _rule, human, infra), us in buckets.items():
+        us.sort(key=lambda x: (-x.score, x.fingerprints[0]))
+        g = Group(source=source, repo=repo, title=us[0].title.split(" — ")[0], fingerprints=[], findings=[],
+                  score=max(u.score for u in us), needs_human=human, human_reason=us[0].human_reason,
+                  recurring_of=next((u.recurring_of for u in us if u.recurring_of), None), infra=list(infra))
+        for u in us:
+            g.fingerprints += u.fingerprints
+            g.findings += u.findings
+        n = len(g.files)
+        g.title += f" — {n} dosya" if n > 1 else f" — {g.files[0].rsplit('/', 1)[-1]}" if n else ""
+        structural = human and not infra
+        g.sp = min(MODERN_SP_MAX, structural_sp(g.total) if structural else modern_sp(g.total, tool_fix))
+        out.append(g)
+    return out
+
+
 def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: str, board_index: dict, now: float,
-                 cfg: dict, ext_ok=None, source: str = SOURCE) -> tuple[list, list[dict], dict]:
+                 cfg: dict, ext_ok=None, source: str = SOURCE, tool_fix: bool = False) -> tuple[list, list[dict], dict]:
     """(gruplar, atlananlar, kural özeti). Yalnız hedef sürümün sunduğu kurallar; dedup board'dan;
     dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez."""
     from agile_sdlc_crew.quality import dedup, rank
@@ -406,13 +460,8 @@ def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: st
             u.infra = [f"ext:{e}" for e in missing]
             u.human_reason = f"Altyapı: PHP eklentisi {', '.join(missing)} imajda doğrulanamadı — DevOps isteği açılır"
         live.append(u)
-    infra_units = [u for u in live if u.infra]
-    live = [u for u in live if not u.infra]
-    file_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "file"]
-    module_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "module"] + infra_units
-    packed = rank.pack_units(file_units, pack_sp=int(cfg.get("pack_sp", 3)), pack_files=int(cfg.get("pack_files", 5)),
-                             source=source)
-    groups = packed + module_units
+    # Aynı öneri her yerde aynı düzenleme → kural başına TEK iş (dosya ve modül birimleri birlikte)
+    groups = pack_modern(live, source=source, tool_fix=tool_fix)
     groups.sort(key=lambda g: (-g.score, g.fingerprints[0]))
     return groups, skipped, summary
 
