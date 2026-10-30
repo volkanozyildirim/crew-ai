@@ -405,7 +405,7 @@ def scan(client, repo: str, lang: str, *, team: str = "", force: bool = False, d
     version = tv["version"] if lang == "nextjs" else "99.0"
     groups, skipped, summary = php_modern.build_groups({"hits": hits}, rules, version, repo=repo,
                                                        board_index=deps.board(client), now=deps.now(), cfg=cfg,
-                                                       source=LANGS[lang]["source"])
+                                                       source=LANGS[lang]["source"], tool_fix=LANGS[lang]["tool_fix"])
     out.update({
         "sha": sha, "files": len({h["file"] for h in hits}), "errors": errors, "rules": summary,
         "auto": [php_modern._row(g, rules_by_key) for g in groups if not g.needs_human],
@@ -451,7 +451,7 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", 
         version = tv["version"] if lang == "nextjs" else "99.0"
         groups, _s, _sum = php_modern.build_groups({"hits": hits}, rules, version, repo=repo,
                                                    board_index=deps.board(client), now=deps.now(), cfg=cfg,
-                                                   source=LANGS[lang]["source"])
+                                                   source=LANGS[lang]["source"], tool_fix=LANGS[lang]["tool_fix"])
         by_gid = {php_modern.gid_of(g): g for g in groups}
         picked, skipped = [], []
         max_take = max(1, int(cfg.get("max_take", 8)))

@@ -291,7 +291,10 @@ def _units(hits: list[dict], rules_by_key: dict[str, Rule], repo: str, source: s
     for g in by.values():
         r = rules_by_key[g.findings[0].rule]
         g.score = r.weight * (1 + math.log10(max(1, g.total)))
-        g.sp = r.sp_unit if r.unit == "module" else max(1, r.sp_unit)
+        # modül birimi (yapısal): katalogdaki sp_unit TAVAN, küçük modül daha az (her modüle 5 SP
+        # verince channel'da 20 yapısal iş 100 SP çıkıyordu)
+        g.sp = (min(max(1, r.sp_unit), 2 if g.total <= 10 else (3 if g.total <= 40 else r.sp_unit))
+                if r.unit == "module" else max(1, r.sp_unit))
     return list(by.values()), summary
 
 
@@ -378,8 +381,48 @@ def _missing_exts(u, r: Rule, ext_ok) -> list[str]:
     return [e for e in dict.fromkeys(need) if not (ext_ok and ext_ok(e))]
 
 
+# SP mekanik dönüşümde DOSYA sayısından değil iş miktarından (yer sayısı) gelir. Eskiden dosya
+# başına 1 SP toplanıyordu (paket ≤3 SP / ≤5 dosya): webservice'te 150 dosya 64 SP çıktı — 40
+# dosyada `strpos → str_contains` tek başına 40 SP'ydi. Araç uygulayan dillerde (Go/Python) iş
+# yalnız inceleme olduğu için paket daha büyük, SP daha düşük.
+def modern_sp(occurrences: int, tool_fix: bool = False) -> int:
+    if tool_fix:
+        return 1 if occurrences <= 200 else 2
+    return 1 if occurrences <= 20 else (2 if occurrences <= 60 else 3)
+
+
+def pack_modern(units: list, *, source: str, tool_fix: bool = False, pack_files: int = 10) -> list:
+    """Aynı repo + kural dosya birimlerini paketle: ≤pack_files dosya ve ≤pack_occ yer (PR
+    incelenebilir kalsın); paket SP'si yer sayısından (modern_sp)."""
+    from agile_sdlc_crew.quality.model import Group
+    from agile_sdlc_crew.quality.rank import pack_units
+    files = pack_files * (2 if tool_fix else 1)
+    occ = 300 if tool_fix else 60
+    out = []
+    for g in pack_units(units, pack_sp=10 ** 6, pack_files=files, source=source):
+        # yer tavanı: büyük paketi dosya sırasıyla böl
+        if g.total > occ and len(g.findings) > 1:
+            cur = None
+            # dosya birimi = bir parmak izi + bir bulgu; pack_units ikisini aynı sırayla ekler
+            for fp, f in zip(g.fingerprints, g.findings):
+                if cur is None or (cur.total + f.count > occ):
+                    cur = Group(source=source, repo=g.repo, title=g.title.split(" (+")[0], fingerprints=[],
+                                findings=[], score=g.score, needs_human=g.needs_human,
+                                human_reason=g.human_reason, recurring_of=g.recurring_of, infra=list(g.infra))
+                    out.append(cur)
+                cur.findings.append(f)
+                cur.fingerprints.append(fp)
+            continue
+        out.append(g)
+    for g in out:
+        g.sp = modern_sp(g.total, tool_fix)
+        base = g.title.split(" (+")[0]
+        g.title = base + (f" (+{len(g.files) - 1} dosya)" if len(g.files) > 1 else "")
+    return out
+
+
 def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: str, board_index: dict, now: float,
-                 cfg: dict, ext_ok=None, source: str = SOURCE) -> tuple[list, list[dict], dict]:
+                 cfg: dict, ext_ok=None, source: str = SOURCE, tool_fix: bool = False) -> tuple[list, list[dict], dict]:
     """(gruplar, atlananlar, kural özeti). Yalnız hedef sürümün sunduğu kurallar; dedup board'dan;
     dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez."""
     from agile_sdlc_crew.quality import dedup, rank
@@ -410,8 +453,8 @@ def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: st
     live = [u for u in live if not u.infra]
     file_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "file"]
     module_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "module"] + infra_units
-    packed = rank.pack_units(file_units, pack_sp=int(cfg.get("pack_sp", 3)), pack_files=int(cfg.get("pack_files", 5)),
-                             source=source)
+    packed = pack_modern(file_units, source=source, tool_fix=tool_fix,
+                         pack_files=int(cfg.get("modern_pack_files", 10)))
     groups = packed + module_units
     groups.sort(key=lambda g: (-g.score, g.fingerprints[0]))
     return groups, skipped, summary
@@ -505,6 +548,7 @@ def load_cfg() -> dict:
         "php_bin": _safe_bin(os.environ.get("CREW_PHP_BIN", "php")),
         "scan_ttl_h": int(_knob("CREW_TECHDEBT_SCAN_TTL_H", 24)),
         "max_take": int(_knob("CREW_TECHDEBT_MODERN_MAX_TAKE", 8)),
+        "modern_pack_files": int(_knob("CREW_TECHDEBT_MODERN_PACK_FILES", 10)),
         "repos_dir": Path(os.environ.get("CREW_REPOS_DIR", "~/.crew_repos")).expanduser(),
         "targets_cache": TARGETS_CACHE_PATH,
         "scan_cache": CACHE_DIR,
