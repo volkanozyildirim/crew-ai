@@ -1,0 +1,125 @@
+# Next.js modernleştirme kataloğu — LLM'siz desen taraması (quality/modern.py, Next.js tarayıcı).
+# since: özelliğin/değişikliğin geldiği Next.js sürümü (React 19 kuralları Next 15 ile gelir);
+# hedef = package.json'daki next sürümü. Düzeltmeyi developer yapar (Next.js için resmi tespit aracı yok).
+# pattern: JS/TS dosyalarında (node_modules/.next hariç) aranan düzenli ifade; file_pattern: dosya adı kuralı.
+version: 1
+rules:
+  - key: next_font_package
+    since: "13.0"
+    kind: deprecation
+    auto: true
+    sp_unit: 1
+    pattern: "from\\s+['\"]@next/font"
+    title: "@next/font → next/font"
+    summary: "@next/font paketi Next 13'te çekirdeğe taşındı, Next 14'te kaldırıldı."
+    advantages: ["Ayrı paket bağımlılığı kalkar; yükseltmede kırılma önlenir."]
+    risks: ["Yok — import yolu değişir, API aynı."]
+    before: "import { Inter } from '@next/font/google'"
+    after: "import { Inter } from 'next/font/google'"
+    ref: "https://nextjs.org/docs/app/building-your-application/upgrading/codemods#built-in-next-font"
+  - key: link_legacy_anchor
+    since: "13.0"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    pattern: "<Link\\b[^>]*>\\s*<a[\\s>]"
+    title: "<Link><a>…</a></Link> → <Link>…</Link>"
+    summary: "Next 13'ten beri Link kendisi <a> üretir; içteki <a> gereksiz ve legacyBehavior gerektirir."
+    advantages: ["Gereksiz sarmalayıcı kalkar; legacyBehavior bağımlılığı biter."]
+    risks: ["<a>'daki className/onClick Link'e taşınmalı."]
+    before: "<Link href=\"/x\"><a className=\"btn\">Git</a></Link>"
+    after: "<Link href=\"/x\" className=\"btn\">Git</Link>"
+    ref: "https://nextjs.org/docs/app/building-your-application/upgrading/codemods#remove-a-tags-from-link-components"
+  - key: images_domains
+    since: "14.0"
+    kind: deprecation
+    auto: true
+    sp_unit: 1
+    pattern: "\\bdomains\\s*:\\s*\\["
+    file_pattern: "^next\\.config\\.(js|mjs|ts)$"
+    title: "images.domains → images.remotePatterns"
+    summary: "images.domains Next 14'te kullanımdan kalktı; remotePatterns protokol/yol düzeyinde kısıt verir."
+    advantages: ["Daha sıkı güvenlik (yalnız izinli yol/protokol)."]
+    risks: ["Desen yanlış yazılırsa görseller yüklenmez — her alan adı için https + yol kontrol edilmeli."]
+    before: "images: { domains: ['cdn.flo.com.tr'] }"
+    after: "images: { remotePatterns: [{ protocol: 'https', hostname: 'cdn.flo.com.tr' }] }"
+    ref: "https://nextjs.org/docs/app/api-reference/components/image#remotepatterns"
+  - key: use_form_state
+    since: "15.0"
+    kind: deprecation
+    auto: true
+    sp_unit: 1
+    pattern: "\\buseFormState\\b"
+    title: "useFormState (react-dom) → useActionState (react)"
+    summary: "React 19'da useFormState kullanımdan kalktı, yerine react'tan useActionState geldi."
+    advantages: ["Bekleme (pending) durumu da döner; React 19 ile uyumlu."]
+    risks: ["İmza aynı; import yolu değişir."]
+    before: "import { useFormState } from 'react-dom'"
+    after: "import { useActionState } from 'react'"
+    ref: "https://react.dev/reference/react/useActionState"
+  - key: react_dom_render
+    since: "13.0"
+    kind: deprecation
+    auto: true
+    sp_unit: 1
+    pattern: "\\bReactDOM\\.(render|hydrate)\\s*\\("
+    title: "ReactDOM.render/hydrate → createRoot/hydrateRoot"
+    summary: "React 18'de eski kök API'si kullanımdan kalktı, React 19'da kaldırıldı."
+    advantages: ["Eşzamanlı render özellikleri açılır; React 19'a hazır."]
+    risks: ["Kök bir kez oluşturulmalı; tekrar render çağrıları root.render'a çevrilmeli."]
+    before: "ReactDOM.render(<App />, el)"
+    after: "createRoot(el).render(<App />)"
+    ref: "https://react.dev/blog/2022/03/08/react-18-upgrade-guide#updates-to-client-rendering-apis"
+  - key: function_default_props
+    since: "15.0"
+    kind: deprecation
+    auto: true
+    sp_unit: 1
+    pattern: "\\b[A-Z]\\w*\\.defaultProps\\s*="
+    title: "Fonksiyon bileşende defaultProps → varsayılan parametre"
+    summary: "React 19 fonksiyon bileşenlerinde defaultProps'u kaldırdı."
+    advantages: ["React 19'da varsayılanlar sessizce kaybolmaz."]
+    risks: ["Sınıf bileşenleri etkilenmez; yalnız fonksiyon bileşenleri çevrilmeli."]
+    before: "Button.defaultProps = { size: 'md' }"
+    after: "function Button({ size = 'md' }) {"
+    ref: "https://react.dev/blog/2024/04/25/react-19-upgrade-guide#removed-proptypes-and-defaultprops"
+  - key: middleware_to_proxy
+    since: "16.0"
+    kind: deprecation
+    auto: true
+    sp_unit: 1
+    file_pattern: "^(src/)?middleware\\.(js|ts)$"
+    title: "middleware.ts → proxy.ts"
+    summary: "Next 16 middleware dosyasını proxy olarak yeniden adlandırdı; middleware adı kullanımdan kalktı."
+    advantages: ["Next 16 uyarısı kalkar; gelecekteki kaldırmaya hazır."]
+    risks: ["Dışa aktarılan fonksiyon adı da `proxy` olmalı; config matcher aynı kalır."]
+    before: "// middleware.ts\nexport function middleware(req) {"
+    after: "// proxy.ts\nexport function proxy(req) {"
+    ref: "https://nextjs.org/docs/app/api-reference/file-conventions/proxy"
+  - key: sync_request_api
+    since: "15.0"
+    kind: structural
+    auto: false
+    sp_unit: 3
+    pattern: "(?<!await )\\b(cookies|headers|draftMode)\\(\\)"
+    title: "Senkron cookies()/headers() → await (async request API)"
+    summary: "Next 15'te istek API'leri asenkron oldu; senkron erişim uyarı verir ve ileride kalkacak."
+    advantages: ["Next 15+ ile uyumlu; render optimizasyonları açılır."]
+    risks: ["Çağıran fonksiyon async olmalı; zincirleme değişiklik — kapsamı insan belirler."]
+    before: "const c = cookies()"
+    after: "const c = await cookies()"
+    ref: "https://nextjs.org/docs/app/building-your-application/upgrading/version-15#async-request-apis-breaking-change"
+  - key: pages_data_fetching
+    since: "13.4"
+    kind: structural
+    auto: false
+    sp_unit: 5
+    unit: module
+    pattern: "export\\s+(async\\s+)?function\\s+(getServerSideProps|getStaticProps|getInitialProps)\\b"
+    title: "Pages router veri çekme → App Router"
+    summary: "getServerSideProps/getStaticProps Pages Router'a ait; App Router'da sunucu bileşenleri ve fetch önbelleği kullanılır."
+    advantages: ["Sunucu bileşenleri, akış (streaming), daha az istemci JS."]
+    risks: ["Mimari geçiş: yönlendirme, layout ve veri katmanı değişir — insan kararı."]
+    before: "export async function getServerSideProps() {"
+    after: "// app/<route>/page.tsx — async server component"
+    ref: "https://nextjs.org/docs/app/building-your-application/upgrading/app-router-migration"

@@ -246,12 +246,12 @@ def scan_repo(repo_root: Path, *, exclude: list[str] | None = None, php_bin: str
 
 # ── Gruplama / skor / dedup ──────────────────────────────────────────────
 
-def fingerprint(repo: str, rule: str, where: str) -> str:
+def fingerprint(repo: str, rule: str, where: str, source: str = SOURCE) -> str:
     from agile_sdlc_crew.quality.rank import cap_fingerprint
-    return cap_fingerprint(f"{SOURCE}:{repo}:{rule}:{where}")
+    return cap_fingerprint(f"{source}:{repo}:{rule}:{where}")
 
 
-def _units(hits: list[dict], rules_by_key: dict[str, Rule], repo: str) -> tuple[list, dict]:
+def _units(hits: list[dict], rules_by_key: dict[str, Rule], repo: str, source: str = SOURCE) -> tuple[list, dict]:
     """Kural birimine göre Group'lar: file birimi dosya başına, module birimi modül başına.
     report kuralları grup üretmez, yalnız özete girer."""
     from agile_sdlc_crew.quality.model import Finding, Group
@@ -269,16 +269,16 @@ def _units(hits: list[dict], rules_by_key: dict[str, Rule], repo: str) -> tuple[
         if r.kind == "report":
             continue
         where = h["file"] if r.unit == "file" else (h.get("module") or module_of(h["file"]))
-        fp = fingerprint(repo, r.key, where)
+        fp = fingerprint(repo, r.key, where, source)
         g = by.get(fp)
         if g is None:
             label = where.rsplit("/", 1)[-1] if r.unit == "file" else where
-            g = by[fp] = Group(source=SOURCE, repo=repo, title=f"{r.title} — {label}", fingerprints=[fp], findings=[],
+            g = by[fp] = Group(source=source, repo=repo, title=f"{r.title} — {label}", fingerprints=[fp], findings=[],
                                needs_human=r.kind == "structural",
                                human_reason=("Tasarım kararı: " + (r.risks[0] if r.risks else "")) if r.kind == "structural" else "")
         f = next((x for x in g.findings if x.file == h["file"]), None)
         if f is None:
-            f = Finding(source=SOURCE, repo=repo, file=h["file"], rule=r.key, rule_name=r.title, count=0, lines=[],
+            f = Finding(source=source, repo=repo, file=h["file"], rule=r.key, rule_name=r.title, count=0, lines=[],
                         message="")
             g.findings.append(f)
         f.count += 1
@@ -379,12 +379,12 @@ def _missing_exts(u, r: Rule, ext_ok) -> list[str]:
 
 
 def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: str, board_index: dict, now: float,
-                 cfg: dict, ext_ok=None) -> tuple[list, list[dict], dict]:
+                 cfg: dict, ext_ok=None, source: str = SOURCE) -> tuple[list, list[dict], dict]:
     """(gruplar, atlananlar, kural özeti). Yalnız hedef sürümün sunduğu kurallar; dedup board'dan;
     dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez."""
     from agile_sdlc_crew.quality import dedup, rank
     rules_by_key = {r.key: r for r in applicable(rules, version)}
-    units, summary = _units(scan.get("hits") or [], rules_by_key, repo)
+    units, summary = _units(scan.get("hits") or [], rules_by_key, repo, source)
     skipped: list[dict] = []
     live = []
     for u in units:
@@ -411,7 +411,7 @@ def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: st
     file_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "file"]
     module_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "module"] + infra_units
     packed = rank.pack_units(file_units, pack_sp=int(cfg.get("pack_sp", 3)), pack_files=int(cfg.get("pack_files", 5)),
-                             source=SOURCE)
+                             source=source)
     groups = packed + module_units
     groups.sort(key=lambda g: (-g.score, g.fingerprints[0]))
     return groups, skipped, summary

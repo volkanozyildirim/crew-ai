@@ -212,6 +212,7 @@ def create_job(
     kickoff_feedback: str = "",
     parent_job_id: int | None = None,
     dry_run: bool = False,
+    job_kind: str = "pipeline",
 ) -> int:
     """Create a new job, add step rows, return job_id.
 
@@ -222,11 +223,11 @@ def create_job(
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO jobs (work_item_id, use_hal, wi_title, kickoff_only, "
-            "kickoff_feedback, parent_job_id, dry_run) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            "kickoff_feedback, parent_job_id, dry_run, job_kind) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 work_item_id, int(use_hal), wi_title,
                 int(bool(kickoff_only)), kickoff_feedback or "", parent_job_id,
-                int(bool(dry_run)),
+                int(bool(dry_run)), job_kind,
             ),
         )
         job_id = cur.lastrowid
@@ -272,7 +273,7 @@ def list_unmarked_queued_jobs() -> list[dict]:
         cur = conn.cursor()
         cur.execute(
             "SELECT id, work_item_id FROM jobs WHERE status='queued' AND dry_run=0 "
-            "AND kickoff_only=0 AND job_kind='pipeline' AND wi_state_before IS NULL ORDER BY id")
+            "AND kickoff_only=0 AND job_kind IN ('pipeline','modern_fix') AND wi_state_before IS NULL ORDER BY id")
         return list(cur.fetchall() or [])
 
 

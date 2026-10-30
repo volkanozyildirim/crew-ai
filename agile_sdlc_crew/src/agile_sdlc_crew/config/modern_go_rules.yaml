@@ -1,0 +1,223 @@
+# Go modernleştirme kataloğu — tespit ve düzeltme Go ekibinin `modernize` analizörüyle
+# (golang.org/x/tools/go/analysis/passes/modernize). key = analizör adı; analizör go.mod'daki
+# `go` sürümünü kendisi gözetir, `since` bilgi amaçlı (özelliğin geldiği Go sürümü).
+# Katalogda olmayan bir analizör çıkarsa genel metinle (analizör mesajı) listelenir.
+# kind: mechanical (davranış aynı, araç uygular) | structural (davranış/serileştirme değişebilir, insan)
+version: 1
+rules:
+  - key: any
+    since: "1.18"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "interface{} → any"
+    summary: "Go 1.18'den beri `any`, `interface{}`'in takma adıdır; aynı tip, daha okunur yazım."
+    advantages: ["Okunabilirlik; generic koddaki yazımla tutarlılık.", "Davranış ve ikili çıktı birebir aynı."]
+    risks: ["Yok — derleyici için aynı tip."]
+    before: "func Do(v interface{}) map[string]interface{}"
+    after: "func Do(v any) map[string]any"
+    ref: "https://go.dev/ref/spec#Interface_types"
+  - key: minmax
+    since: "1.21"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "if/else ile en küçük/en büyük → min() / max()"
+    summary: "Go 1.21 yerleşik min ve max fonksiyonlarını getirdi; elle yazılmış karşılaştırma blokları tek ifadeye iner."
+    advantages: ["Daha kısa ve hatasız; sınır karşılaştırmasında < / <= karışıklığı ortadan kalkar."]
+    risks: ["Kayan noktada NaN davranışı min/max'ta farklıdır; analizör yalnız eşdeğer olduğu yerleri önerir."]
+    before: "x := a\nif b < x {\n    x = b\n}"
+    after: "x := min(a, b)"
+    ref: "https://go.dev/ref/spec#Min_and_max"
+  - key: slicescontains
+    since: "1.21"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Arama döngüsü → slices.Contains / ContainsFunc"
+    summary: "Bir dilimde eleman arayan for döngüleri standart kütüphanedeki slices.Contains ile değiştirilir."
+    advantages: ["Niyet tek satırda okunur; döngüdeki erken çıkış hataları ortadan kalkar."]
+    risks: ["Yok — analizör yalnız birebir eşdeğer döngüleri önerir."]
+    before: "found := false\nfor _, s := range list {\n    if s == x { found = true; break }\n}"
+    after: "found := slices.Contains(list, x)"
+    ref: "https://pkg.go.dev/slices#Contains"
+  - key: slicessort
+    since: "1.21"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "sort.Slice → slices.Sort"
+    summary: "Basit karşılaştırmalı sort.Slice çağrıları tip güvenli ve daha hızlı slices.Sort'a çevrilir."
+    advantages: ["Reflection yok, daha hızlı; tip güvenli."]
+    risks: ["Yok — yalnız doğal sıralama yapan çağrılar önerilir."]
+    before: "sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })"
+    after: "slices.Sort(ids)"
+    ref: "https://pkg.go.dev/slices#Sort"
+  - key: mapsloop
+    since: "1.21"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Map kopyalama döngüsü → maps.Copy / maps.Collect"
+    summary: "Bir map'i başka bir map'e kopyalayan döngüler maps paketinin fonksiyonlarıyla yazılır."
+    advantages: ["Kısa ve açık; döngü değişkeni hataları yok."]
+    risks: ["Yok — analizör eşdeğer döngüleri önerir."]
+    before: "for k, v := range src {\n    dst[k] = v\n}"
+    after: "maps.Copy(dst, src)"
+    ref: "https://pkg.go.dev/maps#Copy"
+  - key: rangeint
+    since: "1.22"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "for i := 0; i < n; i++ → for i := range n"
+    summary: "Go 1.22 tamsayı üzerinde range'i destekler; sayaç döngüleri sadeleşir."
+    advantages: ["Sınır ve artırma hataları yapılamaz; okunur."]
+    risks: ["Yok — döngü gövdesi sayacı değiştirmiyorsa önerilir."]
+    before: "for i := 0; i < n; i++ {"
+    after: "for i := range n {"
+    ref: "https://go.dev/ref/spec#For_range"
+  - key: forvar
+    since: "1.22"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Döngüde gereksiz x := x kopyası"
+    summary: "Go 1.22'den beri her iterasyon değişkeni ayrıdır; goroutine için yapılan `x := x` kopyaları gereksiz."
+    advantages: ["Gürültü azalır; Go 1.22 semantiğiyle tutarlı."]
+    risks: ["go.mod sürümü 1.22'nin altındaysa önerilmez (analizör bunu gözetir)."]
+    before: "for _, x := range xs {\n    x := x\n    go use(x)\n}"
+    after: "for _, x := range xs {\n    go use(x)\n}"
+    ref: "https://go.dev/blog/loopvar-preview"
+  - key: stringsseq
+    since: "1.24"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "range strings.Split → strings.SplitSeq"
+    summary: "Yalnız üzerinde dönülen Split sonuçları ara dilim oluşturmayan SplitSeq iteratörüyle değiştirilir."
+    advantages: ["Bellek ayırması azalır; büyük girdide belirgin hızlanma."]
+    risks: ["Yok — sonuç yalnız range'de kullanılıyorsa önerilir."]
+    before: "for _, p := range strings.Split(s, \",\") {"
+    after: "for p := range strings.SplitSeq(s, \",\") {"
+    ref: "https://pkg.go.dev/strings#SplitSeq"
+  - key: stringscutprefix
+    since: "1.20"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "HasPrefix + TrimPrefix → strings.CutPrefix"
+    summary: "Önce önek kontrolü sonra kırpma yapan çiftler tek CutPrefix çağrısına iner."
+    advantages: ["Tek tarama; kontrol ile kırpmanın ayrışma hatası olmaz."]
+    risks: ["Yok."]
+    before: "if strings.HasPrefix(s, p) {\n    s = strings.TrimPrefix(s, p)"
+    after: "if rest, ok := strings.CutPrefix(s, p); ok {\n    s = rest"
+    ref: "https://pkg.go.dev/strings#CutPrefix"
+  - key: stringscut
+    since: "1.18"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "strings.Index + dilimleme → strings.Cut"
+    summary: "Ayraç indeksini bulup iki parçaya bölen kod strings.Cut ile yazılır."
+    advantages: ["İndeks -1 durumunu unutma hatası ortadan kalkar."]
+    risks: ["Yok."]
+    before: "i := strings.Index(s, \"=\")\nk, v := s[:i], s[i+1:]"
+    after: "k, v, ok := strings.Cut(s, \"=\")"
+    ref: "https://pkg.go.dev/strings#Cut"
+  - key: stringsbuilder
+    since: "1.10"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Döngüde string += → strings.Builder"
+    summary: "Döngü içinde birleştirilen string'ler her adımda yeni bellek ayırır; strings.Builder bunu tek tamponda yapar."
+    advantages: ["Büyük döngülerde O(n²) yerine O(n)."]
+    risks: ["Yok."]
+    before: "s := \"\"\nfor _, x := range xs { s += x }"
+    after: "var sb strings.Builder\nfor _, x := range xs { sb.WriteString(x) }\ns := sb.String()"
+    ref: "https://pkg.go.dev/strings#Builder"
+  - key: fmtappendf
+    since: "1.19"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "[]byte(fmt.Sprintf(...)) → fmt.Appendf"
+    summary: "Ara string oluşturmadan doğrudan bayt dilimine biçimlendirme."
+    advantages: ["Bir bellek ayırması az."]
+    risks: ["Yok."]
+    before: "b := []byte(fmt.Sprintf(\"%d\", n))"
+    after: "b := fmt.Appendf(nil, \"%d\", n)"
+    ref: "https://pkg.go.dev/fmt#Appendf"
+  - key: reflecttypefor
+    since: "1.22"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "reflect.TypeOf((*T)(nil)).Elem() → reflect.TypeFor[T]()"
+    summary: "Generic TypeFor ile tip nesnesi doğrudan alınır."
+    advantages: ["Okunur, hata yapılması zor."]
+    risks: ["Yok."]
+    before: "t := reflect.TypeOf((*error)(nil)).Elem()"
+    after: "t := reflect.TypeFor[error]()"
+    ref: "https://pkg.go.dev/reflect#TypeFor"
+  - key: bloop
+    since: "1.24"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Benchmark'ta for i := 0; i < b.N → for b.Loop()"
+    summary: "Go 1.24 b.Loop() hazırlık süresini ölçümden ayırır ve derleyicinin döngüyü silmesini engeller."
+    advantages: ["Daha doğru benchmark sonuçları."]
+    risks: ["Yalnız test dosyaları; üretim kodu değişmez."]
+    before: "for i := 0; i < b.N; i++ {"
+    after: "for b.Loop() {"
+    ref: "https://pkg.go.dev/testing#B.Loop"
+  - key: testingcontext
+    since: "1.24"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Testte context.WithCancel → t.Context()"
+    summary: "Test bitince kendiliğinden iptal edilen bağlam testing paketinden alınır."
+    advantages: ["Cancel unutma sızıntısı olmaz."]
+    risks: ["Yalnız test dosyaları."]
+    before: "ctx, cancel := context.WithCancel(context.Background())\ndefer cancel()"
+    after: "ctx := t.Context()"
+    ref: "https://pkg.go.dev/testing#T.Context"
+  - key: waitgroup
+    since: "1.25"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "wg.Add(1) + go func(){ defer wg.Done() } → wg.Go()"
+    summary: "Go 1.25 sync.WaitGroup.Go ile goroutine başlatma ve sayaç yönetimi tek çağrı olur."
+    advantages: ["Add/Done eşleşme hataları ortadan kalkar."]
+    risks: ["Yok — analizör birebir kalıpları önerir."]
+    before: "wg.Add(1)\ngo func() {\n    defer wg.Done()\n    work()\n}()"
+    after: "wg.Go(func() {\n    work()\n})"
+    ref: "https://pkg.go.dev/sync#WaitGroup.Go"
+  - key: omitzero
+    since: "1.24"
+    kind: structural
+    auto: false
+    sp_unit: 2
+    title: "Struct alanında etkisiz omitempty → omitzero"
+    summary: "omitempty iç içe struct alanlarını hiç atlamaz; omitzero sıfır değerli alanı JSON'dan çıkarır."
+    advantages: ["Niyet edilen davranış gerçekten çalışır; daha küçük JSON."]
+    risks: ["JSON ÇIKTISI DEĞİŞİR: bugün `{}` olarak giden alan artık hiç gönderilmez; tüketen servis/istemci etkilenebilir — insan kararı."]
+    before: "Addr Address `json:\"addr,omitempty\"`"
+    after: "Addr Address `json:\"addr,omitzero\"`"
+    ref: "https://pkg.go.dev/encoding/json#Marshal"
+  - key: plusbuild
+    since: "1.17"
+    kind: mechanical
+    auto: true
+    sp_unit: 1
+    title: "Eski // +build satırları kaldırılır"
+    summary: "Go 1.17'den beri //go:build yeterli; eski satırlar gereksiz."
+    advantages: ["Tek doğruluk kaynağı."]
+    risks: ["Yok."]
+    before: "//go:build linux\n// +build linux"
+    after: "//go:build linux"
+    ref: "https://go.dev/doc/go1.17#build-lines"

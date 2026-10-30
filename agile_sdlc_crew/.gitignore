@@ -34,3 +34,4 @@ sprint_reports/
 src/agile_sdlc_crew/config/quality_app_map.yaml
 src/agile_sdlc_crew/config/quality_php_targets.yaml
 src/agile_sdlc_crew/config/quality_php_modern_cache/
+src/agile_sdlc_crew/config/quality_build_index.yaml
