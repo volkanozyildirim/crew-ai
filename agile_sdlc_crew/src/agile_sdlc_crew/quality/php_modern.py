@@ -293,7 +293,7 @@ def _units(hits: list[dict], rules_by_key: dict[str, Rule], repo: str, source: s
         g.score = r.weight * (1 + math.log10(max(1, g.total)))
         # modül birimi (yapısal): katalogdaki sp_unit TAVAN, küçük modül daha az (her modüle 5 SP
         # verince channel'da 20 yapısal iş 100 SP çıkıyordu)
-        g.sp = (min(max(1, r.sp_unit), 2 if g.total <= 10 else (3 if g.total <= 40 else r.sp_unit))
+        g.sp = (min(MODERN_SP_MAX, max(1, r.sp_unit), 2 if g.total <= 10 else (3 if g.total <= 40 else r.sp_unit))
                 if r.unit == "module" else max(1, r.sp_unit))
     return list(by.values()), summary
 
@@ -381,43 +381,54 @@ def _missing_exts(u, r: Rule, ext_ok) -> list[str]:
     return [e for e in dict.fromkeys(need) if not (ext_ok and ext_ok(e))]
 
 
-# SP mekanik dönüşümde DOSYA sayısından değil iş miktarından (yer sayısı) gelir. Eskiden dosya
-# başına 1 SP toplanıyordu (paket ≤3 SP / ≤5 dosya): webservice'te 150 dosya 64 SP çıktı — 40
-# dosyada `strpos → str_contains` tek başına 40 SP'ydi. Araç uygulayan dillerde (Go/Python) iş
-# yalnız inceleme olduğu için paket daha büyük, SP daha düşük.
+# Aynı öneri her yerde aynı düzenleme: TEK iş (Task) — kullanıcı kararı (2026-10-30). Eskiden
+# dosya başına 1 SP toplanıyor ve ≤5 dosyalık paketlere bölünüyordu: webservice'te 150 dosya
+# 64 SP, `strpos → str_contains` tek başına 14 iş / 40 SP. SP iş miktarından (yer sayısı), en
+# çok 8; araç uygulayan dillerde (Go/Python) iş yalnız inceleme olduğu için daha düşük.
+MODERN_SP_MAX = 8
+
+
 def modern_sp(occurrences: int, tool_fix: bool = False) -> int:
     if tool_fix:
-        return 1 if occurrences <= 200 else 2
-    return 1 if occurrences <= 20 else (2 if occurrences <= 60 else 3)
+        steps = ((200, 1), (1000, 2), (3000, 3))
+    else:
+        steps = ((20, 1), (60, 2), (150, 3), (400, 5))
+    for limit, sp in steps:
+        if occurrences <= limit:
+            return sp
+    return MODERN_SP_MAX if not tool_fix else 5
 
 
-def pack_modern(units: list, *, source: str, tool_fix: bool = False, pack_files: int = 10) -> list:
-    """Aynı repo + kural dosya birimlerini paketle: ≤pack_files dosya ve ≤pack_occ yer (PR
-    incelenebilir kalsın); paket SP'si yer sayısından (modern_sp)."""
+def structural_sp(occurrences: int) -> int:
+    """Tasarım kararı gerektiren iş: kapsamı insan belirler; SP yer sayısından, en çok 8."""
+    for limit, sp in ((10, 2), (40, 3), (150, 5)):
+        if occurrences <= limit:
+            return sp
+    return MODERN_SP_MAX
+
+
+def pack_modern(units: list, *, source: str, tool_fix: bool = False) -> list:
+    """Aynı repo + kural (+ insan/altyapı durumu) birimlerini TEK işte topla — dosya birimleri de
+    modül birimleri de. SP yer sayısından, en çok MODERN_SP_MAX. Parmak izleri birim başına kalır
+    (dedup dosya/modül düzeyinde çalışmaya devam eder)."""
     from agile_sdlc_crew.quality.model import Group
-    from agile_sdlc_crew.quality.rank import pack_units
-    files = pack_files * (2 if tool_fix else 1)
-    occ = 300 if tool_fix else 60
+    buckets: dict[tuple, list] = {}
+    for u in units:
+        buckets.setdefault((u.repo, u.findings[0].rule, u.needs_human, tuple(u.infra)), []).append(u)
     out = []
-    for g in pack_units(units, pack_sp=10 ** 6, pack_files=files, source=source):
-        # yer tavanı: büyük paketi dosya sırasıyla böl
-        if g.total > occ and len(g.findings) > 1:
-            cur = None
-            # dosya birimi = bir parmak izi + bir bulgu; pack_units ikisini aynı sırayla ekler
-            for fp, f in zip(g.fingerprints, g.findings):
-                if cur is None or (cur.total + f.count > occ):
-                    cur = Group(source=source, repo=g.repo, title=g.title.split(" (+")[0], fingerprints=[],
-                                findings=[], score=g.score, needs_human=g.needs_human,
-                                human_reason=g.human_reason, recurring_of=g.recurring_of, infra=list(g.infra))
-                    out.append(cur)
-                cur.findings.append(f)
-                cur.fingerprints.append(fp)
-            continue
+    for (repo, _rule, human, infra), us in buckets.items():
+        us.sort(key=lambda x: (-x.score, x.fingerprints[0]))
+        g = Group(source=source, repo=repo, title=us[0].title.split(" — ")[0], fingerprints=[], findings=[],
+                  score=max(u.score for u in us), needs_human=human, human_reason=us[0].human_reason,
+                  recurring_of=next((u.recurring_of for u in us if u.recurring_of), None), infra=list(infra))
+        for u in us:
+            g.fingerprints += u.fingerprints
+            g.findings += u.findings
+        n = len(g.files)
+        g.title += f" — {n} dosya" if n > 1 else f" — {g.files[0].rsplit('/', 1)[-1]}" if n else ""
+        structural = human and not infra
+        g.sp = min(MODERN_SP_MAX, structural_sp(g.total) if structural else modern_sp(g.total, tool_fix))
         out.append(g)
-    for g in out:
-        g.sp = modern_sp(g.total, tool_fix)
-        base = g.title.split(" (+")[0]
-        g.title = base + (f" (+{len(g.files) - 1} dosya)" if len(g.files) > 1 else "")
     return out
 
 
@@ -449,13 +460,8 @@ def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: st
             u.infra = [f"ext:{e}" for e in missing]
             u.human_reason = f"Altyapı: PHP eklentisi {', '.join(missing)} imajda doğrulanamadı — DevOps isteği açılır"
         live.append(u)
-    infra_units = [u for u in live if u.infra]
-    live = [u for u in live if not u.infra]
-    file_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "file"]
-    module_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "module"] + infra_units
-    packed = pack_modern(file_units, source=source, tool_fix=tool_fix,
-                         pack_files=int(cfg.get("modern_pack_files", 10)))
-    groups = packed + module_units
+    # Aynı öneri her yerde aynı düzenleme → kural başına TEK iş (dosya ve modül birimleri birlikte)
+    groups = pack_modern(live, source=source, tool_fix=tool_fix)
     groups.sort(key=lambda g: (-g.score, g.fingerprints[0]))
     return groups, skipped, summary
 
@@ -548,7 +554,6 @@ def load_cfg() -> dict:
         "php_bin": _safe_bin(os.environ.get("CREW_PHP_BIN", "php")),
         "scan_ttl_h": int(_knob("CREW_TECHDEBT_SCAN_TTL_H", 24)),
         "max_take": int(_knob("CREW_TECHDEBT_MODERN_MAX_TAKE", 8)),
-        "modern_pack_files": int(_knob("CREW_TECHDEBT_MODERN_PACK_FILES", 10)),
         "repos_dir": Path(os.environ.get("CREW_REPOS_DIR", "~/.crew_repos")).expanduser(),
         "targets_cache": TARGETS_CACHE_PATH,
         "scan_cache": CACHE_DIR,

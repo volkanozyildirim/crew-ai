@@ -4778,19 +4778,18 @@ def test_php_modern_groups():
     g84, _s, sum84 = pm.build_groups(scan, rules, "8.4", repo="webservice", board_index={}, now=1e9, cfg=cfg)
     check("8.4 hedefte property_hooks grubu var", "property_hooks" in {g.findings[0].rule for g in g84})
     sc = [g for g in groups if g.findings[0].rule == "str_contains"]
-    # SP yer sayısından (≤20 yer 1 SP), paket ≤10 dosya — dosya başına 1 SP toplanmaz (150 dosya 64 SP çıkıyordu)
-    check("mekanik: aynı kural ≤10 dosyalık paket, SP yer sayısından → 12 dosya → 2 paket × 1 SP",
-          len(sc) == 2 and all(g.sp == 1 and len(g.files) <= 10 for g in sc) and sum(len(g.files) for g in sc) == 12,
-          str([(g.sp, len(g.files)) for g in sc]))
+    # Aynı öneri tek iş (kullanıcı kararı): dosya başına 1 SP toplanmaz (150 dosya 64 SP çıkıyordu)
+    check("mekanik: aynı kural TEK iş, SP yer sayısından → 12 dosya → 1 iş × 1 SP",
+          len(sc) == 1 and sc[0].sp == 1 and len(sc[0].files) == 12, str([(g.sp, len(g.files)) for g in sc]))
     check("paket parmak izleri dosya başına php_modern:<repo>:<kural>:<dosya>",
           all(fp.startswith("php_modern:webservice:str_contains:app/Lib/F") for g in sc for fp in g.fingerprints)
           and sum(len(g.fingerprints) for g in sc) == 12)
     check("aynı dosyada 2 bulgu → tek birim, count 2", any(f.count == 2 and f.file == "app/Lib/F0.php" for g in sc for f in g.findings))
     check("mekanik grup otonom", all(not g.needs_human for g in sc))
     tp = [g for g in groups if g.findings[0].rule == "typed_properties"]
-    check("yapısal: modül başına birim (app/Model, app/Lib) → 2 grup, küçük modül SP 2 (tavan 5), needs_human",
-          len(tp) == 2 and all(g.needs_human and g.sp == 2 for g in tp)
-          and {g.fingerprints[0] for g in tp} == {"php_modern:webservice:typed_properties:app/Model", "php_modern:webservice:typed_properties:app/Lib"},
+    check("yapısal: aynı kural TEK iş, parmak izleri modül başına (app/Model, app/Lib), SP ≤8, needs_human",
+          len(tp) == 1 and tp[0].needs_human and tp[0].sp <= 8
+          and set(tp[0].fingerprints) == {"php_modern:webservice:typed_properties:app/Model", "php_modern:webservice:typed_properties:app/Lib"},
           str([(g.fingerprints, g.sp) for g in tp]))
     check("yapısal neden metni katalog riskinden", all(g.human_reason.startswith("Tasarım kararı") for g in tp))
     dep = next(g for g in groups if g.findings[0].rule == "utf8_encode")
@@ -6092,19 +6091,26 @@ def test_modern_multilang():
 
 
 def test_modern_sp():
-    """SP iş miktarından: 150 dosya 64 SP çıkıyordu (dosya başına 1 SP)."""
+    """Aynı öneri tek iş, SP iş miktarından, en çok 8 (kullanıcı kararı 2026-10-30)."""
     print("\n[modernleştirme SP]")
     from agile_sdlc_crew.quality import php_modern as pm
-    check("geliştirici: ≤20 yer 1, ≤60 yer 2, fazlası 3 SP", (pm.modern_sp(5), pm.modern_sp(20), pm.modern_sp(21), pm.modern_sp(60), pm.modern_sp(61)) == (1, 1, 2, 2, 3))
-    check("araç uygulayan dil: ≤200 yer 1, fazlası 2 SP", (pm.modern_sp(150, True), pm.modern_sp(201, True)) == (1, 2))
     from agile_sdlc_crew.quality.model import Finding, Group
+    check("geliştirici: ≤20 yer 1, ≤60 2, ≤150 3, ≤400 5, fazlası 8 SP",
+          [pm.modern_sp(n) for n in (5, 21, 61, 151, 401, 5000)] == [1, 2, 3, 5, 8, 8])
+    check("araç uygulayan dil: ≤200 1, ≤1000 2, ≤3000 3, fazlası 5 SP",
+          [pm.modern_sp(n, True) for n in (150, 900, 2212, 9000)] == [1, 2, 3, 5])
+    check("yapısal: ≤10 2, ≤40 3, ≤150 5, fazlası 8 SP", [pm.structural_sp(n) for n in (4, 19, 135, 956)] == [2, 3, 5, 8])
     units = [Group(source="go_modern", repo="r", title="any — f%d.go" % i, fingerprints=["go_modern:r:any:f%d.go" % i],
-                   findings=[Finding(source="go_modern", file="f%d.go" % i, rule="any", count=40)]) for i in range(12)]
-    packs = pm.pack_modern(units, source="go_modern", tool_fix=True, pack_files=10)
-    check("araç paketi ≤300 yer, parmak izleri dosyasıyla birlikte bölünür",
-          all(g.total <= 300 for g in packs) and sum(len(g.files) for g in packs) == 12
-          and all(len(g.fingerprints) == len(g.findings) and all(fp.endswith(f.file) for fp, f in zip(g.fingerprints, g.findings)) for g in packs),
-          str([(g.total, len(g.files)) for g in packs]))
+                   findings=[Finding(source="go_modern", file="f%d.go" % i, rule="any", count=40)]) for i in range(150)]
+    packs = pm.pack_modern(units, source="go_modern", tool_fix=True)
+    check("150 dosyalık aynı öneri → tek iş, SP ≤8, dosya başına parmak izi",
+          len(packs) == 1 and packs[0].sp <= 8 and len(packs[0].fingerprints) == 150 and "150 dosya" in packs[0].title,
+          str([(g.sp, len(g.files), g.title) for g in packs]))
+    infra = Group(source="php_modern", repo="r", title="utf8 — a.php", fingerprints=["php_modern:r:utf8_encode:a.php"],
+                  findings=[Finding(source="php_modern", file="a.php", rule="utf8_encode", count=1)], needs_human=True,
+                  human_reason="Altyapı", infra=["ext:mbstring"])
+    out = pm.pack_modern([infra], source="php_modern")
+    check("altyapı işi ayrı kalır ve ön koşulu korunur", len(out) == 1 and out[0].infra == ["ext:mbstring"] and out[0].needs_human)
 
 
 def main():

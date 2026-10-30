@@ -554,14 +554,6 @@ SCHEMA: list[dict] = [
         "desc": "'İş olarak aç' tek seferde en çok bu kadar grup açar (mekanik olanların her biri bir pipeline işi — maliyet tavanı).",
     },
     {
-        "key": "CREW_TECHDEBT_MODERN_PACK_FILES",
-        "label": "Teknik borç · modernleştirme paketi (dosya)",
-        "type": "int",
-        "default": 10,
-        "min": 1,
-        "desc": "Aynı öneri için bir Task'a en çok bu kadar dosya (araç uygulayan Go/Python'da iki katı); paket ayrıca en çok 60 yer (araçta 300) taşır. SP dosya sayısından değil yer sayısından: ≤20 yer 1, ≤60 yer 2, fazlası 3 SP (araç uygulayan dillerde ≤200 yer 1, fazlası 2 SP). Eskiden dosya başına 1 SP toplanıyordu: webservice'te 150 dosya 64 SP çıktı.",
-    },
-    {
         "key": "CREW_QUALITY_TARGET_SPRINT",
         "label": "Kalite · hedef sprint",
         "type": "str",
