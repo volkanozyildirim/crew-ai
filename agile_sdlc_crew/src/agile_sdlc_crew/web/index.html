@@ -1588,22 +1588,40 @@ function renderModern(){
   const rules=Object.entries(r.rules||{}).sort((a,b)=>b[1].count-a[1].count);
   const chips=rules.map(([k,v])=>`<span class="chip dim" title="${esc(v.title)}">${esc(v.title.split(' → ')[0].slice(0,34))} <b>${v.count}</b></span>`).join(' ');
   const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
-  const row=(t,human)=>{
+  // Aynı öneri (kural) tek satır: dosya paketleri (her biri ayrı Task) satırın içinde listelenir.
+  const statusChip=(t,human)=>human?humanChip(t.human_reason):(t.recurring_of?`<span class="chip dim">tekrar · önceki #${t.recurring_of}</span>`:(_tdm.scan&&_tdm.scan.tool_fix?'<span class="chip dim" title="İş olarak açılınca dilin aracı düzeltir, doğrulayıcı çalışır, PR açılır, LLM yalnız inceler">Araç uygular</span>':'<span class="chip dim" title="İş olarak açılınca pipeline kuyruğuna alınır">Kuyruğa alınır</span>'));
+  const unitRow=(t,human)=>{
     const loc=(t.locations||[]).map(l=>`<li><code>${esc(l.file)}:${l.line}</code>${l.text?` — <code>${esc(l.text)}</code>`:''}</li>`).join('');
     const where=t.module?`${esc(t.module)} · ${t.files.length} dosya`:(t.files.length===1?esc(t.files[0]):`${esc(t.files[0])} +${t.files.length-1}`);
-    return `<tr><td><input type="checkbox" class="tdmSel" value="${esc(t.gid)}"></td>
+    return `<li style="list-style:none;margin:4px 0"><label style="display:flex;gap:6px;align-items:flex-start">
+      <input type="checkbox" class="tdmSel" data-rule="${esc(t.rule)}" value="${esc(t.gid)}" onchange="_tdmChildToggle(this)">
+      <span style="flex:1"><details><summary style="cursor:pointer">${where} <span style="color:var(--text-dim)">· ${t.count} yer · ${t.sp} SP</span>${t.recurring_of?` <span class="chip dim">tekrar · #${t.recurring_of}</span>`:''}</summary>
+        <div style="font-size:12px;margin-top:2px"><b>Bulunan yerler (${t.count}):</b></div>
+        <ul style="margin:2px 0 4px 18px">${loc}${t.count>(t.locations||[]).length?`<li>+${t.count-(t.locations||[]).length} yer daha</li>`:''}</ul>
+        ${human&&t.human_reason?`<div style="font-size:11px;color:var(--text-dim)">${esc(t.human_reason)}</div>`:''}</details></span></label></li>`;
+  };
+  const ruleRow=(items,human)=>{
+    const t=items[0];
+    const total=items.reduce((a,x)=>a+(x.count||0),0),sp=items.reduce((a,x)=>a+(x.sp||0),0);
+    const files=new Set(items.flatMap(x=>x.files||[])).size;
+    return `<tr><td><input type="checkbox" class="tdmRule" data-rule="${esc(t.rule)}" onchange="_tdmRuleToggle(this)" title="Bu önerinin bütün işlerini seç"></td>
       <td><details><summary style="cursor:pointer">${esc(t.rule_title)} ${t.since&&t.since!=='0.0'?`<span class="chip dim">${esc((_tdm.scan&&_tdm.scan.label)||'PHP')} ${esc(t.since)}</span>`:''}</summary>
         <div style="font-size:12px;margin:6px 0 4px;color:var(--text)"><b>Ne:</b> ${esc(t.summary)}</div>
         <div style="font-size:12px;color:var(--text)"><b>Avantajlar:</b><ul style="margin:2px 0 4px 18px">${(t.advantages||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>
         <div style="font-size:12px;color:var(--text)"><b>Riskler:</b><ul style="margin:2px 0 4px 18px">${(t.risks||[]).map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px"><div style="flex:1;min-width:220px"><b>Önce</b><pre style="margin:2px 0;white-space:pre-wrap;color:var(--text)">${esc(t.before)}</pre></div><div style="flex:1;min-width:220px"><b>Sonra</b><pre style="margin:2px 0;white-space:pre-wrap;color:var(--text)">${esc(t.after)}</pre></div></div>
-        <div style="font-size:12px;color:var(--text)"><b>Bulunan yerler (${t.count}):</b><ul style="margin:2px 0 4px 18px">${loc}${t.count>(t.locations||[]).length?`<li>+${t.count-(t.locations||[]).length} yer daha</li>`:''}</ul></div>
         ${t.ref?`<div style="font-size:12px"><b>Kaynak:</b> <a href="${esc(t.ref)}" target="_blank" rel="noopener">${esc(t.ref)}</a></div>`:''}
+        <div style="font-size:12px;color:var(--text);margin-top:6px"><b>İşler (${items.length}):</b> <span style="color:var(--text-dim)">her biri ayrı Task; tek tek de seçilebilir</span><ul style="margin:2px 0 4px 0;padding:0">${items.map(x=>unitRow(x,human)).join('')}</ul></div>
       </details></td>
-      <td>${where}</td><td class="num">${t.count}</td><td class="num">${t.sp}</td>
-      <td>${_tdmKindChip(t.kind)} ${human?humanChip(t.human_reason):(t.recurring_of?`<span class="chip dim">tekrar · önceki #${t.recurring_of}</span>`:(_tdm.scan&&_tdm.scan.tool_fix?'<span class="chip dim" title="İş olarak açılınca dilin aracı düzeltir, doğrulayıcı çalışır, PR açılır, LLM yalnız inceler">Araç uygular</span>':'<span class="chip dim" title="İş olarak açılınca pipeline kuyruğuna alınır">Kuyruğa alınır</span>'))}</td></tr>`;
+      <td>${files} dosya · ${items.length} iş</td><td class="num">${total}</td><td class="num">${sp}</td>
+      <td>${_tdmKindChip(t.kind)} ${statusChip(t,human)}</td></tr>`;
   };
-  const tbl=(list,human)=>`<table class="perf"><tr><th></th><th>Öneri</th><th>Yer</th><th class="num">Adet</th><th class="num">SP</th><th>Durum</th></tr>${list.map(t=>row(t,human)).join('')}</table>`;
+  const tbl=(list,human)=>{
+    const by=new Map();
+    for(const t of list){if(!by.has(t.rule))by.set(t.rule,[]);by.get(t.rule).push(t)}
+    const groups=[...by.values()].sort((a,b)=>b.reduce((s,x)=>s+x.count,0)-a.reduce((s,x)=>s+x.count,0));
+    return `<table class="perf"><tr><th></th><th>Öneri</th><th>Yer</th><th class="num">Adet</th><th class="num">SP</th><th>Durum</th></tr>${groups.map(g=>ruleRow(g,human)).join('')}</table>`;
+  };
   const sec=(title,sub)=>`<div style="font-size:12px;font-weight:700;margin:12px 0 4px">${title} <span style="font-weight:400;color:var(--text-dim)">${sub}</span></div>`;
   const auto=r.auto||[],infra=r.infra||[],hum=r.human||[];
   const errs=(r.errors||[]).length?`<div style="color:var(--warning);margin-top:4px">${(r.errors||[]).length} dosya taranamadı — liste eksik olabilir (${esc((r.errors||[]).slice(0,3).join('; '))})</div>`:'';
@@ -1612,6 +1630,15 @@ function renderModern(){
     +(auto.length?sec('Otomatik işler',r.tool_fix?'— yalnız kod düzenlemesiyle çözülür; Task açılır, düzeltmeyi araç uygular, LLM inceler':'— yalnız kod düzenlemesiyle çözülür; Task açılır ve pipeline kuyruğuna alınır'):'')+(auto.length?tbl(auto,false):'')
     +(infra.length?sec('Altyapı (DevOps) gerektiren işler','— kod dışı ön koşul var (ör. PHP eklentisi); Task needs-human açılır, DevOps takımına ayrı iş açılır')+tbl(infra,true):'')
     +(hum.length?sec('İnsan kararı gerektiren yapısal işler','— Task needs-human açılır; kapsamı insan belirler, etiket kalkınca kuyruğa alınabilir')+tbl(hum,true):'');
+}
+function _tdmRuleToggle(el){
+  document.querySelectorAll(`.tdmSel[data-rule="${CSS.escape(el.dataset.rule)}"]`).forEach(c=>c.checked=el.checked);
+  el.indeterminate=false;
+}
+function _tdmChildToggle(el){
+  const kids=[...document.querySelectorAll(`.tdmSel[data-rule="${CSS.escape(el.dataset.rule)}"]`)];
+  const on=kids.filter(c=>c.checked).length;
+  document.querySelectorAll(`.tdmRule[data-rule="${CSS.escape(el.dataset.rule)}"]`).forEach(p=>{p.checked=on===kids.length;p.indeterminate=on>0&&on<kids.length});
 }
 async function modernTake(){
   const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');

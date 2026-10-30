@@ -6083,6 +6083,9 @@ def test_modern_multilang():
     check("iş türü ve onaylı kapsam INSERT'te verilir (işçi yarışı yok, WI açıklaması okunmaz)",
           'job_kind="modern_fix",' in md and "job_payload=payloads.get(title" in md)
     html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("aynı öneri tek satır: kural başına grup, alt işler tek tek ve toplu seçilir",
+          "const ruleRow=(items,human)=>" in html and "function _tdmRuleToggle" in html and "function _tdmChildToggle" in html
+          and 'class="tdmSel" data-rule=' in html)
     check("kart çok dilli: başlık, dil:repo seçimi, araç uygular etiketi",
           '<span class="h">Modernleştirme</span>' in html and "function _tdmSel()" in html and "Araç uygular" in html)
 
