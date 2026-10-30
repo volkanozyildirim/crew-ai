@@ -5118,8 +5118,8 @@ def test_php_modern_ui():
     pane = html[s:html.find("<section", s + 10)] if s >= 0 else ""
     check("kart Teknik borç sekmesinde, başlangıçta gizli", 'id="tdModernCard"' in pane and "Modernleştirme (PHP)" in pane
           and 'id="tdModernCard" style="display:none' in pane)
-    check("repo seçici, hedef sürüm chip'i, benimseme özeti, Tara / Yeniden tara, İş olarak aç",
-          all(x in pane for x in ('id="tdmRepo"', 'id="tdmTarget"', 'id="tdmAdoption"', 'id="tdmScan"', 'id="tdmRescan"', 'id="tdmTake"'))
+    check("repo seçici, hedef sürüm chip'i, benimseme özeti, Yeniden tara, İş olarak aç",
+          all(x in pane for x in ('id="tdmRepo"', 'id="tdmTarget"', 'id="tdmAdoption"', 'id="tdmRescan"', 'id="tdmTake"'))
           and "Seçilenleri iş olarak aç" in pane)
     for fn in ("loadModernRepos", "modernScan", "modernTake", "renderModern"):
         check(f"JS: {fn}", f"function {fn}" in html)
@@ -5135,6 +5135,11 @@ def test_php_modern_ui():
     check("alım sonucu silinmez, yeniden tarama beklenir (butonlar erken açılmaz)", "await modernScan(false,true)" in tk and "keepMsg" in js)
     check("tekrarlayan (recurring) satır da seçilebilir", "t.recurring_of?'':" not in js)
     check("tarayıcı dosya hataları gösterilir", "errors" in js[js.find("function renderModern"):js.find("async function modernTake")])
+    rc = html[html.find("function _tdmRepoChanged"):html.find("async function loadModernRepos")]
+    check("repo listesi 'Repo seçiniz…' ile başlar, ilk repo kendiliğinden seçilmez",
+          "Repo seçiniz…" in js and "sel.value='';" in js and 'id="tdmScan"' not in html)
+    check("repo seçilince tarama kendiliğinden başlar", "if(r&&r.version)modernScan(false);" in rc)
+    check("hızlı repo değişiminde eski tarama sonucu yazılmaz", "if(seq!==_tdm.seq)return;" in js)
 
 
 def test_quality_sonar_exclude():
