@@ -568,6 +568,20 @@ SCHEMA: list[dict] = [
         "desc": "tempo-quality etiketli işlerde repo keşfi (repo Task açıklamasında yazılı), test planlama ve UAT atlanır. Ölçüm (#228, #230): bu üç adım iş başına ~$2.1 (toplamın %40'ı) — tek satırlık null/isset düzeltmesinde test planı ve UAT raporu karar üretmiyor; PR'daki birim testi + yeşil build + review kapısı kalıyor. Normal pipeline işleri etkilenmez.",
     },
     {
+        "key": "CREW_DEVOPS_REQUESTS",
+        "label": "DevOps altyapı isteği",
+        "type": "bool",
+        "default": True,
+        "desc": "Kod değişikliği tek başına yetmeyen işlerde DevOps takımına ayrı Task: (1) pipeline PR'ı repoda daha önce okunmayan bir ortam değişkeni ekliyorsa (getenv/os.Getenv/env()/process.env, sabite konmuş adlar dahil) — değişken adları, okunduğu satır, FLODevOps production servisleri, externalSecrets adı ve imajlarla; (2) teknik borçta kural bir PHP eklentisi gerektiriyor ve repoda kullanıldığına dair kanıt yoksa. Task DevOps alanında aktif sprintte açılır, kaynak işe Predecessor olarak bağlanır, akışı durdurmaz; PR ve WI'ye 'DevOps #N tamamlanmadan birleştirilmemeli' notu düşülür. Aynı istek iki kez açılmaz. Kullanıcı kararı (2026-10-30); takımın elle açtığı 'ENV tanımlamaları' (#77061) aynı ihtiyacı karşılıyordu.",
+    },
+    {
+        "key": "CREW_DEVOPS_TEAM",
+        "label": "DevOps takımı",
+        "type": "str",
+        "default": "DevOps",
+        "desc": "DevOps isteklerinin açılacağı Azure takımı (alan + aktif sprint bu takımdan okunur).",
+    },
+    {
         "key": "CREW_PRE_PR_VERIFY",
         "label": "PR öncesi derleme/lint doğrulaması",
         "type": "bool",

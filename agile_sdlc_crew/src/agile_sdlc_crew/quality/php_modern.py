@@ -56,6 +56,8 @@ class Rule:
     auto: bool = False
     sp_unit: int = 1
     rector: str = ""
+    requires: list[str] = field(default_factory=list)            # PHP eklentileri
+    requires_if: dict[str, list[str]] = field(default_factory=dict)  # bulunan yerde geçen ad → eklentiler
 
     @property
     def since_str(self) -> str:
@@ -89,6 +91,8 @@ def load_rules(path: Path = RULES_PATH) -> list[Rule]:
             # structural / report asla otonom değil — YAML ne derse desin
             auto=bool(r.get("auto")) and kind in ("deprecation", "mechanical"),
             sp_unit=int(r.get("sp_unit") or 0), rector=str(r.get("rector") or ""),
+            requires=[str(x) for x in r.get("requires") or []],
+            requires_if={str(k): [str(x) for x in v or []] for k, v in (r.get("requires_if") or {}).items()},
         ))
     return out
 
@@ -291,8 +295,91 @@ def _units(hits: list[dict], rules_by_key: dict[str, Rule], repo: str) -> tuple[
     return list(by.values()), summary
 
 
+# Eklentinin üretimde var olduğuna dair repo kanıtı: composer'da ext-<ad> şartı / polyfill,
+# ya da uygulama kodunda (vendor hariç) o eklentinin API'si zaten kullanılıyor.
+# git grep -E POSIX ERE ister (\b / \s yok)
+EXT_EVIDENCE = {
+    "mbstring": r"(^|[^A-Za-z0-9_])mb_[a-z_]+[[:space:]]*\(",
+    "intl": r"(NumberFormatter|IntlDateFormatter|Collator|Transliterator|Normalizer)",
+    "iconv": r"(^|[^A-Za-z0-9_])iconv[[:space:]]*\(",
+}
+
+
+def ext_available(root: Path, ext: str) -> bool:
+    import subprocess
+    root = Path(root)
+    for name in ("composer.json", "composer.lock"):
+        try:
+            txt = (root / name).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if f'"ext-{ext}"' in txt or f"symfony/polyfill-{ext}" in txt:
+            return True
+    pat = EXT_EVIDENCE.get(ext)
+    if not pat:
+        return False
+    try:
+        r = subprocess.run(["git", "grep", "-q", "-E", pat, "HEAD", "--", "*.php", ":!vendor", ":!node_modules"],
+                           cwd=str(root), capture_output=True, timeout=30)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ext_checker(root: Path):
+    seen: dict[str, bool] = {}
+
+    def ok(ext: str) -> bool:
+        if ext not in seen:
+            seen[ext] = ext_available(root, ext)
+        return seen[ext]
+    return ok
+
+
+def _devops_requests(client, repo: str, picked: list, rows: list[dict], cfg: dict) -> list[dict]:
+    """Altyapı ön koşullu Task'lar için DevOps takımına ayrı iş (eklenti başına tek iş, her
+    Task'a Predecessor bağı). CREW_DEVOPS_REQUESTS kapalıysa açılmaz."""
+    from agile_sdlc_crew import devops_request as dr
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake
+    if not pc.get("CREW_DEVOPS_REQUESTS"):
+        return []
+    out: list[dict] = []
+    deps_cache: list | None = None
+    for g, row in zip(picked, rows):
+        if not g.infra or not row.get("id"):
+            continue
+        exts = sorted(i.split(":", 1)[1] for i in g.infra if i.startswith("ext:"))
+        if not exts:
+            continue
+        try:
+            if deps_cache is None:
+                deps_cache = dr.deployments(client, repo)
+            body = dr.ext_request_body(repo=repo, exts=exts, deps=deps_cache, source_wi=row["id"],
+                                       reason=f"Teknik borç işi ({g.title}) kodda bu eklentinin fonksiyonlarını kullanacak; "
+                                              "repoda eklentinin üretimde yüklü olduğuna dair kanıt yok.")
+            res = dr.open_request(client, team=pc.get("CREW_DEVOPS_TEAM") or "DevOps",
+                                  title=f"[{repo}] PHP eklentisi: {', '.join(exts)}", body_html=body,
+                                  source_wi=row["id"], key=f"ext:{repo}:{'+'.join(exts)}",
+                                  task_fields=cfg.get("task_fields") or intake.load_task_fields())
+            out.append({"task": row["id"], "devops": res["id"], "created": res["created"], "exts": exts})
+        except Exception as e:  # noqa: BLE001 — Task açıldı; DevOps isteği elle de açılabilir
+            log.warning(f"  🛠️ DevOps isteği açılamadı ({repo} {exts}): {e}")
+            out.append({"task": row["id"], "error": str(e), "exts": exts})
+    return out
+
+
+def _missing_exts(u, r: Rule, ext_ok) -> list[str]:
+    need = list(r.requires)
+    texts = " ".join(uri for f in u.findings for uri in f.uris)
+    for name, exts in r.requires_if.items():
+        if name in texts:
+            need += exts
+    return [e for e in dict.fromkeys(need) if not (ext_ok and ext_ok(e))]
+
+
 def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: str, board_index: dict, now: float,
-                 cfg: dict) -> tuple[list, list[dict], dict]:
+                 cfg: dict, ext_ok=None) -> tuple[list, list[dict], dict]:
     """(gruplar, atlananlar, kural özeti). Yalnız hedef sürümün sunduğu kurallar; dedup board'dan;
     dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez."""
     from agile_sdlc_crew.quality import dedup, rank
@@ -311,9 +398,18 @@ def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: st
             continue
         if v == "recurring":
             u.recurring_of = prev
+        # "Otomatik" yalnız KOD düzenlemesiyle çözülen iş: eklenti gibi kod dışı ön koşul
+        # repoda kanıtlanamıyorsa iş insana + DevOps'a gider (kullanıcı kararı 2026-10-30).
+        missing = _missing_exts(u, rules_by_key[u.findings[0].rule], ext_ok)
+        if missing:
+            u.needs_human = True
+            u.infra = [f"ext:{e}" for e in missing]
+            u.human_reason = f"Altyapı: PHP eklentisi {', '.join(missing)} imajda doğrulanamadı — DevOps isteği açılır"
         live.append(u)
+    infra_units = [u for u in live if u.infra]
+    live = [u for u in live if not u.infra]
     file_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "file"]
-    module_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "module"]
+    module_units = [u for u in live if rules_by_key[u.findings[0].rule].unit == "module"] + infra_units
     packed = rank.pack_units(file_units, pack_sp=int(cfg.get("pack_sp", 3)), pack_files=int(cfg.get("pack_files", 5)),
                              source=SOURCE)
     groups = packed + module_units
@@ -466,6 +562,7 @@ def _row(g, rules_by_key: dict[str, Rule]) -> dict:
         "risks": list(r.risks) if r else [], "before": r.before if r else "", "after": r.after if r else "",
         "ref": r.ref if r else "", "count": g.total, "files": g.files, "module": where,
         "locations": [{"file": f, "line": ln, "text": t} for f, ln, t in locs[:20]], "recurring_of": g.recurring_of,
+        "infra": list(g.infra),
     })
     return row
 
@@ -521,14 +618,16 @@ def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, s
     rules = load_rules()
     rules_by_key = {r.key: r for r in rules}
     groups, skipped, summary = build_groups(res, rules, tv["version"], repo=repo, board_index=deps.board(client),
-                                            now=deps.now(), cfg=cfg)
+                                            now=deps.now(), cfg=cfg, ext_ok=_ext_checker(root))
     out = {
         "repo": repo, "version": tv["version"], "version_source": tv.get("source"), "images": tv.get("images") or [],
         "sha": res.get("sha", ""), "files": res.get("files", 0), "adoption": res.get("adoption") or {},
         "cached": bool(res.get("cached")), "scanned_at": res.get("built_at"), "errors": res.get("errors") or [],
         "rules": summary,
+        # auto: yalnız kod düzenlemesiyle çözülen işler; infra: kod dışı ön koşul (DevOps)
         "auto": [_row(g, rules_by_key) for g in groups if not g.needs_human],
-        "human": [_row(g, rules_by_key) for g in groups if g.needs_human],
+        "infra": [_row(g, rules_by_key) for g in groups if g.needs_human and g.infra],
+        "human": [_row(g, rules_by_key) for g in groups if g.needs_human and not g.infra],
         "skipped": skipped[:50],
         "skipped_counts": dict(Counter(s["reason"].split(" #")[0] for s in skipped)),
     }
@@ -563,7 +662,7 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, 
         rules = load_rules()
         rules_by_key = {r.key: r for r in rules}
         groups, _skipped, _summary = build_groups(res, rules, tv["version"], repo=repo, board_index=deps.board(client),
-                                                  now=deps.now(), cfg=cfg)
+                                                  now=deps.now(), cfg=cfg, ext_ok=_ext_checker(root))
         by_gid = {gid_of(g): g for g in groups}
         picked, skipped = [], []
         max_take = max(1, int(cfg.get("max_take", 8)))
@@ -586,10 +685,11 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, 
             estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
         tasks = [r for r in rows if not r["needs_human"]]
         human = [r for r in rows if r["needs_human"]]
+        devops = _devops_requests(client, repo, picked, rows, cfg)
         log.info(f"🧹 PHP modernleştirme ({repo}): story #{story['id']} · {len(rows)} Task · {added} SP")
         return {"repo": repo, "version": tv["version"],
                 "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"]},
-                "tasks": tasks, "human_tasks": human, "skipped": skipped,
+                "tasks": tasks, "human_tasks": human, "devops": devops, "skipped": skipped,
                 "total_sp": sum(r["sp"] for r in tasks if r.get("id")), "human_sp": sum(r["sp"] for r in human if r.get("id"))}
     finally:
         intake._LOCK.release()

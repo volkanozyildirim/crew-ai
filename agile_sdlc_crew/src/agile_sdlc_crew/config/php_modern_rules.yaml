@@ -25,6 +25,7 @@ rules:
     ref: "https://wiki.php.net/rfc/deprecate-implicitly-nullable-types"
     rector: "Rector\\Php84\\Rector\\Param\\ExplicitNullableParamTypeRector"
   - key: utf8_encode
+    requires: [mbstring]   # mb_convert_encoding; repoda kanıt yoksa DevOps'a gider
     since: "8.2"
     kind: deprecation
     unit: file
@@ -75,6 +76,7 @@ rules:
     after: "htmlspecialchars($q, ENT_QUOTES)"
     ref: "https://wiki.php.net/rfc/deprecations_php_8_1#filter_sanitize_string"
   - key: removed_functions
+    requires_if: {money_format: [intl]}   # NumberFormatter
     since: "8.0"
     kind: deprecation
     unit: file
