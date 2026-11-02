@@ -4269,6 +4269,13 @@ def test_modern_freshen_and_targets():
         g(repo, "checkout", "-q", "-b", "feature/x")
         check("başka daldaysa dokunulmaz", "dalında" in pm.freshen_clone(repo, force=True, running_repos=set()).get("skipped", ""))
         g(repo, "checkout", "-q", "main")
+        check("git hatasındaki URL kimlik bilgisi silinir",
+              pm._redact("fatal: unable to access 'https://u:SECRETPAT@dev.azure.com/x/'") ==
+              "fatal: unable to access 'https://***@dev.azure.com/x/'")
+        g(repo, "remote", "set-url", "origin", "https://u:SECRETPAT@127.0.0.1:9/x.git")
+        r = pm.freshen_clone(repo, force=True, running_repos=set())
+        check("fetch hatası arayüze ayrıntı (PAT) taşımaz", "SECRETPAT" not in str(r) and "fetch" in r.get("skipped", ""), r)
+        g(repo, "remote", "set-url", "origin", str(root / "origin.git"))
         check("o repoda koşan iş varsa dokunulmaz",
               "koşan" in pm.freshen_clone(repo, force=True, running_repos={"repo"}).get("skipped", ""))
         amap = {"[Prod] dashboard.sneakerbox.ru": {"repo": "flo-dashboard", "src": "russia/build/dashboard"}}

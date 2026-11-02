@@ -667,6 +667,13 @@ def _safe_index(client, app_map_cache: dict | None) -> dict:
 # ── Yerel klonu güncelleme ───────────────────────────────────────────────
 
 _FRESHENED: dict[str, float] = {}
+_URL_CRED = re.compile(r"://[^@/\s]+@")
+
+
+def _redact(text: str) -> str:
+    """git çıktısındaki remote URL'leri PAT taşır (set_remote_auth); ayrıntı arayüze gitmeden
+    kimlik bilgisi silinir ve yalnız sunucu loguna yazılır."""
+    return _URL_CRED.sub("://***@", text or "")
 FRESHEN_MIN_INTERVAL_S = 300
 
 
@@ -709,17 +716,20 @@ def freshen_clone(root: Path, *, force: bool = False, running_repos: set[str] | 
             pass
         r = git("fetch", "-q", "origin", branch, timeout=120)
         if r.returncode != 0:
-            return {"skipped": "fetch başarısız: " + (r.stderr or r.stdout).strip()[:160]}
+            log.warning(f"⚠️ modernleştirme: {repo} fetch başarısız: {_redact((r.stderr or r.stdout).strip())[:300]}")
+            return {"skipped": "fetch başarısız (ayrıntı sunucu logunda)"}
         n = git("rev-list", "--count", f"HEAD..origin/{branch}").stdout.strip() or "0"
         if n != "0":
             m = git("merge", "-q", "--ff-only", f"origin/{branch}")
             if m.returncode != 0:
-                return {"skipped": "ileri sarılamadı: " + (m.stderr or m.stdout).strip()[:160]}
+                log.warning(f"⚠️ modernleştirme: {repo} ileri sarılamadı: {_redact((m.stderr or m.stdout).strip())[:300]}")
+                return {"skipped": "ileri sarılamadı (ayrıntı sunucu logunda)"}
             log.info(f"🔄 modernleştirme: {repo} yerel klonu {n} commit ileri sarıldı")
         _FRESHENED[repo] = time.time()
         return {"updated": int(n)}
     except Exception as e:  # noqa: BLE001
-        return {"skipped": f"güncelleme hatası: {e}"[:200]}
+        log.warning(f"⚠️ modernleştirme: {repo} klon güncelleme hatası: {_redact(str(e))[:300]}")
+        return {"skipped": "güncelleme hatası (ayrıntı sunucu logunda)"}
 
 
 # ── Sekme akışı: repolar → tarama → iş açma ──────────────────────────────
