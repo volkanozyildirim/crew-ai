@@ -431,11 +431,12 @@ def scope_of(lang: str, repo: str, g) -> dict:
     return {"lang": lang, "repo": repo, "scope": scope}
 
 
-def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", deps=None) -> dict:
+def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", sprint: str = "", deps=None) -> dict:
     """Seçilenleri 'Teknik borç' story'si altında Task olarak aç. Go/Python otomatik işleri
-    araç-düzeltme işine (modern_fix), diğerleri pipeline'a kuyruklanır."""
+    araç-düzeltme işine (modern_fix), diğerleri pipeline'a kuyruklanır. `sprint`: seçilen sprint
+    yolu; boşsa aktif sprint."""
     if lang == "php":
-        return {**php_modern.take(client, repo, group_ids, team=team, deps=deps), "lang": "php"}
+        return {**php_modern.take(client, repo, group_ids, team=team, sprint=sprint, deps=deps), "lang": "php"}
     from agile_sdlc_crew import db, estimation
     from agile_sdlc_crew.quality import intake
     deps = deps or php_modern.default_deps()
@@ -467,8 +468,8 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", 
                 picked.append(g)
         if not picked:
             return {"repo": repo, "lang": lang, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
-        story = intake.resolve_story(client, LANGS[lang]["source"], None, team, cfg.get("target_sprint") or "next",
-                                     lane="techdebt")
+        story = intake.resolve_story(client, LANGS[lang]["source"], None, team, "current_or_next",
+                                     lane="techdebt", iteration=sprint)
         cfg2 = {**cfg, "php_target": f"{tv['version']} ({tv['source']})"}
         if LANGS[lang]["tool_fix"]:
             # Onaylanan kapsam (dil, repo, kural × dosya) işin kaydına INSERT'te yazılır; çalışırken
@@ -488,7 +489,8 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", 
         human = [r for r in rows if r["needs_human"]]
         log.info(f"🧹 {LANGS[lang]['label']} modernleştirme ({repo}): story #{story['id']} · {len(rows)} Task · {added} SP")
         return {"repo": repo, "lang": lang, "version": tv["version"],
-                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"]},
+                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"],
+                          "iteration": story["iteration"]},
                 "tasks": tasks, "human_tasks": human, "devops": [], "skipped": skipped,
                 "total_sp": sum(r["sp"] for r in tasks if r.get("id")),
                 "human_sp": sum(r["sp"] for r in human if r.get("id")), "tool_fix": bool(LANGS[lang]["tool_fix"])}

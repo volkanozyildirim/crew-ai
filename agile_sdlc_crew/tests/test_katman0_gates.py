@@ -4156,6 +4156,61 @@ def test_techdebt_lane():
           and "tempo-techdebt" in c.created[0][1]["System.Tags"] and st["id"] == 7)
 
 
+def test_techdebt_sprint_choice():
+    print("\n[TD3] Teknik borç — işlerin açılacağı sprint seçilebilir, varsayılan aktif sprint")
+    from agile_sdlc_crew.quality import intake
+
+    class C:
+        org_url, project = "https://dev.azure.com/o", "P"
+
+        def __init__(self, iters):
+            self.iters, self.wiql, self.created = iters, [], []
+
+        def list_iterations(self, team=""):
+            return self.iters
+
+        def query_work_items(self, wiql, limit=0):
+            self.wiql.append(wiql)
+            return []
+
+        def get_team_area_path(self, team=""):
+            return "P\\T"
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append(fields)
+            return {"id": 8, "fields": fields}
+    iters = [{"name": "S21", "path": "P\\S21", "attributes": {"timeFrame": "past"}},
+             {"name": "S22", "path": "P\\S22", "attributes": {"timeFrame": "current"}},
+             {"name": "S24", "path": "P\\S24", "attributes": {"timeFrame": "future", "startDate": "2026-11-30"}},
+             {"name": "S23", "path": "P\\S23", "attributes": {"timeFrame": "future", "startDate": "2026-11-16"}}]
+    c = C(iters)
+    st = intake.resolve_story(c, "php_modern", None, "T", "current_or_next", lane="techdebt")
+    check("seçim yoksa aktif sprint", st["iteration"] == "P\\S22" and c.created[0]["System.IterationPath"] == "P\\S22")
+    c = C(iters)
+    st = intake.resolve_story(c, "php_modern", None, "T", "current_or_next", lane="techdebt", iteration="P\\S24")
+    check("seçilen gelecek sprint kullanılır", st["iteration"] == "P\\S24" and "P\\S24" in c.wiql[0]
+          and c.created[0]["System.Title"] == "Teknik borç — S24")
+    for bad, why in (("P\\S21", "geçmiş"), ("P\\Baska", "takımda yok")):
+        try:
+            intake.resolve_story(C(iters), "php_modern", None, "T", "current_or_next", lane="techdebt", iteration=bad)
+            check(f"{why} sprint reddedilir", False)
+        except ValueError:
+            check(f"{why} sprint reddedilir", True)
+    st = intake.resolve_story(C(iters[2:]), "php_modern", None, "T", "current_or_next", lane="techdebt")
+    check("aktif sprint yoksa en yakın gelecek sprint", st["iteration"] == "P\\S23")
+    check("kalite alımının 'next' davranışı değişmedi",
+          intake.target_iteration(iters, "next")["name"] == "S23" and intake.target_iteration(iters[2:], "current") is None)
+    from agile_sdlc_crew.quality import modern, php_modern
+    from agile_sdlc_crew import server
+    check("take sprint'i story çözümüne geçirir",
+          "iteration=sprint" in inspect_source(php_modern.take) and "iteration=sprint" in inspect_source(modern.take)
+          and "sprint" in server.TechdebtModernTakeRequest.model_fields)
+    html = (Path(__file__).resolve().parents[1] / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("arayüz: sprint seçici, varsayılan aktif, take'e gider",
+          'id="tdmSprint"' in html and "function loadTdmSprints" in html and "group_ids:ids,team,sprint" in html
+          and "x.timeFrame==='current'||x.timeFrame==='future'" in html)
+
+
 def test_techdebt_open_tasks_db():
     print("\n[TD2] Teknik borç — ortak Task açma + quality_items.source kolonu")
     from agile_sdlc_crew.quality import intake
@@ -6200,7 +6255,7 @@ def main():
               test_quality_lean,
               test_worktree_staging,
               test_techdebt_lane,
-              test_techdebt_open_tasks_db,
+              test_techdebt_sprint_choice, test_techdebt_open_tasks_db,
               test_techdebt_list_queue,
               test_techdebt_endpoints,
               test_techdebt_ui,

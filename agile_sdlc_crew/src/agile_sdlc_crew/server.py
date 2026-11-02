@@ -153,6 +153,7 @@ class TechdebtModernTakeRequest(BaseModel):
     group_ids: list[str] = []
     team: str = ""
     lang: str = "php"
+    sprint: str = ""  # sprint yolu; boşsa aktif sprint
 
 
 class QualityTakeRequest(BaseModel):
@@ -2082,7 +2083,7 @@ async def techdebt_modern_take(req: TechdebtModernTakeRequest):
         return JSONResponse({"error": "Seçili öneri yok"}, status_code=400)
     try:
         res = await asyncio.to_thread(_md.take, AzureDevOpsClient(), req.repo.strip(), (req.lang or "php").strip(),
-                                      req.group_ids, team=req.team)
+                                      req.group_ids, team=req.team, sprint=(req.sprint or "").strip())
         if any(t.get("job_id") for t in res.get("tasks") or []):
             _ensure_worker()
         return JSONResponse(res, status_code=201 if res.get("story") else 200)

@@ -687,11 +687,11 @@ def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, s
     return out
 
 
-def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, scan_fn=None, head_sha_fn=None,
-         app_map_cache: dict | None = None) -> dict:
+def take(client, repo: str, group_ids: list[str], *, team: str = "", sprint: str = "", deps=None, scan_fn=None,
+         head_sha_fn=None, app_map_cache: dict | None = None) -> dict:
     """Seçilen grupları 'Teknik borç — <sprint>' story'si altında Task olarak aç; mekanik olanları
     kuyruğa al, yapısal olanlar needs-human. Seçim kilit altında taze taramaya (aynı sha) ve board'a
-    karşı yeniden doğrulanır."""
+    karşı yeniden doğrulanır. `sprint`: kullanıcının seçtiği sprint yolu; boşsa aktif sprint."""
     from agile_sdlc_crew import estimation
     from agile_sdlc_crew.quality import intake
     deps = deps or default_deps()
@@ -727,7 +727,7 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, 
             if skipped and all("tarama" in s["reason"] for s in skipped):
                 raise ValueError("Seçim güncel taramada yok — tarama değişti, yeniden tarayın")
             return {"repo": repo, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
-        story = intake.resolve_story(client, SOURCE, None, team, cfg.get("target_sprint") or "next", lane="techdebt")
+        story = intake.resolve_story(client, SOURCE, None, team, "current_or_next", lane="techdebt", iteration=sprint)
         cfg2 = {**cfg, "php_target": tv["version"]}
         rows, added = intake._open_tasks(client, picked, story, cfg2, deps, source=SOURCE, lane="techdebt", queue=True)
         if added:
@@ -737,7 +737,8 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, 
         devops = _devops_requests(client, repo, picked, rows, cfg)
         log.info(f"🧹 PHP modernleştirme ({repo}): story #{story['id']} · {len(rows)} Task · {added} SP")
         return {"repo": repo, "version": tv["version"],
-                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"]},
+                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"],
+                          "iteration": story["iteration"]},
                 "tasks": tasks, "human_tasks": human, "devops": devops, "skipped": skipped,
                 "total_sp": sum(r["sp"] for r in tasks if r.get("id")), "human_sp": sum(r["sp"] for r in human if r.get("id"))}
     finally:
