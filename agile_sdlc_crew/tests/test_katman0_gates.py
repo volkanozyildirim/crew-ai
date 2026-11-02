@@ -4238,6 +4238,61 @@ def test_php_repo_subdir_composer():
               pm.is_php_repo(bare) and not pm.is_php_repo(gor) and modern.detect_langs(gor) == ["go"])
 
 
+def test_modern_freshen_and_targets():
+    print("\n[PM10] modernleştirme — tarama öncesi klon güncelleme + tüm prod servislerinden hedef sürüm")
+    import time
+    import subprocess as sp
+    from agile_sdlc_crew.quality import php_modern as pm
+
+    def g(cwd, *a):
+        return sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], cwd=str(cwd), capture_output=True,
+                      text=True, check=True).stdout.strip()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        g(root, "init", "-q", "--bare", "-b", "main", "origin.git")
+        seed = root / "seed"
+        g(root, "clone", "-q", str(root / "origin.git"), "seed")
+        (seed / "a.php").write_text("<?php\n", encoding="utf-8")
+        g(seed, "add", "."); g(seed, "commit", "-q", "-m", "1"); g(seed, "push", "-q", "origin", "HEAD:main")
+        g(root, "clone", "-q", str(root / "origin.git"), "repo")
+        repo = root / "repo"
+        for i in range(3):
+            (seed / "a.php").write_text(f"<?php // {i}\n", encoding="utf-8")
+            g(seed, "commit", "-q", "-am", f"c{i}"); g(seed, "push", "-q", "origin", "HEAD:main")
+        r = pm.freshen_clone(repo, force=True, running_repos=set())
+        check("geride kalan klon ileri sarılır", r == {"updated": 3} and "// 2" in (repo / "a.php").read_text(), r)
+        check("5 dakika içinde tekrar fetch edilmez", pm.freshen_clone(repo, running_repos=set()).get("recent"))
+        (repo / "a.php").write_text("<?php // yerel\n", encoding="utf-8")
+        check("izlenen dosyada değişiklik varsa dokunulmaz",
+              "değişiklik" in pm.freshen_clone(repo, force=True, running_repos=set()).get("skipped", ""))
+        g(repo, "checkout", "-q", "--", "a.php")
+        g(repo, "checkout", "-q", "-b", "feature/x")
+        check("başka daldaysa dokunulmaz", "dalında" in pm.freshen_clone(repo, force=True, running_repos=set()).get("skipped", ""))
+        g(repo, "checkout", "-q", "main")
+        check("o repoda koşan iş varsa dokunulmaz",
+              "koşan" in pm.freshen_clone(repo, force=True, running_repos={"repo"}).get("skipped", ""))
+        amap = {"[Prod] dashboard.sneakerbox.ru": {"repo": "flo-dashboard", "src": "russia/build/dashboard"}}
+
+        class C:
+            def get_file_content(self, devrepo, path, branch=None, project=None):
+                return "FROM reg/prod-ar/php-8-3:1.0\n" if devrepo == "russia" else ""
+        idx = {"flo-dashboard": [{"src": "anatolia/build/dashboard", "images": ["reg/prod-ar/php-8-4:1.0"]},
+                                 {"src": "russia/build/dashboard", "images": ["reg/prod-ar/php-8-3:1.0"]}]}
+        t = pm.target_version(C(), "flo-dashboard", app_map_cache=amap, cache_path=root / "t.yaml", index=idx)
+        check("app_map'te olmayan prod servisi de sayılır; hedef en düşük, servis başına sürüm listelenir",
+              t["version"] == "8.3" and len(t["images"]) == 2
+              and sorted((x["src"], x["version"]) for x in t["per_src"])
+              == [("anatolia/build/dashboard", "8.4"), ("russia/build/dashboard", "8.3")], t)
+        import yaml as _y
+        (root / "t2.yaml").write_text(_y.safe_dump({"repos": {"flo-dashboard": {
+            "version": "8.3", "images": ["x"], "source": "dockerfile", "built_at": time.time()}}}), encoding="utf-8")
+        t2 = pm.target_version(C(), "flo-dashboard", app_map_cache=amap, cache_path=root / "t2.yaml", index=idx)
+        check("eski biçimli önbellek kaydı yeniden kurulur", len(t2["per_src"]) == 2)
+    html = (Path(__file__).resolve().parents[1] / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("arayüz: servis başına sürüm ipucu + klon notu",
+          "Production servisleri" in html and "klon güncellenemedi" in html and "en düşük prod" in html)
+
+
 def test_techdebt_open_tasks_db():
     print("\n[TD2] Teknik borç — ortak Task açma + quality_items.source kolonu")
     from agile_sdlc_crew.quality import intake
@@ -6282,7 +6337,8 @@ def main():
               test_quality_lean,
               test_worktree_staging,
               test_techdebt_lane,
-              test_techdebt_sprint_choice, test_php_repo_subdir_composer, test_techdebt_open_tasks_db,
+              test_techdebt_sprint_choice, test_php_repo_subdir_composer,
+              test_modern_freshen_and_targets, test_techdebt_open_tasks_db,
               test_techdebt_list_queue,
               test_techdebt_endpoints,
               test_techdebt_ui,

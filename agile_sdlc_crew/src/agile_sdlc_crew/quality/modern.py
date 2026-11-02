@@ -146,7 +146,7 @@ def target(client, repo: str, root: Path, lang: str, *, index: dict | None = Non
     root = Path(root)
     if lang == "php":
         cfg = php_modern.load_cfg()
-        return php_modern._target(client, repo, root, cfg, None)
+        return php_modern._target(client, repo, root, cfg, None, index=index)
     images: list[str] = []
     if index is not None:
         images = [i for e in index.get(repo.lower(), []) for i in e.get("images", [])]
@@ -394,7 +394,8 @@ def scan(client, repo: str, lang: str, *, team: str = "", force: bool = False, d
     except Exception:  # noqa: BLE001
         index = {}
     tv = target(client, repo, root, lang, index=index)
-    out = {"repo": repo, "lang": lang, "label": LANGS[lang]["label"], "version": tv["version"],
+    fresh = php_modern.freshen_clone(root, force=force) if cfg.get("freshen", True) else {}
+    out = {"repo": repo, "lang": lang, "label": LANGS[lang]["label"], "version": tv["version"], "freshen": fresh,
            "version_source": tv["source"], "images": tv["images"], "auto": [], "infra": [], "human": [],
            "rules": {}, "skipped": [], "skipped_counts": {}, "errors": [], "files": 0, "adoption": {}}
     if not tv["version"]:

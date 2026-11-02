@@ -546,6 +546,13 @@ SCHEMA: list[dict] = [
         "desc": "Tarama sonucu repo HEAD sha'sı + katalog sürümüyle önbelleklenir; bu süre dolunca ya da sha değişince yeniden taranır. Hedef PHP sürümü (FLODevOps Dockerfile) de aynı süreyle saklanır.",
     },
     {
+        "key": "CREW_TECHDEBT_FRESHEN",
+        "label": "Teknik borç · taramadan önce klonu güncelle",
+        "type": "bool",
+        "default": True,
+        "desc": "Modernleştirme taraması yerel klonu okur; açıkken taramadan önce klon origin'in varsayılan dalına ileri sarılır (yalnız fast-forward, en sık 5 dakikada bir). Klon başka daldaysa, izlenen dosyada değişiklik varsa ya da o repoda koşan iş varsa dokunulmaz ve kart 'sonuçlar eski olabilir' der.",
+    },
+    {
         "key": "CREW_TECHDEBT_MODERN_MAX_TAKE",
         "label": "Teknik borç · modernleştirmede istek başı en çok iş",
         "type": "int",
