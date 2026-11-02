@@ -6113,6 +6113,39 @@ def test_modern_sp():
     check("altyapı işi ayrı kalır ve ön koşulu korunur", len(out) == 1 and out[0].infra == ["ext:mbstring"] and out[0].needs_human)
 
 
+def test_php_modern_82_84():
+    """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
+    denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
+    print("\n[php_modern: 8.2 / 8.3 / 8.4 kuralları]")
+    import shutil
+    from agile_sdlc_crew.quality import php_modern as pm
+    if not shutil.which("php"):
+        skip("php_modern 8.2-8.4", "php yok"); return
+    fx = Path(__file__).resolve().parent / "fixtures" / "php_modern"
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "a.php").write_text((Path(__file__).resolve().parent / "fixtures" / "php_modern_82" / "a.php").read_text())
+        res = pm.scan_repo(Path(td))
+    got = {(h["rule"], h["line"]) for h in res["hits"]}
+    want = {("typed_class_constants", 3), ("dynamic_properties", 8), ("sensitive_parameter", 9),
+            ("new_without_parens", 10), ("new_without_parens", 11), ("get_class_noarg", 13), ("partial_callable", 15),
+            ("deprecated_84", 16), ("deprecated_84", 17), ("deprecated_84", 18), ("mb_legacy_encoding", 19),
+            ("deprecated_83", 20), ("deprecated_83", 21), ("readonly_class", 24)}
+    check("yeni kurallar bulunur", want <= got, str(sorted(want - got)))
+    check("yanlış pozitif yok: tipli sabit, işaretli parametre, anonim sınıf, get_class($x), extends/AllowDynamic sınıflar, const LIST",
+          not ({("typed_class_constants", 4), ("sensitive_parameter", 9 + 100), ("new_without_parens", 12), ("get_class_noarg", 14),
+                ("dynamic_properties", 25), ("dynamic_properties", 27), ("array_destructuring", 5)} & got), str(sorted(got)))
+    rules = {r.key: r for r in pm.load_rules()}
+    check("katalogda 8.2/8.3/8.4 kuralları", all(k in rules for k in (
+        "dynamic_properties", "partial_callable", "mb_legacy_encoding", "sensitive_parameter", "readonly_class",
+        "typed_class_constants", "get_class_noarg", "deprecated_83", "new_without_parens", "deprecated_84")))
+    check("8.2 hedefte 8.3/8.4 kuralı önerilmez", not {r.key for r in pm.applicable(list(rules.values()), "8.2")}
+          & {"typed_class_constants", "get_class_noarg", "deprecated_83", "new_without_parens", "deprecated_84"})
+    md = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern.py").read_text()
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("repo listesi: taranabilenler üstte, bilinmeyenler altta ayrı grupta",
+          'items.sort(key=lambda i: (not i.get("scannable")' in md and "Hedef sürümü bilinmeyen (" in html)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -6203,7 +6236,8 @@ def main():
               test_security_hardening,
               test_devops_requests,
               test_modern_multilang,
-              test_modern_sp):
+              test_modern_sp,
+              test_php_modern_82_84):
         try:
             t()
         except Exception as e:

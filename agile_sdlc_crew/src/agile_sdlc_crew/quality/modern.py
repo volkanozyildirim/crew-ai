@@ -333,6 +333,8 @@ def repos(client, *, deps=None) -> dict:
             tv = target(client, p.name, p, lang, index=index)
             items.append({"repo": p.name, "lang": lang, "label": LANGS[lang]["label"], "version": tv["version"],
                           "source": tv["source"], "images": tv["images"], "scannable": bool(tv["version"])})
+    # taranabilenler üstte, hedef sürümü bilinmeyenler altta (her grup kendi içinde ada göre)
+    items.sort(key=lambda i: (not i.get("scannable"), i["repo"].lower(), i.get("lang", "")))
     return {"items": items}
 
 

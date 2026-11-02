@@ -3,7 +3,7 @@
 # since: özelliğin geldiği PHP sürümü; yalnız since ≤ hedef sürüm olan kurallar önerilir.
 # kind: deprecation (hedefte uyarı/hata) | mechanical (davranış aynı, otonom) | structural (tasarım kararı, needs-human) | report (iş açılmaz)
 # unit: file (dosya başına birim, paketlenir) | module (kaynak kökünden 2 dizin, paketlenmez)
-version: 2
+version: 3
 rules:
   # ── deprecation: hedef sürümde uyarı / hata üretir ──
   - key: implicit_nullable
@@ -92,6 +92,97 @@ rules:
     after: "foreach ($arr as $k => $v) { … }"
     ref: "https://www.php.net/manual/en/migration80.incompatible.php"
 
+  - key: dynamic_properties
+    since: "8.2"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Bildirilmemiş property'ye atama (dinamik property)"
+    summary: "Sınıfta tanımlı olmayan bir property'ye `$this->x = …` ile atama PHP 8.2'de deprecation, PHP 9'da hata. Yalnız kalıtım, trait ve __set olmayan sınıflarda raporlanır."
+    advantages:
+      - "PHP 9 geçişinin en yaygın kırılma noktası şimdiden kapanır."
+      - "Sınıfın tuttuğu veri tanımdan okunur; yazım hatasıyla yeni property oluşturma yakalanır."
+    risks:
+      - "Yok — property sınıfa bildirilir (tipli ya da tipsiz); değer ve davranış aynı."
+    before: "class Cart {\n    public function load() { $this->items = []; }\n}"
+    after: "class Cart {\n    private array $items = [];\n    public function load() { $this->items = []; }\n}"
+    ref: "https://wiki.php.net/rfc/deprecate_dynamic_properties"
+  - key: partial_callable
+    since: "8.2"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "\"self::m\" / \"parent::m\" string callable'ları"
+    summary: "Yalnız call_user_func ile çalışan, is_callable'ın tutarsız davrandığı bu string callable'lar 8.2'de deprecated, 9'da kaldırılacak."
+    advantages:
+      - "Statik analiz ve IDE callable'ı takip edebilir; yeniden adlandırmada kırılmaz."
+    risks:
+      - "Yok — aynı metot çağrılır."
+    before: "usort($list, 'self::compare');"
+    after: "usort($list, self::compare(...));"
+    ref: "https://wiki.php.net/rfc/deprecate_partially_supported_callables"
+  - key: mb_legacy_encoding
+    since: "8.2"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "mb_* ile HTML-ENTITIES / BASE64 / UUENCODE / QPRINT kodlaması"
+    summary: "Bu sözde kodlamalar 8.2'de mbstring'den kullanımdan kalktı; karşılıkları ayrı fonksiyonlardır."
+    advantages:
+      - "Doğru fonksiyon niyeti açık eder (ör. htmlspecialchars / base64_encode)."
+    risks:
+      - "HTML-ENTITIES karşılığı tek fonksiyon değil: mb_encode_numericentity / htmlspecialchars / html_entity_decode — çağrı yerine göre doğru olan seçilmeli."
+    before: "$html = mb_convert_encoding($s, 'HTML-ENTITIES', 'UTF-8');"
+    after: "$html = mb_encode_numericentity($s, [0x80, 0x10FFFF, 0, 0x1FFFFF], 'UTF-8');"
+    ref: "https://www.php.net/manual/en/migration82.deprecated.php"
+  - key: get_class_noarg
+    since: "8.3"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Argümansız get_class() / get_parent_class() → self::class / parent::class"
+    summary: "Argümansız çağrı 8.3'te deprecated."
+    advantages:
+      - "Derleme zamanında çözülür; okunur."
+    risks:
+      - "Yok — aynı sınıf adı döner."
+    before: "$name = get_class();"
+    after: "$name = self::class;"
+    ref: "https://wiki.php.net/rfc/deprecations_php_8_3"
+  - key: deprecated_83
+    since: "8.3"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "8.3'te kullanımdan kalkanlar (assert_options, MT_RAND_PHP)"
+    summary: "assert_options() ini ayarlarıyla, MT_RAND_PHP ise varsayılan Mt19937 ile değiştirilmeli."
+    advantages:
+      - "Üretim logundaki deprecation gürültüsü kesilir; 9'a hazırlık."
+    risks:
+      - "MT_RAND_PHP kaldırılınca aynı seed farklı sayı dizisi üretir — seed'e bağlı tekrarlanabilir çıktı varsa kontrol edilmeli."
+    before: "mt_srand($seed, MT_RAND_PHP);"
+    after: "mt_srand($seed);"
+    ref: "https://wiki.php.net/rfc/deprecations_php_8_3"
+  - key: deprecated_84
+    since: "8.4"
+    kind: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "8.4'te kullanımdan kalkanlar (lcg_value, mysqli_ping/kill/refresh, E_STRICT, E_USER_ERROR…)"
+    summary: "Bu fonksiyon ve sabitler 8.4'te deprecated; E_STRICT artık hiçbir hata üretmiyor, trigger_error(E_USER_ERROR) yerine exception beklenir."
+    advantages:
+      - "Deprecation gürültüsü kesilir; PHP 9'da kırılacak yerler şimdiden temizlenir."
+    risks:
+      - "trigger_error(…, E_USER_ERROR) yerine exception fırlatmak akışı değiştirir: yakalayan katman olup olmadığı her yerde kontrol edilmeli."
+    before: "error_reporting(E_ALL & ~E_STRICT);\n$r = lcg_value();"
+    after: "error_reporting(E_ALL);\n$r = mt_rand() / mt_getrandmax();"
+    ref: "https://wiki.php.net/rfc/deprecations_php_8_4"
   # ── mechanical: davranış aynı, dönüşüm yerel ──
   - key: str_contains
     since: "8.0"
@@ -243,6 +334,52 @@ rules:
     ref: "https://wiki.php.net/rfc/constructor_promotion"
     rector: "Rector\\Php80\\Rector\\Class_\\ClassPropertyAssignToConstructorPromotionRector"
 
+  - key: sensitive_parameter
+    since: "8.2"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Parola / token parametresine #[\\SensitiveParameter]"
+    summary: "Bu öznitelikli parametrelerin değeri stack trace'lerde ve hata loglarında gizlenir; parola/token New Relic'e ve loglara sızmaz."
+    advantages:
+      - "Kimlik bilgisi sızıntısı riski azalır (hata izleri New Relic'e gidiyor)."
+      - "Davranış değişmez; yalnız hata çıktısı maskelenir."
+    risks:
+      - "Yok."
+    before: "public function login(string $user, string $password)"
+    after: "public function login(string $user, #[\\SensitiveParameter] string $password)"
+    ref: "https://wiki.php.net/rfc/redact_parameters_in_back_traces"
+  - key: typed_class_constants
+    since: "8.3"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Tipsiz sınıf sabiti → tipli sabit (const string X)"
+    summary: "PHP 8.3 sınıf sabitlerine tip verilmesine izin verir; alt sınıfın sabiti yanlış tiple ezmesi engellenir."
+    advantages:
+      - "Sözleşme açık; alt sınıflarda tip uyuşmazlığı derleme hatası olur."
+    risks:
+      - "Alt sınıf aynı sabiti başka tiple eziyorsa artık hata verir — kalıtımla ezilen sabitler kontrol edilmeli."
+    before: "const MAX_RETRY = 3;"
+    after: "const int MAX_RETRY = 3;"
+    ref: "https://wiki.php.net/rfc/typed_class_constants"
+  - key: new_without_parens
+    since: "8.4"
+    kind: mechanical
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "(new Foo())->bar() → new Foo()->bar()"
+    summary: "PHP 8.4'te new ifadesi parantezle sarılmadan doğrudan zincirlenebilir."
+    advantages:
+      - "Daha az parantez, okunur zincir."
+    risks:
+      - "Yok — argüman parantezi zorunlu: `new Foo->bar()` değil `new Foo()->bar()`."
+    before: "$total = (new Cart($items))->total();"
+    after: "$total = new Cart($items)->total();"
+    ref: "https://wiki.php.net/rfc/new_without_parentheses"
   # ── structural: tasarım kararı, insan onayı ──
   - key: typed_properties
     since: "7.4"
@@ -389,6 +526,21 @@ rules:
       public function testNormalize(string $in): void
     ref: "https://wiki.php.net/rfc/attributes_v2"
 
+  - key: readonly_class
+    since: "8.2"
+    kind: structural
+    unit: file
+    auto: false
+    sp_unit: 2
+    title: "Tüm property'leri readonly sınıf → readonly class"
+    summary: "Her property'si readonly olan değer nesnesi sınıf düzeyinde readonly yapılır; yeni eklenen property de kendiliğinden readonly olur."
+    advantages:
+      - "Değişmezlik sınıf sözleşmesi olur; ileride eklenen alanda unutulmaz."
+    risks:
+      - "readonly sınıf yalnız readonly sınıflarca genişletilebilir ve dinamik/statik property alamaz — sınıfı genişleten kod varsa kırılır."
+    before: "final class Money {\n    public function __construct(public readonly int $amount, public readonly string $cur) {}\n}"
+    after: "final readonly class Money {\n    public function __construct(public int $amount, public string $cur) {}\n}"
+    ref: "https://wiki.php.net/rfc/readonly_classes"
   # ── report-only: iş açılmaz, repo kartında gösterilir ──
   - key: strict_types
     since: "7.0"

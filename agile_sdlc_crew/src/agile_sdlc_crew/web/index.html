@@ -1552,7 +1552,12 @@ async function loadModernRepos(){
     if(!resp.ok){document.getElementById('tdmMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
     _tdm.repos=r.items||[];_tdm.loaded=true;
     const sel=document.getElementById('tdmRepo');
-    sel.innerHTML=_tdm.repos.length?'<option value="" selected>Repo seçiniz…</option>'+_tdm.repos.map(i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'PHP')} ${i.version?esc(i.version):'— hedef sürüm bilinmiyor'}</option>`).join('')
+    const opt=i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'PHP')} ${i.version?esc(i.version):'— hedef sürüm bilinmiyor'}</option>`;
+    const act=_tdm.repos.filter(i=>i.version),pas=_tdm.repos.filter(i=>!i.version);
+    // aktifler üstte, hedef sürümü bilinmeyen (taranamayan) repolar altta ayrı grupta
+    sel.innerHTML=_tdm.repos.length?'<option value="" selected>Repo seçiniz…</option>'
+      +(act.length?`<optgroup label="Taranabilir (${act.length})">${act.map(opt).join('')}</optgroup>`:'')
+      +(pas.length?`<optgroup label="Hedef sürümü bilinmeyen (${pas.length})">${pas.map(opt).join('')}</optgroup>`:'')
       :'<option value="">Yerel repo yok</option>';
     sel.value='';
     _tdmRepoChanged();

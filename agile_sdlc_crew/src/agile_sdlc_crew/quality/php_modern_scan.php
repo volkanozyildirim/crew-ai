@@ -37,6 +37,13 @@ final class Scanner
     private const CALLBACK_FUNCS = ['array_map', 'array_filter', 'usort', 'uasort', 'uksort', 'array_walk',
         'call_user_func', 'call_user_func_array', 'array_reduce', 'iterator_apply'];
     private const REMOVED_FUNCS = ['each', 'create_function', 'money_format'];
+    // 8.3 / 8.4'te kullanımdan kalkan fonksiyon ve sabitler (yalnız çağrı / sabit kullanımı)
+    private const DEPRECATED_83_FUNCS = ['assert_options'];
+    private const DEPRECATED_83_CONSTS = ['MT_RAND_PHP'];
+    private const DEPRECATED_84_FUNCS = ['lcg_value', 'mysqli_ping', 'mysqli_kill', 'mysqli_refresh'];
+    private const DEPRECATED_84_CONSTS = ['E_STRICT', 'DATE_RFC7231'];
+    private const MB_LEGACY = '/^[\'"](HTML-ENTITIES|HTML|BASE64|UUENCODE|QUOTED-PRINTABLE|QPRINT)[\'"]$/i';
+    private const SENSITIVE_PARAM = '/^\$(password|passwd|pass|pwd|secret|token|api_?key|apikey|client_?secret|private_?key|auth_?token|access_?token|refresh_?token)$/i';
     private const ENUMISH_NAME = '/(Status|Type|Kind|State|Enum|Constants?|Codes?)$/';
     private const ANNOTATIONS = '/@(Route|Assert|ORM|dataProvider|test\b|depends|covers|Serializer|Groups)\b/';
 
@@ -256,7 +263,7 @@ final class Scanner
                 case T_DOLLAR_OPEN_CURLY_BRACES: $this->hit('string_interp_brace', $this->ln($i)); break;
                 case T_FUNCTION: case T_FN: $this->checkFunction($i); break;
                 case T_LIST:
-                    if (!in_array($this->id($i - 1), [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION], true)) $this->hit('array_destructuring', $this->ln($i));
+                    if (!in_array($this->id($i - 1), [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION, T_CONST], true)) $this->hit('array_destructuring', $this->ln($i)); // const LIST = … sabit adı
                     break;
                 case T_ISSET: $this->checkIssetTernary($i); break;
                 case T_SWITCH: $this->checkSwitch($i); break;
@@ -265,8 +272,13 @@ final class Scanner
                 case T_PUBLIC: case T_PROTECTED: case T_PRIVATE: case T_VAR: $this->checkPropertyDecl($i); break;
                 case T_RETURN: if ($this->depth > 0) $this->checkArrayReturn($i); break;
                 case T_STRING: $this->checkString($i); break;
+                case T_CONSTANT_ENCAPSED_STRING:
+                    // 8.2: "self::m" / "parent::m" / "static::m" string callable'ları
+                    if (preg_match('/^[\'"](self|parent|static)::\w+[\'"]$/i', $this->tx($i))) $this->hit('partial_callable', $this->ln($i));
+                    break;
                 case 0:
                     if ($this->tx($i) === '!' && $this->isWord($i + 1, 'is_null')) $this->checkIsNullTernary($i);
+                    elseif ($this->tx($i) === '(' && $this->id($i + 1) === T_NEW) $this->checkNewParens($i);
                     break;
             }
         }
@@ -281,10 +293,27 @@ final class Scanner
         }
         if (!$this->isCall($i)) {
             if ($w === 'is_null' && $this->is($i + 1, '(')) $this->checkIsNullTernary($i);
+            $up = strtoupper($this->tx($i));
+            $p = $this->id($i - 1);
+            if (!$this->is($i + 1, '(') && !in_array($p, [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON, T_CONST, T_FUNCTION], true)) {
+                if (in_array($up, self::DEPRECATED_83_CONSTS, true)) $this->hit('deprecated_83', $this->ln($i));
+                elseif (in_array($up, self::DEPRECATED_84_CONSTS, true)) $this->hit('deprecated_84', $this->ln($i));
+            }
             return;
         }
         $close = $this->closeOf($i + 1);
         if ($close < 0) return;
+        if (($w === 'get_class' || $w === 'get_parent_class') && $close === $i + 2) { $this->hit('get_class_noarg', $this->ln($i)); return; }
+        if (in_array($w, self::DEPRECATED_83_FUNCS, true)) { $this->hit('deprecated_83', $this->ln($i)); return; }
+        if (in_array($w, self::DEPRECATED_84_FUNCS, true)) { $this->hit('deprecated_84', $this->ln($i)); return; }
+        if ($w === 'trigger_error') {
+            for ($j = $i + 2; $j < $close; $j++) if ($this->isWord($j, 'E_USER_ERROR')) { $this->hit('deprecated_84', $this->ln($i)); return; }
+        }
+        if (str_starts_with($w, 'mb_')) {
+            for ($j = $i + 2; $j < $close; $j++) {
+                if ($this->id($j) === T_CONSTANT_ENCAPSED_STRING && preg_match(self::MB_LEGACY, $this->tx($j))) { $this->hit('mb_legacy_encoding', $this->ln($i)); return; }
+            }
+        }
         if ($w === 'utf8_encode' || $w === 'utf8_decode') { $this->hit('utf8_encode', $this->ln($i)); return; }
         if (in_array($w, self::REMOVED_FUNCS, true)) { $this->hit('removed_functions', $this->ln($i)); return; }
         if ($w === 'strpos' || $w === 'mb_strpos') { // stripos harf duyarsız: str_contains eşdeğer değil
@@ -457,6 +486,12 @@ final class Scanner
             }
             $params[] = ['var' => $this->tx($v), 'promoted' => $promoted, 'line' => $this->ln($v),
                 'promotable' => !$promoted && !$variadic && !$isCallable];
+            // 8.2: parola/token parametresi #[\SensitiveParameter] taşımıyorsa stack trace'te açık görünür
+            if (preg_match(self::SENSITIVE_PARAM, $this->tx($v))) {
+                $marked = false;
+                for ($j = $a; $j < $v; $j++) if ($this->id($j) === T_ATTRIBUTE && stripos($this->text($j, $v), 'SensitiveParameter') !== false) $marked = true;
+                if (!$marked) $this->hit('sensitive_parameter', $this->ln($v));
+            }
             // implicit nullable: tip var, ? ile başlamıyor, null/mixed içermiyor, = null
             if ($typeToks && $this->is($v + 1, '=') && $this->isNullTok($v + 2) && $v + 2 === $b) {
                 $first = $typeToks[0];
@@ -581,24 +616,49 @@ final class Scanner
         if ($keys >= 4) $this->hit('dto_from_array', $this->ln($i));
     }
 
+    private function checkNewParens(int $i): void
+    {
+        // 8.4: (new Foo())->bar() → new Foo()->bar()
+        $c = $this->closeOf($i);
+        if ($c < 0) return;
+        if (!in_array($this->id($c + 1), [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON], true) && !$this->is($c + 1, '[')) return;
+        $j = $i + 2;
+        $names = [T_STRING, T_STATIC, T_VARIABLE];
+        foreach (['T_NAME_QUALIFIED', 'T_NAME_FULLY_QUALIFIED', 'T_NAME_RELATIVE'] as $tn) if (defined($tn)) $names[] = constant($tn);
+        if (!in_array($this->id($j), $names, true)) return; // anonim sınıf / ifade: atla
+        $j++;
+        if ($j === $c || ($this->is($j, '(') && $this->closeOf($j) === $c - 1)) $this->hit('new_without_parens', $this->ln($i));
+    }
+
     private function checkClass(int $i): void
     {
         if ($this->id($i - 1) === T_DOUBLE_COLON || $this->id($i - 1) === T_NEW) return;
         if ($this->id($i + 1) !== T_STRING) return;
         $name = $this->tx($i + 1);
+        $isReadonly = false;
+        for ($b = $i - 1; $b >= max(0, $i - 3); $b--) {
+            if ($this->id($b) === T_READONLY) $isReadonly = true;
+            if (!in_array($this->id($b), [T_READONLY, T_FINAL, T_ABSTRACT], true)) break;
+        }
+        $allowDynamic = stripos($this->text(max(0, $i - 20), $i), 'AllowDynamicProperties') !== false;
         $j = $i + 2;
-        while ($j < $this->n && !$this->is($j, '{')) $j++;
+        $extends = false;
+        while ($j < $this->n && !$this->is($j, '{')) { if ($this->id($j) === T_EXTENDS) $extends = true; $j++; }
         $end = $this->closeOf($j);
         if ($end < 0) return;
         $consts = [];
         $methods = [];
-        $props = [];      // name => ['line'=>, 'vis'=>]
+        $props = [];      // name => ['line'=>, 'vis'=>, 'readonly'=>, 'static'=>]
+        $promoted = [];   // name => readonly?
+        $usesTrait = false;
         $k = $j + 1;
         while ($k < $end) {
             $id = $this->id($k);
+            if ($id === T_USE) { $usesTrait = true; $k++; continue; }
             if ($id === T_CONST) {
                 $m = $k + 1;
                 if ($this->id($m) !== T_STRING) { $k++; continue; }
+                $untyped = $this->is($k + 2, '=');
                 while ($m < $end && !$this->is($m, '=')) $m++;
                 $v = $m + 1;
                 $neg = $this->is($v, '-');
@@ -606,6 +666,10 @@ final class Scanner
                 $kind = $this->id($v) === T_CONSTANT_ENCAPSED_STRING && $this->is($v + 1, ';') ? 'string'
                     : ($this->id($v) === T_LNUMBER && $this->is($v + 1, ';') ? 'int' : 'other');
                 $consts[] = $kind;
+                // 8.3: tipsiz sabit, değeri basit literal → tipli sabit
+                $literal = $this->is($v + 1, ';') && (in_array($this->id($v), [T_CONSTANT_ENCAPSED_STRING, T_LNUMBER, T_DNUMBER], true)
+                    || $this->isWord($v, 'true') || $this->isWord($v, 'false'));
+                if ($untyped && $literal) $this->hit('typed_class_constants', $this->ln($k));
                 $k = $v + 1;
                 continue;
             }
@@ -613,6 +677,17 @@ final class Scanner
                 $fname = $this->tx($k + 1);
                 $pc = $this->closeOf($k + 2);
                 if ($pc < 0) { $k++; continue; } // bozuk parametre listesi: geri sarma, ilerle
+                if (strcasecmp($fname, '__construct') === 0) {
+                    foreach ($this->args($k + 2, $pc) as [$a, $b2]) {
+                        $vis = false; $ro = false; $var = '';
+                        for ($q = $a; $q <= $b2; $q++) {
+                            if (in_array($this->id($q), [T_PUBLIC, T_PROTECTED, T_PRIVATE], true)) $vis = true;
+                            if ($this->id($q) === T_READONLY) $ro = true;
+                            if ($this->id($q) === T_VARIABLE) { $var = substr($this->tx($q), 1); break; }
+                        }
+                        if ($vis && $var !== '') $promoted[$var] = $ro;
+                    }
+                }
                 $body = -1; $bodyEnd = -1;
                 $q = $pc + 1;
                 while ($q < $end && !$this->is($q, '{') && !$this->is($q, ';')) $q++;
@@ -623,14 +698,42 @@ final class Scanner
             }
             if (in_array($id, [T_PUBLIC, T_PROTECTED, T_PRIVATE, T_VAR], true)) {
                 $m = $k + 1;
-                while (in_array($this->id($m), [T_STATIC, T_READONLY], true)) $m++;
+                $ro = false; $st = false;
+                while (in_array($this->id($m), [T_STATIC, T_READONLY, T_PUBLIC, T_PROTECTED, T_PRIVATE], true)) {
+                    if ($this->id($m) === T_READONLY) $ro = true;
+                    if ($this->id($m) === T_STATIC) $st = true;
+                    $m++;
+                }
+                if ($this->id($k - 1) === T_READONLY) $ro = true;
                 if ($this->id($m) !== T_FUNCTION && $this->id($m) !== T_CONST) {
                     $v = $m;
                     while ($v < $end && $this->id($v) !== T_VARIABLE && !$this->is($v, ';')) $v++;
-                    if ($this->id($v) === T_VARIABLE) $props[substr($this->tx($v), 1)] = ['line' => $this->ln($v), 'vis' => $id];
+                    if ($this->id($v) === T_VARIABLE) $props[substr($this->tx($v), 1)] = ['line' => $this->ln($v), 'vis' => $id, 'readonly' => $ro, 'static' => $st];
                 }
             }
             $k++;
+        }
+        // 8.2: tüm property'leri readonly olan sınıf → readonly class (kalıtım bilinmiyorsa önerilmez)
+        $all = count($props) + count($promoted);
+        if (!$isReadonly && !$extends && $all > 0
+            && !array_filter($props, static fn($p) => !$p['readonly'] || $p['static'])
+            && !array_filter($promoted, static fn($ro) => !$ro)) {
+            $this->hit('readonly_class', $this->ln($i));
+        }
+        // 8.2: bildirilmemiş property'ye atama (dinamik property) — kalıtım/trait/__set varsa bilinemez, atla
+        if (!$extends && !$usesTrait && !$allowDynamic && !isset($methods['__set']) && !isset($methods['__get'])) {
+            $seen = [];
+            foreach ($methods as $mm) {
+                if ($mm['body'] < 0 || $mm['end'] < 0) continue;
+                for ($q = $mm['body'] + 1; $q < $mm['end']; $q++) {
+                    if ($this->tx($q) !== '$this' || $this->id($q + 1) !== T_OBJECT_OPERATOR || $this->id($q + 2) !== T_STRING) continue;
+                    $pn = $this->tx($q + 2);
+                    if (isset($props[$pn]) || isset($promoted[$pn]) || isset($seen[$pn])) continue;
+                    $r = $q + 3;
+                    if ($this->is($r, '[')) { $c2 = $this->closeOf($r); $r = $c2 > 0 ? $c2 + 1 : $r; }
+                    if ($this->is($r, '=')) { $seen[$pn] = true; $this->hit('dynamic_properties', $this->ln($q)); }
+                }
+            }
         }
         // enum adayı
         $n = count($consts);
