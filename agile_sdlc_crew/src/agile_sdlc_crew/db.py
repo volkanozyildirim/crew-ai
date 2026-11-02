@@ -289,7 +289,7 @@ def set_wi_state_before(job_id: int, state: str):
 def list_running_jobs() -> list[dict]:
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, work_item_id, wi_state_before FROM jobs WHERE status='running'")
+        cur.execute("SELECT id, work_item_id, wi_state_before, repo_name FROM jobs WHERE status='running'")
         return list(cur.fetchall() or [])
 
 

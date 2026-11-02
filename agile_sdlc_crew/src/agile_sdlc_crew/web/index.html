@@ -575,6 +575,7 @@ header {
           <span class="chip dim" id="tdmTarget" title="Hedef sürüm: repo dilinin üretimdeki sürümü"></span><span style="flex:1"></span>
           <select class="sprint-select" id="tdmRepo" title="Yerel repolar (PHP, Go, Python, Next.js)" onchange="_tdmRepoChanged()"><option>Yükleniyor…</option></select>
           <button class="sm-btn ghost small" id="tdmRescan" onclick="modernScan(true)" title="Önbelleği atla, yeniden tara">Yeniden tara</button>
+          <select class="sprint-select" id="tdmSprint" title="İşlerin açılacağı sprint (varsayılan: aktif sprint)"><option value="">Aktif sprint</option></select>
           <button class="sm-btn small" id="tdmTake" onclick="modernTake()">Seçilenleri iş olarak aç</button>
         </div>
         <div id="tdmAdoption" style="padding:0 14px;font-size:12px;color:var(--text-dim)"></div>
@@ -1480,8 +1481,27 @@ function _tdTeam(){
   const s=document.getElementById('teamSel');const o=s&&s.selectedOptions&&s.selectedOptions[0];
   return o&&o.hasAttribute('value')?o.value:'';
 }
+// Modernleştirme işlerinin açılacağı sprint: takımın aktif + gelecek sprintleri, varsayılan aktif.
+// Boş değer = sunucu aktif sprinti (yoksa sonrakini) seçer.
+let _tdmSprintSeq=0;
+async function loadTdmSprints(){
+  const sel=document.getElementById('tdmSprint');if(!sel)return;
+  const team=_tdTeam(),seq=++_tdmSprintSeq;
+  if(!team){sel.innerHTML='<option value="">Aktif sprint</option>';return}
+  try{
+    const r=await fetch('/api/sprints?team='+encodeURIComponent(team)+'&t='+Date.now());const sp=await r.json();
+    if(seq!==_tdmSprintSeq)return;  // takım arada değişti
+    if(!r.ok||!Array.isArray(sp)){sel.innerHTML='<option value="">Aktif sprint</option>';return}
+    const open=sp.filter(x=>x.timeFrame==='current'||x.timeFrame==='future')
+      .sort((a,b)=>(a.timeFrame==='current'?0:1)-(b.timeFrame==='current'?0:1)||String(a.startDate||'9').localeCompare(String(b.startDate||'9')));
+    const cur=open.find(x=>x.timeFrame==='current');
+    sel.innerHTML=(cur?'':'<option value="" selected>Aktif sprint yok — sonraki</option>')
+      +open.map(x=>`<option value="${esc(x.path)}" ${x===cur?'selected':''}>${esc(x.name)}${x.timeFrame==='current'?' ● Aktif':''}</option>`).join('');
+  }catch(e){if(seq===_tdmSprintSeq)sel.innerHTML='<option value="">Aktif sprint</option>'}
+}
 async function loadTechdebt(){
   const team=_tdTeam();
+  loadTdmSprints();
   const lc=document.getElementById('tdListCard');
   try{
     const resp=await fetch('/api/techdebt?team='+encodeURIComponent(team));
@@ -1533,8 +1553,13 @@ function _tdmSel(){const v=document.getElementById('tdmRepo').value;const i=v.in
 function _tdmRepoChanged(){
   const k=_tdmSel();const r=_tdm.repos.find(x=>x.repo===k.repo&&(x.lang||'php')===k.lang);
   const chip=document.getElementById('tdmTarget');
-  chip.textContent=r?(r.version?`Hedef ${r.label||'PHP'} ${r.version}`:'hedef sürüm bilinmiyor'):'';
-  chip.title=r?((r.source?`Kaynak: ${r.source}`:'')+(r.images&&r.images.length?'\n'+r.images.join('\n'):'')):'Hedef sürüm: repo dilinin üretimdeki sürümü';
+  const ps=(r&&r.per_src)||[];const mixed=new Set(ps.map(x=>x.version)).size>1;
+  chip.textContent=r?(r.version?`Hedef ${r.label||'PHP'} ${r.version}`+(mixed?' (en düşük prod)':''):'hedef sürüm bilinmiyor'):'';
+  // Repo birden çok prod serviste farklı imajla çalışıyorsa hepsi gösterilir; hedef en düşüğüdür
+  // (yüksek seçilirse düşük imajlı serviste o sürümde olmayan yapı önerilir ve orada kırılır).
+  chip.title=r?(ps.length?'Production servisleri:\n'+ps.map(x=>`${x.src} → ${x.version}${x.version===r.version?'  ← hedef':''}`).join('\n')
+      +(mixed?'\n\nAynı kod hepsinde çalıştığı için hedef en düşük sürüm.':'')
+    :(r.source?`Kaynak: ${r.source}`:'')+(r.images&&r.images.length?'\n'+r.images.join('\n'):'')):'Hedef sürüm: repo dilinin üretimdeki sürümü';
   document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=!(r&&r.version);
   _tdm.scan=null;_tdm.seq++;document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';
   document.getElementById('tdmMsg').textContent=r&&!r.version?(r.reason||`Bu repo için hedef ${r.label||''} sürümü bulunamadı — tarama yapılmaz.`):'';
@@ -1552,7 +1577,12 @@ async function loadModernRepos(){
     if(!resp.ok){document.getElementById('tdmMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
     _tdm.repos=r.items||[];_tdm.loaded=true;
     const sel=document.getElementById('tdmRepo');
-    sel.innerHTML=_tdm.repos.length?'<option value="" selected>Repo seçiniz…</option>'+_tdm.repos.map(i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'PHP')} ${i.version?esc(i.version):'— hedef sürüm bilinmiyor'}</option>`).join('')
+    const opt=i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'PHP')} ${i.version?esc(i.version):'— hedef sürüm bilinmiyor'}</option>`;
+    const act=_tdm.repos.filter(i=>i.version),pas=_tdm.repos.filter(i=>!i.version);
+    // aktifler üstte, hedef sürümü bilinmeyen (taranamayan) repolar altta ayrı grupta
+    sel.innerHTML=_tdm.repos.length?'<option value="" selected>Repo seçiniz…</option>'
+      +(act.length?`<optgroup label="Taranabilir (${act.length})">${act.map(opt).join('')}</optgroup>`:'')
+      +(pas.length?`<optgroup label="Hedef sürümü bilinmeyen (${pas.length})">${pas.map(opt).join('')}</optgroup>`:'')
       :'<option value="">Yerel repo yok</option>';
     sel.value='';
     _tdmRepoChanged();
@@ -1582,9 +1612,12 @@ function renderModern(){
   const r=_tdm.scan;const box=document.getElementById('tdmResult');if(!r||!box)return;
   const ad=r.adoption||{};const tp=(ad.typed_props||0),up=(ad.untyped_props||0);
   const pct=tp+up?Math.round(100*tp/(tp+up)):null;
-  document.getElementById('tdmAdoption').innerHTML=(r.lang&&r.lang!=='php')
+  const fr=r.freshen||{};
+  const frNote=fr.updated?` · yerel klon ${fr.updated} commit güncellendi`
+    :(fr.skipped&&!fr.recent?` · <span style="color:var(--warning)" title="${esc(fr.skipped)}">klon güncellenemedi — sonuçlar eski olabilir</span>`:'');
+  document.getElementById('tdmAdoption').innerHTML=((r.lang&&r.lang!=='php')
     ?`${r.files} dosyada bulgu · hedef ${esc(r.label||'')} ${esc(r.version||'?')} (${esc(r.version_source||'')})`+(r.tool_fix?` · otomatik işleri <b>araç uygular</b> (${r.lang==='go'?'Go modernize':'ruff'}), LLM yalnız inceler`:' · otomatik işleri pipeline developer\'ı uygular')
-    :`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya`;
+    :`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya`)+frNote;
   const rules=Object.entries(r.rules||{}).sort((a,b)=>b[1].count-a[1].count);
   const chips=rules.map(([k,v])=>`<span class="chip dim" title="${esc(v.title)}">${esc(v.title.split(' → ')[0].slice(0,34))} <b>${v.count}</b></span>`).join(' ');
   const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
@@ -1644,15 +1677,15 @@ async function modernTake(){
   const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');
   const ids=[...document.querySelectorAll('.tdmSel:checked')].map(x=>x.value);
   if(!ids.length){msg.textContent='Seçili öneri yok.';return}
-  const team=_tdTeam();
+  const team=_tdTeam(),sprint=(document.getElementById('tdmSprint')||{}).value||'';
   const btns=[document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
   btns.forEach(b=>b.disabled=true);msg.textContent='İşler açılıyor…';
   try{
-    const resp=await fetch('/api/techdebt/modern/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,lang,group_ids:ids,team})});
+    const resp=await fetch('/api/techdebt/modern/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,lang,group_ids:ids,team,sprint})});
     const r=await resp.json();
     if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
     const t=(r.tasks||[]),h=(r.human_tasks||[]);
-    msg.innerHTML=(r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'')
+    msg.innerHTML=(r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''}${r.story.iteration?' · '+esc(String(r.story.iteration).split('\\').pop()):''} · `:'')
       +`${t.length} iş ${r.tool_fix?'araç düzeltmesine':'kuyruğa'} alındı (${r.total_sp||0} SP) · ${h.length} Task insan bekliyor (${r.human_sp||0} SP)`
       +((r.devops||[]).filter(d=>d.devops).length?' · DevOps isteği: '+[...new Set((r.devops||[]).filter(d=>d.devops).map(d=>d.devops))].map(id=>wiLink(id)).join(', '):'')
       +(t.concat(h).filter(x=>x.id).length?' — '+t.concat(h).filter(x=>x.id).map(x=>wiLink(x.id)).join(', '):'')

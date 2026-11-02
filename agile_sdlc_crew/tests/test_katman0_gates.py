@@ -4156,6 +4156,150 @@ def test_techdebt_lane():
           and "tempo-techdebt" in c.created[0][1]["System.Tags"] and st["id"] == 7)
 
 
+def test_techdebt_sprint_choice():
+    print("\n[TD3] Teknik borç — işlerin açılacağı sprint seçilebilir, varsayılan aktif sprint")
+    from agile_sdlc_crew.quality import intake
+
+    class C:
+        org_url, project = "https://dev.azure.com/o", "P"
+
+        def __init__(self, iters):
+            self.iters, self.wiql, self.created = iters, [], []
+
+        def list_iterations(self, team=""):
+            return self.iters
+
+        def query_work_items(self, wiql, limit=0):
+            self.wiql.append(wiql)
+            return []
+
+        def get_team_area_path(self, team=""):
+            return "P\\T"
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append(fields)
+            return {"id": 8, "fields": fields}
+    iters = [{"name": "S21", "path": "P\\S21", "attributes": {"timeFrame": "past"}},
+             {"name": "S22", "path": "P\\S22", "attributes": {"timeFrame": "current"}},
+             {"name": "S24", "path": "P\\S24", "attributes": {"timeFrame": "future", "startDate": "2026-11-30"}},
+             {"name": "S23", "path": "P\\S23", "attributes": {"timeFrame": "future", "startDate": "2026-11-16"}}]
+    c = C(iters)
+    st = intake.resolve_story(c, "php_modern", None, "T", "current_or_next", lane="techdebt")
+    check("seçim yoksa aktif sprint", st["iteration"] == "P\\S22" and c.created[0]["System.IterationPath"] == "P\\S22")
+    c = C(iters)
+    st = intake.resolve_story(c, "php_modern", None, "T", "current_or_next", lane="techdebt", iteration="P\\S24")
+    check("seçilen gelecek sprint kullanılır", st["iteration"] == "P\\S24" and "P\\S24" in c.wiql[0]
+          and c.created[0]["System.Title"] == "Teknik borç — S24")
+    for bad, why in (("P\\S21", "geçmiş"), ("P\\Baska", "takımda yok")):
+        try:
+            intake.resolve_story(C(iters), "php_modern", None, "T", "current_or_next", lane="techdebt", iteration=bad)
+            check(f"{why} sprint reddedilir", False)
+        except ValueError:
+            check(f"{why} sprint reddedilir", True)
+    st = intake.resolve_story(C(iters[2:]), "php_modern", None, "T", "current_or_next", lane="techdebt")
+    check("aktif sprint yoksa en yakın gelecek sprint", st["iteration"] == "P\\S23")
+    check("kalite alımının 'next' davranışı değişmedi",
+          intake.target_iteration(iters, "next")["name"] == "S23" and intake.target_iteration(iters[2:], "current") is None)
+    from agile_sdlc_crew.quality import modern, php_modern
+    from agile_sdlc_crew import server
+    check("take sprint'i story çözümüne geçirir",
+          "iteration=sprint" in inspect_source(php_modern.take) and "iteration=sprint" in inspect_source(modern.take)
+          and "sprint" in server.TechdebtModernTakeRequest.model_fields)
+    html = (Path(__file__).resolve().parents[1] / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("arayüz: sprint seçici, varsayılan aktif, take'e gider",
+          'id="tdmSprint"' in html and "function loadTdmSprints" in html and "group_ids:ids,team,sprint" in html
+          and "x.timeFrame==='current'||x.timeFrame==='future'" in html)
+
+
+def test_php_repo_subdir_composer():
+    print("\n[PM9] php_modern — composer.json alt dizinde olan repo (flo-dashboard: main/, ru/) PHP sayılır")
+    from agile_sdlc_crew.quality import modern, php_modern as pm
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        dash = root / "flo-dashboard"
+        (dash / "main" / "vendor" / "x").mkdir(parents=True)
+        (dash / "ru").mkdir()
+        (dash / "main" / "composer.json").write_text('{"require":{"php":">=8.1","ext-mbstring":"*"}}', encoding="utf-8")
+        (dash / "main" / "vendor" / "x" / "composer.json").write_text('{"require":{"php":">=5.6"}}', encoding="utf-8")
+        (dash / "index.php").write_text("<?php\n", encoding="utf-8")
+        check("alt dizindeki composer.json bulunur (vendor değil)",
+              pm.composer_paths(dash) == [dash / "main" / "composer.json"])
+        check("repo PHP sayılır, dil tespiti php der", pm.is_php_repo(dash) and modern.detect_langs(dash) == ["php"])
+        check("composer alt sınırı alt dizinden okunur", pm._composer_version(dash) == (8, 1))
+        check("eklenti kanıtı alt dizindeki composer'dan", pm.ext_available(dash, "mbstring"))
+        bare = root / "plain"
+        bare.mkdir()
+        (bare / "index.php").write_text("<?php\n", encoding="utf-8")
+        gor = root / "gorepo"
+        (gor / "scripts").mkdir(parents=True)
+        (gor / "go.mod").write_text("module x\n\ngo 1.22\n", encoding="utf-8")
+        (gor / "scripts" / "a.php").write_text("<?php\n", encoding="utf-8")
+        check("composer'sız ama kökte .php olan repo PHP; derindeki tek .php Go reposunu PHP yapmaz",
+              pm.is_php_repo(bare) and not pm.is_php_repo(gor) and modern.detect_langs(gor) == ["go"])
+
+
+def test_modern_freshen_and_targets():
+    print("\n[PM10] modernleştirme — tarama öncesi klon güncelleme + tüm prod servislerinden hedef sürüm")
+    import time
+    import subprocess as sp
+    from agile_sdlc_crew.quality import php_modern as pm
+
+    def g(cwd, *a):
+        return sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], cwd=str(cwd), capture_output=True,
+                      text=True, check=True).stdout.strip()
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        g(root, "init", "-q", "--bare", "-b", "main", "origin.git")
+        seed = root / "seed"
+        g(root, "clone", "-q", str(root / "origin.git"), "seed")
+        (seed / "a.php").write_text("<?php\n", encoding="utf-8")
+        g(seed, "add", "."); g(seed, "commit", "-q", "-m", "1"); g(seed, "push", "-q", "origin", "HEAD:main")
+        g(root, "clone", "-q", str(root / "origin.git"), "repo")
+        repo = root / "repo"
+        for i in range(3):
+            (seed / "a.php").write_text(f"<?php // {i}\n", encoding="utf-8")
+            g(seed, "commit", "-q", "-am", f"c{i}"); g(seed, "push", "-q", "origin", "HEAD:main")
+        r = pm.freshen_clone(repo, force=True, running_repos=set())
+        check("geride kalan klon ileri sarılır", r == {"updated": 3} and "// 2" in (repo / "a.php").read_text(), r)
+        check("5 dakika içinde tekrar fetch edilmez", pm.freshen_clone(repo, running_repos=set()).get("recent"))
+        (repo / "a.php").write_text("<?php // yerel\n", encoding="utf-8")
+        check("izlenen dosyada değişiklik varsa dokunulmaz",
+              "değişiklik" in pm.freshen_clone(repo, force=True, running_repos=set()).get("skipped", ""))
+        g(repo, "checkout", "-q", "--", "a.php")
+        g(repo, "checkout", "-q", "-b", "feature/x")
+        check("başka daldaysa dokunulmaz", "dalında" in pm.freshen_clone(repo, force=True, running_repos=set()).get("skipped", ""))
+        g(repo, "checkout", "-q", "main")
+        check("git hatasındaki URL kimlik bilgisi silinir",
+              pm._redact("fatal: unable to access 'https://u:SECRETPAT@dev.azure.com/x/'") ==
+              "fatal: unable to access 'https://***@dev.azure.com/x/'")
+        g(repo, "remote", "set-url", "origin", "https://u:SECRETPAT@127.0.0.1:9/x.git")
+        r = pm.freshen_clone(repo, force=True, running_repos=set())
+        check("fetch hatası arayüze ayrıntı (PAT) taşımaz", "SECRETPAT" not in str(r) and "fetch" in r.get("skipped", ""), r)
+        g(repo, "remote", "set-url", "origin", str(root / "origin.git"))
+        check("o repoda koşan iş varsa dokunulmaz",
+              "koşan" in pm.freshen_clone(repo, force=True, running_repos={"repo"}).get("skipped", ""))
+        amap = {"[Prod] dashboard.sneakerbox.ru": {"repo": "flo-dashboard", "src": "russia/build/dashboard"}}
+
+        class C:
+            def get_file_content(self, devrepo, path, branch=None, project=None):
+                return "FROM reg/prod-ar/php-8-3:1.0\n" if devrepo == "russia" else ""
+        idx = {"flo-dashboard": [{"src": "anatolia/build/dashboard", "images": ["reg/prod-ar/php-8-4:1.0"]},
+                                 {"src": "russia/build/dashboard", "images": ["reg/prod-ar/php-8-3:1.0"]}]}
+        t = pm.target_version(C(), "flo-dashboard", app_map_cache=amap, cache_path=root / "t.yaml", index=idx)
+        check("app_map'te olmayan prod servisi de sayılır; hedef en düşük, servis başına sürüm listelenir",
+              t["version"] == "8.3" and len(t["images"]) == 2
+              and sorted((x["src"], x["version"]) for x in t["per_src"])
+              == [("anatolia/build/dashboard", "8.4"), ("russia/build/dashboard", "8.3")], t)
+        import yaml as _y
+        (root / "t2.yaml").write_text(_y.safe_dump({"repos": {"flo-dashboard": {
+            "version": "8.3", "images": ["x"], "source": "dockerfile", "built_at": time.time()}}}), encoding="utf-8")
+        t2 = pm.target_version(C(), "flo-dashboard", app_map_cache=amap, cache_path=root / "t2.yaml", index=idx)
+        check("eski biçimli önbellek kaydı yeniden kurulur", len(t2["per_src"]) == 2)
+    html = (Path(__file__).resolve().parents[1] / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("arayüz: servis başına sürüm ipucu + klon notu",
+          "Production servisleri" in html and "klon güncellenemedi" in html and "en düşük prod" in html)
+
+
 def test_techdebt_open_tasks_db():
     print("\n[TD2] Teknik borç — ortak Task açma + quality_items.source kolonu")
     from agile_sdlc_crew.quality import intake
@@ -6113,6 +6257,39 @@ def test_modern_sp():
     check("altyapı işi ayrı kalır ve ön koşulu korunur", len(out) == 1 and out[0].infra == ["ext:mbstring"] and out[0].needs_human)
 
 
+def test_php_modern_82_84():
+    """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
+    denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
+    print("\n[php_modern: 8.2 / 8.3 / 8.4 kuralları]")
+    import shutil
+    from agile_sdlc_crew.quality import php_modern as pm
+    if not shutil.which("php"):
+        skip("php_modern 8.2-8.4", "php yok"); return
+    fx = Path(__file__).resolve().parent / "fixtures" / "php_modern"
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "a.php").write_text((Path(__file__).resolve().parent / "fixtures" / "php_modern_82" / "a.php").read_text())
+        res = pm.scan_repo(Path(td))
+    got = {(h["rule"], h["line"]) for h in res["hits"]}
+    want = {("typed_class_constants", 3), ("dynamic_properties", 8), ("sensitive_parameter", 9),
+            ("new_without_parens", 10), ("new_without_parens", 11), ("get_class_noarg", 13), ("partial_callable", 15),
+            ("deprecated_84", 16), ("deprecated_84", 17), ("deprecated_84", 18), ("mb_legacy_encoding", 19),
+            ("deprecated_83", 20), ("deprecated_83", 21), ("readonly_class", 24)}
+    check("yeni kurallar bulunur", want <= got, str(sorted(want - got)))
+    check("yanlış pozitif yok: tipli sabit, işaretli parametre, anonim sınıf, get_class($x), extends/AllowDynamic sınıflar, const LIST",
+          not ({("typed_class_constants", 4), ("sensitive_parameter", 9 + 100), ("new_without_parens", 12), ("get_class_noarg", 14),
+                ("dynamic_properties", 25), ("dynamic_properties", 27), ("array_destructuring", 5)} & got), str(sorted(got)))
+    rules = {r.key: r for r in pm.load_rules()}
+    check("katalogda 8.2/8.3/8.4 kuralları", all(k in rules for k in (
+        "dynamic_properties", "partial_callable", "mb_legacy_encoding", "sensitive_parameter", "readonly_class",
+        "typed_class_constants", "get_class_noarg", "deprecated_83", "new_without_parens", "deprecated_84")))
+    check("8.2 hedefte 8.3/8.4 kuralı önerilmez", not {r.key for r in pm.applicable(list(rules.values()), "8.2")}
+          & {"typed_class_constants", "get_class_noarg", "deprecated_83", "new_without_parens", "deprecated_84"})
+    md = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern.py").read_text()
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("repo listesi: taranabilenler üstte, bilinmeyenler altta ayrı grupta",
+          'items.sort(key=lambda i: (not i.get("scannable")' in md and "Hedef sürümü bilinmeyen (" in html)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -6167,7 +6344,8 @@ def main():
               test_quality_lean,
               test_worktree_staging,
               test_techdebt_lane,
-              test_techdebt_open_tasks_db,
+              test_techdebt_sprint_choice, test_php_repo_subdir_composer,
+              test_modern_freshen_and_targets, test_techdebt_open_tasks_db,
               test_techdebt_list_queue,
               test_techdebt_endpoints,
               test_techdebt_ui,
@@ -6203,7 +6381,8 @@ def main():
               test_security_hardening,
               test_devops_requests,
               test_modern_multilang,
-              test_modern_sp):
+              test_modern_sp,
+              test_php_modern_82_84):
         try:
             t()
         except Exception as e:

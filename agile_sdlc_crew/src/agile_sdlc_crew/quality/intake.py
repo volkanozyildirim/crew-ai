@@ -273,19 +273,27 @@ def _wi_url(client, wid: int) -> str:
     return f"{client.org_url}/{client.project}/_workitems/edit/{wid}"
 
 
+def _timeframe(i: dict) -> str:
+    return ((i.get("attributes") or {}).get("timeFrame") or "").lower()
+
+
 def target_iteration(iterations: list[dict], target: str = "next") -> dict | None:
     """'next': başlangıcı en erken gelecek sprint (aktif sprinte dokunulmaz;
-    isteyen işi elle aktif sprinte çeker). 'current': aktif sprint."""
-    def tf(i):
-        return ((i.get("attributes") or {}).get("timeFrame") or "").lower()
-    if target == "current":
-        return next((i for i in iterations if tf(i) == "current"), None)
+    isteyen işi elle aktif sprinte çeker). 'current': aktif sprint.
+    'current_or_next': aktif sprint, yoksa sonraki (teknik borç varsayılanı)."""
+    tf = _timeframe
+    if target in ("current", "current_or_next"):
+        cur = next((i for i in iterations if tf(i) == "current"), None)
+        if cur or target == "current":
+            return cur
     future = [i for i in iterations if tf(i) == "future"]
     return min(future, key=lambda i: (i.get("attributes") or {}).get("startDate") or "9999", default=None)
 
 
 def resolve_story(client, source: str, story_id: int | None, team: str, target: str = "next",
-                  lane: str = "quality") -> dict:
+                  lane: str = "quality", iteration: str = "") -> dict:
+    """Task'ların açılacağı story. `iteration` (sprint yolu) verilirse o sprint kullanılır —
+    takımın sprintlerinden biri olmalı ve geçmiş olmamalı; verilmezse `target` kuralı."""
     if story_id:
         f = (client.get_work_item(int(story_id)) or {}).get("fields") or {}
         if f.get("System.WorkItemType") != "User Story":
@@ -295,9 +303,17 @@ def resolve_story(client, source: str, story_id: int | None, team: str, target: 
         return {"id": int(story_id), "area": f.get("System.AreaPath", ""),
                 "iteration": f.get("System.IterationPath", ""), "sp": float(f.get("Custom.StoryPoints") or 0),
                 "created": False}
-    cur = target_iteration(client.list_iterations(team), target)
+    its = client.list_iterations(team)
+    if iteration:
+        cur = next((i for i in its if (i.get("path") or "") == iteration), None)
+        if not cur:
+            raise ValueError(f"Sprint takımın sprintleri arasında yok: {iteration}")
+        if _timeframe(cur) == "past":
+            raise ValueError(f"Geçmiş sprinte iş açılmaz: {cur.get('name') or iteration}")
+    else:
+        cur = target_iteration(its, target)
     if not cur:
-        raise NoSprint("Takımın " + ("aktif" if target == "current" else "sonraki") + " sprinti yok — story_id verin")
+        raise NoSprint("Takımın " + ("sonraki" if target == "next" else "aktif") + " sprinti yok — story_id verin")
     ipath = cur.get("path") or ""
     esc = ipath.replace("'", "''")
     tag_filter = (f"AND [System.Tags] CONTAINS '{render.TECHDEBT_TAG}' " if lane == "techdebt" else

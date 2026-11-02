@@ -132,55 +132,110 @@ def _read_yaml(path: Path) -> dict:
         return {}
 
 
-def _dockerfile_versions(client, repo: str, amap: dict) -> tuple[list[tuple[int, int]], list[str]]:
+def _dockerfile_versions(client, repo: str, amap: dict, index: dict | None = None,
+                         per_src: list | None = None) -> tuple[list[tuple[int, int]], list[str]]:
+    """Repoyu çalıştıran FLODevOps production servislerinin PHP imajları. Kaynaklar: app_map
+    (New Relic adı olan servisler) + build_index (Jenkinsfile'ı repoyu çeken tüm servisler —
+    flo-dashboard'un anatolia servisi app_map'te yok, yalnız russia vardı). `per_src`'e her
+    servisin sürümü yazılır: liste hangi servisin hedefi belirlediğini gösterebilsin."""
     srcs = sorted({e.get("src", "") for e in amap.values()
                    if isinstance(e, dict) and (e.get("repo") or "").lower() == repo.lower() and e.get("src")})
+    known = {s.strip("/") for s in srcs}
+    from_index = {}
+    for e in (index or {}).get(repo.lower(), []):
+        src = str(e.get("src") or "").strip("/")
+        if src and src not in known:
+            from_index[src] = list(e.get("images") or [])
     versions: list[tuple[int, int]] = []
     images: list[str] = []
-    for src in srcs:
-        devrepo, _, path = src.partition("/")
-        df = app_map._read(client, devrepo, "/" + path.strip("/") + "/Dockerfile")
-        for img in _FROM.findall(df or ""):
+
+    def _add(src, imgs):
+        for img in imgs:
             v = parse_php_image(img)
             if v:
                 versions.append(v)
                 if img not in images:
                     images.append(img)
+                if per_src is not None:
+                    per_src.append({"src": src, "version": f"{v[0]}.{v[1]}", "image": img})
+    for src in srcs:
+        devrepo, _, path = src.partition("/")
+        _add(src, _FROM.findall(app_map._read(client, devrepo, "/" + path.strip("/") + "/Dockerfile") or ""))
+    for src, imgs in sorted(from_index.items()):
+        _add(src, imgs)
     return versions, images
+
+
+_NOT_APP_DIRS = {"vendor", "node_modules"}
+
+
+def composer_paths(root: Path) -> list[Path]:
+    """Kökteki ve bir alt dizindeki composer.json'lar. flo-dashboard gibi repolarda uygulama
+    kökte değil (`main/composer.json`, `ru/`); yalnız köke bakınca repo PHP sayılmıyordu."""
+    root = Path(root)
+    out = [root / "composer.json"] if (root / "composer.json").is_file() else []
+    try:
+        subs = sorted(d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")
+                      and d.name not in _NOT_APP_DIRS)
+    except OSError:
+        subs = []
+    out += [d / "composer.json" for d in subs if (d / "composer.json").is_file()]
+    return out
+
+
+def is_php_repo(root: Path) -> bool:
+    """composer.json (kökte ya da bir alt dizinde) veya kökte .php dosyası."""
+    root = Path(root)
+    if composer_paths(root):
+        return True
+    try:
+        return any(f.suffix == ".php" and f.is_file() for f in root.iterdir())
+    except OSError:
+        return False
 
 
 def _composer_version(repo_root: Path | None) -> tuple[int, int] | None:
     if not repo_root:
         return None
-    try:
-        data = json.loads((repo_root / "composer.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    req = str(((data or {}).get("require") or {}).get("php") or "")
-    found = [(int(a), int(b)) for a, b in _COMPOSER_PHP.findall(req)]
+    found = []
+    for path in composer_paths(repo_root):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        req = str(((data or {}).get("require") or {}).get("php") or "")
+        found += [(int(a), int(b)) for a, b in _COMPOSER_PHP.findall(req)]
     return min(found) if found else None
 
 
+_TARGETS_V = 2  # önbellek kaydı biçimi; eski kayıtlar (yalnız app_map, per_src yok) yeniden kurulur
+
+
 def target_version(client, repo: str, *, app_map_cache: dict | None = None, repo_root: Path | None = None,
-                   cache_path: Path = TARGETS_CACHE_PATH, max_age_h: int = 24, write_cache: bool = True) -> dict:
-    """{"version": "8.4"|None, "images": [...], "source": "dockerfile"|"composer"|None}.
-    Birden çok imaj → EN DÜŞÜK sürüm (yüksek alınırsa 7.4 imajına match önerilir, kırılır)."""
+                   cache_path: Path = TARGETS_CACHE_PATH, max_age_h: int = 24, write_cache: bool = True,
+                   index: dict | None = None) -> dict:
+    """{"version": "8.4"|None, "images": [...], "source": "dockerfile"|"composer"|None, "per_src": [...]}.
+    Birden çok imaj → EN DÜŞÜK sürüm: aynı kod her serviste çalışır, yüksek alınırsa düşük
+    imajlı servise (ör. 7.4) o sürümde olmayan yapı (match) önerilir ve orada kırılır."""
     cached = _read_yaml(cache_path)
     hit = (cached.get("repos") or {}).get(repo)
-    if hit and max_age_h > 0 and time.time() - float(hit.get("built_at") or 0) < max_age_h * 3600:
-        return {"version": hit.get("version"), "images": list(hit.get("images") or []), "source": hit.get("source")}
+    if (hit and hit.get("v") == _TARGETS_V and max_age_h > 0
+            and time.time() - float(hit.get("built_at") or 0) < max_age_h * 3600):
+        return {"version": hit.get("version"), "images": list(hit.get("images") or []), "source": hit.get("source"),
+                "per_src": list(hit.get("per_src") or [])}
     amap = app_map_cache if app_map_cache is not None else app_map.load_map(client)
-    versions, images = _dockerfile_versions(client, repo, amap)
+    per_src: list[dict] = []
+    versions, images = _dockerfile_versions(client, repo, amap, index, per_src)
     if versions:
         v = min(versions)
-        res = {"version": f"{v[0]}.{v[1]}", "images": images, "source": "dockerfile"}
+        res = {"version": f"{v[0]}.{v[1]}", "images": images, "source": "dockerfile", "per_src": per_src}
     else:
         cv = _composer_version(repo_root)
-        res = ({"version": f"{cv[0]}.{cv[1]}", "images": [], "source": "composer"} if cv
-               else {"version": None, "images": [], "source": None})
+        res = ({"version": f"{cv[0]}.{cv[1]}", "images": [], "source": "composer", "per_src": []} if cv
+               else {"version": None, "images": [], "source": None, "per_src": []})
     if write_cache:
         try:
-            cached.setdefault("repos", {})[repo] = {**res, "built_at": time.time()}
+            cached.setdefault("repos", {})[repo] = {**res, "built_at": time.time(), "v": _TARGETS_V}
             cache_path.write_text(yaml.safe_dump(cached, allow_unicode=True), encoding="utf-8")
         except OSError as e:
             log.warning(f"⚠️ php_modern: hedef sürüm önbelleği yazılamadı: {e}")
@@ -311,18 +366,20 @@ EXT_EVIDENCE = {
 def ext_available(root: Path, ext: str) -> bool:
     import subprocess
     root = Path(root)
-    for name in ("composer.json", "composer.lock"):
-        try:
-            txt = (root / name).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if f'"ext-{ext}"' in txt or f"symfony/polyfill-{ext}" in txt:
-            return True
+    for cj in composer_paths(root):
+        for name in ("composer.json", "composer.lock"):
+            try:
+                txt = (cj.parent / name).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if f'"ext-{ext}"' in txt or f"symfony/polyfill-{ext}" in txt:
+                return True
     pat = EXT_EVIDENCE.get(ext)
     if not pat:
         return False
     try:
-        r = subprocess.run(["git", "grep", "-q", "-E", pat, "HEAD", "--", "*.php", ":!vendor", ":!node_modules"],
+        r = subprocess.run(["git", "grep", "-q", "-E", pat, "HEAD", "--", "*.php", ":(exclude,glob)**/vendor/**",
+                            ":(exclude,glob)**/node_modules/**"],
                            cwd=str(root), capture_output=True, timeout=30)
         return r.returncode == 0
     except Exception:  # noqa: BLE001
@@ -553,6 +610,7 @@ def load_cfg() -> dict:
         "php_exclude": [x.strip() for x in ex.split(",") if x.strip()],
         "php_bin": _safe_bin(os.environ.get("CREW_PHP_BIN", "php")),
         "scan_ttl_h": int(_knob("CREW_TECHDEBT_SCAN_TTL_H", 24)),
+        "freshen": bool(_knob("CREW_TECHDEBT_FRESHEN", True)),
         "max_take": int(_knob("CREW_TECHDEBT_MODERN_MAX_TAKE", 8)),
         "repos_dir": Path(os.environ.get("CREW_REPOS_DIR", "~/.crew_repos")).expanduser(),
         "targets_cache": TARGETS_CACHE_PATH,
@@ -586,10 +644,92 @@ def _root(cfg: dict, repo: str, deps) -> Path:
     raise ValueError(f"Repo yerelde yok: {repo!r}")
 
 
-def _target(client, repo: str, root: Path, cfg: dict, app_map_cache: dict | None, *, write_cache: bool = True) -> dict:
+def _target(client, repo: str, root: Path, cfg: dict, app_map_cache: dict | None, *, write_cache: bool = True,
+            index: dict | None = None) -> dict:
     return target_version(client, repo, app_map_cache=app_map_cache, repo_root=root,
                           cache_path=Path(cfg["targets_cache"]), max_age_h=int(cfg.get("scan_ttl_h", 24)),
-                          write_cache=write_cache)
+                          write_cache=write_cache, index=index)
+
+
+def _safe_index(client, app_map_cache: dict | None) -> dict:
+    """FLODevOps build dizini (modern.build_index, 24 saat önbellekli). Çağıran hazır bir
+    app_map verdiyse (testler) ağa çıkılmaz."""
+    if app_map_cache is not None:
+        return {}
+    try:
+        from agile_sdlc_crew.quality import modern
+        return modern.build_index(client)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"⚠️ php_modern: FLODevOps build dizini okunamadı: {e}")
+        return {}
+
+
+# ── Yerel klonu güncelleme ───────────────────────────────────────────────
+
+_FRESHENED: dict[str, float] = {}
+_URL_CRED = re.compile(r"://[^@/\s]+@")
+
+
+def _redact(text: str) -> str:
+    """git çıktısındaki remote URL'leri PAT taşır (set_remote_auth); ayrıntı arayüze gitmeden
+    kimlik bilgisi silinir ve yalnız sunucu loguna yazılır."""
+    return _URL_CRED.sub("://***@", text or "")
+FRESHEN_MIN_INTERVAL_S = 300
+
+
+def freshen_clone(root: Path, *, force: bool = False, running_repos: set[str] | None = None) -> dict:
+    """Taramadan önce yerel klonu origin'in varsayılan dalına ileri sar (yalnız fast-forward).
+    Tarama yerel çalışma ağacını okur; klon geride kalınca öneriler eski koda göre çıkıyordu
+    (flo-dashboard 22 commit gerideydi). Klon paylaşımlı olduğundan dokunulmaz: başka dalda /
+    detached (modern_fix) ise, izlenen dosyada değişiklik varsa (pipeline dosya sahnelemiş
+    olabilir) ya da o repoda koşan bir iş varsa. Dönen: {"updated": n} | {"skipped": neden}."""
+    import subprocess
+    root = Path(root)
+    repo = root.name
+    if not (root / ".git").exists():
+        return {"skipped": "git klonu değil"}
+    if not force and time.time() - _FRESHENED.get(repo, 0) < FRESHEN_MIN_INTERVAL_S:
+        return {"skipped": "az önce güncellendi", "recent": True}
+    if running_repos is None:
+        try:
+            from agile_sdlc_crew import db
+            running_repos = {str(j.get("repo_name") or "").lower() for j in db.list_running_jobs()}
+        except Exception:  # noqa: BLE001
+            running_repos = set()
+    if repo.lower() in running_repos:
+        return {"skipped": "bu repoda koşan bir iş var"}
+
+    def git(*a, timeout=60):
+        return subprocess.run(["git", *a], cwd=str(root), capture_output=True, text=True, timeout=timeout)
+    try:
+        head = git("symbolic-ref", "-q", "refs/remotes/origin/HEAD").stdout.strip()
+        branch = head.rsplit("/", 1)[-1] if head else "main"
+        cur = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        if cur != branch:
+            return {"skipped": f"klon '{cur or '?'}' dalında, '{branch}' değil"}
+        if git("status", "--porcelain", "--untracked-files=no").stdout.strip():
+            return {"skipped": "klonda commit edilmemiş değişiklik var"}
+        try:
+            from agile_sdlc_crew.tools.local_repo import LocalRepoManager
+            LocalRepoManager(str(root.parent)).set_remote_auth(repo)
+        except Exception:  # noqa: BLE001
+            pass
+        r = git("fetch", "-q", "origin", branch, timeout=120)
+        if r.returncode != 0:
+            log.warning(f"⚠️ modernleştirme: {repo} fetch başarısız: {_redact((r.stderr or r.stdout).strip())[:300]}")
+            return {"skipped": "fetch başarısız (ayrıntı sunucu logunda)"}
+        n = git("rev-list", "--count", f"HEAD..origin/{branch}").stdout.strip() or "0"
+        if n != "0":
+            m = git("merge", "-q", "--ff-only", f"origin/{branch}")
+            if m.returncode != 0:
+                log.warning(f"⚠️ modernleştirme: {repo} ileri sarılamadı: {_redact((m.stderr or m.stdout).strip())[:300]}")
+                return {"skipped": "ileri sarılamadı (ayrıntı sunucu logunda)"}
+            log.info(f"🔄 modernleştirme: {repo} yerel klonu {n} commit ileri sarıldı")
+        _FRESHENED[repo] = time.time()
+        return {"updated": int(n)}
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"⚠️ modernleştirme: {repo} klon güncelleme hatası: {_redact(str(e))[:300]}")
+        return {"skipped": "güncelleme hatası (ayrıntı sunucu logunda)"}
 
 
 # ── Sekme akışı: repolar → tarama → iş açma ──────────────────────────────
@@ -617,7 +757,7 @@ def _row(g, rules_by_key: dict[str, Rule]) -> dict:
 
 
 def repos(client, *, deps=None, app_map_cache: dict | None = None, **_ignored) -> dict:
-    """Yerel PHP repoları (composer.json) + hedef sürüm. Sürümü bilinmeyen repo taranamaz."""
+    """Yerel PHP repoları (is_php_repo) + hedef sürüm. Sürümü bilinmeyen repo taranamaz."""
     deps = deps or default_deps()
     cfg = deps.cfg()
     base = Path(cfg["repos_dir"])
@@ -625,8 +765,9 @@ def repos(client, *, deps=None, app_map_cache: dict | None = None, **_ignored) -
     if base.is_dir():
         amap = app_map_cache
         amap_failed = False
+        index = _safe_index(client, app_map_cache)
         for p in sorted(base.iterdir(), key=lambda x: x.name.lower()):
-            if not p.is_dir() or not (p / "composer.json").is_file():
+            if not p.is_dir() or not is_php_repo(p):
                 continue
             if amap is None:
                 try:
@@ -635,11 +776,12 @@ def repos(client, *, deps=None, app_map_cache: dict | None = None, **_ignored) -
                     log.warning(f"⚠️ php_modern: FLODevOps eşlemesi okunamadı, composer.json'a düşülüyor: {e}")
                     amap, amap_failed = {}, True  # geçici kesinti 24 saatlik yanlış hedef olarak kalmasın
             try:
-                tv = _target(client, p.name, p, cfg, amap, write_cache=not amap_failed)
+                tv = _target(client, p.name, p, cfg, amap, write_cache=not amap_failed, index=index)
             except Exception as e:  # noqa: BLE001
                 tv = {"version": None, "images": [], "source": None, "error": str(e)}
             items.append({"repo": p.name, "version": tv.get("version"), "source": tv.get("source"),
-                          "images": tv.get("images") or [], "scannable": bool(tv.get("version"))})
+                          "images": tv.get("images") or [], "per_src": tv.get("per_src") or [],
+                          "scannable": bool(tv.get("version"))})
     return {"items": items}
 
 
@@ -659,7 +801,8 @@ def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, s
     cfg = deps.cfg()
     root = _root(cfg, repo, deps)
     repo = root.name  # kanonik: WEBSERVICE ve webservice aynı parmak izini üretsin
-    tv = _target(client, repo, root, cfg, app_map_cache)
+    tv = _target(client, repo, root, cfg, app_map_cache, index=_safe_index(client, app_map_cache))
+    fresh = freshen_clone(root, force=force) if cfg.get("freshen", True) and scan_fn is None else {}
     with _scan_lock(repo):  # aynı repo için paralel 300 sn'lik php süreçleri açılmasın
         res = scan_cached(repo, root, cache_dir=Path(cfg["scan_cache"]), scan_fn=scan_fn, head_sha_fn=head_sha_fn,
                           exclude=cfg.get("php_exclude"), php_bin=cfg.get("php_bin", "php"),
@@ -670,6 +813,7 @@ def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, s
                                             now=deps.now(), cfg=cfg, ext_ok=_ext_checker(root))
     out = {
         "repo": repo, "version": tv["version"], "version_source": tv.get("source"), "images": tv.get("images") or [],
+        "per_src": tv.get("per_src") or [], "freshen": fresh,
         "sha": res.get("sha", ""), "files": res.get("files", 0), "adoption": res.get("adoption") or {},
         "cached": bool(res.get("cached")), "scanned_at": res.get("built_at"), "errors": res.get("errors") or [],
         "rules": summary,
@@ -687,11 +831,11 @@ def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, s
     return out
 
 
-def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, scan_fn=None, head_sha_fn=None,
-         app_map_cache: dict | None = None) -> dict:
+def take(client, repo: str, group_ids: list[str], *, team: str = "", sprint: str = "", deps=None, scan_fn=None,
+         head_sha_fn=None, app_map_cache: dict | None = None) -> dict:
     """Seçilen grupları 'Teknik borç — <sprint>' story'si altında Task olarak aç; mekanik olanları
     kuyruğa al, yapısal olanlar needs-human. Seçim kilit altında taze taramaya (aynı sha) ve board'a
-    karşı yeniden doğrulanır."""
+    karşı yeniden doğrulanır. `sprint`: kullanıcının seçtiği sprint yolu; boşsa aktif sprint."""
     from agile_sdlc_crew import estimation
     from agile_sdlc_crew.quality import intake
     deps = deps or default_deps()
@@ -701,7 +845,7 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, 
         cfg = deps.cfg()
         root = _root(cfg, repo, deps)
         repo = root.name
-        tv = _target(client, repo, root, cfg, app_map_cache)
+        tv = _target(client, repo, root, cfg, app_map_cache, index=_safe_index(client, app_map_cache))
         if not tv["version"]:
             raise ValueError("Hedef PHP sürümü bilinmiyor — bu repo için öneri açılamaz")
         with _scan_lock(repo):
@@ -727,7 +871,7 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, 
             if skipped and all("tarama" in s["reason"] for s in skipped):
                 raise ValueError("Seçim güncel taramada yok — tarama değişti, yeniden tarayın")
             return {"repo": repo, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
-        story = intake.resolve_story(client, SOURCE, None, team, cfg.get("target_sprint") or "next", lane="techdebt")
+        story = intake.resolve_story(client, SOURCE, None, team, "current_or_next", lane="techdebt", iteration=sprint)
         cfg2 = {**cfg, "php_target": tv["version"]}
         rows, added = intake._open_tasks(client, picked, story, cfg2, deps, source=SOURCE, lane="techdebt", queue=True)
         if added:
@@ -737,7 +881,8 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", deps=None, 
         devops = _devops_requests(client, repo, picked, rows, cfg)
         log.info(f"🧹 PHP modernleştirme ({repo}): story #{story['id']} · {len(rows)} Task · {added} SP")
         return {"repo": repo, "version": tv["version"],
-                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"]},
+                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"],
+                          "iteration": story["iteration"]},
                 "tasks": tasks, "human_tasks": human, "devops": devops, "skipped": skipped,
                 "total_sp": sum(r["sp"] for r in tasks if r.get("id")), "human_sp": sum(r["sp"] for r in human if r.get("id"))}
     finally:
