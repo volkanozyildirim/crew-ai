@@ -149,15 +149,45 @@ def _dockerfile_versions(client, repo: str, amap: dict) -> tuple[list[tuple[int,
     return versions, images
 
 
+_NOT_APP_DIRS = {"vendor", "node_modules"}
+
+
+def composer_paths(root: Path) -> list[Path]:
+    """Kökteki ve bir alt dizindeki composer.json'lar. flo-dashboard gibi repolarda uygulama
+    kökte değil (`main/composer.json`, `ru/`); yalnız köke bakınca repo PHP sayılmıyordu."""
+    root = Path(root)
+    out = [root / "composer.json"] if (root / "composer.json").is_file() else []
+    try:
+        subs = sorted(d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")
+                      and d.name not in _NOT_APP_DIRS)
+    except OSError:
+        subs = []
+    out += [d / "composer.json" for d in subs if (d / "composer.json").is_file()]
+    return out
+
+
+def is_php_repo(root: Path) -> bool:
+    """composer.json (kökte ya da bir alt dizinde) veya kökte .php dosyası."""
+    root = Path(root)
+    if composer_paths(root):
+        return True
+    try:
+        return any(f.suffix == ".php" and f.is_file() for f in root.iterdir())
+    except OSError:
+        return False
+
+
 def _composer_version(repo_root: Path | None) -> tuple[int, int] | None:
     if not repo_root:
         return None
-    try:
-        data = json.loads((repo_root / "composer.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    req = str(((data or {}).get("require") or {}).get("php") or "")
-    found = [(int(a), int(b)) for a, b in _COMPOSER_PHP.findall(req)]
+    found = []
+    for path in composer_paths(repo_root):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        req = str(((data or {}).get("require") or {}).get("php") or "")
+        found += [(int(a), int(b)) for a, b in _COMPOSER_PHP.findall(req)]
     return min(found) if found else None
 
 
@@ -311,18 +341,20 @@ EXT_EVIDENCE = {
 def ext_available(root: Path, ext: str) -> bool:
     import subprocess
     root = Path(root)
-    for name in ("composer.json", "composer.lock"):
-        try:
-            txt = (root / name).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if f'"ext-{ext}"' in txt or f"symfony/polyfill-{ext}" in txt:
-            return True
+    for cj in composer_paths(root):
+        for name in ("composer.json", "composer.lock"):
+            try:
+                txt = (cj.parent / name).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if f'"ext-{ext}"' in txt or f"symfony/polyfill-{ext}" in txt:
+                return True
     pat = EXT_EVIDENCE.get(ext)
     if not pat:
         return False
     try:
-        r = subprocess.run(["git", "grep", "-q", "-E", pat, "HEAD", "--", "*.php", ":!vendor", ":!node_modules"],
+        r = subprocess.run(["git", "grep", "-q", "-E", pat, "HEAD", "--", "*.php", ":(exclude,glob)**/vendor/**",
+                            ":(exclude,glob)**/node_modules/**"],
                            cwd=str(root), capture_output=True, timeout=30)
         return r.returncode == 0
     except Exception:  # noqa: BLE001
@@ -617,7 +649,7 @@ def _row(g, rules_by_key: dict[str, Rule]) -> dict:
 
 
 def repos(client, *, deps=None, app_map_cache: dict | None = None, **_ignored) -> dict:
-    """Yerel PHP repoları (composer.json) + hedef sürüm. Sürümü bilinmeyen repo taranamaz."""
+    """Yerel PHP repoları (is_php_repo) + hedef sürüm. Sürümü bilinmeyen repo taranamaz."""
     deps = deps or default_deps()
     cfg = deps.cfg()
     base = Path(cfg["repos_dir"])
@@ -626,7 +658,7 @@ def repos(client, *, deps=None, app_map_cache: dict | None = None, **_ignored) -
         amap = app_map_cache
         amap_failed = False
         for p in sorted(base.iterdir(), key=lambda x: x.name.lower()):
-            if not p.is_dir() or not (p / "composer.json").is_file():
+            if not p.is_dir() or not is_php_repo(p):
                 continue
             if amap is None:
                 try:

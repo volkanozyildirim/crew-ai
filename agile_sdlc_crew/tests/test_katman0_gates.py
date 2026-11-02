@@ -4211,6 +4211,33 @@ def test_techdebt_sprint_choice():
           and "x.timeFrame==='current'||x.timeFrame==='future'" in html)
 
 
+def test_php_repo_subdir_composer():
+    print("\n[PM9] php_modern — composer.json alt dizinde olan repo (flo-dashboard: main/, ru/) PHP sayılır")
+    from agile_sdlc_crew.quality import modern, php_modern as pm
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        dash = root / "flo-dashboard"
+        (dash / "main" / "vendor" / "x").mkdir(parents=True)
+        (dash / "ru").mkdir()
+        (dash / "main" / "composer.json").write_text('{"require":{"php":">=8.1","ext-mbstring":"*"}}', encoding="utf-8")
+        (dash / "main" / "vendor" / "x" / "composer.json").write_text('{"require":{"php":">=5.6"}}', encoding="utf-8")
+        (dash / "index.php").write_text("<?php\n", encoding="utf-8")
+        check("alt dizindeki composer.json bulunur (vendor değil)",
+              pm.composer_paths(dash) == [dash / "main" / "composer.json"])
+        check("repo PHP sayılır, dil tespiti php der", pm.is_php_repo(dash) and modern.detect_langs(dash) == ["php"])
+        check("composer alt sınırı alt dizinden okunur", pm._composer_version(dash) == (8, 1))
+        check("eklenti kanıtı alt dizindeki composer'dan", pm.ext_available(dash, "mbstring"))
+        bare = root / "plain"
+        bare.mkdir()
+        (bare / "index.php").write_text("<?php\n", encoding="utf-8")
+        gor = root / "gorepo"
+        (gor / "scripts").mkdir(parents=True)
+        (gor / "go.mod").write_text("module x\n\ngo 1.22\n", encoding="utf-8")
+        (gor / "scripts" / "a.php").write_text("<?php\n", encoding="utf-8")
+        check("composer'sız ama kökte .php olan repo PHP; derindeki tek .php Go reposunu PHP yapmaz",
+              pm.is_php_repo(bare) and not pm.is_php_repo(gor) and modern.detect_langs(gor) == ["go"])
+
+
 def test_techdebt_open_tasks_db():
     print("\n[TD2] Teknik borç — ortak Task açma + quality_items.source kolonu")
     from agile_sdlc_crew.quality import intake
@@ -6255,7 +6282,7 @@ def main():
               test_quality_lean,
               test_worktree_staging,
               test_techdebt_lane,
-              test_techdebt_sprint_choice, test_techdebt_open_tasks_db,
+              test_techdebt_sprint_choice, test_php_repo_subdir_composer, test_techdebt_open_tasks_db,
               test_techdebt_list_queue,
               test_techdebt_endpoints,
               test_techdebt_ui,

@@ -85,7 +85,7 @@ def _generic_rule(key: str, message: str, *, manual: bool) -> php_modern.Rule:
 def detect_langs(root: Path) -> list[str]:
     root = Path(root)
     out: list[str] = []
-    if (root / "composer.json").is_file():
+    if php_modern.is_php_repo(root):
         out.append("php")
     if (root / "go.mod").is_file():
         out.append("go")
