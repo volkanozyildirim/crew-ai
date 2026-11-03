@@ -6379,6 +6379,29 @@ def test_php_rector_fix():
           and 'p.name != "rector"' in pm)
 
 
+def test_tool_review_diff_context():
+    """PR #45721 (Rector, 63 dosya): build_pr_context en çok 12 dosya gövdesi verdiği için
+    reviewer 51 dosyayı hiç görmedi. Araç PR'ında bağlam TÜM dosyaların diff'i."""
+    print("\n[araç PR'ı incelemesi: tüm dosyaların diff'i]")
+    from agile_sdlc_crew import pr_review
+    changes = {f"app/F{i:02d}.php": ("<?php\n// x\n" + "\n".join(f"$a{j} = 1;" for j in range(40)) + "\nlist($a, $b) = f();\n",
+                                     "<?php\n// x\n" + "\n".join(f"$a{j} = 1;" for j in range(40)) + "\n[$a, $b] = f();\n")
+               for i in range(30)}
+    ctx = pr_review.tool_diff_context(changes, tool="rector")
+    check("30 dosyanın hepsi bağlamda (12 dosya sınırı yok)", all(f"## app/F{i:02d}.php" in ctx for i in range(30)))
+    check("yalnız değişen satırlar (dosya gövdesi değil)", "-list($a, $b) = f();" in ctx and "+[$a, $b] = f();" in ctx
+          and "$a5 = 1;" not in ctx and len(ctx) < 30 * 400, str(len(ctx)))
+    small = pr_review.tool_diff_context(changes, tool="rector", max_chars=3000)
+    check("bütçe aşılırsa kesilen dosyalar AÇIKÇA yazılır", "BAĞLAM SINIRI" in small and "İNCELENMEDİ" in small
+          and "app/F29.php" in small.split("BAĞLAM SINIRI")[1])
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
+    check("run_pr_review: changes verilirse diff bağlamı, gövdeler satır oturtma için",
+          "if changes:" in src and "tool_diff_context(changes, tool=tool)" in src and 'file_bodies.update({"/" + p.lstrip("/")' in src)
+    mf = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern_fix.py").read_text()
+    check("modern_fix incelemeye eski/yeni hâli verir", 'originals = {f: _git(root, "show", f"origin/main:{f}").stdout' in mf
+          and "changes={f: (originals.get(f, \"\"), c) for f, c in contents.items()}, tool=tool" in mf)
+
+
 def test_modern_sp():
     """Aynı öneri tek iş, SP iş miktarından, en çok 8 (kullanıcı kararı 2026-10-30)."""
     print("\n[modernleştirme SP]")
@@ -6528,7 +6551,8 @@ def main():
               test_modern_multilang,
               test_modern_sp,
               test_php_modern_82_84,
-              test_php_rector_fix):
+              test_php_rector_fix,
+              test_tool_review_diff_context):
         try:
             t()
         except Exception as e:

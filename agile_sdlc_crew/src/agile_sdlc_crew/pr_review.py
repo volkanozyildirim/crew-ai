@@ -356,8 +356,50 @@ def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int = 12, p
     return "\n".join(parts), used
 
 
+TOOL_DIFF_MAX_CHARS = 120_000  # ~30K token; 150 değişiklikli bir Rector PR'ı ~35K karakter
+
+
+def tool_diff_context(changes: dict[str, tuple[str, str]], *, tool: str = "", context: int = 2,
+                      max_chars: int = TOOL_DIFF_MAX_CHARS) -> str:
+    """Araç düzeltmesi (modern_fix) PR'ı için inceleme bağlamı: TÜM dosyaların değişen
+    satırları (unified diff, ±`context` satır). build_pr_context dosya GÖVDESİ verir ve en
+    çok 12 dosya alır — insan PR'ı için doğru; 63 dosyalık bir Rector PR'ında (#45721)
+    reviewer 51 dosyayı hiç görmedi. Mekanik değişiklikte her yer 1–2 satır olduğu için
+    hepsi aynı bütçeye sığar; sığmazsa kesilir ve kesildiği AÇIKÇA yazılır."""
+    head = [
+        f"\n# PR DEĞİŞİKLİKLERİ — ARAÇ DÜZELTMESİ ({tool or 'araç'}), {len(changes)} dosya, YALNIZ DEĞİŞEN SATIRLAR",
+        "Bu PR'ın kodunu bir araç yazdı; LLM geliştirici yok. Aşağıda HER değişen dosyanın diff'i var "
+        "(`-` eski, `+` yeni, `@@ -a +b @@` başlığındaki `+b` yeni dosyadaki satır numarası). Kontrol et: "
+        "yalnız iş kalemindeki kuralın dönüşümü mü yapılmış, davranış korunmuş mu, kuralla ilgisiz bir "
+        "değişiklik var mı. Dosyaların değişmeyen kısmı incelemenin kapsamı DEĞİL. get_pr_changes / "
+        "browse_repo ÇAĞIRMA. `evidence.quote` alanına satırı `+`/`-` öneki OLMADAN yaz.",
+    ]
+    out, used, cut = list(head), sum(len(x) for x in head), []
+    for path in sorted(changes):
+        old, new = changes[path]
+        diff = "\n".join(difflib.unified_diff((old or "").splitlines(), (new or "").splitlines(),
+                                              fromfile=f"a/{path}", tofile=f"b/{path}", n=context, lineterm=""))
+        if not diff:
+            continue
+        block = f"\n## {path}\n```diff\n{diff}\n```"
+        if used + len(block) > max_chars:
+            cut.append(path)
+            continue
+        out.append(block)
+        used += len(block)
+    if cut:
+        out.append(f"\n⚠️ BAĞLAM SINIRI: {len(cut)} dosyanın diff'i sığmadı ve İNCELENMEDİ: "
+                   + ", ".join(cut[:30]) + (" …" if len(cut) > 30 else "")
+                   + ". Özetinde bunu belirt; bu dosyalar için onay verme.")
+    return "\n".join(out)
+
+
 def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name: str = "",
-                  job_id: int | None = None, post: bool = True) -> dict:
+                  job_id: int | None = None, post: bool = True,
+                  changes: dict[str, tuple[str, str]] | None = None, tool: str = "") -> dict:
+    """`changes` (yol → (eski, yeni)) verilirse PR bir araç düzeltmesidir: bağlam dosya
+    gövdeleri değil tüm dosyaların diff'i (tool_diff_context); gövdeler satır oturtma ve
+    öneri doğrulaması için yine `file_bodies`'e yazılır."""
     """Uçtan uca: PR bul → context → reviewer → PR/WI yorumları. Sonuç dict."""
     from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
     from agile_sdlc_crew.tools import claude_cli_llm as _acct
@@ -384,10 +426,17 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
             log.info(f"  WI okunamadı: {e}")
     requirements = wi_requirements_text(wi_fields) if wi_fields else f"# Iş Kalemi\n{pr.get('title', '')}"
     file_bodies: dict[str, str] = {}
-    pr_ctx, files = build_pr_context(client, rname, pr, bodies=file_bodies)
-    ctx = (requirements + "\n\n# İNCELEME KAPSAMI\nBu PR insan tarafından geliştirildi. İncelemen DANIŞMA "
-           "niteliğindedir: kodu sen değiştirmeyeceksin; bulgular PR yorumu olarak geliştiriciye gidecek. "
-           "Somut, dosya/satır referanslı, uygulanabilir yaz." + pr_ctx)
+    if changes:
+        file_bodies.update({"/" + p.lstrip("/"): new for p, (_old, new) in changes.items()})
+        pr_ctx, files = tool_diff_context(changes, tool=tool), sorted(changes)
+        who = (f"Bu PR'ı bir araç ({tool or 'araç'}) üretti. İncelemen DANIŞMA niteliğindedir: kodu sen "
+               "değiştirmeyeceksin; bulgular PR yorumu olarak gidecek. Somut, dosya/satır referanslı yaz.")
+    else:
+        pr_ctx, files = build_pr_context(client, rname, pr, bodies=file_bodies)
+        who = ("Bu PR insan tarafından geliştirildi. İncelemen DANIŞMA "
+               "niteliğindedir: kodu sen değiştirmeyeceksin; bulgular PR yorumu olarak geliştiriciye gidecek. "
+               "Somut, dosya/satır referanslı, uygulanabilir yaz.")
+    ctx = requirements + "\n\n# İNCELEME KAPSAMI\n" + who + pr_ctx
     if job_id:
         db.update_job(job_id, repo_name=rname, branch_name=branch, pr_id=str(pid), pr_url=pr_url,
                       wi_title=(wi_fields.get("System.Title", "") or pr.get("title", "") or "")[:200],

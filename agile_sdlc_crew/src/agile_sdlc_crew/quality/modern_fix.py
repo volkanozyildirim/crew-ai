@@ -210,6 +210,8 @@ def run(job_id: int, work_item_id: str) -> dict:
         try:
             changed = apply_tool(root, lang, scope, tv["version"] or "")
             contents = {f: (root / f).read_text(encoding="utf-8") for f in changed}
+            # İnceleme TÜM dosyaların diff'ini görsün (pr_review.tool_diff_context) — eski hâl origin/main
+            originals = {f: _git(root, "show", f"origin/main:{f}").stdout for f in changed}
             res = verify.verify(root, changed) if changed else {"ok": True, "ran": [], "issues": [], "skipped": []}
         finally:
             _git(root, "checkout", "--", ".")
@@ -261,7 +263,8 @@ def run(job_id: int, work_item_id: str) -> dict:
                 prof = str(pc.get("CREW_MODERN_FIX_REVIEW_PROFILE") or "").strip()
                 if prof:
                     resolver.set_job_llm_overrides({"code_reviewer": prof})
-                run_pr_review(work_item_id=str(work_item_id), pr_id=int(pr["pr_id"]), repo_name=repo, job_id=job_id)
+                run_pr_review(work_item_id=str(work_item_id), pr_id=int(pr["pr_id"]), repo_name=repo, job_id=job_id,
+                              changes={f: (originals.get(f, ""), c) for f, c in contents.items()}, tool=tool)
         except Exception as e:  # noqa: BLE001 — PR açık; inceleme elle de istenebilir
             log.warning(f"  PR incelemesi yapılamadı: {e}")
         if lifecycle:
