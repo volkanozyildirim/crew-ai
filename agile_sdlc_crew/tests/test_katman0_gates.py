@@ -6369,7 +6369,8 @@ def test_php_rector_fix():
     check("inceleme düşük modelle (iş kapsamlı reviewer profili)", "CREW_MODERN_FIX_REVIEW_PROFILE" in src
           and 'set_job_llm_overrides({"code_reviewer": prof})' in src and "job_llm_scope()" in src)
     check("önceki koşunun dalı varsa araç düzeltmesi taze dalda açılır",
-          'br.get("note") == "zaten mevcut"' in src and "-tool-" in src)
+          'f"refs/heads/feature/{work_item_id}" in heads' in src and "-tool-" in src
+          and 'br.get("note") == "zaten mevcut"' not in src)
     pm = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/php_modern.py").read_text()
     ik = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/intake.py").read_text()
     check("take: Rector grupları modern_fix + onaylı kapsam INSERT'te",

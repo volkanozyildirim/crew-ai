@@ -221,18 +221,22 @@ def run(job_id: int, work_item_id: str) -> dict:
             return {"changed": 0}
         if not res["ok"]:
             raise RuntimeError("Doğrulayıcı geçmedi: " + "; ".join(res["issues"][:5]))
-        br = pipeline.create_branch(repo, str(work_item_id))
-        if not br.get("success"):
-            raise RuntimeError(f"Branch açılamadı: {br.get('error')}")
-        branch = br["branch"]
-        if br.get("note") == "zaten mevcut":
-            # Önceki (ör. başarısız LLM) koşunun dalı: üstüne yazmak eski commit'leri ve kapsam dışı
-            # değişiklikleri bu PR'a taşırdı — araç düzeltmesi main'den TAZE dalda açılır.
+        # Önceki (ör. başarısız LLM) koşunun dalı varsa üstüne yazmak eski commit'leri PR'a taşır —
+        # araç düzeltmesi main'den TAZE dalda açılır. Varlık AÇIKÇA sorulur: Azure refs API var
+        # olan dal için hata fırlatmıyor (200 + ref başına success=false), pipeline.create_branch
+        # "zaten mevcut" notunu üretmiyordu ve #260'ın PR'ı (#45721) #249'un 11 commit'ini taşıdı.
+        heads = {b.get("name") for b in client.list_branches(repo)}
+        if f"refs/heads/feature/{work_item_id}" in heads:
             import time
             branch = f"feature/{work_item_id}-tool-{int(time.time()) % 100000}"
             client.create_branch(repo, branch)
             log.info(f"  feature/{work_item_id} zaten var (önceki koşu) — taze dal: {branch}")
-        tool ={"go": "modernize -fix", "php": "rector"}.get(lang, "ruff --fix")
+        else:
+            br = pipeline.create_branch(repo, str(work_item_id))
+            if not br.get("success"):
+                raise RuntimeError(f"Branch açılamadı: {br.get('error')}")
+            branch = br["branch"]
+        tool = {"go": "modernize -fix", "php": "rector"}.get(lang, "ruff --fix")
         client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f, "content": c}
                                            for f, c in contents.items()],
                             f"#{work_item_id}: {title[:80]} ({tool})")
