@@ -464,7 +464,7 @@ def structural_sp(occurrences: int) -> int:
     return MODERN_SP_MAX
 
 
-def pack_modern(units: list, *, source: str, tool_fix: bool = False) -> list:
+def pack_modern(units: list, *, source: str, tool_fix: bool = False, tool_rules: set | frozenset = frozenset()) -> list:
     """Aynı repo + kural (+ insan/altyapı durumu) birimlerini TEK işte topla — dosya birimleri de
     modül birimleri de. SP yer sayısından, en çok MODERN_SP_MAX. Parmak izleri birim başına kalır
     (dedup dosya/modül düzeyinde çalışmaya devam eder)."""
@@ -473,7 +473,7 @@ def pack_modern(units: list, *, source: str, tool_fix: bool = False) -> list:
     for u in units:
         buckets.setdefault((u.repo, u.findings[0].rule, u.needs_human, tuple(u.infra)), []).append(u)
     out = []
-    for (repo, _rule, human, infra), us in buckets.items():
+    for (repo, rule, human, infra), us in buckets.items():
         us.sort(key=lambda x: (-x.score, x.fingerprints[0]))
         g = Group(source=source, repo=repo, title=us[0].title.split(" — ")[0], fingerprints=[], findings=[],
                   score=max(u.score for u in us), needs_human=human, human_reason=us[0].human_reason,
@@ -484,13 +484,15 @@ def pack_modern(units: list, *, source: str, tool_fix: bool = False) -> list:
         n = len(g.files)
         g.title += f" — {n} dosya" if n > 1 else f" — {g.files[0].rsplit('/', 1)[-1]}" if n else ""
         structural = human and not infra
-        g.sp = min(MODERN_SP_MAX, structural_sp(g.total) if structural else modern_sp(g.total, tool_fix))
+        g.sp = min(MODERN_SP_MAX, structural_sp(g.total) if structural
+                   else modern_sp(g.total, tool_fix or rule in tool_rules))
         out.append(g)
     return out
 
 
 def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: str, board_index: dict, now: float,
-                 cfg: dict, ext_ok=None, source: str = SOURCE, tool_fix: bool = False) -> tuple[list, list[dict], dict]:
+                 cfg: dict, ext_ok=None, source: str = SOURCE, tool_fix: bool = False,
+                 tool_rules: set | frozenset = frozenset()) -> tuple[list, list[dict], dict]:
     """(gruplar, atlananlar, kural özeti). Yalnız hedef sürümün sunduğu kurallar; dedup board'dan;
     dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez."""
     from agile_sdlc_crew.quality import dedup, rank
@@ -518,7 +520,7 @@ def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: st
             u.human_reason = f"Altyapı: PHP eklentisi {', '.join(missing)} imajda doğrulanamadı — DevOps isteği açılır"
         live.append(u)
     # Aynı öneri her yerde aynı düzenleme → kural başına TEK iş (dosya ve modül birimleri birlikte)
-    groups = pack_modern(live, source=source, tool_fix=tool_fix)
+    groups = pack_modern(live, source=source, tool_fix=tool_fix, tool_rules=tool_rules)
     groups.sort(key=lambda g: (-g.score, g.fingerprints[0]))
     return groups, skipped, summary
 
@@ -598,6 +600,40 @@ def _safe_bin(v: str) -> str:
             log.warning(f"⚠️ CREW_PHP_BIN geçersiz ({v!r}) — 'php' kullanılıyor")
         return "php"
     return v
+
+
+# ── Rector: mekanik kuralı araç uygular (LLM developer'a gitmez) ──────────
+# Kullanıcı kararı (2026-11-03): #249 (core, list() → [], 64 dosya) LLM pipeline'ında
+# $5.40'a başarısız bitti — plan 64 dosyanın 9'unu kapsadı. Kataloğunda `rector` sınıfı
+# olan mekanik kurallar Go/Python gibi modern_fix işine gider: Rector yalnız o kural ×
+# o dosyalarda çalışır, verify (php -l) geçer, PR açılır, LLM yalnız bir kez inceler.
+RECTOR_BIN_DEFAULT = "~/.crew_tools/rector/vendor/bin/rector"
+
+
+def rector_bin() -> str:
+    """CREW_RECTOR_BIN yalnız .env'den (CREW_PHP_BIN ile aynı karar: dashboard'dan
+    yazılabilen bir binary yolu keyfi çalıştırma olurdu). Dosya adı 'rector' olmalı ve
+    dosya var olmalı; değilse '' (kurallar pipeline'a döner)."""
+    import os
+    v = (os.environ.get("CREW_RECTOR_BIN") or RECTOR_BIN_DEFAULT).strip()
+    p = Path(v).expanduser()
+    if not _BIN.match(v) or p.name != "rector" or not p.is_file():
+        return ""
+    return str(p)
+
+
+def rector_on() -> bool:
+    return bool(_knob("CREW_TECHDEBT_RECTOR", True)) and bool(rector_bin())
+
+
+def rector_fixable(r) -> bool:
+    """Katalogda Rector sınıfı olan otomatik (mekanik / deprecation) kural."""
+    return bool(r is not None and r.auto and r.rector and r.kind in ("mechanical", "deprecation"))
+
+
+def tool_rules(rules) -> set[str]:
+    """Rector'un uygulayacağı kurallar; Rector kapalı ya da kurulu değilse boş."""
+    return {r.key for r in rules if rector_fixable(r)} if rector_on() else set()
 
 
 def load_cfg() -> dict:
@@ -752,6 +788,8 @@ def _row(g, rules_by_key: dict[str, Rule]) -> dict:
         "ref": r.ref if r else "", "count": g.total, "files": g.files, "module": where,
         "locations": [{"file": f, "line": ln, "text": t} for f, ln, t in locs[:20]], "recurring_of": g.recurring_of,
         "infra": list(g.infra),
+        # Rector uygular (modern_fix) — UI "Araç uygular" der, pipeline kuyruğu değil
+        "tool": bool(not g.needs_human and rector_fixable(r) and rector_on()),
     })
     return row
 
@@ -810,8 +848,10 @@ def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, s
     rules = load_rules()
     rules_by_key = {r.key: r for r in rules}
     groups, skipped, summary = build_groups(res, rules, tv["version"], repo=repo, board_index=deps.board(client),
-                                            now=deps.now(), cfg=cfg, ext_ok=_ext_checker(root))
+                                            now=deps.now(), cfg=cfg, ext_ok=_ext_checker(root),
+                                            tool_rules=tool_rules(rules))
     out = {
+        "rector": rector_on(),
         "repo": repo, "version": tv["version"], "version_source": tv.get("source"), "images": tv.get("images") or [],
         "per_src": tv.get("per_src") or [], "freshen": fresh,
         "sha": res.get("sha", ""), "files": res.get("files", 0), "adoption": res.get("adoption") or {},
@@ -829,6 +869,49 @@ def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, s
     elif not groups:
         out["message"] = "Hedef sürümün sunduğu özelliklerle ilgili öneri yok."
     return out
+
+
+def _rector_queue(deps, repo: str, tool_groups: list):
+    """Rector'un uygulayacağı grupların işini modern_fix olarak aç; onaylı kapsam (kural ×
+    dosya) INSERT'te işin kaydına yazılır — çalışırken düzenlenebilir WI açıklaması okunmaz.
+    Diğer gruplar deps.queue (pipeline) ile kalır."""
+    if not tool_groups or getattr(deps, "queue_tool", None) is None:
+        return deps
+    import json
+    from agile_sdlc_crew.quality import intake, modern
+    payloads = {intake._row(g)["title"]: json.dumps(modern.scope_of("php", repo, g)) for g in tool_groups}
+    base, tool = deps.queue, deps.queue_tool
+
+    def _queue(wid, title):
+        if title in payloads:
+            return tool(wid, title, payloads[title])  # job_kind="modern_fix", job_payload=payloads[title]
+        return base(wid, title)
+    return deps._replace(queue=_queue)
+
+
+def rector_scope_for(repo_root: Path, fingerprints: list[str], *, cfg: dict | None = None) -> dict | None:
+    """Board'da zaten açık bir teknik borç Task'ı için Rector kapsamı: Task'ın parmak
+    izlerinden (repo, kural) okunur, DOSYALAR ise taze taramadan alınır — parmak izi
+    satırı düzenlenebilir metin olduğu için kapsamı tek başına belirlemez. Kural Rector'la
+    uygulanamıyorsa / Rector yoksa None (iş pipeline'a gider)."""
+    from agile_sdlc_crew.quality import modern
+    parsed = [fp.split(":", 3) for fp in fingerprints or []]
+    parsed = [p for p in parsed if len(p) == 4 and p[0] == SOURCE]
+    if not parsed or len({(p[1], p[2]) for p in parsed}) != 1:
+        return None
+    repo, rule = parsed[0][1], parsed[0][2]
+    rules = {r.key: r for r in load_rules()}
+    if repo.lower() != repo_root.name.lower() or rule not in tool_rules(rules.values()):
+        return None
+    cfg = cfg or load_cfg()
+    res = scan_cached(repo_root.name, repo_root, cache_dir=Path(cfg["scan_cache"]), exclude=cfg.get("php_exclude"),
+                      php_bin=cfg.get("php_bin", "php"), ttl_h=int(cfg.get("scan_ttl_h", 24)))
+    wanted = set(fingerprints)  # uzun yol parmak izinde kısaltılmış olabilir — taramadan yeniden üretilip karşılaştırılır
+    files = sorted({h["file"] for h in res.get("hits") or []
+                    if h.get("rule") == rule and fingerprint(repo, rule, h.get("file", "")) in wanted})
+    if not files:
+        return None
+    return {"lang": "php", "repo": repo_root.name, "scope": {rule: files}}
 
 
 def take(client, repo: str, group_ids: list[str], *, team: str = "", sprint: str = "", deps=None, scan_fn=None,
@@ -854,8 +937,9 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", sprint: str
                               ttl_h=int(cfg.get("scan_ttl_h", 24)))
         rules = load_rules()
         rules_by_key = {r.key: r for r in rules}
+        tools = tool_rules(rules)
         groups, _skipped, _summary = build_groups(res, rules, tv["version"], repo=repo, board_index=deps.board(client),
-                                                  now=deps.now(), cfg=cfg, ext_ok=_ext_checker(root))
+                                                  now=deps.now(), cfg=cfg, ext_ok=_ext_checker(root), tool_rules=tools)
         by_gid = {gid_of(g): g for g in groups}
         picked, skipped = [], []
         max_take = max(1, int(cfg.get("max_take", 8)))
@@ -873,6 +957,7 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", sprint: str
             return {"repo": repo, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
         story = intake.resolve_story(client, SOURCE, None, team, "current_or_next", lane="techdebt", iteration=sprint)
         cfg2 = {**cfg, "php_target": tv["version"]}
+        deps = _rector_queue(deps, repo, [g for g in picked if g.findings[0].rule in tools and not g.needs_human])
         rows, added = intake._open_tasks(client, picked, story, cfg2, deps, source=SOURCE, lane="techdebt", queue=True)
         if added:
             estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)

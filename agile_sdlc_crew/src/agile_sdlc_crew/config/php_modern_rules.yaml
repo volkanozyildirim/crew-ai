@@ -365,6 +365,7 @@ rules:
     before: "const MAX_RETRY = 3;"
     after: "const int MAX_RETRY = 3;"
     ref: "https://wiki.php.net/rfc/typed_class_constants"
+    rector: "Rector\\Php83\\Rector\\ClassConst\\AddTypeToConstRector"
   - key: new_without_parens
     since: "8.4"
     kind: mechanical
@@ -380,6 +381,7 @@ rules:
     before: "$total = (new Cart($items))->total();"
     after: "$total = new Cart($items)->total();"
     ref: "https://wiki.php.net/rfc/new_without_parentheses"
+    rector: "Rector\\Php84\\Rector\\MethodCall\\NewMethodCallWithoutParenthesesRector"
   # ── structural: tasarım kararı, insan onayı ──
   - key: typed_properties
     since: "7.4"

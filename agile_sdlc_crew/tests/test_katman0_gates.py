@@ -6249,6 +6249,136 @@ def test_modern_multilang():
           '<span class="h">Modernleştirme</span>' in html and "function _tdmSel()" in html and "Araç uygular" in html)
 
 
+def test_php_rector_fix():
+    """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
+    başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
+    kodu Rector yazar (yalnız kural × dosya), LLM yalnız bir kez ve Sonnet'le inceler."""
+    print("\n[PHP: Rector ile araç düzeltmesi]")
+    from agile_sdlc_crew.quality import modern_fix, php_modern, techdebt
+    from agile_sdlc_crew.quality.model import Finding, Group
+
+    rules = {r.key: r for r in php_modern.load_rules()}
+    check("katalog: list()/??/str_contains/match/promotion Rector'la uygulanabilir",
+          all(php_modern.rector_fixable(rules[k]) for k in
+              ("array_destructuring", "null_coalesce", "str_contains", "match", "ctor_promotion")))
+    check("katalog: yapısal ve Rector'suz kural araca gitmez",
+          not php_modern.rector_fixable(rules["typed_properties"]) and not php_modern.rector_fixable(rules["sensitive_parameter"]))
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "core"
+        (root / "app").mkdir(parents=True)
+        cfg = modern_fix.rector_config(root, {"array_destructuring": ["app/A.php", "app/it's$x.php"]}, "8.2", Path(td) / "c")
+        check("Rector yapılandırması: yalnız kural sınıfı, kapsam dosyaları, hedef sürüm",
+              "ListToArrayDestructRector" in cfg and "->withPhpVersion(80200)" in cfg and "/app/A.php'" in cfg
+              and "StrContainsRector" not in cfg, cfg)
+        check("Rector yapılandırması: yollar tek tırnaklı ($ enterpolasyonu yok, ' kaçışlı)",
+              "it\\'s$x.php'" in cfg and '"' not in cfg.split("withPaths")[1].split(")")[0], cfg)
+
+        _on = php_modern.rector_on
+        php_modern.rector_on = lambda: True
+        try:
+            ok = modern_fix.load_scope(json.dumps({"lang": "php", "repo": "core",
+                                                   "scope": {"array_destructuring": ["app/A.php"]}}), Path(td))
+            check("PHP kapsamı: Rector kuralı kabul edilir", ok[:3] == ("php", "core", {"array_destructuring": ["app/A.php"]}))
+            rej = 0
+            for b in ({"typed_properties": ["app/A.php"]}, {"sensitive_parameter": ["app/A.php"]},
+                      {"array_destructuring": ["../x.php"]}):
+                try:
+                    modern_fix.load_scope(json.dumps({"lang": "php", "repo": "core", "scope": b}), Path(td))
+                except ValueError:
+                    rej += 1
+            check("PHP kapsamı: Rector'suz/yapısal kural ve kök dışı yol reddedilir", rej == 3, f"{rej}/3")
+        finally:
+            php_modern.rector_on = _on
+        php_modern.rector_on = lambda: False
+        try:
+            try:
+                modern_fix.load_scope(json.dumps({"lang": "php", "repo": "core",
+                                                  "scope": {"array_destructuring": ["app/A.php"]}}), Path(td))
+                off = False
+            except ValueError:
+                off = True
+            check("Rector kapalı/kurulu değil → PHP araç işi reddedilir", off)
+        finally:
+            php_modern.rector_on = _on
+
+        binp = php_modern.rector_bin()
+        if binp:
+            # reponun autoload'u çalıştırılmamalı (rector bin cwd'deki vendor/autoload.php'yi include eder)
+            (root / "vendor").mkdir()
+            (root / "vendor" / "autoload.php").write_text(
+                f"<?php file_put_contents({json.dumps(str(Path(td) / 'PWNED'))}, 'x');\n")
+            (root / "app" / "A.php").write_text("<?php\nfunction f() { return [1, 2]; }\nlist($a, $b) = f();\n"
+                                                "$c = isset($x) ? $x : 0;\n")
+            modern_fix.php_apply(root, {"array_destructuring": ["app/A.php"]}, "8.2")
+            out = (root / "app" / "A.php").read_text()
+            check("Rector: yalnız kapsamdaki kural uygulanır", "[$a, $b] = f();" in out and "isset($x) ? $x : 0" in out, out)
+            check("Rector: reponun vendor/autoload.php'si çalıştırılmaz (cwd repo dışında)",
+                  not (Path(td) / "PWNED").exists())
+        else:
+            skip("Rector uygulaması", "rector kurulu değil")
+
+    fs = [Finding(source="php_modern", file=f"app/F{i}.php", rule="array_destructuring", lines=[1] * 3, uris=[])
+          for i in range(70)]
+    unit = [Group(source="php_modern", repo="core", title="list", fingerprints=[f"php_modern:core:array_destructuring:{f.file}"],
+                  findings=[f]) for f in fs]
+    dev = php_modern.pack_modern(unit, source="php_modern")[0].sp
+    tool = php_modern.pack_modern(unit, source="php_modern", tool_rules={"array_destructuring"})[0].sp
+    check("SP: Rector uygulayan kural araç eşikleriyle (geliştirici 3 → araç 1)", dev == 3 and tool == 1, f"{dev} {tool}")
+
+    from agile_sdlc_crew.quality import intake
+    from agile_sdlc_crew.quality.intake import _row
+    g = php_modern.pack_modern(unit, source="php_modern", tool_rules={"array_destructuring"})[0]
+    piped, tooled = [], []
+    plain = intake.Deps(gather=None, board=None, repo_ok=None, queue=lambda w, t: (piped.append(w), 1)[1],
+                        record=None, now=None, cfg=None)
+    check("elle kurulan Deps (queue_tool yok) araç yoluna girmez — test DB'ye iş yazmaz",
+          php_modern._rector_queue(plain, "core", [g]) is plain)
+    wired = plain._replace(queue_tool=lambda w, t, p: (tooled.append((w, json.loads(p))), 2)[1])
+    q = php_modern._rector_queue(wired, "core", [g]).queue
+    q(10, _row(g)["title"]); q(11, "başka iş")
+    check("take: Rector grubu queue_tool'a onaylı kapsamla, diğeri pipeline'a",
+          tooled and tooled[0][0] == 10 and tooled[0][1]["scope"]["array_destructuring"][:1] == ["app/F0.php"]
+          and piped == [11], f"{tooled[:1]} {piped}")
+
+    _rs = php_modern.rector_scope_for
+    php_modern.rector_scope_for = lambda root, fps, cfg=None: (
+        {"lang": "php", "repo": "core", "scope": {"array_destructuring": ["app/A.php"]}}
+        if any(":array_destructuring:" in f for f in fps) else None)
+    _cfg = php_modern.load_cfg
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "core").mkdir()
+        php_modern.load_cfg = lambda: {"repos_dir": Path(td)}
+        try:
+            # techdebt.queue'ya queue_fn enjekte edilip tool_fn verilmezse araç yolu kapalı
+            src_td = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/techdebt.py").read_text()
+            check("teknik borç kuyruğu: enjekte queue_fn'de araç yolu kapalı (test DB'ye iş yazmaz)",
+                  "_split_rector(take) if tool_fn else ([], take)" in src_td)
+            tool_rows, pipe_rows = techdebt._split_rector([
+                {"id": 1, "title": "list", "repo": "core", "fingerprints": ["php_modern:core:array_destructuring:app/A.php"]},
+                {"id": 2, "title": "sens", "repo": "core", "fingerprints": ["php_modern:core:sensitive_parameter:app/A.php"]},
+                {"id": 3, "title": "nr", "repo": "webservice", "fingerprints": ["newrelic:x"]},
+                {"id": 4, "title": "kötü repo", "repo": "../core", "fingerprints": ["php_modern:core:array_destructuring:a"]}])
+        finally:
+            php_modern.rector_scope_for, php_modern.load_cfg = _rs, _cfg
+    check("teknik borç kuyruğu: Rector kuralı modern_fix'e, diğerleri pipeline'a",
+          [r["id"] for r, _ in tool_rows] == [1] and [r["id"] for r in pipe_rows] == [2, 3, 4]
+          and json.loads(tool_rows[0][1])["lang"] == "php")
+
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern_fix.py").read_text()
+    check("inceleme düşük modelle (iş kapsamlı reviewer profili)", "CREW_MODERN_FIX_REVIEW_PROFILE" in src
+          and 'set_job_llm_overrides({"code_reviewer": prof})' in src and "job_llm_scope()" in src)
+    check("önceki koşunun dalı varsa araç düzeltmesi taze dalda açılır",
+          'f"refs/heads/feature/{work_item_id}" in heads' in src and "-tool-" in src
+          and 'br.get("note") == "zaten mevcut"' not in src)
+    pm = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/php_modern.py").read_text()
+    ik = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/intake.py").read_text()
+    check("take: Rector grupları modern_fix + onaylı kapsam INSERT'te",
+          "_rector_queue(deps, repo," in pm and 'job_kind="modern_fix", job_payload=payload)' in ik)
+    check("CREW_RECTOR_BIN yalnız .env'den, adı 'rector' olmalı", 'os.environ.get("CREW_RECTOR_BIN")' in pm
+          and 'p.name != "rector"' in pm)
+
+
 def test_modern_sp():
     """Aynı öneri tek iş, SP iş miktarından, en çok 8 (kullanıcı kararı 2026-10-30)."""
     print("\n[modernleştirme SP]")
@@ -6397,7 +6527,8 @@ def main():
               test_devops_requests,
               test_modern_multilang,
               test_modern_sp,
-              test_php_modern_82_84):
+              test_php_modern_82_84,
+              test_php_rector_fix):
         try:
             t()
         except Exception as e:

@@ -553,6 +553,20 @@ SCHEMA: list[dict] = [
         "desc": "Modernleştirme taraması yerel klonu okur; açıkken taramadan önce klon origin'in varsayılan dalına ileri sarılır (yalnız fast-forward, en sık 5 dakikada bir). Klon başka daldaysa, izlenen dosyada değişiklik varsa ya da o repoda koşan iş varsa dokunulmaz ve kart 'sonuçlar eski olabilir' der.",
     },
     {
+        "key": "CREW_TECHDEBT_RECTOR",
+        "label": "Teknik borç · PHP mekanik kurallarını Rector uygulasın",
+        "type": "bool",
+        "default": True,
+        "desc": "Açıkken katalogda Rector sınıfı olan otomatik PHP kuralları (list() → [], ?? , str_contains, match, promotion…) LLM pipeline'ına değil araç düzeltmesine (modern_fix) gider: Rector yalnız o kural × o dosyalarda çalışır, php -l doğrular, PR açılır, LLM yalnız bir kez inceler. Rector kurulu değilse (~/.crew_tools/rector, CREW_RECTOR_BIN yalnız .env'den) kurallar pipeline'a döner. Ölçüm: #249 (64 dosya) pipeline'da $5.40'a 9 dosyada kaldı.",
+    },
+    {
+        "key": "CREW_MODERN_FIX_REVIEW_PROFILE",
+        "label": "Araç düzeltmesi · inceleme modeli (profil)",
+        "type": "str",
+        "default": "reviewer_cli",
+        "desc": "Araç düzeltmesi (modern_fix: Rector / Go modernize / ruff) PR'ının tek LLM incelemesinin profili (config/llm_profiles.yaml). Kodu araç yazdığı için varsayılan Sonnet (reviewer_cli); boş = reviewer'ın normal modeli (Opus).",
+    },
+    {
         "key": "CREW_TECHDEBT_MODERN_MAX_TAKE",
         "label": "Teknik borç · modernleştirmede istek başı en çok iş",
         "type": "int",
