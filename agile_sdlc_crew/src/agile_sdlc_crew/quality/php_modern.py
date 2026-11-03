@@ -56,6 +56,10 @@ class Rule:
     auto: bool = False
     sp_unit: int = 1
     rector: str = ""
+    fixer: str = ""  # "tempo": kendi deterministik düzelticimiz (Rector karşılığı yok)
+    # Bulgu satırına dar bir pencerede (±birkaç satır) çözülebilir mi — araç kaçırırsa kalan yeri
+    # LLM pencereyle düzeltir. switch→match, promotion, dinamik property: sınıf/blok düzeyinde → hayır.
+    line_local: bool = True
     requires: list[str] = field(default_factory=list)            # PHP eklentileri
     requires_if: dict[str, list[str]] = field(default_factory=dict)  # bulunan yerde geçen ad → eklentiler
 
@@ -91,6 +95,7 @@ def load_rules(path: Path = RULES_PATH) -> list[Rule]:
             # structural / report asla otonom değil — YAML ne derse desin
             auto=bool(r.get("auto")) and kind in ("deprecation", "mechanical"),
             sp_unit=int(r.get("sp_unit") or 0), rector=str(r.get("rector") or ""),
+            fixer=str(r.get("fixer") or ""), line_local=bool(r.get("line_local", True)),
             requires=[str(x) for x in r.get("requires") or []],
             requires_if={str(k): [str(x) for x in v or []] for k, v in (r.get("requires_if") or {}).items()},
         ))
@@ -626,14 +631,69 @@ def rector_on() -> bool:
     return bool(_knob("CREW_TECHDEBT_RECTOR", True)) and bool(rector_bin())
 
 
+_RECTOR_CLASSES: dict[str, frozenset] = {}
+
+
+def rector_classes() -> frozenset:
+    """Kurulu Rector'daki kural sınıfları (rules/<Yol>.php → Rector\\<Yol>). #263: katalogdaki
+    FirstClassCallableRector 2.x'te ArrayToFirstClassCallableRector olmuş, Rector 'Expected an
+    existing class name' ile düştü — kurulu sürümde olmayan sınıf araca hiç gönderilmez."""
+    binp = rector_bin()
+    if not binp:
+        return frozenset()
+    if binp not in _RECTOR_CLASSES:
+        base = Path(binp).resolve().parents[1] / "rules"  # …/vendor/rector/rector/bin/rector → rules
+        if not base.is_dir():
+            base = Path(binp).expanduser().parent.parent / "rector" / "rector" / "rules"  # vendor/bin/rector
+        names = {"Rector\\" + str(p.relative_to(base).with_suffix("")).replace("/", "\\")
+                 for p in base.rglob("*Rector.php")} if base.is_dir() else set()
+        _RECTOR_CLASSES[binp] = frozenset(names)
+    return _RECTOR_CLASSES[binp]
+
+
 def rector_fixable(r) -> bool:
     """Katalogda Rector sınıfı olan otomatik (mekanik / deprecation) kural."""
     return bool(r is not None and r.auto and r.rector and r.kind in ("mechanical", "deprecation"))
 
 
+def fixer_fixable(r) -> bool:
+    """Kendi deterministik düzelticimizin (php_modern_scan.php --fix-<kural>) uyguladığı kural."""
+    return bool(r is not None and r.auto and r.fixer == "tempo" and r.kind in ("mechanical", "deprecation"))
+
+
+def llm_line_fixable(r) -> bool:
+    """Aracı olmayan ama satıra yerel otomatik kural: modern_fix'te bulunan HER yer taramadan
+    bilinir ve LLM yalnız o satırların ±birkaç satırlık penceresini düzeltir. Pipeline'da
+    mimar Task metnini 3000 karakterde kesik görüyor, planı eksik kalıyordu (#249)."""
+    return bool(r is not None and r.auto and r.line_local and r.kind in ("mechanical", "deprecation"))
+
+
+def tool_fixable(r) -> bool:
+    return rector_fixable(r) or fixer_fixable(r) or llm_line_fixable(r)
+
+
 def tool_rules(rules) -> set[str]:
-    """Rector'un uygulayacağı kurallar; Rector kapalı ya da kurulu değilse boş."""
-    return {r.key for r in rules if rector_fixable(r)} if rector_on() else set()
+    """Aracın (Rector ya da kendi düzelticimiz) uygulayacağı kurallar. Rector kurulu
+    değilse yalnız kendi düzelticimizinkiler; CREW_TECHDEBT_RECTOR kapalıysa hiçbiri."""
+    if not bool(_knob("CREW_TECHDEBT_RECTOR", True)):
+        return set()
+    known = rector_classes() if rector_on() else frozenset()
+    return {r.key for r in rules
+            if fixer_fixable(r) or (rector_fixable(r) and r.rector in known) or llm_line_fixable(r)}
+
+
+def scan_files(repo_root: Path, files: list[str], *, php_bin: str = "php", timeout: int = 300) -> list[dict]:
+    """Yalnız verilen dosyaların bulguları (tarayıcının --files kipi) — araç düzeltmesinden
+    sonra KALAN yerleri bulmak için. Yollar tarayıcıda da kök içi olarak süzülür."""
+    import subprocess
+    from agile_sdlc_crew import verify
+    if not files:
+        return []
+    r = subprocess.run([php_bin, "-d", "display_errors=stderr", str(SCAN_PHP), "--files", str(repo_root), *files],
+                       capture_output=True, text=True, timeout=timeout, env=verify._env())
+    if r.returncode != 0:
+        raise RuntimeError(f"Tarayıcı (--files) hata verdi: {(r.stderr or r.stdout)[-300:]}")
+    return list((json.loads(r.stdout or "{}") or {}).get("hits") or [])
 
 
 def load_cfg() -> dict:
@@ -789,7 +849,7 @@ def _row(g, rules_by_key: dict[str, Rule]) -> dict:
         "locations": [{"file": f, "line": ln, "text": t} for f, ln, t in locs[:20]], "recurring_of": g.recurring_of,
         "infra": list(g.infra),
         # Rector uygular (modern_fix) — UI "Araç uygular" der, pipeline kuyruğu değil
-        "tool": bool(not g.needs_human and rector_fixable(r) and rector_on()),
+        "tool": bool(not g.needs_human and r is not None and r.key in tool_rules([r])),
     })
     return row
 

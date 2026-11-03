@@ -567,6 +567,28 @@ SCHEMA: list[dict] = [
         "desc": "Araç düzeltmesi (modern_fix: Rector / Go modernize / ruff) PR'ının tek LLM incelemesinin profili (config/llm_profiles.yaml). Kodu araç yazdığı için varsayılan Sonnet (reviewer_cli); boş = reviewer'ın normal modeli (Opus).",
     },
     {
+        "key": "CREW_MODERN_FIX_LLM_LEFTOVERS",
+        "label": "Araç düzeltmesi · aracın kaçırdığı yerleri LLM düzeltsin",
+        "type": "bool",
+        "default": True,
+        "desc": "Araçtan (Rector) sonra kapsam dosyaları yeniden taranır; satır-yerel kuralın kalan her yeri ±6 satırlık pencerede LLM'e (CREW_MODERN_FIX_DEV_PROFILE) düzelttirilir, php -l'den geçmeyen dosya geri alınır. Aracı olmayan satır-yerel kurallar (?->, deprecated fonksiyonlar…) tamamen bu yolla düzeltilir. #264: Rector zincirleme atamayı atladı, satır elle düzeltilmek zorunda kaldı.",
+    },
+    {
+        "key": "CREW_MODERN_FIX_DEV_PROFILE",
+        "label": "Araç düzeltmesi · pencere düzeltme modeli (profil)",
+        "type": "str",
+        "default": "developer_cli",
+        "desc": "Kalan yer ve inceleme maddesi pencere düzeltmesinin profili (config/llm_profiles.yaml). Varsayılan developer_cli = Sonnet; boş = geliştiricinin normal modeli.",
+    },
+    {
+        "key": "CREW_MODERN_FIX_REVIEW_ROUNDS",
+        "label": "Araç düzeltmesi · inceleme düzeltme turu",
+        "type": "int",
+        "default": 1,
+        "min": 0,
+        "desc": "İnceleme bloklayan (blocker/major) madde bulursa maddenin satırı çevresinde LLM penceresiyle düzeltme + yeniden inceleme turu sayısı. Turlar bitince madde kalırsa iş needs_human olur (PR açık, WI Code Review'a GEÇMEZ).",
+    },
+    {
         "key": "CREW_TECHDEBT_MODERN_MAX_TAKE",
         "label": "Teknik borç · modernleştirmede istek başı en çok iş",
         "type": "int",

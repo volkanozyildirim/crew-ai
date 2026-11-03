@@ -651,7 +651,7 @@ def _quality_requirements_json(title: str, desc_html: str, ac_html: str) -> str:
         "acceptance_criteria": [{"id": f"AC{i + 1}", "desc": a[:500]} for i, a in enumerate(acs[:5])],
         "out_of_scope": ["Kanıtta olmayan dosyalarda yeniden düzenleme"],
         "assumptions": [], "open_questions": [],
-        "task_text": desc[:3000],
+        "task_text": desc[:_cb.cap("QUALITY_TASK_TEXT")],
     }
     return "```json\n" + _json.dumps(data, ensure_ascii=False, indent=2) + "\n```"
 
@@ -1586,7 +1586,15 @@ class AgileSDLCFlow(Flow[PipelineState]):
 
         # Requirements (step 1 sonrasi — kickoff dahil, artik requirements once calisiyor)
         if s.requirements_text and step_key != "requirements_analysis_task":
-            parts.append(f"\n# Is Analizi (Gereksinimler)\n{self._forward_text('requirements', s.requirements_text, _cb.cap('REQUIREMENTS'))}")
+            # Kalite doğrudan akışında gereksinim = Task'ın kendisi (dosya:satır listesi dahil). 3000'de
+            # kesilince #249'un mimarı 64 dosyanın 17'sini gördü — o akışta Task metninin sınırı geçerli.
+            _req_cap = _cb.cap('REQUIREMENTS')
+            try:
+                if self._quality_direct_flow():
+                    _req_cap = max(_req_cap, _cb.cap('QUALITY_TASK_TEXT') + 3000)
+            except Exception:  # noqa: BLE001
+                pass
+            parts.append(f"\n# Is Analizi (Gereksinimler)\n{self._forward_text('requirements', s.requirements_text, _req_cap)}")
 
         # Kickoff Design Review tutanagi — adima gore FARKLI kirpilir, o yuzden
         # TAIL'e gider (prefix'i bozmasin). Teknik tasarim en genis pencereyi

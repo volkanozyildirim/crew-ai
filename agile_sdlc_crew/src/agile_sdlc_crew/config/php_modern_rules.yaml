@@ -97,6 +97,7 @@ rules:
     kind: deprecation
     unit: file
     auto: true
+    line_local: false  # blok/sınıf düzeyinde — araç kaçırdıysa LLM penceresiyle düzeltilmez
     sp_unit: 1
     title: "Bildirilmemiş property'ye atama (dinamik property)"
     summary: "Sınıfta tanımlı olmayan bir property'ye `$this->x = …` ile atama PHP 8.2'de deprecation, PHP 9'da hata. Yalnız kalıtım, trait ve __set olmayan sınıflarda raporlanır."
@@ -251,7 +252,6 @@ rules:
     before: "$name = $order->getCustomer() ? $order->getCustomer()->getName() : null;"
     after: "$name = $order->getCustomer()?->getName();"
     ref: "https://wiki.php.net/rfc/nullsafe_operator"
-    rector: "Rector\\Php80\\Rector\\Ternary\\TernaryToNullsafeOperatorRector"
   - key: array_destructuring
     since: "7.1"
     kind: mechanical
@@ -273,6 +273,7 @@ rules:
     kind: mechanical
     unit: file
     auto: true
+    line_local: false  # blok/sınıf düzeyinde — araç kaçırdıysa LLM penceresiyle düzeltilmez
     sp_unit: 1
     title: "Her dalı tek değer döndüren switch → match"
     summary: "switch'in her case'i aynı değişkene atama ya da return yapıyor; break unutma riski taşıyor."
@@ -312,12 +313,13 @@ rules:
     before: "array_map([$this, 'normalize'], $rows)"
     after: "array_map($this->normalize(...), $rows)"
     ref: "https://wiki.php.net/rfc/first_class_callable_syntax"
-    rector: "Rector\\Php81\\Rector\\Array_\\FirstClassCallableRector"
+    rector: "Rector\\Php81\\Rector\\Array_\\ArrayToFirstClassCallableRector"  # yalnız [$obj, 'm'] biçimi
   - key: ctor_promotion
     since: "8.0"
     kind: mechanical
     unit: file
     auto: true
+    line_local: false  # blok/sınıf düzeyinde — araç kaçırdıysa LLM penceresiyle düzeltilmez
     sp_unit: 1
     title: "Yalnız $this->x = $x yapan constructor → constructor promotion"
     summary: "Property tanımı, constructor parametresi ve atama üç ayrı yerde tekrar ediyor."
@@ -350,6 +352,7 @@ rules:
     before: "public function login(string $user, string $password)"
     after: "public function login(string $user, #[\\SensitiveParameter] string $password)"
     ref: "https://wiki.php.net/rfc/redact_parameters_in_back_traces"
+    fixer: "tempo"  # Rector'un AddSensitiveParameterAttributeRector'ı kaldırıldı
   - key: typed_class_constants
     since: "8.3"
     kind: mechanical

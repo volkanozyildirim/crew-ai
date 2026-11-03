@@ -22,6 +22,9 @@ _DEFAULTS = {
     "UAT": 2500,
     "PLAN_CHANGES": 10,     # adet
     "WI_COMMENTS": 4000,   # WI'daki insan yorumlari (ayri endpoint, alanlarda yok)
+    # Kalite dogrudan akisinda mimara giden Task metni. 3000'di: #249'un 64 dosyalik Task'inin
+    # 17 dosyasi gorundu, plan 9 dosyada kaldi. ~16K char Task ≈ 4K token (Sonnet'te kurus).
+    "QUALITY_TASK_TEXT": 20000,
     "SIMILAR": 200,         # benzer is icerik char
     "TOTAL_WARN": 24000,    # assemble edilen context icin uyari esigi
 }
