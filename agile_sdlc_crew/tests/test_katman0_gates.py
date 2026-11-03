@@ -6304,11 +6304,17 @@ def test_php_rector_fix():
 
         binp = php_modern.rector_bin()
         if binp:
+            # reponun autoload'u çalıştırılmamalı (rector bin cwd'deki vendor/autoload.php'yi include eder)
+            (root / "vendor").mkdir()
+            (root / "vendor" / "autoload.php").write_text(
+                f"<?php file_put_contents({json.dumps(str(Path(td) / 'PWNED'))}, 'x');\n")
             (root / "app" / "A.php").write_text("<?php\nfunction f() { return [1, 2]; }\nlist($a, $b) = f();\n"
                                                 "$c = isset($x) ? $x : 0;\n")
             modern_fix.php_apply(root, {"array_destructuring": ["app/A.php"]}, "8.2")
             out = (root / "app" / "A.php").read_text()
             check("Rector: yalnız kapsamdaki kural uygulanır", "[$a, $b] = f();" in out and "isset($x) ? $x : 0" in out, out)
+            check("Rector: reponun vendor/autoload.php'si çalıştırılmaz (cwd repo dışında)",
+                  not (Path(td) / "PWNED").exists())
         else:
             skip("Rector uygulaması", "rector kurulu değil")
 

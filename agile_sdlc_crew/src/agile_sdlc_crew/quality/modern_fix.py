@@ -145,8 +145,12 @@ def php_apply(root: Path, scope: dict[str, list[str]], version: str) -> None:
     with tempfile.TemporaryDirectory(prefix="tempo-rector-") as td:
         cfg = Path(td) / "rector.php"
         cfg.write_text(rector_config(root, scope, version, Path(td) / "cache"), encoding="utf-8")
+        # cwd repo DIŞINDA: rector'un bin'i çalışma dizinindeki `vendor/autoload.php`'yi
+        # include eder (bin/rector.php AutoloadIncluder) — repo kökünde koşsa reponun
+        # composer autoload'u (ve `files` girdileri) sunucu kullanıcısıyla ÇALIŞIRDI.
+        # Yollar yapılandırmada mutlak; hedef sürüm withPhpVersion'da, composer.json okunmaz.
         r = subprocess.run([binp, "process", "--config", str(cfg), "--no-progress-bar", "--no-diffs",
-                            "--memory-limit=2G"], cwd=str(root), capture_output=True, text=True, timeout=1200,
+                            "--memory-limit=2G"], cwd=td, capture_output=True, text=True, timeout=1200,
                            env=verify._env())
         if r.returncode != 0:  # process: 0 = tamam (değişiklik olsa da); ayrıştırma hatası ≠ 0
             raise RuntimeError("Rector hata verdi: " + ((r.stderr or r.stdout) or "").strip()[-600:])
