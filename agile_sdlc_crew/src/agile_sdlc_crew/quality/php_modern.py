@@ -57,6 +57,9 @@ class Rule:
     sp_unit: int = 1
     rector: str = ""
     fixer: str = ""  # "tempo": kendi deterministik düzelticimiz (Rector karşılığı yok)
+    # Bulgu satırına dar bir pencerede (±birkaç satır) çözülebilir mi — araç kaçırırsa kalan yeri
+    # LLM pencereyle düzeltir. switch→match, promotion, dinamik property: sınıf/blok düzeyinde → hayır.
+    line_local: bool = True
     requires: list[str] = field(default_factory=list)            # PHP eklentileri
     requires_if: dict[str, list[str]] = field(default_factory=dict)  # bulunan yerde geçen ad → eklentiler
 
@@ -92,7 +95,7 @@ def load_rules(path: Path = RULES_PATH) -> list[Rule]:
             # structural / report asla otonom değil — YAML ne derse desin
             auto=bool(r.get("auto")) and kind in ("deprecation", "mechanical"),
             sp_unit=int(r.get("sp_unit") or 0), rector=str(r.get("rector") or ""),
-            fixer=str(r.get("fixer") or ""),
+            fixer=str(r.get("fixer") or ""), line_local=bool(r.get("line_local", True)),
             requires=[str(x) for x in r.get("requires") or []],
             requires_if={str(k): [str(x) for x in v or []] for k, v in (r.get("requires_if") or {}).items()},
         ))
@@ -658,8 +661,15 @@ def fixer_fixable(r) -> bool:
     return bool(r is not None and r.auto and r.fixer == "tempo" and r.kind in ("mechanical", "deprecation"))
 
 
+def llm_line_fixable(r) -> bool:
+    """Aracı olmayan ama satıra yerel otomatik kural: modern_fix'te bulunan HER yer taramadan
+    bilinir ve LLM yalnız o satırların ±birkaç satırlık penceresini düzeltir. Pipeline'da
+    mimar Task metnini 3000 karakterde kesik görüyor, planı eksik kalıyordu (#249)."""
+    return bool(r is not None and r.auto and r.line_local and r.kind in ("mechanical", "deprecation"))
+
+
 def tool_fixable(r) -> bool:
-    return rector_fixable(r) or fixer_fixable(r)
+    return rector_fixable(r) or fixer_fixable(r) or llm_line_fixable(r)
 
 
 def tool_rules(rules) -> set[str]:
@@ -668,7 +678,22 @@ def tool_rules(rules) -> set[str]:
     if not bool(_knob("CREW_TECHDEBT_RECTOR", True)):
         return set()
     known = rector_classes() if rector_on() else frozenset()
-    return {r.key for r in rules if fixer_fixable(r) or (rector_fixable(r) and r.rector in known)}
+    return {r.key for r in rules
+            if fixer_fixable(r) or (rector_fixable(r) and r.rector in known) or llm_line_fixable(r)}
+
+
+def scan_files(repo_root: Path, files: list[str], *, php_bin: str = "php", timeout: int = 300) -> list[dict]:
+    """Yalnız verilen dosyaların bulguları (tarayıcının --files kipi) — araç düzeltmesinden
+    sonra KALAN yerleri bulmak için. Yollar tarayıcıda da kök içi olarak süzülür."""
+    import subprocess
+    from agile_sdlc_crew import verify
+    if not files:
+        return []
+    r = subprocess.run([php_bin, "-d", "display_errors=stderr", str(SCAN_PHP), "--files", str(repo_root), *files],
+                       capture_output=True, text=True, timeout=timeout, env=verify._env())
+    if r.returncode != 0:
+        raise RuntimeError(f"Tarayıcı (--files) hata verdi: {(r.stderr or r.stdout)[-300:]}")
+    return list((json.loads(r.stdout or "{}") or {}).get("hits") or [])
 
 
 def load_cfg() -> dict:

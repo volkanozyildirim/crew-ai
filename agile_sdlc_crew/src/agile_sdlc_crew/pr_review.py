@@ -396,7 +396,8 @@ def tool_diff_context(changes: dict[str, tuple[str, str]], *, tool: str = "", co
 
 def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name: str = "",
                   job_id: int | None = None, post: bool = True,
-                  changes: dict[str, tuple[str, str]] | None = None, tool: str = "") -> dict:
+                  changes: dict[str, tuple[str, str]] | None = None, tool: str = "",
+                  extra_context: str = "") -> dict:
     """`changes` (yol → (eski, yeni)) verilirse PR bir araç düzeltmesidir: bağlam dosya
     gövdeleri değil tüm dosyaların diff'i (tool_diff_context); gövdeler satır oturtma ve
     öneri doğrulaması için yine `file_bodies`'e yazılır."""
@@ -436,7 +437,7 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
         who = ("Bu PR insan tarafından geliştirildi. İncelemen DANIŞMA "
                "niteliğindedir: kodu sen değiştirmeyeceksin; bulgular PR yorumu olarak geliştiriciye gidecek. "
                "Somut, dosya/satır referanslı, uygulanabilir yaz.")
-    ctx = requirements + "\n\n# İNCELEME KAPSAMI\n" + who + pr_ctx
+    ctx = requirements + "\n\n# İNCELEME KAPSAMI\n" + who + (extra_context or "") + pr_ctx
     if job_id:
         db.update_job(job_id, repo_name=rname, branch_name=branch, pr_id=str(pid), pr_url=pr_url,
                       wi_title=(wi_fields.get("System.Title", "") or pr.get("title", "") or "")[:200],
@@ -523,4 +524,5 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
         except Exception:
             pass
     return {"repo": rname, "pr_id": pid, "pr_url": pr_url, "work_item_id": work_item_id, "branch": branch,
-            "verdict": verdict, "issues": len(issues), "files": len(files), "posted": posted, "summary": summary}
+            "verdict": verdict, "issues": len(issues), "files": len(files), "posted": posted, "summary": summary,
+            "issue_list": issues}

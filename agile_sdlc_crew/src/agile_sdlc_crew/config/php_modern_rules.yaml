@@ -97,6 +97,7 @@ rules:
     kind: deprecation
     unit: file
     auto: true
+    line_local: false  # blok/sınıf düzeyinde — araç kaçırdıysa LLM penceresiyle düzeltilmez
     sp_unit: 1
     title: "Bildirilmemiş property'ye atama (dinamik property)"
     summary: "Sınıfta tanımlı olmayan bir property'ye `$this->x = …` ile atama PHP 8.2'de deprecation, PHP 9'da hata. Yalnız kalıtım, trait ve __set olmayan sınıflarda raporlanır."
@@ -272,6 +273,7 @@ rules:
     kind: mechanical
     unit: file
     auto: true
+    line_local: false  # blok/sınıf düzeyinde — araç kaçırdıysa LLM penceresiyle düzeltilmez
     sp_unit: 1
     title: "Her dalı tek değer döndüren switch → match"
     summary: "switch'in her case'i aynı değişkene atama ya da return yapıyor; break unutma riski taşıyor."
@@ -317,6 +319,7 @@ rules:
     kind: mechanical
     unit: file
     auto: true
+    line_local: false  # blok/sınıf düzeyinde — araç kaçırdıysa LLM penceresiyle düzeltilmez
     sp_unit: 1
     title: "Yalnız $this->x = $x yapan constructor → constructor promotion"
     summary: "Property tanımı, constructor parametresi ve atama üç ayrı yerde tekrar ediyor."

@@ -17,11 +17,14 @@ declare(strict_types=1);
 // Yalnız verilen dosyalarda, taramanın sensitive_parameter dediği parametrelerin ÖNÜNE
 // `#[\SensitiveParameter] ` yazar (Rector'un karşılığı kaldırıldı — ad eşleşmesi bizde,
 // ekleme davranış değiştirmez: yalnız hata izinde değer gizlenir). Çıktı: {"changed": [...]}.
+// Dosya kipi: php php_modern_scan.php --files <repo kökü> <dosya…> → yalnız o dosyaların bulguları
+// (araç düzeltmesinden SONRA kalan yerleri bulmak için; tüm repoyu taramaz).
 $fixSensitive = ($argv[1] ?? '') === '--fix-sensitive';
-$argOff = $fixSensitive ? 1 : 0;
+$filesOnly = ($argv[1] ?? '') === '--files';
+$argOff = ($fixSensitive || $filesOnly) ? 1 : 0;
 $root = rtrim((string) ($argv[1 + $argOff] ?? ''), '/');
-$exclude = $fixSensitive ? [] : array_values(array_filter(array_map('trim', explode(',', (string) ($argv[2] ?? '')))));
-$fixFiles = $fixSensitive ? array_slice($argv, 3) : [];
+$exclude = $argOff ? [] : array_values(array_filter(array_map('trim', explode(',', (string) ($argv[2] ?? '')))));
+$fixFiles = $argOff ? array_slice($argv, 3) : [];
 if ($root === '' || !is_dir($root)) {
     fwrite(STDERR, "kök dizin yok\n");
     exit(2);
@@ -793,8 +796,8 @@ final class Scanner
     }
 }
 
-// ── düzeltme kipi: yalnız verilen dosyalar ──
-if ($fixSensitive) {
+// ── düzeltme / dosya kipi: yalnız verilen dosyalar ──
+if ($argOff) {
     $sc = new Scanner();
     $changed = [];
     $rootReal = realpath($root);
@@ -807,7 +810,7 @@ if ($fixSensitive) {
         }
         $sc->scanFile($path, $rel);
         $offs = array_unique($sc->inserts[$rel] ?? []);
-        if (!$offs) {
+        if ($filesOnly || !$offs) {
             continue;
         }
         rsort($offs);
@@ -818,7 +821,8 @@ if ($fixSensitive) {
         file_put_contents($path, $code);
         $changed[] = $rel;
     }
-    echo json_encode(['changed' => $changed], JSON_UNESCAPED_SLASHES);
+    echo json_encode($filesOnly ? ['hits' => array_values($sc->hits)] : ['changed' => $changed],
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     exit(0);
 }
 

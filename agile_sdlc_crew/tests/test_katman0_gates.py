@@ -6287,7 +6287,7 @@ def test_php_rector_fix():
             check("PHP kapsamı: SensitiveParameter kendi düzelticimizle kabul edilir", ok2[2] == {"sensitive_parameter": ["app/A.php"]})
             rej = 0
             for b in ({"typed_properties": ["app/A.php"]}, {"array_destructuring": ["../x.php"]},
-                      {"str_contains": ["app/A.php"]}):  # sınıfı kurulu Rector'da yok sayılıyor
+                      {"ctor_promotion": ["app/A.php"]}):  # blok düzeyinde, sınıfı kurulu Rector'da yok sayılıyor
                 try:
                     modern_fix.load_scope(json.dumps({"lang": "php", "repo": "core", "scope": b}), Path(td))
                 except ValueError:
@@ -6299,11 +6299,11 @@ def test_php_rector_fix():
         try:
             try:
                 modern_fix.load_scope(json.dumps({"lang": "php", "repo": "core",
-                                                  "scope": {"array_destructuring": ["app/A.php"]}}), Path(td))
+                                                  "scope": {"ctor_promotion": ["app/A.php"]}}), Path(td))
                 off = False
             except ValueError:
                 off = True
-            check("Rector kapalı/kurulu değil → PHP araç işi reddedilir", off)
+            check("Rector kapalı/kurulu değil → Rector'a muhtaç (blok düzeyindeki) kural reddedilir", off)
         finally:
             php_modern.rector_on = _on
 
@@ -6392,10 +6392,11 @@ def test_php_rector_fix():
           and json.loads(tool_rows[0][1])["lang"] == "php")
 
     src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern_fix.py").read_text()
-    check("inceleme düşük modelle (iş kapsamlı reviewer profili)", "CREW_MODERN_FIX_REVIEW_PROFILE" in src
-          and 'set_job_llm_overrides({"code_reviewer": prof})' in src and "job_llm_scope()" in src)
+    check("inceleme ve pencere düzeltmesi düşük modelle (iş kapsamlı profiller)", "CREW_MODERN_FIX_REVIEW_PROFILE" in src
+          and "CREW_MODERN_FIX_DEV_PROFILE" in src and "resolver.set_job_llm_overrides(_job_models(pc))" in src
+          and "job_llm_scope()" in src)
     check("önceki koşunun dalı varsa araç düzeltmesi taze dalda açılır",
-          'f"refs/heads/feature/{work_item_id}" in heads' in src and "-tool-" in src
+          'if f"refs/heads/{base}" in heads:' in src and "-tool-" in src
           and 'br.get("note") == "zaten mevcut"' not in src)
     pm = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/php_modern.py").read_text()
     ik = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/intake.py").read_text()
@@ -6425,7 +6426,82 @@ def test_tool_review_diff_context():
           "if changes:" in src and "tool_diff_context(changes, tool=tool)" in src and 'file_bodies.update({"/" + p.lstrip("/")' in src)
     mf = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern_fix.py").read_text()
     check("modern_fix incelemeye eski/yeni hâli verir", 'originals = {f: _git(root, "show", f"origin/main:{f}").stdout' in mf
-          and "changes={f: (originals.get(f, \"\"), c) for f, c in contents.items()}, tool=tool" in mf)
+          and "changes={f: (originals.get(f, \"\"), c) for f, c in cur.items()}, tool=tool" in mf)
+
+
+def test_tool_fix_leftovers():
+    """#264: Rector zincirleme atamayı atladı, inceleme CHANGES_REQUIRED dedi, satır elle
+    düzeltilecekti. Kullanıcı kararı: manuel müdahale gerekmesin — araçtan sonra kalan yerler
+    taranır ve LLM yalnız o satırların penceresini düzeltir; inceleme maddesi de bir turda."""
+    print("\n[araç düzeltmesi: kalan yerler ve inceleme turu]")
+    import re as _re
+    from agile_sdlc_crew.quality import modern_fix, php_modern
+    rules = {r.key: r for r in php_modern.load_rules()}
+    check("satır-yerel kural aracı olmasa da araç işi (?->), blok düzeyindeki değil (match, promotion, dinamik property)",
+          php_modern.llm_line_fixable(rules["nullsafe"]) and not php_modern.llm_line_fixable(rules["match"])
+          and not php_modern.llm_line_fixable(rules["ctor_promotion"])
+          and not php_modern.llm_line_fixable(rules["dynamic_properties"]))
+    check("pencereler birleşir", modern_fix._merge_windows([10, 14, 40], 100, 3) == [(7, 17, [10, 14]), (37, 43, [40])])
+
+    def fake_llm(prompt: str) -> str:
+        body = prompt.rsplit("\n```\n", 1)[-1].rsplit("\n```", 1)[0]
+        lines = [_re.sub(r"^\s*\d+\| ?", "", ln) for ln in body.rstrip("\n").splitlines()]
+        out = [_re.sub(r"isset\((\$[\w\[\]'\"]+)\) \? \1 : ", r"\1 ?? ", ln) for ln in lines]
+        return "```php\n" + "\n".join(out) + "\n```"
+
+    if not shutil.which("php"):
+        skip("kalan yer düzeltmesi", "php yok")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "core"
+        (root / "app").mkdir(parents=True)
+        (root / "app" / "R.php").write_text(
+            "<?php\nfunction r(array $params) {\n"
+            "    $searchText = $params['searchText'] = isset($params['searchText']) ? $params['searchText'] : null;\n"
+            "    $b = 1;\n    return $searchText;\n}\n"
+            "function k($t) {\n    switch ($t) {\n        case 'a':\n            return 1;\n        case 'b':\n"
+            "            return 2;\n        default:\n            return 0;\n    }\n}\n")
+        hits = php_modern.scan_files(root, ["app/R.php", "../../x.php"])
+        check("tarayıcı --files: yalnız verilen dosya, kalan ?? yeri bulunur",
+              any(h["rule"] == "null_coalesce" and h["line"] == 3 for h in hits), str(hits))
+        scope = {"null_coalesce": ["app/R.php"], "match": ["app/R.php"]}
+        res = modern_fix.fix_leftovers(root, scope, "8.2", ask=fake_llm)
+        out = (root / "app" / "R.php").read_text()
+        check("kalan satır-yerel yer pencereyle düzeltilir (zincirleme atama dahil)",
+              res["fixed"] == 1 and "$params['searchText'] ?? null" in out and not res["remaining"], f"{res} {out}")
+        check("blok düzeyindeki kalan yer (switch) LLM'e verilmez, 'bilerek bırakıldı' listesinde",
+              any(r == "match" for _f, _l, r in res["skipped"]) and "switch ($t)" in out, str(res))
+        snap = (root / "app" / "R.php").read_text()
+        n = modern_fix.window_fix(root, "app/R.php", [4], "x", radius=2, ask=lambda p: "Bu satırı değiştirdim, tamam.")
+        check("düzyazı yanıt reddedilir, dosya değişmez", n == 0 and (root / "app" / "R.php").read_text() == snap)
+        n = modern_fix.window_fix(root, "app/R.php", [4], "x", radius=1,
+                                  ask=lambda p: "```php\n    $searchText = 1;\n    $b = 1 +;\n    switch ($b) {\n```")
+        check("sözdizimini bozan yanıt php -l'de yakalanır ve geri alınır", n == 0 and (root / "app" / "R.php").read_text() == snap)
+        issues = [{"file": "app/R.php", "line": 4, "severity": "major", "problem": "p", "required_fix": "f"},
+                  {"file": "app/X.php", "line": 2, "severity": "major"}]
+        seen = []
+        modern_fix.fix_review_issues(root, issues, {"app/R.php"}, ask=lambda p: (seen.append(p), "")[1])
+        check("inceleme maddesi: yalnız kapsamdaki dosya, satır penceresi + maddenin düzeltmesi isteme girer",
+              len(seen) == 1 and "line 4: p FIX: f" in seen[0])
+
+    mf = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern_fix.py").read_text()
+    check("bloklayan madde turlardan sonra kalırsa needs_human (WI Code Review'a geçmez)",
+          "raise NeedsHumanReview(" in mf and "db.needs_human_job(job_id, str(e))" in mf
+          and mf.index("raise NeedsHumanReview(") < mf.index('"review")\n        if target:'))
+    check("önceki araç PR'ı açıksa dalına itilir (yeni PR / terk gerekmez)",
+          "job_kind='modern_fix'" in mf and "str(pr.get(\"pr_id\")) == pid" in mf)
+    check("bilerek bırakılan yerler inceleme düzeltmesine hedef olmaz", "keep = {(f, int(ln or 0))" in mf)
+    pr = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
+    check("run_pr_review madde listesini ve ek bağlamı taşır", '"issue_list": issues' in pr and "extra_context" in pr)
+    from agile_sdlc_crew import context_budget as cb
+    from agile_sdlc_crew.flow import _quality_requirements_json
+    desc = "<p>Bulunan yerler (150):</p>" + "".join(f"<p>app/F{i}.php:{i} — list($a, $b) = f();</p>" for i in range(64))
+    req = _quality_requirements_json("[core] list", desc, "<li>AC</li>")
+    check("kalite doğrudan akışı: 64 dosyalık Task metni kesilmeden gereksinime girer (#249: 3000'de 17 dosya)",
+          "app/F63.php" in req and cb.cap("QUALITY_TASK_TEXT") >= 16000)
+    fl = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("doğrudan akışta gereksinim ileri beslemesi de Task sınırını kullanır",
+          "_req_cap = max(_req_cap, _cb.cap('QUALITY_TASK_TEXT') + 3000)" in fl)
 
 
 def test_modern_sp():
@@ -6578,7 +6654,8 @@ def main():
               test_modern_sp,
               test_php_modern_82_84,
               test_php_rector_fix,
-              test_tool_review_diff_context):
+              test_tool_review_diff_context,
+              test_tool_fix_leftovers):
         try:
             t()
         except Exception as e:
