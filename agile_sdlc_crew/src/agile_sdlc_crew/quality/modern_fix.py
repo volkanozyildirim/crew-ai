@@ -567,32 +567,68 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
                              extra_context=notes)
     rv = review(contents)
     rounds = int(pc.get("CREW_MODERN_FIX_REVIEW_ROUNDS") or 0)
-    while _blocking(rv.get("issue_list")) and rounds > 0:
-        rounds -= 1
-        # Aracın bilerek bıraktığı (satır-yerel olmayan) yerler düzeltme hedefi DEĞİL — LLM switch→match
-        # ya da promotion'ı pencerede yapmasın; inceleme yine de işaretlerse o madde insana kalır.
-        keep = {(f, int(ln or 0)) for f, ln, _r in left["skipped"]}
-        blocking = [i for i in _blocking(rv.get("issue_list"))
-                    if (str(i.get("file") or "").lstrip("/"), int(i.get("line") or 0)) not in keep]
+    rules_by = {x.key: x for x in _pm.load_rules()} if lang == "php" else {}
+    # Kuralın tamamı blok/sınıf düzeyindeyse (promotion, match) inceleme maddesi pencereyle düzeltilmez.
+    # #269: Rector Ekol SOAP sınıflarında yalnız $apiKey'i promote etti, property bildirim sırası değişti
+    # (SoapClient nesneyi bildirim sırasıyla serileştirir → XML eleman sırası). Böyle dosya PR'dan
+    # ÇIKARILIR (main hâline döner), geri kalanı yeniden incelenir — insan beklemez.
+    non_local = lang == "php" and not any(_pm.llm_line_fixable(rules_by.get(k)) for k in scope)
+    dropped: list[str] = []
+
+    def _rel(i) -> str:
+        return str(i.get("file") or "").lstrip("/")
+    while True:
+        blocking = _blocking(rv.get("issue_list"))
         if not blocking:
             break
-        log.info(f"  🧰 İnceleme {len(blocking)} bloklayan madde buldu — pencereyle düzeltiliyor")
+        keep = {(f, int(ln or 0)) for f, ln, _r in left["skipped"]}
+        to_drop = sorted({_rel(i) for i in blocking if _rel(i) in contents
+                          and (non_local or (_rel(i), int(i.get("line") or 0)) in keep)})
+        fixable = [i for i in blocking if _rel(i) not in to_drop]
+        if to_drop and pc.get("CREW_MODERN_FIX_DROP_RISKY"):
+            if len(to_drop) >= len(contents):
+                raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: incelemede değişen dosyaların TÜMÜ "
+                                       "davranış riski taşıyor — PR açık, insan karar versin")
+            client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f,
+                                                "content": originals.get(f, "")} for f in to_drop],
+                                f"#{work_item_id}: incelemede riskli bulunan {len(to_drop)} dosya PR'dan çıkarıldı")
+            for f in to_drop:
+                contents.pop(f, None)
+            dropped += to_drop
+            why = {_rel(i): (i.get("problem") or "")[:200] for i in blocking if _rel(i) in to_drop}
+            msg = (f"## 🧰 Araç düzeltmesi — {len(to_drop)} dosya PR'dan çıkarıldı\n\nİnceleme bu dosyalarda "
+                   "davranış riski buldu; kural blok/sınıf düzeyinde olduğu için elle düzeltilmedi, dosyalar "
+                   "`main` hâline döndü (bilerek bırakıldı):\n"
+                   + "\n".join(f"- `{f}` — {why.get(f, '')}" for f in to_drop) + sig)
+            try:
+                client.add_pr_comment(repo, int(pr["pr_id"]), msg)
+                _add_wi_comment(client, work_item_id, msg)
+            except Exception as e:  # noqa: BLE001
+                log.info(f"  Çıkarma notu yazılamadı: {e}")
+            log.info(f"  🧰 {len(to_drop)} riskli dosya PR'dan çıkarıldı — kalan {len(contents)} dosya yeniden inceleniyor")
+            notes += ("\n\nİNCELEMEDE RİSKLİ BULUNUP PR'DAN ÇIKARILAN dosyalar (main hâlinde, kapsam dışı — "
+                      "eksik sayılmaz): " + ", ".join(f"`{f}`" for f in dropped))
+            rv = review(contents)
+            continue
+        if not fixable or rounds <= 0:
+            break
+        rounds -= 1
+        log.info(f"  🧰 İnceleme {len(fixable)} bloklayan madde buldu — pencereyle düzeltiliyor")
         if job_id:
             _acct.set_call_context(job_id, "implement_change_task", "senior_developer")
         with _detached(root):
             for f, c in contents.items():
                 (root / f).write_text(c, encoding="utf-8")
-            n = fix_review_issues(root, blocking, set(files_all))
+            n = fix_review_issues(root, fixable, set(contents))
             if lang == "php":
-                more = fix_leftovers(root, scope, version)
+                more = fix_leftovers(root, {k: [f for f in v if f in contents] for k, v in scope.items()}, version)
                 left = {**more, "fixed": left["fixed"] + more["fixed"]}
-            new = {f: (root / f).read_text(encoding="utf-8") for f in _changed_in_scope(root, files_all)}
+            new = {f: (root / f).read_text(encoding="utf-8") for f in _changed_in_scope(root, list(contents))}
             fix_res = verify.verify(root, list(new)) if new else {"ok": True}
         upd = {f: c for f, c in new.items() if contents.get(f) != c}
         if not n or not upd or not fix_res.get("ok"):
             log.info("  🧰 İnceleme düzeltmesi ilerleme sağlamadı — insan incelemesine")
             break
-        originals.update({f: _git(root, "show", f"origin/main:{f}").stdout for f in upd if f not in originals})
         contents.update(upd)
         client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f, "content": c}
                                            for f, c in upd.items()],
@@ -607,8 +643,8 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
         target = wl.plan_transition(info["wi_state"], info["wi_states"], "review")
         if target:
             wl.apply_state(client, str(work_item_id), target, logger=log.info)
-    return {"changed": len(changed), "pr_id": pr["pr_id"], "leftover_fixed": left["fixed"],
-            "remaining": len(left["remaining"]), "verdict": rv.get("verdict")}
+    return {"changed": len(contents), "pr_id": pr["pr_id"], "leftover_fixed": left["fixed"],
+            "remaining": len(left["remaining"]), "dropped": dropped, "verdict": rv.get("verdict")}
 
 
 def _sites_note(left: dict) -> str:
