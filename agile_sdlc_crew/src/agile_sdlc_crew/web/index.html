@@ -16,6 +16,7 @@
   --run: #2f6fed; --run-soft: #e3ebfd; --success: #1f9d6a; --ok-soft: #e2f4ec;
   --danger: #d64545; --fail-soft: #fbe3e2; --warning: #e08a1e; --human-soft: #fdefd8; --info: #2f6fed;
   --shadow: 0 8px 24px rgba(27,26,23,0.10);
+  --viz-1: #0e7c86; --viz-2: #2f6fed; --viz-3: #e08a1e; --viz-4: #8a5cd6;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   color-scheme: dark;
@@ -25,6 +26,7 @@
   --run: #6f9bff; --run-soft: #1c2a4d; --success: #3fbf8a; --ok-soft: #14352a;
   --danger: #f07070; --fail-soft: #3f1f1f; --warning: #f0a53a; --human-soft: #3d2a10; --info: #6f9bff;
   --shadow: 0 8px 24px rgba(0,0,0,0.45);
+  --viz-1: #3fb7bf; --viz-2: #6f9bff; --viz-3: #f0a53a; --viz-4: #b08cf0;
 }}
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -34,6 +36,7 @@
   --run: #6f9bff; --run-soft: #1c2a4d; --success: #3fbf8a; --ok-soft: #14352a;
   --danger: #f07070; --fail-soft: #3f1f1f; --warning: #f0a53a; --human-soft: #3d2a10; --info: #6f9bff;
   --shadow: 0 8px 24px rgba(0,0,0,0.45);
+  --viz-1: #3fb7bf; --viz-2: #6f9bff; --viz-3: #f0a53a; --viz-4: #b08cf0;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family:'Geist','Helvetica Neue',Arial,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; overflow-x:hidden; -webkit-font-smoothing:antialiased; }
@@ -200,6 +203,59 @@ header {
 .perf .stack { display:flex; height:8px; border-radius:999px; overflow:hidden; background:var(--border); min-width:160px; }
 .perf .stack span { height:100%; }
 .perf tr.total td { font-weight:600; background:var(--bg-elevated); }
+/* ── Maliyet sekmesi ── */
+.cx { padding:20px 24px 28px; display:flex; flex-direction:column; gap:14px; }
+.cx-head { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
+.cx-title { font-size:18px; font-weight:650; letter-spacing:-.01em; }
+.cx-sub { font-size:12px; color:var(--text-dim); }
+.cx-kpis { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
+.cx-kpi { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:14px 16px; display:flex; flex-direction:column; gap:4px; min-width:0; }
+.cx-kpi .l { font-size:11px; color:var(--text-dim); font-weight:600; text-transform:uppercase; letter-spacing:.05em; }
+.cx-kpi .v { font-size:26px; font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; line-height:1.15; }
+.cx-kpi .v small { font-size:13px; font-weight:500; color:var(--text-dim); margin-left:2px; }
+.cx-kpi .s { font-size:12px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cx-grid { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:14px; align-items:start; }
+.cx-grid.even { grid-template-columns:minmax(0,1fr) minmax(0,1.15fr); }
+.cx-col { display:flex; flex-direction:column; gap:14px; min-width:0; }
+.cx .card { overflow:hidden; }
+.cx .card-head .note { font-size:11.5px; color:var(--faint); font-weight:400; }
+.cx-scroll { overflow-x:auto; }
+.cx-tbl { width:100%; border-collapse:collapse; font-size:12.5px; }
+.cx-tbl th { text-align:left; font-size:11px; font-weight:600; color:var(--text-dim); padding:7px 12px; border-top:1px solid var(--border); white-space:nowrap; background:var(--bg-elevated); }
+.cx-tbl td { padding:8px 12px; border-top:1px solid var(--border); vertical-align:middle; }
+.cx-tbl th:first-child, .cx-tbl td:first-child { padding-left:14px; }
+.cx-tbl th:last-child, .cx-tbl td:last-child { padding-right:14px; }
+.cx-tbl th.num { font-family:inherit; font-size:11px; }
+.cx-tbl .num { text-align:right; font-family:'Geist Mono',Menlo,monospace; font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.cx-tbl .dim { color:var(--text-dim); }
+.cx-tbl .strong { font-weight:600; color:var(--text); }
+.cx-tbl tr.click { cursor:pointer; }
+.cx-tbl tr.click:hover td { background:var(--bg-elevated); }
+.cx-name { display:flex; flex-direction:column; gap:1px; min-width:0; }
+.cx-name b { font-weight:550; white-space:nowrap; }
+.cx-name span { font-size:10.5px; color:var(--faint); font-family:'Geist Mono',Menlo,monospace; white-space:nowrap; }
+.cx-share { display:flex; align-items:center; gap:8px; min-width:120px; }
+.cx-bar { flex:1; height:8px; border-radius:999px; background:var(--bg-elevated); overflow:hidden; }
+.cx-bar i { display:block; height:100%; border-radius:999px; background:var(--accent); }
+.cx-share .num { width:34px; color:var(--text-dim); }
+.cx-stack { display:flex; height:12px; border-radius:999px; overflow:hidden; background:var(--bg-elevated); }
+.cx-stack span { height:100%; }
+.cx-stack span + span { box-shadow:inset 2px 0 0 var(--bg-card); }
+.cx-stackwrap { padding:2px 14px 14px; display:flex; flex-direction:column; gap:10px; }
+.cx-stacklbl { display:flex; justify-content:space-between; font-size:11px; color:var(--text-dim); margin-bottom:5px; }
+.cx-sw { display:inline-block; width:10px; height:10px; border-radius:3px; vertical-align:-1px; margin-right:8px; flex:none; }
+.cx-foot { padding:10px 14px 12px; font-size:11.5px; color:var(--faint); border-top:1px solid var(--border); line-height:1.5; }
+.cx-find { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+.cx-f { display:flex; gap:10px; padding:11px 14px; border-top:1px solid var(--border); font-size:12.5px; line-height:1.5; min-width:0; }
+.cx-find .cx-f:nth-child(odd) { border-right:1px solid var(--border); }
+.cx-f .t { font-weight:600; }
+.cx-f .d { color:var(--text-dim); font-size:12px; margin-top:1px; }
+.cx-f .ic { width:20px; height:20px; border-radius:6px; flex:none; display:flex; align-items:center; justify-content:center; margin-top:1px; }
+.cx-f .ic svg { width:12px; height:12px; }
+.cx-f.warn .ic { background:var(--human-soft); color:var(--warning); }
+.cx-f.info .ic { background:var(--accent-soft); color:var(--accent-light); }
+.cx-empty { padding:40px 16px; text-align:center; color:var(--text-dim); font-size:13px; }
+@media(max-width:1100px){ .cx{padding:16px} .cx-kpis{grid-template-columns:repeat(2,minmax(0,1fr))} .cx-grid,.cx-grid.even{grid-template-columns:1fr} .cx-find{grid-template-columns:1fr} .cx-find .cx-f:nth-child(odd){border-right:none} }
 .agent { display:flex; align-items:center; gap:10px; padding:9px 0; border-top:1px solid var(--border); font-size:12.5px; }
 .agent:first-child { border-top:none; }
 .av { width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; color:#fff; flex:none; background:var(--faint); }
@@ -585,29 +641,28 @@ header {
   </section>
 
   <section class="pane" id="paneCost">
-    <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
-      <div class="card" style="display:flex;flex-direction:column;overflow:hidden">
-        <div class="card-head" style="flex-wrap:wrap;gap:10px">
-          <span style="font-size:15px;font-weight:600">Maliyet Analizi</span>
-          <select class="sprint-select" id="costScope" onchange="loadCosts()" style="height:28px;font-weight:500">
-            <option value="0">Tüm zaman</option>
-            <option value="90">Son 90 gün</option>
-            <option value="30">Son 30 gün</option>
-            <option value="7">Son 7 gün</option>
-          </select>
-          <select class="sprint-select" id="costKind" onchange="loadCosts()" style="height:28px;font-weight:500" title="İş türü — pr_review ve refinement işleri de LLM harcıyor">
-            <option value="">Tüm iş türleri</option>
-            <option value="pipeline">Yalnız pipeline</option>
-            <option value="pr_review">Yalnız PR review</option>
-            <option value="refinement">Yalnız refinement</option>
-          </select>
-          <span style="flex:1"></span>
-          <span id="costStatus" style="font-size:12px;color:var(--text-dim)"></span>
-          <button class="sm-btn ghost small" onclick="loadCosts()">Yenile</button>
+    <div class="cx">
+      <div class="cx-head">
+        <div style="display:flex;flex-direction:column;gap:2px;min-width:0">
+          <span class="cx-title">Maliyet</span>
+          <span class="cx-sub" id="costStatus">LLM harcaması — adım, ajan, model ve iş kırılımı</span>
         </div>
-        <div id="costFindings" style="display:none;flex-direction:column;gap:6px;padding:0 14px 12px"></div>
-        <div id="costBody" style="padding:0 14px 14px"><div class="board-empty">Yükleniyor…</div></div>
+        <span style="flex:1"></span>
+        <select class="sprint-select" id="costScope" onchange="loadCosts()" title="Zaman penceresi">
+          <option value="0">Tüm zaman</option>
+          <option value="90">Son 90 gün</option>
+          <option value="30">Son 30 gün</option>
+          <option value="7">Son 7 gün</option>
+        </select>
+        <select class="sprint-select" id="costKind" onchange="loadCosts()" title="İş türü — pr_review ve refinement işleri de LLM harcıyor">
+          <option value="">Tüm iş türleri</option>
+          <option value="pipeline">Yalnız pipeline</option>
+          <option value="pr_review">Yalnız PR inceleme</option>
+          <option value="refinement">Yalnız refinement</option>
+        </select>
+        <button class="sm-btn ghost small" onclick="loadCosts()">Yenile</button>
       </div>
+      <div id="costBody" style="display:flex;flex-direction:column;gap:14px"><div class="card cx-empty">Yükleniyor…</div></div>
     </div>
   </section>
 
@@ -1102,36 +1157,116 @@ function showTab(name){
 }
 
 // ── Maliyet analizi (salt okunur; /api/costs) ──
-// Tablolar sunucudaki markdown'dan gelir (mdToHtml) — esikler ve bicimleme
-// tek yerde, Python tarafinda. UI yalnizca bulgulari renklendirir.
+// Esikler ve bulgular Python'da (cost_analytics) — UI yalnizca JSON'u cizer,
+// hicbir esik/hesap kurali burada tekrar edilmez.
 let _cost=null;
+const CX_FAM={opus:'var(--viz-4)',sonnet:'var(--viz-2)',haiku:'var(--viz-1)'};
+const CX_KIND={pipeline:['Pipeline','var(--viz-1)'],pr_review:['PR inceleme','var(--viz-2)'],refinement:['Refinement','var(--viz-3)'],modern_fix:['Modernleştirme','var(--viz-4)']};
+const CX_TOK=[['input','Girdi','var(--viz-2)'],['cache_write','Önbellek yazma','var(--viz-3)'],['cache_read','Önbellek okuma','var(--viz-1)'],['output','Çıktı','var(--viz-4)']];
+const CX_STATUS={completed:['Tamamlandı','ok'],failed:['Başarısız','fail'],needs_human:['İnsan bekliyor','human'],needs_info:['Bilgi bekliyor','human'],running:['Çalışıyor','run'],queued:['Kuyrukta','dim']};
+const CX_ICON={warn:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3.5v5.5"/><path d="M8 12.2v.3"/></svg>',
+  info:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 7v5.5"/><path d="M8 3.8v.3"/></svg>'};
+function cxUsd(v,d){return v==null?'—':'$'+Number(v).toFixed(d==null?2:d)}
+function cxNum(v){return v==null?'—':Number(v).toLocaleString('tr-TR')}
+function cxTok(v){v=Number(v)||0;return v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(1)+'K':String(v)}
+function cxPct(v){return '%'+Math.round(Number(v)||0)}
+function cxDur(min){min=Number(min)||0;return min>=90?{v:(min/60).toFixed(1),u:'sa'}:{v:String(Math.round(min)),u:'dk'}}
+function cxShare(usd,max,pct,color){
+  const w=max>0?Math.max(2,Math.round(100*usd/max)):0;
+  return `<div class="cx-share"><div class="cx-bar"><i style="width:${w}%${color?';background:'+color:''}"></i></div><span class="num">${cxPct(pct)}</span></div>`}
+// Bulgu metinleri adım anahtarı tasır (technical_design_task) — ekranda Türkçe adı.
+function cxStepTitle(t){return String(t||'').replace(/\b([a-z_]+_task|pr_build_gate)\b/g,k=>STEP_NAMES[k]||k)}
+function cxCard(title,note,inner){return `<div class="card"><div class="card-head"><span class="h">${title}</span>${note?`<span style="flex:1"></span><span class="note">${note}</span>`:''}</div>${inner}</div>`}
+function cxStack(items){ // [{v,color,title}]
+  const tot=items.reduce((a,x)=>a+(x.v||0),0)||1;
+  return `<div class="cx-stack">${items.filter(x=>x.v>0).map(x=>`<span style="width:${(100*x.v/tot).toFixed(2)}%;background:${x.color}" title="${esc(x.title||'')}"></span>`).join('')}</div>`}
 async function loadCosts(){
   const days=(document.getElementById('costScope')||{}).value||'0';
   const kind=(document.getElementById('costKind')||{}).value||'';
-  const body=document.getElementById('costBody'),st=document.getElementById('costStatus'),
-        fnd=document.getElementById('costFindings');
+  const body=document.getElementById('costBody'),st=document.getElementById('costStatus');
   st.textContent='Hesaplanıyor…';
   try{
     const r=await fetch('/api/costs?days='+encodeURIComponent(days)+'&job_kind='+encodeURIComponent(kind)+'&t='+Date.now());
     const d=await r.json();
-    if(d.error){body.innerHTML='<div class="board-empty" style="color:var(--danger)">'+esc(d.error)+'</div>';st.textContent='';fnd.style.display='none';return}
-    _cost=d;
-    const t=d.totals||{};
-    st.textContent='$'+(t.usd||0).toFixed(2)+' · '+(t.calls||0)+' çağrı · '+(t.jobs||0)+' iş';
-    const fs=d.findings||[];
-    if(fs.length){
-      fnd.style.display='flex';
-      fnd.innerHTML=fs.map(f=>{
-        const warn=f.level==='warn';
-        return '<div style="display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:1.5;'
-          +'border-left:3px solid '+(warn?'var(--danger)':'var(--accent)')+';padding:4px 0 4px 10px">'
-          +'<div><b>'+esc(f.title)+'</b><div style="color:var(--text-dim)">'+esc(f.detail)+'</div></div></div>';
-      }).join('');
-    }else{fnd.style.display='none'}
-    // Bulgular yukarida ayri render edildi; markdown'dan o bolumu cikar.
-    const md=(d.markdown||'').replace(/## Bulgular[\s\S]*?(?=\n## )/,'');
-    body.innerHTML=mdToHtml(md);
-  }catch(e){body.innerHTML='<div class="board-empty">Hata: '+esc(String(e))+'</div>';st.textContent=''}
+    if(d.error){body.innerHTML='<div class="card cx-empty" style="color:var(--danger)">'+esc(String(d.error))+'</div>';st.textContent='';return}
+    _cost=d;renderCosts(d);
+  }catch(e){body.innerHTML='<div class="card cx-empty">Hata: '+esc(String(e))+'</div>';st.textContent=''}
+}
+function renderCosts(d){
+  const body=document.getElementById('costBody'),st=document.getElementById('costStatus');
+  const t=d.totals||{},mix=d.token_mix||{},share=mix.cost_share||{};
+  const day=s=>s?String(s).slice(0,10):'';
+  st.textContent=t.first?`${day(t.first)} → ${day(t.last)} · güncellendi ${String(d.generated_at||'').slice(11,16)}`:'Bu pencerede kayıt yok';
+  if(!t.calls){body.innerHTML='<div class="card cx-empty">Bu pencerede kayıtlı LLM çağrısı yok.</div>';return}
+
+  // KPI şeridi
+  const dur=cxDur(t.minutes),wr=share.cache_write;
+  const kpi=(l,v,s)=>`<div class="cx-kpi"><span class="l">${l}</span><span class="v">${v}</span><span class="s">${s}</span></div>`;
+  let h=`<div class="cx-kpis">
+    ${kpi('Toplam harcama',cxUsd(t.usd),`${cxNum(t.jobs)} iş · ${cxNum(t.calls)} çağrı`)}
+    ${kpi('İş başına',cxUsd(t.usd_per_job),`${t.calls_per_job??'—'} çağrı / iş`)}
+    ${kpi('Çağrı başına',cxUsd(t.calls?t.usd/t.calls:null),`${cxNum(t.calls)} claude -p oturumu`)}
+    ${kpi('Model süresi',`${dur.v}<small>${dur.u}</small>`,`çağrı başına ${t.calls?Math.round(60*t.minutes/t.calls):0} sn`)}
+    ${kpi('Önbellek oku/yaz',mix.cache_ratio!=null?`${Number(mix.cache_ratio).toFixed(1)}<small>×</small>`:'—',wr?`yazma maliyetin %${Math.round(wr.min)}–${Math.round(wr.max)}'i`:'')}
+  </div>`;
+
+  // Bulgular — uyarılar önce
+  const fs=(d.findings||[]).slice().sort((a,b)=>(b.level==='warn')-(a.level==='warn'));
+  if(fs.length){
+    const nw=fs.filter(f=>f.level==='warn').length;
+    h+=cxCard('Bulgular',`${nw} uyarı · ${fs.length-nw} bilgi`,`<div class="cx-find">${fs.map(f=>{
+      const lv=f.level==='warn'?'warn':'info';
+      return `<div class="cx-f ${lv}"><span class="ic">${CX_ICON[lv]}</span><div style="min-width:0"><div class="t">${esc(cxStepTitle(f.title))}</div><div class="d">${esc(cxStepTitle(f.detail))}</div></div></div>`}).join('')}</div>`);
+  }
+
+  // Adım + ajan (sol) · model sınıfı + token + iş türü (sağ)
+  const steps=d.by_step||[],maxS=Math.max(0,...steps.map(s=>s.usd));
+  const stepTbl=`<div class="cx-scroll"><table class="cx-tbl"><thead><tr><th>Adım</th><th>Pay</th><th class="num">Tutar</th><th class="num">İş</th><th class="num">$/iş</th><th class="num">Çağrı/iş</th><th class="num">Süre</th></tr></thead><tbody>${
+    steps.map(s=>`<tr><td><div class="cx-name"><b>${esc(STEP_NAMES[s.key]||s.key)}</b>${STEP_NAMES[s.key]?`<span>${esc(s.key)}</span>`:''}</div></td>
+      <td style="width:28%">${cxShare(s.usd,maxS,s.share_pct)}</td><td class="num strong">${cxUsd(s.usd)}</td><td class="num dim">${s.jobs||'—'}</td>
+      <td class="num">${cxUsd(s.usd_per_job)}</td><td class="num dim">${s.calls_per_job??'—'}</td><td class="num dim">${Math.round(s.minutes)} dk</td></tr>`).join('')}</tbody></table></div>`;
+  const agents=d.by_agent||[],maxA=Math.max(0,...agents.map(s=>s.usd));
+  const agentTbl=`<div class="cx-scroll"><table class="cx-tbl"><thead><tr><th>Ajan</th><th>Pay</th><th class="num">Tutar</th><th class="num">Çağrı</th><th class="num">$/çağrı</th></tr></thead><tbody>${
+    agents.map(s=>`<tr><td><div class="cx-name"><b>${esc(AGENT_NAME[s.key]||s.key)}</b>${AGENT_NAME[s.key]?`<span>${esc(s.key)}</span>`:''}</div></td>
+      <td style="width:34%">${cxShare(s.usd,maxA,s.share_pct,'var(--viz-2)')}</td><td class="num strong">${cxUsd(s.usd)}</td><td class="num dim">${cxNum(s.calls)}</td><td class="num">${cxUsd(s.usd_per_call)}</td></tr>`).join('')}</tbody></table></div>`;
+
+  const fams=d.by_family||[];
+  const famCard=cxCard('Model sınıfı','',`<div class="cx-stackwrap">${cxStack(fams.map(f=>({v:f.usd,color:CX_FAM[f.key]||'var(--faint)',title:f.key})))}</div>
+    <table class="cx-tbl"><thead><tr><th>Sınıf</th><th class="num">Tutar</th><th class="num">Pay</th><th class="num">Çağrı</th><th class="num">$/çağrı</th></tr></thead><tbody>${
+    fams.map(f=>`<tr><td><span class="cx-sw" style="background:${CX_FAM[f.key]||'var(--faint)'}"></span>${esc(f.key)}</td><td class="num strong">${cxUsd(f.usd)}</td><td class="num">${cxPct(f.share_pct)}</td><td class="num dim">${cxNum(f.calls)}</td><td class="num">${cxUsd(f.usd_per_call)}</td></tr>`).join('')}</tbody></table>`);
+
+  const tokTot=CX_TOK.reduce((a,[k])=>a+(Number(mix[k])||0),0)||1;
+  const mid=k=>share[k]?(share[k].min+share[k].max)/2:0;
+  const tokCard=cxCard('Token ve önbellek',mix.cache_ratio!=null?`okuma/yazma ${Number(mix.cache_ratio).toFixed(1)}×`:'',`<div class="cx-stackwrap">
+      <div><div class="cx-stacklbl"><span>Token sayısı</span><span>${cxTok(tokTot)}</span></div>${cxStack(CX_TOK.map(([k,l,c])=>({v:Number(mix[k])||0,color:c,title:l})))}</div>
+      ${Object.keys(share).length?`<div><div class="cx-stacklbl"><span>Maliyet payı</span><span>ağırlıklı</span></div>${cxStack(CX_TOK.map(([k,l,c])=>({v:mid(k),color:c,title:l})))}</div>`:''}
+    </div>
+    <table class="cx-tbl"><thead><tr><th>Sınıf</th><th class="num">Token</th><th class="num">Token payı</th><th class="num">Maliyet payı</th></tr></thead><tbody>${
+    CX_TOK.map(([k,l,c])=>{const v=share[k];return `<tr><td><span class="cx-sw" style="background:${c}"></span>${l}</td><td class="num">${cxTok(mix[k])}</td><td class="num dim">${cxPct(100*(Number(mix[k])||0)/tokTot)}</td><td class="num strong">${v?(Math.round(v.min)===Math.round(v.max)?cxPct(v.min):`%${Math.round(v.min)}–${Math.round(v.max)}`):'—'}</td></tr>`}).join('')}</tbody></table>
+    <div class="cx-foot">Önbellek okuma girdinin 0.1 katı, yazma 1.25–2 katı, çıktı 5 katı fiyatlanır. Aralık, yazma TTL'inden (5 dk / 1 saat) gelir.</div>`);
+
+  const kinds=d.by_kind||[];
+  const kindCard=kinds.length>1?cxCard('İş türü','',`<div class="cx-stackwrap">${cxStack(kinds.map(k=>({v:k.usd,color:(CX_KIND[k.key]||[0,'var(--faint)'])[1],title:k.key})))}</div>
+    <table class="cx-tbl"><thead><tr><th>Tür</th><th class="num">Tutar</th><th class="num">Pay</th><th class="num">İş</th><th class="num">$/iş</th></tr></thead><tbody>${
+    kinds.map(k=>{const m=CX_KIND[k.key]||[k.key,'var(--faint)'];return `<tr><td><span class="cx-sw" style="background:${m[1]}"></span>${esc(m[0])}</td><td class="num strong">${cxUsd(k.usd)}</td><td class="num">${cxPct(k.share_pct)}</td><td class="num dim">${cxNum(k.jobs)}</td><td class="num">${cxUsd(k.usd_per_job)}</td></tr>`}).join('')}</tbody></table>`):'';
+
+  h+=`<div class="cx-grid"><div class="cx-col">${cxCard('Adım bazında','',stepTbl)}${cxCard('Ajan bazında','',agentTbl)}</div>
+    <div class="cx-col">${famCard}${tokCard}${kindCard}</div></div>`;
+
+  // En pahalı işler · model bazında
+  const jobs=(d.by_job||[]).slice(0,10),maxJ=Math.max(0,...jobs.map(j=>j.usd));
+  const jobTbl=jobs.length?`<div class="cx-scroll"><table class="cx-tbl"><thead><tr><th>İş</th><th>WI</th><th>Durum</th><th>Pay</th><th class="num">Çağrı</th><th class="num">Tutar</th></tr></thead><tbody>${
+    jobs.map(j=>{const s=CX_STATUS[j.status];const kd=(CX_KIND[j.job_kind]||[j.job_kind])[0];
+      return `<tr${j.status?` class="click" onclick="viewJob(${Number(j.job_id)})" title="İş detayını aç"`:''}><td><div class="cx-name"><b class="mono">#${esc(String(j.job_id))}</b><span>${esc(String(kd||''))}</span></div></td>
+        <td class="mono dim" style="font-size:12px">${j.work_item_id?esc(String(j.work_item_id)):'—'}</td>
+        <td>${s?`<span class="chip ${s[1]}">${s[0]}</span>`:'<span class="chip dim" title="İş kaydı silinmiş; çağrı kayıtları duruyor">silinmiş</span>'}</td>
+        <td style="width:26%">${cxShare(j.usd,maxJ,j.share_pct,'var(--viz-3)')}</td><td class="num dim">${cxNum(j.calls)}</td><td class="num strong">${cxUsd(j.usd)}</td></tr>`}).join('')}</tbody></table></div>`:'<div class="cx-empty">İş yok.</div>';
+  const models=d.by_model||[];
+  const fam=k=>{k=String(k).toLowerCase();return ['opus','sonnet','haiku'].find(f=>k.includes(f))};
+  const modelTbl=`<div class="cx-scroll"><table class="cx-tbl"><thead><tr><th>Model</th><th class="num">Tutar</th><th class="num">Pay</th><th class="num">Çağrı</th><th class="num">$/çağrı</th><th class="num" title="Modeller arası fiyat kıyası için kullanmayın: önbellek okuma girdinin onda biri fiyatlanır, çok okuyan model ucuz görünür. Aynı modelin zaman içindeki değişimini izlemek içindir.">$/1M token</th></tr></thead><tbody>${
+    models.map(m=>`<tr><td style="white-space:nowrap"><span class="cx-sw" style="background:${CX_FAM[fam(m.key)]||'var(--faint)'}"></span><span class="mono" style="font-size:12px">${esc(m.key)}</span></td><td class="num strong">${cxUsd(m.usd)}</td><td class="num">${cxPct(m.share_pct)}</td><td class="num dim">${cxNum(m.calls)}</td><td class="num">${cxUsd(m.usd_per_call)}</td><td class="num dim">${cxUsd(m.usd_per_mtok)}</td></tr>`).join('')}</tbody></table></div>`;
+  h+=`<div class="cx-grid even">${cxCard('En pahalı işler','satıra tıkla: iş detayı',jobTbl)}${cxCard('Model bazında','$/1M token fiyat kıyası değildir',modelTbl)}</div>`;
+  body.innerHTML=h;
 }
 // ── Backlog refinement (Scrum faz 6) ──
 let _rf=null,_rfFilter='all',_rfQ={};
