@@ -347,14 +347,12 @@ def cli_cwd() -> str | None:
     önbellek bloğu olduğundan her çağrıda yeniden YAZILIYORDU. Ölçüldü (2026-11-03, aynı
     "ok" istemi, Sonnet): repo kökünde 46,992 token yazma / $0.189, boş dizinde 17,530 /
     $0.071 — çağrı başına −29.5K token, Opus'ta ~5 katı. Ajanların bu repoyla işi yok.
-    Repo araçlı çağrıda (--add-dir) cwd HEDEF REPO'dur: göreli yollar ("app/X.php") orada
-    çözülür ve repo kendi CLAUDE.md'sini taşıyorsa (core'unki 37 KB) o yüklenir — o repoda kod
-    yazan ajan için doğru bağlam budur, Tempo'nunki değil. None = eski davranış (sürecin cwd'si)."""
+    Repo araçlı çağrıda da cwd BOŞ dizindir, hedef repo yalnız --add-dir ile verilir: klonlanan
+    repo cwd olsaydı onun `.claude/settings.json`'u (hook'lar = komut çalıştırma) ve CLAUDE.md'si
+    (istem enjeksiyonu) yüklenirdi; --add-dir ile eklenen dizinin ayarları yüklenmez. Eskiden de
+    cwd hedef repo değildi (Tempo kökü), göreli yol davranışı değişmez. None = eski davranış."""
     if os.environ.get("CREW_CLI_NEUTRAL_CWD", "1").strip().lower() in ("0", "false", "no", "off"):
         return None
-    dirs, _tools = _get_repo_ctx()
-    if dirs and os.path.isdir(str(dirs[0])):
-        return str(dirs[0])
     d = os.path.expanduser(os.environ.get("CREW_CLI_CWD") or "~/.crew_tools/cli_cwd")
     try:
         os.makedirs(d, exist_ok=True)

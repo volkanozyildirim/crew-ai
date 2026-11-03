@@ -6507,6 +6507,10 @@ def test_tool_fix_leftovers():
         try:
             check("claude -p nötr dizinde koşar (repo CLAUDE.md'si her çağrıya girmez)",
                   _cli.cli_cwd() == str(Path(td2) / "neutral") and (Path(td2) / "neutral").is_dir())
+            (Path(td2) / "repo" / ".claude").mkdir(parents=True)
+            with _cli.repo_tools_context([str(Path(td2) / "repo")]):
+                check("repo araçlı çağrıda da cwd nötr — klonun .claude/ ayarları/hook'ları yüklenmez",
+                      _cli.cli_cwd() == str(Path(td2) / "neutral"))
         finally:
             if _old is None:
                 _os.environ.pop("CREW_CLI_CWD", None)
