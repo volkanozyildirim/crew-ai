@@ -338,6 +338,29 @@ def _kill_proc_tree(proc) -> None:
             pass
 
 
+def cli_cwd() -> str | None:
+    """`claude -p`'nin çalışma dizini: BOŞ, nötr bir dizin (CREW_CLI_NEUTRAL_CWD, varsayılan açık).
+
+    claude -p çalıştığı dizinin (ve üst dizinlerinin) CLAUDE.md'sini ve o projenin otomatik
+    hafızasını ilk kullanıcı mesajına ekler. Sunucu repo kökünde koştuğu için HER pipeline
+    çağrısı bu projenin 80 KB'lık CLAUDE.md'sini taşıyordu — ve kullanıcı mesajı tek atomik
+    önbellek bloğu olduğundan her çağrıda yeniden YAZILIYORDU. Ölçüldü (2026-11-03, aynı
+    "ok" istemi, Sonnet): repo kökünde 46,992 token yazma / $0.189, boş dizinde 17,530 /
+    $0.071 — çağrı başına −29.5K token, Opus'ta ~5 katı. Ajanların bu repoyla işi yok.
+    Repo araçlı çağrıda da cwd BOŞ dizindir, hedef repo yalnız --add-dir ile verilir: klonlanan
+    repo cwd olsaydı onun `.claude/settings.json`'u (hook'lar = komut çalıştırma) ve CLAUDE.md'si
+    (istem enjeksiyonu) yüklenirdi; --add-dir ile eklenen dizinin ayarları yüklenmez. Eskiden de
+    cwd hedef repo değildi (Tempo kökü), göreli yol davranışı değişmez. None = eski davranış."""
+    if os.environ.get("CREW_CLI_NEUTRAL_CWD", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    d = os.path.expanduser(os.environ.get("CREW_CLI_CWD") or "~/.crew_tools/cli_cwd")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        return None
+    return d
+
+
 def _run_streaming(cmd: list, env: dict, timeout_s: int, meta: dict | None = None,
                    idle_s: int = 0) -> str:
     """stream-json modunda calistir, event'leri canli logla, final metni dondur.
@@ -355,6 +378,7 @@ def _run_streaming(cmd: list, env: dict, timeout_s: int, meta: dict | None = Non
         cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, stdin=subprocess.DEVNULL, env=env, bufsize=1,
         start_new_session=True,  # kendi process-group'u → tum agac oldurulebilir
+        cwd=cli_cwd(),
     )
     done = threading.Event()
     start = time.monotonic()
@@ -579,7 +603,7 @@ def claude_cli_completion(
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s, env=env,
+            cmd, capture_output=True, text=True, timeout=timeout_s, env=env, cwd=cli_cwd(),
         )
         if result.returncode != 0:
             log.warning(f"  Claude CLI hata: {result.stderr.strip()[:200]}")
