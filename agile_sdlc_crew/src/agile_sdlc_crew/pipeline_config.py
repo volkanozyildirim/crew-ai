@@ -589,6 +589,13 @@ SCHEMA: list[dict] = [
         "desc": "İnceleme bloklayan (blocker/major) madde bulursa maddenin satırı çevresinde LLM penceresiyle düzeltme + yeniden inceleme turu sayısı. Turlar bitince madde kalırsa iş needs_human olur (PR açık, WI Code Review'a GEÇMEZ).",
     },
     {
+        "key": "CREW_MODERN_FIX_DROP_RISKY",
+        "label": "Araç düzeltmesi · riskli dosyayı PR'dan çıkar",
+        "type": "bool",
+        "default": True,
+        "desc": "Blok/sınıf düzeyindeki kuralda (constructor promotion, switch→match) inceleme bir dosyada davranış riski bulursa o dosya elle düzeltilmez, PR'dan çıkarılır (main hâline döner), kalan dosyalar yeniden incelenir; PR'a ve WI'a gerekçesiyle not düşülür. #269: kısmi promotion SOAP istek sınıflarında property sırasını değiştirdi.",
+    },
+    {
         "key": "CREW_TECHDEBT_MODERN_MAX_TAKE",
         "label": "Teknik borç · modernleştirmede istek başı en çok iş",
         "type": "int",

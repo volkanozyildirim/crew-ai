@@ -6529,6 +6529,13 @@ def test_tool_fix_leftovers():
     check("önceki araç PR'ı açıksa dalına itilir (yeni PR / terk gerekmez)",
           "job_kind='modern_fix'" in mf and "str(pr.get(\"pr_id\")) == pid" in mf)
     check("bilerek bırakılan yerler inceleme düzeltmesine hedef olmaz", "keep = {(f, int(ln or 0))" in mf)
+    check("blok düzeyindeki kuralda riskli dosya PR'dan çıkarılır, kalan yeniden incelenir (#269)",
+          "non_local = lang == \"php\" and not any(_pm.llm_line_fixable(" in mf
+          and "CREW_MODERN_FIX_DROP_RISKY" in mf and '"content": originals.get(f, "")} for f in to_drop]' in mf
+          and "rv = review(contents)\n            continue" in mf)
+    check("tüm dosyalar riskliyse insana (PR açık)", "len(to_drop) >= len(contents)" in mf)
+    pcs = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pipeline_config.py").read_text()
+    check("CREW_MODERN_FIX_DROP_RISKY kayıtlı (varsayılan açık)", '"key": "CREW_MODERN_FIX_DROP_RISKY"' in pcs)
     pr = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
     check("run_pr_review madde listesini ve ek bağlamı taşır", '"issue_list": issues' in pr and "extra_context" in pr)
     from agile_sdlc_crew import context_budget as cb
