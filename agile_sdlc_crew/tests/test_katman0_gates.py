@@ -6549,6 +6549,27 @@ def test_tool_fix_leftovers():
           "_req_cap = max(_req_cap, _cb.cap('QUALITY_TASK_TEXT') + 3000)" in fl)
 
 
+def test_scan_line_text_multibyte():
+    """Teknik borç kartında Dpdcarrier.php:1300 'strpos' bulgusu `in_array(...)` satırını gösterdi:
+    tarayıcı satır metnini `preg_split('/\\R/')` ile bölüyordu; u bayrağı olmadan `\\R` 0x85 baytını
+    da satır sonu sayar ve Kiril 'х' (D1 85) içerir — dosyadaki 3 'х' metni 3 satır kaydırdı."""
+    print("\n[tarayıcı: çok baytlı karakterde satır metni]")
+    from agile_sdlc_crew.quality import php_modern
+    if not shutil.which("php"):
+        skip("satır metni", "php yok")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "core"
+        (root / "app").mkdir(parents=True)
+        (root / "app" / "D.php").write_text(
+            "<?php\nclass D {\n    const A = 'выход';\n    const B = 'хорошо';\n    const C = 'тихо';\n"
+            "    public function f($s) {\n        $x = 1;\n        if (strpos($s, 'a') !== false) { return 1; }\n"
+            "        return 0;\n    }\n}\n", encoding="utf-8")
+        hits = [h for h in php_modern.scan_files(root, ["app/D.php"]) if h["rule"] == "str_contains"]
+        check("bulgunun satır metni gerçekten o satır (0x85 baytı satır sonu sayılmaz)",
+              hits and hits[0]["line"] == 8 and "strpos($s, 'a') !== false" in hits[0]["text"], str(hits))
+
+
 def test_modern_sp():
     """Aynı öneri tek iş, SP iş miktarından, en çok 8 (kullanıcı kararı 2026-10-30)."""
     print("\n[modernleştirme SP]")
@@ -6700,7 +6721,8 @@ def main():
               test_php_modern_82_84,
               test_php_rector_fix,
               test_tool_review_diff_context,
-              test_tool_fix_leftovers):
+              test_tool_fix_leftovers,
+              test_scan_line_text_multibyte):
         try:
             t()
         except Exception as e:

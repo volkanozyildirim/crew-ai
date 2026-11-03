@@ -63,7 +63,11 @@ final class Scanner
     {
         $code = (string) file_get_contents($file);
         $this->file = $rel;
-        $this->lines = preg_split('/\R/', $code) ?: [];
+        // Satırlar YALNIZ \r\n / \n / \r ile bölünür — PHP lexer'ı satır numarasını böyle sayar.
+        // `\R` (u bayrağı olmadan) 0x0B/0x0C/0x85 baytlarını da satır sonu sayıyordu; 0x85 UTF-8
+        // çok baytlı karakterlerin içinde geçer (Kiril 'х' = D1 85). Dpdcarrier.php'de 3 'х' metni
+        // 3 satır kaydırdı: bulgu 1300'de (mb_strpos), "Bulunan yerler" 1297'nin metnini gösterdi.
+        $this->lines = preg_split('/\r\n|\n|\r/', $code) ?: [];
         $raw = @token_get_all($code);
         if (!is_array($raw)) {
             return;
