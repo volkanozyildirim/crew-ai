@@ -1752,12 +1752,12 @@ function renderModern(){
     :(fr.skipped&&!fr.recent?` · <span style="color:var(--warning)" title="${esc(fr.skipped)}">klon güncellenemedi — sonuçlar eski olabilir</span>`:'');
   document.getElementById('tdmAdoption').innerHTML=((r.lang&&r.lang!=='php')
     ?`${r.files} dosyada bulgu · hedef ${esc(r.label||'')} ${esc(r.version||'?')} (${esc(r.version_source||'')})`+(r.tool_fix?` · otomatik işleri <b>araç uygular</b> (${r.lang==='go'?'Go modernize':'ruff'}), LLM yalnız inceler`:' · otomatik işleri pipeline developer\'ı uygular')
-    :`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya`)+frNote;
+    :`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya${r.rector?' · mekanik kuralları <b>Rector uygular</b>, LLM yalnız inceler':''}`)+frNote;
   const rules=Object.entries(r.rules||{}).sort((a,b)=>b[1].count-a[1].count);
   const chips=rules.map(([k,v])=>`<span class="chip dim" title="${esc(v.title)}">${esc(v.title.split(' → ')[0].slice(0,34))} <b>${v.count}</b></span>`).join(' ');
   const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
   // Aynı öneri (kural) tek satır: dosya paketleri (her biri ayrı Task) satırın içinde listelenir.
-  const statusChip=(t,human)=>human?humanChip(t.human_reason):(t.recurring_of?`<span class="chip dim">tekrar · önceki #${t.recurring_of}</span>`:(_tdm.scan&&_tdm.scan.tool_fix?'<span class="chip dim" title="İş olarak açılınca dilin aracı düzeltir, doğrulayıcı çalışır, PR açılır, LLM yalnız inceler">Araç uygular</span>':'<span class="chip dim" title="İş olarak açılınca pipeline kuyruğuna alınır">Kuyruğa alınır</span>'));
+  const statusChip=(t,human)=>human?humanChip(t.human_reason):(t.recurring_of?`<span class="chip dim">tekrar · önceki #${t.recurring_of}</span>`:(t.tool||(_tdm.scan&&_tdm.scan.tool_fix)?'<span class="chip dim" title="İş olarak açılınca dilin aracı düzeltir, doğrulayıcı çalışır, PR açılır, LLM yalnız inceler">Araç uygular</span>':'<span class="chip dim" title="İş olarak açılınca pipeline kuyruğuna alınır">Kuyruğa alınır</span>'));
   const unitRow=(t,human)=>{
     const loc=(t.locations||[]).map(l=>`<li><code>${esc(l.file)}:${l.line}</code>${l.text?` — <code>${esc(l.text)}</code>`:''}</li>`).join('');
     const where=t.module?`${esc(t.module)} · ${t.files.length} dosya`:(t.files.length===1?esc(t.files[0]):`${esc(t.files[0])} +${t.files.length-1}`);

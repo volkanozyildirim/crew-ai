@@ -46,6 +46,9 @@ class Deps(NamedTuple):
     record: Callable
     now: Callable
     cfg: Callable
+    # (wid, title, payload) → job_id: araç düzeltmesi (modern_fix) işi. None = araç yolu yok
+    # (testlerin elle kurduğu Deps gerçek DB'ye iş yazmasın diye varsayılan None).
+    queue_tool: Callable | None = None
 
 
 def load_cfg() -> dict:
@@ -188,6 +191,8 @@ def default_deps() -> Deps:
         record=db.record_quality_item,
         now=time.time,
         cfg=load_cfg,
+        queue_tool=lambda wid, title, payload: db.create_job(str(wid), False, wi_title=title[:200],
+                                                             job_kind="modern_fix", job_payload=payload),
     )
 
 

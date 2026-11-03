@@ -11,6 +11,7 @@ kalite alımının `techdebt` hattıyla (intake.resolve_story(lane=)) açılacak
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from agile_sdlc_crew.quality import intake, render
 
@@ -73,26 +74,37 @@ def list_items(client, *, team: str = "", job_status=None) -> dict:
             "iteration": (f.get("System.IterationPath") or "").rsplit("\\", 1)[-1],
             "sp": _sp(f), "repo": render.repo_from_description(f.get("System.Description") or ""),
             "needs_human": human, "job": job, "queueable": not human and not busy,
+            "fingerprints": render.parse_fingerprints(f.get("System.Description") or ""),
         })
     rows.sort(key=lambda r: (not r["queueable"], -r["id"]))
     return {"items": rows, "area": area.replace("''", "'")}
 
 
-def queue(client, ids: list, *, team: str = "", max_queue: int = 5, job_status=None, queue_fn=None) -> dict:
+def _create_tool_job(wid, title: str, payload: str) -> int:
+    from agile_sdlc_crew import db
+    return db.create_job(str(wid), False, wi_title=title[:200], job_kind="modern_fix", job_payload=payload)
+
+
+def queue(client, ids: list, *, team: str = "", max_queue: int = 5, job_status=None, queue_fn=None,
+          tool_fn=None) -> dict:
     """Listede görünen WI'ları kuyruğa al. İnsan işi ve liste dışı reddedilir; açık
-    işi olanı sprint_planning.queue_selected atlar; istek başı en çok max_queue."""
+    işi olanı sprint_planning.queue_selected atlar; istek başı en çok max_queue.
+    Rector'un uygulayabileceği PHP modernleştirme Task'ı araç düzeltmesine (tool_fn) gider.
+    Enjekte edilen queue_fn'de (test) tool_fn verilmezse araç yolu kapalı — gerçek DB'ye
+    iş yazılmasın."""
     if queue_fn is None:
         from agile_sdlc_crew.sprint_planning import queue_selected as queue_fn
+        tool_fn = tool_fn or _create_tool_job
     # Çift tıklama / aynı id'nin tekrarı aynı WI için birden çok iş (paralel PR) açmasın
     if not intake._LOCK.acquire(blocking=False):
         raise intake.Busy("Başka bir alım / kuyruk isteği sürüyor")
     try:
-        return _queue_locked(client, list(dict.fromkeys(ids or [])), team, max_queue, job_status, queue_fn)
+        return _queue_locked(client, list(dict.fromkeys(ids or [])), team, max_queue, job_status, queue_fn, tool_fn)
     finally:
         intake._LOCK.release()
 
 
-def _queue_locked(client, ids, team, max_queue, job_status, queue_fn) -> dict:
+def _queue_locked(client, ids, team, max_queue, job_status, queue_fn, tool_fn=None) -> dict:
     listed = {r["id"]: r for r in list_items(client, team=team, job_status=job_status)["items"]}
     skipped, take = [], []
     for raw in ids:
@@ -112,6 +124,37 @@ def _queue_locked(client, ids, team, max_queue, job_status, queue_fn) -> dict:
         elif len(take) >= max(1, int(max_queue)):
             skipped.append({"wi": str(wid), "reason": f"istek başı tavan ({max_queue})"})
         else:
-            take.append({"id": wid, "title": row["title"]})
-    res = queue_fn(take) if take else {"queued": [], "skipped": []}
-    return {"queued": res.get("queued", []), "skipped": skipped + list(res.get("skipped", []))}
+            take.append({"id": wid, "title": row["title"], "repo": row.get("repo") or "",
+                         "fingerprints": row.get("fingerprints") or []})
+    tool, pipe = _split_rector(take) if tool_fn else ([], take)
+    res = queue_fn([{"id": r["id"], "title": r["title"]} for r in pipe]) if pipe else {"queued": [], "skipped": []}
+    queued = list(res.get("queued", []))
+    for r, payload in tool:
+        try:
+            jid = tool_fn(r["id"], r["title"], payload)
+            queued.append({"wi": str(r["id"]), "job_id": jid, "kind": "modern_fix"})
+        except Exception as e:  # noqa: BLE001
+            skipped.append({"wi": str(r["id"]), "reason": f"kuyruğa alınamadı: {e}"})
+    return {"queued": queued, "skipped": skipped + list(res.get("skipped", []))}
+
+
+def _split_rector(rows: list[dict]) -> tuple[list[tuple[dict, str]], list[dict]]:
+    """PHP modernleştirme Task'ı Rector'un uygulayabileceği bir kuralsa araç düzeltmesine
+    (modern_fix) gider, LLM pipeline'ına değil. Kapsam taze taramadan (php_modern.rector_scope_for)."""
+    import json
+    tool, pipe = [], []
+    for r in rows:
+        payload = ""
+        if any(fp.startswith("php_modern:") for fp in r.get("fingerprints") or []):
+            try:
+                from agile_sdlc_crew.quality import php_modern
+                cfg = php_modern.load_cfg()
+                repo = r.get("repo") or ""
+                root = Path(cfg["repos_dir"]) / repo
+                if php_modern._REPO_NAME.match(repo) and ".." not in repo and root.is_dir():
+                    scope = php_modern.rector_scope_for(root, r["fingerprints"], cfg=cfg)
+                    payload = json.dumps(scope) if scope else ""
+            except Exception as e:  # noqa: BLE001 — kapsam çıkmazsa iş pipeline'a gider
+                log.warning(f"  🧰 WI #{r['id']} Rector kapsamı çıkarılamadı: {e}")
+        (tool.append((r, payload)) if payload else pipe.append(r))
+    return tool, pipe

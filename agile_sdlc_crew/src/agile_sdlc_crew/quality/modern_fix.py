@@ -34,7 +34,14 @@ def load_scope(payload: str, base_dir: Path) -> tuple[str, str, dict[str, list[s
     except ValueError:
         raise ValueError("İşin kapsam kaydı yok/bozuk — Teknik borç sekmesinden yeniden açın")
     lang, repo, scope = data.get("lang"), str(data.get("repo") or ""), data.get("scope") or {}
-    if lang not in modern.LANGS or not modern.LANGS[lang]["tool_fix"]:
+    if lang == "php":
+        # PHP'de araç kural bazında: yalnız katalogda Rector sınıfı olan otomatik kural
+        from agile_sdlc_crew.quality import php_modern
+        allowed = php_modern.tool_rules(php_modern.load_rules())
+        bad = [r for r in scope if r not in allowed]
+        if not allowed or bad:
+            raise ValueError(f"Rector bu kural(lar)ı uygulamıyor ya da kurulu değil: {bad or list(scope)}")
+    elif lang not in modern.LANGS or not modern.LANGS[lang]["tool_fix"]:
         raise ValueError(f"Araç düzeltmesi bu dil için yok: {lang!r}")
     if not _REPO.match(repo) or ".." in repo:
         raise ValueError(f"Geçersiz repo adı: {repo!r}")
@@ -105,12 +112,54 @@ def go_apply(root: Path, scope: dict[str, list[str]]) -> list[str]:
     return changed
 
 
+def _php_str(s: str) -> str:
+    """Tek tırnaklı PHP dizgesi (çift tırnakta `$` enterpolasyonu olurdu)."""
+    return "'" + str(s).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def rector_config(root: Path, scope: dict[str, list[str]], version: str, cache_dir: Path) -> str:
+    """Yalnız kapsamdaki kural(lar) × dosyalar için Rector yapılandırması. Sınıf adları
+    katalogdan (güvenilir), yollar load_scope'tan geçmiş repo-göreli yollar."""
+    from agile_sdlc_crew.quality import php_modern
+    rules = {r.key: r for r in php_modern.load_rules()}
+    classes = sorted({rules[k].rector for k in scope})
+    files = sorted({f for fs in scope.values() for f in fs})
+    major, _, minor = (version or "8.0").partition(".")
+    php_id = int(major) * 10000 + int((minor or "0").split(".")[0] or 0) * 100
+    return ("<?php\nuse Rector\\Config\\RectorConfig;\nreturn RectorConfig::configure()\n"
+            "    ->withPaths([" + ", ".join(_php_str(str(root / f)) for f in files) + "])\n"
+            "    ->withRules([" + ", ".join(_php_str(c) for c in classes) + "])\n"
+            f"    ->withPhpVersion({php_id})\n"
+            f"    ->withCache({_php_str(str(cache_dir))});\n")
+
+
+def php_apply(root: Path, scope: dict[str, list[str]], version: str) -> None:
+    """Rector'u repo dışındaki geçici bir yapılandırmayla çalıştır (repo'ya dosya yazılmaz).
+    Ortam süzülür (Azure/Sonar anahtarları Rector'a geçmez)."""
+    import tempfile
+    from agile_sdlc_crew import verify
+    from agile_sdlc_crew.quality import php_modern
+    binp = php_modern.rector_bin()
+    if not binp:
+        raise RuntimeError("Rector kurulu değil (CREW_RECTOR_BIN / ~/.crew_tools/rector)")
+    with tempfile.TemporaryDirectory(prefix="tempo-rector-") as td:
+        cfg = Path(td) / "rector.php"
+        cfg.write_text(rector_config(root, scope, version, Path(td) / "cache"), encoding="utf-8")
+        r = subprocess.run([binp, "process", "--config", str(cfg), "--no-progress-bar", "--no-diffs",
+                            "--memory-limit=2G"], cwd=str(root), capture_output=True, text=True, timeout=1200,
+                           env=verify._env())
+        if r.returncode != 0:  # process: 0 = tamam (değişiklik olsa da); ayrıştırma hatası ≠ 0
+            raise RuntimeError("Rector hata verdi: " + ((r.stderr or r.stdout) or "").strip()[-600:])
+
+
 def apply_tool(root: Path, lang: str, scope: dict[str, list[str]], version: str) -> list[str]:
     """Aracı yalnız kapsamdaki kurallar/dosyalar için çalıştır; değişen kapsam dosyaları."""
     from agile_sdlc_crew.quality import modern
     files = sorted({f for fs in scope.values() for f in fs})
     if lang == "go":
         go_apply(root, scope)
+    elif lang == "php":
+        php_apply(root, scope, version)
     elif lang == "python":
         codes = sorted({r.split(":")[0] for r in scope if not r.endswith(":manual")})
         tv = "py" + version.replace(".", "")
@@ -172,7 +221,14 @@ def run(job_id: int, work_item_id: str) -> dict:
         if not br.get("success"):
             raise RuntimeError(f"Branch açılamadı: {br.get('error')}")
         branch = br["branch"]
-        tool = "modernize -fix" if lang == "go" else "ruff --fix"
+        if br.get("note") == "zaten mevcut":
+            # Önceki (ör. başarısız LLM) koşunun dalı: üstüne yazmak eski commit'leri ve kapsam dışı
+            # değişiklikleri bu PR'a taşırdı — araç düzeltmesi main'den TAZE dalda açılır.
+            import time
+            branch = f"feature/{work_item_id}-tool-{int(time.time()) % 100000}"
+            client.create_branch(repo, branch)
+            log.info(f"  feature/{work_item_id} zaten var (önceki koşu) — taze dal: {branch}")
+        tool ={"go": "modernize -fix", "php": "rector"}.get(lang, "ruff --fix")
         client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f, "content": c}
                                            for f, c in contents.items()],
                             f"#{work_item_id}: {title[:80]} ({tool})")
@@ -189,8 +245,15 @@ def run(job_id: int, work_item_id: str) -> dict:
                         f"doğrulama ({', '.join(res['ran']) or '-'}) geçti. LLM incelemesi PR'a yazılıyor.\n\n"
                         "*Tempo — araç düzeltmesi*")
         try:
+            from agile_sdlc_crew.llm import resolver
             from agile_sdlc_crew.pr_review import run_pr_review
-            run_pr_review(work_item_id=str(work_item_id), pr_id=int(pr["pr_id"]), repo_name=repo, job_id=job_id)
+            # Kodu araç yazdı; inceleme mekanik bir diff'in doğrulaması — Opus gerekmez
+            # (kullanıcı kararı 2026-11-03: "düşük modeller ile işlet"). Kapsam yalnız bu iş.
+            with resolver.job_llm_scope():
+                prof = str(pc.get("CREW_MODERN_FIX_REVIEW_PROFILE") or "").strip()
+                if prof:
+                    resolver.set_job_llm_overrides({"code_reviewer": prof})
+                run_pr_review(work_item_id=str(work_item_id), pr_id=int(pr["pr_id"]), repo_name=repo, job_id=job_id)
         except Exception as e:  # noqa: BLE001 — PR açık; inceleme elle de istenebilir
             log.warning(f"  PR incelemesi yapılamadı: {e}")
         if lifecycle:
