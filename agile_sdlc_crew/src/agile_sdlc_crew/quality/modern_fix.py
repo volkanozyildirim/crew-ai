@@ -231,43 +231,96 @@ def _php_lint_ok(path: Path) -> bool:
     return r.returncode == 0
 
 
-def window_fix(root: Path, rel: str, lines: list[int], instruction: str, *, radius: int, ask=None) -> int:
-    """`rel` dosyasında `lines` çevresindeki pencereleri LLM'e düzelttir. ask(prompt) -> yanıt
-    (test için enjekte edilir). Uygulanan pencere sayısı; php -l geçmezse dosya eski hâline döner."""
+# Bir çağrıya giren en çok pencere. #266: pencere başına bir claude -p çağrısı ($0.19, çoğu sabit
+# önek) — 4 dosyada 7 çağrı $1.35 tuttu. Hepsi tek istemde, yanıtta pencere sırasıyla kod blokları.
+BATCH_MAX = 20
+
+
+def batch_window_fix(root: Path, items: list[tuple[str, list[int], str]], *, radius: int, ask=None) -> int:
+    """items: (dosya, satırlar, talimat). Tüm pencereler TEK (≤BATCH_MAX'lık) istemde düzelttirilir;
+    ask(prompt) -> yanıt (testte enjekte). Yanıttaki blok sayısı pencere sayısını tutmazsa o parti
+    atılır. Düzyazı/kısa/çok farklı pencere uygulanmaz; php -l'den geçmeyen dosya eski hâline döner.
+    Döner: uygulanan pencere sayısı."""
     import difflib
-    from agile_sdlc_crew.edit_window import parse_reply
-    path = root / rel
-    content = path.read_text(encoding="utf-8")
-    src = content.splitlines()
+    from agile_sdlc_crew.edit_window import _FENCE, parse_reply
+    by_file: dict[str, tuple[list[int], list[str]]] = {}
+    for rel, lines, instr in items:
+        lns, ins = by_file.setdefault(rel, ([], []))
+        lns.extend(lines)
+        if instr not in ins:
+            ins.append(instr)
+    rules: list[str] = []
+    files: dict[str, tuple[str, list[str]]] = {}
+    wins: list[tuple[str, int, int, list[int], list[int]]] = []  # (dosya, a, b, hedefler, kural no'ları)
+    for rel, (lns, ins) in by_file.items():
+        content = (root / rel).read_text(encoding="utf-8")
+        files[rel] = (content, content.splitlines())
+        nums = []
+        for i in ins:
+            if i not in rules:
+                rules.append(i)
+            nums.append(rules.index(i) + 1)
+        for a, b, t in _merge_windows(lns, len(files[rel][1]), radius):
+            wins.append((rel, a, b, t, nums))
+    if not wins:
+        return 0
     if ask is None:
         llm = _dev_llm()
 
         def ask(prompt: str) -> str:
             return str(llm.call([{"role": "user", "content": prompt}]) or "")
+    replies: dict[int, list[str] | None] = {}
+    for start in range(0, len(wins), BATCH_MAX):
+        chunk = list(range(start, min(start + BATCH_MAX, len(wins))))
+        parts = ["You fix several small windows of PHP files. RULES:"]
+        parts += [f"R{n}. {r}" for n, r in enumerate(rules, 1)]
+        parts.append(
+            "Each window below shows numbered lines ('NNNNN| ' is NOT part of the file). In each window CHANGE "
+            "ONLY its target lines, applying the rule(s) named for it; every other line stays byte-identical. "
+            "If a target line cannot be changed safely, leave it as it is.\n"
+            f"Return EXACTLY {len(chunk)} ```php code blocks, one per window, in the same order — each the "
+            "COMPLETE new version of that window (unchanged lines included), WITHOUT the 'NNNNN| ' prefixes. "
+            "No prose.")
+        for k, wi in enumerate(chunk, 1):
+            rel, a, b, t, nums = wins[wi]
+            src = files[rel][1]
+            body = "\n".join(f"{i:>5}| {src[i - 1]}" for i in range(a, b + 1))
+            parts.append(f"\n### WINDOW {k} — {rel}, lines {a}-{b}; targets: {', '.join(map(str, t))}; "
+                         f"rule: {', '.join(f'R{n}' for n in nums)}\n```\n{body}\n```")
+        blocks = _FENCE.findall(ask("\n".join(parts)) or "")
+        if len(blocks) != len(chunk):
+            log.info(f"  🧰 Pencere yanıtı {len(blocks)} blok, beklenen {len(chunk)} — parti atlandı")
+            continue
+        for wi, body in zip(chunk, blocks):
+            replies[wi] = parse_reply("```php\n" + body + "```")
     applied = 0
-    for a, b, targets in reversed(_merge_windows(lines, len(src), radius)):
-        old = src[a - 1:b]
-        window = "\n".join(f"{i:>5}| {src[i - 1]}" for i in range(a, b + 1))
-        prompt = (f"{instruction}\n\nFILE: {rel}\nWINDOW: lines {a}-{b} (each line is prefixed with 'NNNNN| ' — "
-                  f"the prefix is NOT part of the file).\nCHANGE ONLY lines {', '.join(map(str, targets))}; every other "
-                  "line must stay byte-identical. If a target line cannot be changed safely, leave it as it is.\n"
-                  f"Return the COMPLETE new version of lines {a}-{b} — unchanged lines included — in ONE ```php "
-                  "code block, WITHOUT the 'NNNNN| ' prefixes. No prose.\n\n```\n" + window + "\n```")
-        new = parse_reply(ask(prompt))
-        if not new or new == old or len(new) < len(old) * 0.6:
+    for rel, (content, src) in files.items():
+        src = list(src)
+        n = 0
+        for wi in sorted((w for w in replies if wins[w][0] == rel), key=lambda w: -wins[w][1]):
+            _rel, a, b, _t, _n = wins[wi]
+            new, old = replies[wi], src[a - 1:b]
+            if not new or new == old or len(new) < len(old) * 0.6:
+                continue
+            if difflib.SequenceMatcher(None, "\n".join(old), "\n".join(new), autojunk=False).ratio() < 0.5:
+                continue
+            src[a - 1:b] = new
+            n += 1
+        if not n:
             continue
-        if difflib.SequenceMatcher(None, "\n".join(old), "\n".join(new), autojunk=False).ratio() < 0.5:
+        path = root / rel
+        path.write_text("\n".join(src) + ("\n" if content.endswith("\n") else ""), encoding="utf-8")
+        if rel.endswith(".php") and not _php_lint_ok(path):
+            path.write_text(content, encoding="utf-8")
+            log.info(f"  🧰 {rel}: pencere düzeltmesi php -l'den geçmedi — geri alındı")
             continue
-        src[a - 1:b] = new
-        applied += 1
-    if not applied:
-        return 0
-    path.write_text("\n".join(src) + ("\n" if content.endswith("\n") else ""), encoding="utf-8")
-    if rel.endswith(".php") and not _php_lint_ok(path):
-        path.write_text(content, encoding="utf-8")
-        log.info(f"  🧰 {rel}: pencere düzeltmesi php -l'den geçmedi — geri alındı")
-        return 0
+        applied += n
     return applied
+
+
+def window_fix(root: Path, rel: str, lines: list[int], instruction: str, *, radius: int, ask=None) -> int:
+    """Tek dosya için batch_window_fix."""
+    return batch_window_fix(root, [(rel, lines, instruction)], radius=radius, ask=ask)
 
 
 def _rule_instruction(r, version: str) -> str:
@@ -296,9 +349,8 @@ def fix_leftovers(root: Path, scope: dict[str, list[str]], version: str, *, ask=
         by: dict[tuple[str, str], list[int]] = {}
         for h in local:
             by.setdefault((h["file"], h["rule"]), []).append(int(h.get("line") or 0))
-        for (rel, rule), lns in by.items():
-            fixed += window_fix(root, rel, lns, _rule_instruction(rules[rule], version),
-                                radius=LEFTOVER_RADIUS, ask=ask)
+        fixed = batch_window_fix(root, [(rel, lns, _rule_instruction(rules[rule], version))
+                                        for (rel, rule), lns in by.items()], radius=LEFTOVER_RADIUS, ask=ask)
         log.info(f"  🧰 Araç {len(local)} yeri kaçırdı → {fixed} pencere LLM'le düzeltildi")
         hits = left()
     remaining = [(h["file"], h.get("line"), h["rule"]) for h in hits
@@ -308,19 +360,19 @@ def fix_leftovers(root: Path, scope: dict[str, list[str]], version: str, *, ask=
 
 def fix_review_issues(root: Path, issues: list[dict], files: set[str], *, ask=None) -> int:
     """İncelemenin bloklayan (blocker/major) maddelerini, maddenin satırı çevresinde düzelt."""
-    n = 0
     by: dict[str, list[dict]] = {}
     for it in issues:
         rel = str(it.get("file") or "").lstrip("/")
         if rel in files and int(it.get("line") or 0) > 0:
             by.setdefault(rel, []).append(it)
+    items = []
     for rel, its in by.items():
-        instr = ("Fix the following code-review findings in this PHP file. Keep behaviour identical apart from "
-                 "the fix; do not touch unrelated code.\n" + "\n".join(
+        instr = (f"In {rel}, fix these code-review findings. Keep behaviour identical apart from the fix; do not "
+                 "touch unrelated code.\n" + "\n".join(
                      f"- line {it.get('line')}: {it.get('problem') or ''} FIX: {it.get('required_fix') or ''}"
                      for it in its))
-        n += window_fix(root, rel, [int(it["line"]) for it in its], instr, radius=REVIEW_FIX_RADIUS, ask=ask)
-    return n
+        items.append((rel, [int(it["line"]) for it in its], instr))
+    return batch_window_fix(root, items, radius=REVIEW_FIX_RADIUS, ask=ask) if items else 0
 
 
 def _changed_in_scope(root: Path, files: list[str]) -> list[str]:
@@ -506,6 +558,7 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
                     f"## 🧰 Araç düzeltmesi\n\nPR: [#{pr['pr_id']}]({pr['url']}) — {tool}, {len(changed)} dosya, "
                     f"doğrulama ({', '.join(res['ran']) or '-'}) geçti"
                     + (" (önceki araç PR'ı güncellendi)" if reused else "") + ". LLM incelemesi PR'a yazılıyor."
+                    + f"\n\nDeğişen dosyalar ({len(changed)}):\n" + "\n".join(f"- `{f}`" for f in changed)
                     + notes + sig)
 
     def review(cur: dict[str, str]) -> dict:

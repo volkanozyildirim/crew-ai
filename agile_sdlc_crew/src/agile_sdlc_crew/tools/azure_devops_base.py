@@ -71,6 +71,9 @@ def extract_build_errors(log_text: str, max_lines: int = 80) -> str:
     return "\n".join(out)
 
 
+PR_DESCRIPTION_MAX = 4000  # Azure DevOps PR açıklaması sınırı
+
+
 class AzureDevOpsClient:
     """Azure DevOps REST API icin paylasilan HTTP istemcisi."""
 
@@ -520,7 +523,14 @@ class AzureDevOpsClient:
         description: str = "",
         work_item_ids: list[int] | None = None,
     ) -> dict:
-        """Pull request olusturur."""
+        """Pull request olusturur.
+
+        Azure PR aciklamasi en cok 4000 karakter; asilirsa govdesiz bir 400 Bad Request doner —
+        #268: 41 dosyalik arac PR'inin listesi siniri asti, PR acilmadi. Aciklama burada
+        sigdirilir; yine hata olursa Azure'un yaniti mesaja eklenir."""
+        if len(description or "") > PR_DESCRIPTION_MAX:
+            note = "\n\n… (açıklama Azure'un 4000 karakter sınırına sığdırıldı — tam liste WI yorumunda)"
+            description = description[:PR_DESCRIPTION_MAX - len(note)] + note
         url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests"
         params = {"api-version": self.API_VERSION}
         body: dict = {
@@ -534,7 +544,9 @@ class AzureDevOpsClient:
         resp = requests.post(
             url, headers=self._headers, json=body, params=params, timeout=30
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            raise requests.HTTPError(f"{resp.status_code} PR oluşturulamadı: {(resp.text or '')[:400]}",
+                                     response=resp)
         return resp.json()
 
     def delete_branch(self, repo_id_or_name: str, branch_name: str) -> bool:

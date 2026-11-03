@@ -6443,11 +6443,16 @@ def test_tool_fix_leftovers():
           and not php_modern.llm_line_fixable(rules["dynamic_properties"]))
     check("pencereler birleşir", modern_fix._merge_windows([10, 14, 40], 100, 3) == [(7, 17, [10, 14]), (37, 43, [40])])
 
+    calls = []
+
     def fake_llm(prompt: str) -> str:
-        body = prompt.rsplit("\n```\n", 1)[-1].rsplit("\n```", 1)[0]
-        lines = [_re.sub(r"^\s*\d+\| ?", "", ln) for ln in body.rstrip("\n").splitlines()]
-        out = [_re.sub(r"isset\((\$[\w\[\]'\"]+)\) \? \1 : ", r"\1 ?? ", ln) for ln in lines]
-        return "```php\n" + "\n".join(out) + "\n```"
+        calls.append(prompt)
+        blocks = []
+        for body in _re.findall(r"### WINDOW \d+ [^\n]*\n```\n(.*?)\n```", prompt, _re.S):
+            lines = [_re.sub(r"^\s*\d+\| ?", "", ln) for ln in body.splitlines()]
+            out = [_re.sub(r"isset\((\$[\w\[\]'\"]+)\) \? \1 : ", r"\1 ?? ", ln) for ln in lines]
+            blocks.append("```php\n" + "\n".join(out) + "\n```")
+        return "\n\n".join(blocks)
 
     if not shutil.which("php"):
         skip("kalan yer düzeltmesi", "php yok")
@@ -6483,7 +6488,36 @@ def test_tool_fix_leftovers():
         modern_fix.fix_review_issues(root, issues, {"app/R.php"}, ask=lambda p: (seen.append(p), "")[1])
         check("inceleme maddesi: yalnız kapsamdaki dosya, satır penceresi + maddenin düzeltmesi isteme girer",
               len(seen) == 1 and "line 4: p FIX: f" in seen[0])
+        # Toplu: 3 dosyada 5 pencere TEK çağrı (#266: pencere başına bir çağrı, 7 × $0.19)
+        for k in range(3):
+            (root / "app" / f"B{k}.php").write_text(
+                "<?php\n$a = isset($x) ? $x : 1;\n" + "$n = 0;\n" * 30 + "$b = isset($y) ? $y : 2;\n")
+        calls.clear()
+        res2 = modern_fix.fix_leftovers(root, {"null_coalesce": [f"app/B{k}.php" for k in range(3)]}, "8.2", ask=fake_llm)
+        check("kalan yerler tek çağrıda (3 dosya, 6 pencere → 1 claude -p)",
+              len(calls) == 1 and res2["fixed"] == 6 and not res2["remaining"], f"{len(calls)} {res2}")
+        n = modern_fix.window_fix(root, "app/B0.php", [2], "x", radius=1, ask=lambda p: "```php\na\n```\n```php\nb\n```")
+        check("blok sayısı pencere sayısını tutmazsa parti uygulanmaz", n == 0)
 
+    from agile_sdlc_crew.tools import claude_cli_llm as _cli
+    import os as _os
+    _old = _os.environ.get("CREW_CLI_CWD")
+    with tempfile.TemporaryDirectory() as td2:
+        _os.environ["CREW_CLI_CWD"] = str(Path(td2) / "neutral")
+        try:
+            check("claude -p nötr dizinde koşar (repo CLAUDE.md'si her çağrıya girmez)",
+                  _cli.cli_cwd() == str(Path(td2) / "neutral") and (Path(td2) / "neutral").is_dir())
+        finally:
+            if _old is None:
+                _os.environ.pop("CREW_CLI_CWD", None)
+            else:
+                _os.environ["CREW_CLI_CWD"] = _old
+    cs = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/tools/claude_cli_llm.py").read_text()
+    check("claude -p'nin iki çalıştırma yolu da cwd=cli_cwd()", cs.count("cwd=cli_cwd()") == 2)
+    az = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/tools/azure_devops_base.py").read_text()
+    check("PR açıklaması Azure'un 4000 sınırına sığdırılır, hata yanıtı mesajda (#268)",
+          "PR_DESCRIPTION_MAX = 4000" in az and "description[:PR_DESCRIPTION_MAX - len(note)]" in az
+          and "PR oluşturulamadı: {(resp.text" in az)
     mf = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern_fix.py").read_text()
     check("bloklayan madde turlardan sonra kalırsa needs_human (WI Code Review'a geçmez)",
           "raise NeedsHumanReview(" in mf and "db.needs_human_job(job_id, str(e))" in mf
