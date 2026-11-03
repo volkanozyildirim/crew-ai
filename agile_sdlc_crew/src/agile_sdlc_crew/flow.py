@@ -2011,8 +2011,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
         self.state.wi_type = info["wi_type"]
         self.state.wi_state_initial = info["wi_state"]
         self.state.wi_state_current = info["wi_state"]
-        # Kuyruğa alınırken WI zaten In Progress'e taşındıysa (server
-        # _wi_mark_queued_jobs) dönülecek durum o anki hâldir, şimdiki değil.
+        # Server WI'ı kuyruğa alınca To Do'ya (_wi_mark_queued_jobs), iş başlayınca
+        # In Progress'e (_wi_start_job) taşır; dönülecek durum kuyruk ÖNCESİ hâldir,
+        # şimdiki değil. Aşağıdaki "start" geçişi CLI yolu için — server'da no-op.
         try:
             _before = ((self._db.get_job(self.state.job_id) if (self._db and self.state.job_id) else None)
                        or {}).get("wi_state_before")
