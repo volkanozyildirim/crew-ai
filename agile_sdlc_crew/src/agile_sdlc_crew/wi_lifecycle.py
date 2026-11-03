@@ -37,6 +37,9 @@ log = logging.getLogger("pipeline")
 # Süreç şablonları farklı adlar kullanır; takımın workitemtype/states listesinde
 # hangisi varsa o seçilir. Eşleşme büyük/küçük harf duyarsız.
 STATE_PREFS: dict[str, list[str]] = {
+    # iş kuyruğa alındı, sırası bekleniyor — "ilerletilecek" (kullanıcı kararı
+    # 2026-11-03: kuyruktaki her kart aynı anda In Progress görünmesin)
+    "queue":   ["To Do", "Ready", "Approved", "Selected for Development"],
     # iş kuyruktan alındı, pipeline çalışıyor
     "start":   ["In Progress", "Active", "Doing", "In Development", "Development", "Committed"],
     # PR açıldı, inceleme bekliyor
@@ -51,6 +54,9 @@ STATE_PREFS: dict[str, list[str]] = {
 
 # Pipeline'ın sahiplendiği durum adları (Proposed kategorisi bunlara eklenir).
 _OWNED_NAMES = {n.lower() for k in ("start", "review", "wait") for n in STATE_PREFS[k]}
+# Geri alma yalnızca pipeline'ın koyabileceği durumlardan yapılır; kuyruk
+# durumu (To Do) da onlardan biri — silinen kuyruk işi Backlog'a döner.
+_REVERT_FROM = _OWNED_NAMES | {n.lower() for n in STATE_PREFS["queue"]}
 
 _TEST_PATH_RE = re.compile(
     r"(^|/)(tests?|spec|__tests__)(/|$)|(_test|Test|\.test|\.spec|_spec)\.[a-zA-Z]+$",
@@ -97,6 +103,20 @@ def plan_transition(current: str, available: list[dict], event: str) -> str | No
     return target
 
 
+def plan_queue(current: str, available: list[dict]) -> str | None:
+    """İş kuyruğa alındı: WI'ı "ilerletilecek" durumuna (To Do) al — ama
+    yalnızca hâlâ Proposed kategorisindeyse (Backlog/New). İnsanın zaten
+    başlattığı (In Progress) ya da ilerlettiği bir işi geri çekmez."""
+    target = pick_state(available, "queue")
+    cur = (current or "").strip()
+    if not target or not cur or cur.lower() == target.lower():
+        return None
+    cats = {(s.get("name") or "").lower(): s.get("category") or "" for s in available or []}
+    if cats.get(cur.lower()) != "Proposed":
+        return None
+    return target
+
+
 def plan_revert(current: str, initial: str, available: list[dict], pr_exists: bool) -> str | None:
     """İş `failed` bitti: pipeline'ın kendi taşıdığı WI'ı başlangıç durumuna
     geri al. PR açılmışsa geri alma YOK (kod var, Code Review'da kalsın —
@@ -110,8 +130,8 @@ def plan_revert(current: str, initial: str, available: list[dict], pr_exists: bo
     owned = owned_states(available)
     if cur not in owned or ini.lower() not in owned:
         return None
-    # Yalnızca pipeline'ın koyduğu durumlardan geri dön (start/review/wait).
-    if cur not in _OWNED_NAMES:
+    # Yalnızca pipeline'ın koyduğu durumlardan geri dön (queue/start/review/wait).
+    if cur not in _REVERT_FROM:
         return None
     return ini
 
@@ -331,14 +351,27 @@ def apply_state(client, work_item_id: str, target: str, logger=None) -> bool:
 
 
 def mark_queued(client, work_item_id: str, logger=None) -> str:
-    """İş kuyruğa alındı → WI In Progress (sahiplik aralığındaysa). Geri dönülecek
-    durumu (taşımadan ÖNCEKİ hâl) döndürür; okunamazsa ''."""
+    """İş kuyruğa alındı → WI To Do (Proposed'daysa; bkz. plan_queue). Geri
+    dönülecek durumu (taşımadan ÖNCEKİ hâl) döndürür; okunamazsa ''.
+    In Progress'e iş SIRASI GELİNCE geçer (mark_started) — kuyrukta bekleyen
+    on kart aynı anda "çalışıyor" görünmesin."""
     info = load_wi_context(client, work_item_id)
     before = info["wi_state"]
-    target = plan_transition(before, info["wi_states"], "start")
+    target = plan_queue(before, info["wi_states"])
     if target:
         apply_state(client, work_item_id, target, logger=logger)
     return before
+
+
+def mark_started(client, work_item_id: str, logger=None) -> tuple[str, str | None]:
+    """Worker işi kuyruktan aldı → WI In Progress (sahiplik aralığındaysa).
+    (taşımadan önceki durum, yazılan hedef ya da None) döndürür."""
+    info = load_wi_context(client, work_item_id)
+    before = info["wi_state"]
+    target = plan_transition(before, info["wi_states"], "start")
+    if target and apply_state(client, work_item_id, target, logger=logger):
+        return before, target
+    return before, None
 
 
 def revert_to(client, work_item_id: str, initial: str, logger=None) -> str | None:

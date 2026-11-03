@@ -2288,9 +2288,11 @@ def _wi_lifecycle_on() -> bool:
 
 
 def _wi_mark_queued_jobs():
-    """Kuyruğa alınan pipeline işlerinin WI'ını In Progress'e taşı, önceki durumu
-    jobs.wi_state_before'a yaz (sorun olursa oraya dönülür). Kullanıcı kararı:
-    kart kuyruğa atıldığı anda ilerlemeli, işin sırası gelince değil."""
+    """Kuyruğa alınan pipeline işlerinin WI'ını To Do'ya ("ilerletilecek") taşı,
+    önceki durumu jobs.wi_state_before'a yaz (sorun olursa oraya dönülür).
+    In Progress'e yalnızca worker işi kuyruktan ALINCA geçer (_wi_mark_started).
+    Kullanıcı kararı 2026-11-03: kuyruktaki tüm kartlar aynı anda In Progress
+    görünmesin — yalnız o an işlenen iş In Progress'te olsun."""
     if not _wi_lifecycle_on() or not _wi_mark_lock.acquire(blocking=False):
         return
     try:
@@ -2309,6 +2311,36 @@ def _wi_mark_queued_jobs():
         pipeline_log.warning(f"  🗂️ Kuyruk WI işaretleme hatası: {e}")
     finally:
         _wi_mark_lock.release()
+
+
+def _wi_tracked(job: dict) -> bool:
+    """Yaşam döngüsünün izlediği iş mi (list_unmarked_queued_jobs ile aynı süzgeç)."""
+    return (not job.get("dry_run") and not job.get("kickoff_only")
+            and (job.get("job_kind") or "pipeline") in ("pipeline", "modern_fix"))
+
+
+def _wi_start_job(job: dict) -> None:
+    """İşi running'e al ve WI'ını In Progress'e taşı.
+
+    Kilit: süren bir kuyruk işaretleme turu bitmeden iş başlamaz — aksi hâlde
+    tur, az önce In Progress'e geçen kartı To Do'ya geri yazabilirdi. Kilit
+    altında status=running olduktan sonra hiçbir tur bu işi seçmez."""
+    job_id = job["id"]
+    with _wi_mark_lock:
+        db.start_job(job_id)
+        fresh = db.get_job(job_id) or job
+    if not (_wi_lifecycle_on() and _wi_tracked(fresh)):
+        return
+    try:
+        from agile_sdlc_crew import wi_lifecycle as _wl
+        from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+        before, _ = _wl.mark_started(AzureDevOpsClient(), fresh["work_item_id"], logger=pipeline_log.info)
+        # Kuyruk turu bu işi hiç görmediyse (yaşam döngüsü sonradan açıldı, Azure
+        # okunamadı) dönülecek durum işin başladığı andaki hâldir.
+        if not fresh.get("wi_state_before") and before:
+            db.set_wi_state_before(job_id, before)
+    except Exception as e:  # noqa: BLE001 — WI durumu işi asla durdurmaz
+        pipeline_log.warning(f"  🗂️ WI #{fresh.get('work_item_id')} In Progress'e taşınamadı: {e}")
 
 
 def _wi_revert_async(work_item_id: str, initial: str, why: str):
@@ -2360,12 +2392,12 @@ def _queue_worker():
             if (job.get("job_kind") or "pipeline") == "modern_fix":
                 # Araç düzeltmesi (Go modernize / ruff): LLM developer yok, yalnız inceleme
                 from agile_sdlc_crew.quality import modern_fix
-                db.start_job(job_id)
+                _wi_start_job(job)
                 modern_fix.run(job_id, work_item_id)
                 db.complete_job(job_id)
                 continue
 
-            db.start_job(job_id)
+            _wi_start_job(job)
             tracker = StatusTracker()
             run_pipeline(
                 work_item_id,

@@ -5808,19 +5808,31 @@ def test_resume_skips_discarded_work():
 
 
 def test_wi_lifecycle_on_queue():
-    """Kullanıcı kararı: kart kuyruğa atıldığı anda In Progress'e geçer; sorun olursa
-    kuyruk anındaki duruma (To Do) döner — iş başlarken okunan In Progress'e değil."""
+    """Kullanıcı kararı (2026-11-03): kuyruktaki kartlar aynı anda In Progress'e
+    atılmaz — kuyruğa alınan To Do'ya ("ilerletilecek"), işlenen iş In Progress'e.
+    Sorun olursa kuyruk ÖNCESİ duruma döner — iş başlarken okunan In Progress'e değil."""
     print("\n[yaşam döngüsü: kuyruğa alınınca]")
     from agile_sdlc_crew import wi_lifecycle as wl
     from agile_sdlc_crew import pipeline_config as pc
 
-    c = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "To Do"})
+    c = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "Backlog"})
     before = wl.mark_queued(c, "76578")
-    check("kuyruk: To Do → In Progress, önceki durum döner", before == "To Do" and c.ops == [("state", 76578, "In Progress")], str(c.ops))
+    check("kuyruk: Backlog → To Do (In Progress DEĞİL), önceki durum döner",
+          before == "Backlog" and c.ops == [("state", 76578, "To Do")], str(c.ops))
+    c1 = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "To Do"})
+    check("kuyruk: zaten To Do → dokunmaz", wl.mark_queued(c1, "1") == "To Do" and c1.ops == [])
+    c3 = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "In Progress"})
+    check("kuyruk: insan başlatmış (In Progress) → geri çekmez", wl.mark_queued(c3, "1") == "In Progress" and c3.ops == [])
     c2 = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "QA To Do"})
     check("kuyruk: sahiplik dışı (QA) → dokunmaz", wl.mark_queued(c2, "1") == "QA To Do" and c2.ops == [])
-    check("geri al: In Progress → To Do", wl.revert_to(c, "76578", "To Do") == "To Do" and c.ops[-1] == ("state", 76578, "To Do"))
-    check("geri al: başlangıç boşsa dokunmaz", wl.revert_to(c, "76578", "") is None)
+    cs = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "To Do"})
+    check("iş başladı: To Do → In Progress", wl.mark_started(cs, "76578") == ("To Do", "In Progress")
+          and cs.ops == [("state", 76578, "In Progress")], str(cs.ops))
+    cq = _StubAzClient(_FLO_TASK, {"System.WorkItemType": "Task", "System.State": "QA"})
+    check("iş başladı: sahiplik dışı (QA) → dokunmaz", wl.mark_started(cq, "1") == ("QA", None) and cq.ops == [])
+    check("silinen kuyruk işi: To Do → Backlog", wl.plan_revert("To Do", "Backlog", _FLO_TASK, pr_exists=False) == "Backlog")
+    check("geri al: In Progress → To Do", wl.revert_to(cs, "76578", "To Do") == "To Do" and cs.ops[-1] == ("state", 76578, "To Do"))
+    check("geri al: başlangıç boşsa dokunmaz", wl.revert_to(cs, "76578", "") is None)
 
     knobs = {"CREW_WI_LIFECYCLE": True, "CREW_WI_ASSIGN_IF_EMPTY": False}
     _orig = pc.get
@@ -5840,6 +5852,9 @@ def test_wi_lifecycle_on_queue():
 
     src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/server.py").read_text()
     check("server: her kuyruğa almada işaretleme (_ensure_worker)", "threading.Thread(target=_wi_mark_queued_jobs" in src)
+    check("server: iş kuyruktan alınınca In Progress (_wi_start_job, pipeline + modern_fix)",
+          src.count("_wi_start_job(job)") == 2 and "db.start_job(job_id)\n                modern_fix" not in src)
+    check("server: başlatma kuyruk turuyla aynı kilit altında", "with _wi_mark_lock:\n        db.start_job(job_id)" in src)
     check("server: silinen kuyruk işi ve restart'ta yarım kalan iş geri alınır",
           'f"iş #{job_id} silindi"' in src and '"sunucu yeniden başladı"' in src)
 
