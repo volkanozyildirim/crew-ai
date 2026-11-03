@@ -13,8 +13,15 @@
 
 declare(strict_types=1);
 
-$root = rtrim((string) ($argv[1] ?? ''), '/');
-$exclude = array_values(array_filter(array_map('trim', explode(',', (string) ($argv[2] ?? '')))));
+// Düzeltme kipi: php php_modern_scan.php --fix-sensitive <repo kökü> <dosya…>
+// Yalnız verilen dosyalarda, taramanın sensitive_parameter dediği parametrelerin ÖNÜNE
+// `#[\SensitiveParameter] ` yazar (Rector'un karşılığı kaldırıldı — ad eşleşmesi bizde,
+// ekleme davranış değiştirmez: yalnız hata izinde değer gizlenir). Çıktı: {"changed": [...]}.
+$fixSensitive = ($argv[1] ?? '') === '--fix-sensitive';
+$argOff = $fixSensitive ? 1 : 0;
+$root = rtrim((string) ($argv[1 + $argOff] ?? ''), '/');
+$exclude = $fixSensitive ? [] : array_values(array_filter(array_map('trim', explode(',', (string) ($argv[2] ?? '')))));
+$fixFiles = $fixSensitive ? array_slice($argv, 3) : [];
 if ($root === '' || !is_dir($root)) {
     fwrite(STDERR, "kök dizin yok\n");
     exit(2);
@@ -29,6 +36,8 @@ final class Scanner
     /** @var string[] */
     private array $lines = [];
     public array $hits = [];
+    /** @var array<string, int[]> dosya → `#[\SensitiveParameter] ` eklenecek bayt konumları */
+    public array $inserts = [];
     public array $adoption = [
         'enum' => 0, 'readonly' => 0, 'match' => 0, 'nullsafe' => 0, 'attribute' => 0,
         'typed_props' => 0, 'untyped_props' => 0, 'strict_types_files' => 0,
@@ -59,7 +68,10 @@ final class Scanner
         $this->t = [];
         $line = 1;
         $hasStrict = false;
+        $off = 0;  // token'ın dosyadaki bayt konumu (düzeltme kipi için)
         foreach ($raw as $i => $tok) {
+            $at = $off;
+            $off += strlen(is_array($tok) ? $tok[1] : $tok);
             if (is_array($tok)) {
                 [$id, $text, $line] = $tok;
                 if ($id === T_DOC_COMMENT && preg_match(self::ANNOTATIONS, $text)) {
@@ -71,9 +83,9 @@ final class Scanner
                 if ($id === T_DECLARE) {
                     $hasStrict = $hasStrict || (bool) preg_match('/strict_types\s*=\s*1/', substr($code, 0, 400));
                 }
-                $this->t[] = ['id' => $id, 'text' => $text, 'line' => $line];
+                $this->t[] = ['id' => $id, 'text' => $text, 'line' => $line, 'off' => $at];
             } else {
-                $this->t[] = ['id' => 0, 'text' => $tok, 'line' => $line];
+                $this->t[] = ['id' => 0, 'text' => $tok, 'line' => $line, 'off' => $at];
             }
         }
         $this->n = count($this->t);
@@ -490,7 +502,10 @@ final class Scanner
             if (preg_match(self::SENSITIVE_PARAM, $this->tx($v))) {
                 $marked = false;
                 for ($j = $a; $j < $v; $j++) if ($this->id($j) === T_ATTRIBUTE && stripos($this->text($j, $v), 'SensitiveParameter') !== false) $marked = true;
-                if (!$marked) $this->hit('sensitive_parameter', $this->ln($v));
+                if (!$marked) {
+                    $this->hit('sensitive_parameter', $this->ln($v));
+                    $this->inserts[$this->file][] = (int) $this->t[$a]['off'];  // parametrenin ilk token'ı
+                }
             }
             // implicit nullable: tip var, ? ile başlamıyor, null/mixed içermiyor, = null
             if ($typeToks && $this->is($v + 1, '=') && $this->isNullTok($v + 2) && $v + 2 === $b) {
@@ -776,6 +791,35 @@ final class Scanner
         }
         return $assigns && $stmts <= 3;
     }
+}
+
+// ── düzeltme kipi: yalnız verilen dosyalar ──
+if ($fixSensitive) {
+    $sc = new Scanner();
+    $changed = [];
+    $rootReal = realpath($root);
+    foreach ($fixFiles as $rel) {
+        $rel = ltrim((string) $rel, '/');
+        $path = realpath($root . '/' . $rel);
+        // kök dışına çıkan / olmayan yol atlanır (yollar zaten load_scope'tan geçti; ikinci kilit)
+        if ($path === false || $rootReal === false || !str_starts_with($path, $rootReal . '/') || !str_ends_with($path, '.php')) {
+            continue;
+        }
+        $sc->scanFile($path, $rel);
+        $offs = array_unique($sc->inserts[$rel] ?? []);
+        if (!$offs) {
+            continue;
+        }
+        rsort($offs);
+        $code = (string) file_get_contents($path);
+        foreach ($offs as $o) {
+            $code = substr($code, 0, $o) . '#[\SensitiveParameter] ' . substr($code, $o);
+        }
+        file_put_contents($path, $code);
+        $changed[] = $rel;
+    }
+    echo json_encode(['changed' => $changed], JSON_UNESCAPED_SLASHES);
+    exit(0);
 }
 
 // ── dosya gezgini ──

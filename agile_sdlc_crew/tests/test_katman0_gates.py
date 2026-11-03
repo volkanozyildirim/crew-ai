@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -6274,22 +6275,26 @@ def test_php_rector_fix():
         check("Rector yapılandırması: yollar tek tırnaklı ($ enterpolasyonu yok, ' kaçışlı)",
               "it\\'s$x.php'" in cfg and '"' not in cfg.split("withPaths")[1].split(")")[0], cfg)
 
-        _on = php_modern.rector_on
+        _on, _cls = php_modern.rector_on, php_modern.rector_classes
         php_modern.rector_on = lambda: True
+        php_modern.rector_classes = lambda: frozenset({rules["array_destructuring"].rector})
         try:
             ok = modern_fix.load_scope(json.dumps({"lang": "php", "repo": "core",
                                                    "scope": {"array_destructuring": ["app/A.php"]}}), Path(td))
             check("PHP kapsamı: Rector kuralı kabul edilir", ok[:3] == ("php", "core", {"array_destructuring": ["app/A.php"]}))
+            ok2 = modern_fix.load_scope(json.dumps({"lang": "php", "repo": "core",
+                                                    "scope": {"sensitive_parameter": ["app/A.php"]}}), Path(td))
+            check("PHP kapsamı: SensitiveParameter kendi düzelticimizle kabul edilir", ok2[2] == {"sensitive_parameter": ["app/A.php"]})
             rej = 0
-            for b in ({"typed_properties": ["app/A.php"]}, {"sensitive_parameter": ["app/A.php"]},
-                      {"array_destructuring": ["../x.php"]}):
+            for b in ({"typed_properties": ["app/A.php"]}, {"array_destructuring": ["../x.php"]},
+                      {"str_contains": ["app/A.php"]}):  # sınıfı kurulu Rector'da yok sayılıyor
                 try:
                     modern_fix.load_scope(json.dumps({"lang": "php", "repo": "core", "scope": b}), Path(td))
                 except ValueError:
                     rej += 1
-            check("PHP kapsamı: Rector'suz/yapısal kural ve kök dışı yol reddedilir", rej == 3, f"{rej}/3")
+            check("PHP kapsamı: yapısal kural, kök dışı yol, kurulu Rector'da olmayan sınıf reddedilir", rej == 3, f"{rej}/3")
         finally:
-            php_modern.rector_on = _on
+            php_modern.rector_on, php_modern.rector_classes = _on, _cls
         php_modern.rector_on = lambda: False
         try:
             try:
@@ -6302,8 +6307,29 @@ def test_php_rector_fix():
         finally:
             php_modern.rector_on = _on
 
+        if shutil.which("php"):
+            (root / "app" / "S.php").write_text(
+                "<?php\nclass S {\n"
+                "    public function __construct(private string $apiKey, private int $n) {}\n"
+                "    public function login(string $user, string $password, #[\\SensitiveParameter] string $token, $x = 1) {}\n"
+                "}\nfunction f(&$secret, ...$rest) { $s = 'string $password'; }\n")
+            modern_fix.sensitive_apply(root, ["app/S.php", "../../etc/passwd"])
+            out = (root / "app" / "S.php").read_text()
+            check("SensitiveParameter: parola/token/api_key parametresinin önüne eklenir (promoted ve & dahil)",
+                  "#[\\SensitiveParameter] private string $apiKey" in out and "#[\\SensitiveParameter] string $password" in out
+                  and "#[\\SensitiveParameter] &$secret" in out, out)
+            check("SensitiveParameter: zaten işaretli, ilgisiz parametre ve string içi dokunulmaz",
+                  out.count("SensitiveParameter") == 4 and "private int $n" in out and "string $user" in out
+                  and "$s = 'string $password'" in out, out)
+            lint = subprocess.run(["php", "-l", str(root / "app" / "S.php")], capture_output=True, text=True)
+            check("SensitiveParameter: çıktı php -l'den geçer", lint.returncode == 0, lint.stdout + lint.stderr)
+        else:
+            skip("SensitiveParameter düzeltici", "php yok")
+
         binp = php_modern.rector_bin()
         if binp:
+            missing = [r.key for r in rules.values() if php_modern.rector_fixable(r) and r.rector not in php_modern.rector_classes()]
+            check("katalogdaki her Rector sınıfı kurulu Rector'da var", not missing, str(missing))
             # reponun autoload'u çalıştırılmamalı (rector bin cwd'deki vendor/autoload.php'yi include eder)
             (root / "vendor").mkdir()
             (root / "vendor" / "autoload.php").write_text(

@@ -251,7 +251,6 @@ rules:
     before: "$name = $order->getCustomer() ? $order->getCustomer()->getName() : null;"
     after: "$name = $order->getCustomer()?->getName();"
     ref: "https://wiki.php.net/rfc/nullsafe_operator"
-    rector: "Rector\\Php80\\Rector\\Ternary\\TernaryToNullsafeOperatorRector"
   - key: array_destructuring
     since: "7.1"
     kind: mechanical
@@ -312,7 +311,7 @@ rules:
     before: "array_map([$this, 'normalize'], $rows)"
     after: "array_map($this->normalize(...), $rows)"
     ref: "https://wiki.php.net/rfc/first_class_callable_syntax"
-    rector: "Rector\\Php81\\Rector\\Array_\\FirstClassCallableRector"
+    rector: "Rector\\Php81\\Rector\\Array_\\ArrayToFirstClassCallableRector"  # yalnız [$obj, 'm'] biçimi
   - key: ctor_promotion
     since: "8.0"
     kind: mechanical
@@ -350,6 +349,7 @@ rules:
     before: "public function login(string $user, string $password)"
     after: "public function login(string $user, #[\\SensitiveParameter] string $password)"
     ref: "https://wiki.php.net/rfc/redact_parameters_in_back_traces"
+    fixer: "tempo"  # Rector'un AddSensitiveParameterAttributeRector'ı kaldırıldı
   - key: typed_class_constants
     since: "8.3"
     kind: mechanical

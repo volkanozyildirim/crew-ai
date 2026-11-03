@@ -133,12 +133,34 @@ def rector_config(root: Path, scope: dict[str, list[str]], version: str, cache_d
             f"    ->withCache({_php_str(str(cache_dir))});\n")
 
 
+def sensitive_apply(root: Path, files: list[str]) -> None:
+    """`#[\\SensitiveParameter]`: Rector'un karşılığı kaldırıldı ("ada göre eşleşme belirsiz"),
+    ama eklemenin bedeli düşük — yalnız hata izinde değer gizlenir, davranış değişmez. Tarayıcı
+    bulguyu zaten token düzeyinde buluyor; düzeltme kipi aynı yerin önüne özniteliği yazar.
+    Tarayıcı bizim dosyamız, kodu ÇALIŞTIRMAZ (token_get_all) — repo autoload'u yüklenmez."""
+    from agile_sdlc_crew import verify
+    from agile_sdlc_crew.quality import php_modern
+    cfg = php_modern.load_cfg()
+    r = subprocess.run([cfg.get("php_bin", "php"), "-d", "display_errors=stderr", str(php_modern.SCAN_PHP),
+                        "--fix-sensitive", str(root), *files], capture_output=True, text=True, timeout=600,
+                       env=verify._env())
+    if r.returncode != 0:
+        raise RuntimeError("SensitiveParameter düzeltmesi hata verdi: " + ((r.stderr or r.stdout) or "").strip()[-600:])
+
+
 def php_apply(root: Path, scope: dict[str, list[str]], version: str) -> None:
     """Rector'u repo dışındaki geçici bir yapılandırmayla çalıştır (repo'ya dosya yazılmaz).
     Ortam süzülür (Azure/Sonar anahtarları Rector'a geçmez)."""
     import tempfile
     from agile_sdlc_crew import verify
     from agile_sdlc_crew.quality import php_modern
+    rules = {r.key: r for r in php_modern.load_rules()}
+    own = {k: v for k, v in scope.items() if php_modern.fixer_fixable(rules.get(k))}
+    if own:
+        sensitive_apply(root, sorted({f for fs in own.values() for f in fs}))
+    scope = {k: v for k, v in scope.items() if k not in own}
+    if not scope:
+        return
     binp = php_modern.rector_bin()
     if not binp:
         raise RuntimeError("Rector kurulu değil (CREW_RECTOR_BIN / ~/.crew_tools/rector)")
@@ -238,7 +260,10 @@ def run(job_id: int, work_item_id: str) -> dict:
             if not br.get("success"):
                 raise RuntimeError(f"Branch açılamadı: {br.get('error')}")
             branch = br["branch"]
-        tool = {"go": "modernize -fix", "php": "rector"}.get(lang, "ruff --fix")
+        from agile_sdlc_crew.quality import php_modern as _pm
+        _own = lang == "php" and all(_pm.fixer_fixable(r) for r in
+                                     [{x.key: x for x in _pm.load_rules()}.get(k) for k in scope])
+        tool = {"go": "modernize -fix", "php": "tempo-fixer" if _own else "rector"}.get(lang, "ruff --fix")
         client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f, "content": c}
                                            for f, c in contents.items()],
                             f"#{work_item_id}: {title[:80]} ({tool})")
