@@ -101,7 +101,7 @@ def changed_paths(change_entries: list[dict]) -> list[str]:
 
 
 def review_summary_markdown(*, verdict: str, issues: list[dict], pr_id: int, pr_url: str,
-                            work_item_id: str, files: int, text_tail: str = "") -> str:
+                            work_item_id: str, files: int, text_tail: str = "", tool: str = "") -> str:
     mark = {"APPROVE": "✅ Onay", "CHANGES_REQUIRED": "🔴 Değişiklik gerekli"}.get(verdict, "⚪ Karar belirsiz")
     L = [f"## 🔍 Pipeline İnceleme Katkısı — PR #{pr_id}", "",
          f"**Karar (danışma):** {mark} · **İncelenen dosya:** {files} · **WI:** #{work_item_id}", ""]
@@ -119,8 +119,12 @@ def review_summary_markdown(*, verdict: str, issues: list[dict], pr_id: int, pr_
         L += ["Bloklayan ya da önemli madde bulunmadı.", ""]
     if text_tail:
         L += ["<details><summary>Reviewer notu</summary>", "", text_tail[:2500], "", "</details>", ""]
-    L += ["---", f"*Bu inceleme danışma niteliğindedir: PR insan tarafından geliştirildi; pipeline kodu değiştirmez, "
-          f"oy vermez, WI durumuna dokunmaz. [PR]({pr_url})*"]
+    if tool:
+        L += ["---", f"*Bu PR'ın kodunu bir araç ({tool}) yazdı; inceleme danışma niteliğindedir, oy vermez. "
+              f"[PR]({pr_url})*"]
+    else:
+        L += ["---", f"*Bu inceleme danışma niteliğindedir: PR insan tarafından geliştirildi; pipeline kodu "
+              f"değiştirmez, oy vermez, WI durumuna dokunmaz. [PR]({pr_url})*"]
     return "\n".join(L)
 
 
@@ -469,11 +473,30 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
         log.info(f"  Satır düzeltme: {anch['moved']} madde doğru satıra oturtuldu, "
                  f"{anch['cleared']} maddenin alıntısı dosyada bulunamadı (numara düşürüldü)")
 
-    posted = {"pr_summary": False, "inline": 0, "wi": False, "suggestions": 0}
     summary = review_summary_markdown(verdict=verdict, issues=issues, pr_id=pid, pr_url=pr_url,
                                       work_item_id=work_item_id or "?", files=len(files),
-                                      text_tail="" if issues else text[:2500])
-    if post:
+                                      text_tail="" if issues else text[:2500], tool=tool if changes else "")
+    posted = post_review(client, rname, pid, work_item_id, summary, issues, file_bodies) if post else \
+        {"pr_summary": False, "inline": 0, "wi": False, "suggestions": 0}
+    if job_id:
+        try:
+            db.complete_step(job_id, "review_pr_task", text[:50_000])
+        except Exception:
+            pass
+    return {"repo": rname, "pr_id": pid, "pr_url": pr_url, "work_item_id": work_item_id, "branch": branch,
+            "verdict": verdict, "issues": len(issues), "files": len(files), "posted": posted, "summary": summary,
+            "issue_list": issues, "file_bodies": file_bodies}
+
+
+def post_review(client, rname: str, pid, work_item_id: str, summary: str, issues: list[dict],
+                file_bodies: dict, *, only_blocking: bool = False, wi: bool = True) -> dict:
+    """İnceleme sonucunu PR'a (özet + satır yorumları) ve WI'a yaz.
+
+    only_blocking: yalnız blocker/major satıra yazılır (araç düzeltmesi: minor ve öneri satır
+    yorumu olmaz — #45729'da ara turların maddeleri PR'ı doldurdu)."""
+    from agile_sdlc_crew.main import _add_wi_comment
+    posted = {"pr_summary": False, "inline": 0, "wi": False, "suggestions": 0}
+    if True:
         try:
             client.add_pr_comment(rname, pid, summary)
             posted["pr_summary"] = True
@@ -492,7 +515,7 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
         # duzeltme, ozet tablosunda bir satir olmaktan daha degerli.
         _sugs = {id(i): verified_suggestion(i, file_bodies) for i in issues}
         _inline = [i for i in issues
-                   if i.get("severity") in INLINE_SEVERITIES or _sugs.get(id(i))]
+                   if i.get("severity") in INLINE_SEVERITIES or (_sugs.get(id(i)) and not only_blocking)]
         for it in _inline[:MAX_INLINE_COMMENTS]:
             try:
                 fp = it.get("file") or ""
@@ -512,17 +535,10 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
                     posted["suggestions"] = posted.get("suggestions", 0) + 1
             except Exception as e:  # noqa: BLE001
                 log.info(f"  Satır yorumu yazılamadı ({it.get('id')}): {e}")
-        if work_item_id:
+        if work_item_id and wi:
             try:
                 _add_wi_comment(client, work_item_id, summary)
                 posted["wi"] = True
             except Exception as e:  # noqa: BLE001
                 log.info(f"  WI yorumu yazılamadı: {e}")
-    if job_id:
-        try:
-            db.complete_step(job_id, "review_pr_task", text[:50_000])
-        except Exception:
-            pass
-    return {"repo": rname, "pr_id": pid, "pr_url": pr_url, "work_item_id": work_item_id, "branch": branch,
-            "verdict": verdict, "issues": len(issues), "files": len(files), "posted": posted, "summary": summary,
-            "issue_list": issues}
+    return posted

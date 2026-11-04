@@ -637,6 +637,31 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
+    def delete_own_pr_comments(self, repo_id_or_name: str, pull_request_id: int, markers: tuple[str, ...]) -> int:
+        """Bu PAT'in (Tempo) PR'a yazdığı, `markers`'dan birini taşıyan yorumları sil — aynı PR'ı
+        güncelleyen yeniden koşuda eski (artık geçersiz) inceleme yorumları kalmasın (#45729: iki
+        koşunun 16 satır yorumu + özetleri). İnsanın yorumuna ASLA dokunmaz (yazar kimliği eşleşmeli)."""
+        me = (self.get_authenticated_user() or {}).get("id")
+        if not me:
+            return 0
+        base = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}/threads"
+        params = {"api-version": self.API_VERSION}
+        resp = requests.get(base, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        n = 0
+        for t in resp.json().get("value") or []:
+            for c in t.get("comments") or []:
+                if c.get("isDeleted") or c.get("commentType") == "system":
+                    continue
+                if (c.get("author") or {}).get("id") != me:
+                    continue
+                if not any(m in (c.get("content") or "") for m in markers):
+                    continue
+                r = requests.delete(f"{base}/{t['id']}/comments/{c['id']}", headers=self._headers,
+                                    params=params, timeout=30)
+                n += int(r.ok)
+        return n
+
     def reply_to_pr_thread(
         self,
         repo_id_or_name: str,
