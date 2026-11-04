@@ -596,6 +596,21 @@ SCHEMA: list[dict] = [
         "desc": "Blok/sınıf düzeyindeki kuralda (constructor promotion, switch→match) inceleme bir dosyada davranış riski bulursa o dosya elle düzeltilmez, PR'dan çıkarılır (main hâline döner), kalan dosyalar yeniden incelenir; PR'a ve WI'a gerekçesiyle not düşülür. #269: kısmi promotion SOAP istek sınıflarında property sırasını değiştirdi.",
     },
     {
+        "key": "CREW_MODERN_FIX_BUILD_GATE",
+        "label": "Araç düzeltmesi · PR build kapısı",
+        "type": "bool",
+        "default": True,
+        "desc": "İnceleme onayladıktan sonra PR'ın CI build'i (testler) beklenir; kırmızıysa hata yığınında adı geçen değişen dosyalar PR'dan çıkarılıp build yeniden beklenir, suçlu bulunamazsa iş needs_human olur. Yeşil olmadan WI Code Review'a geçmez. #45729: testler kırmızıyken Code Review'a geçmişti.",
+    },
+    {
+        "key": "CREW_MODERN_FIX_BUILD_WAIT_MIN",
+        "label": "Araç düzeltmesi · build bekleme süresi (dk)",
+        "type": "int",
+        "default": 30,
+        "min": 1,
+        "desc": "PR build'inin bitmesi için en fazla beklenen süre (her tur için). Süre dolarsa iş needs_human olur.",
+    },
+    {
         "key": "CREW_TECHDEBT_MODERN_MAX_TAKE",
         "label": "Teknik borç · modernleştirmede istek başı en çok iş",
         "type": "int",

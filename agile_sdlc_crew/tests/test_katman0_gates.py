@@ -6626,7 +6626,7 @@ def test_tool_fix_quiet_comments():
           "extra_context=notes, post=False)" in mf and mf.count("_post_final(client, repo, pr, work_item_id") == 3
           and "client.add_pr_comment(repo, int(pr[\"pr_id\"]), msg)" not in mf)
     check("PR açılınca WI'a ara yorum yok — WI'a yalnız insan incelemesi gerekince tek yorum",
-          mf.count("add_wi(client, work_item_id,") == 1 and "insan incelemesi gerekli" in mf
+          mf.count("add_wi(client, work_item_id,") == 2 and "insan incelemesi gerekli" in mf
           and "LLM incelemesi PR'a yazılıyor" not in mf)
     check("aynı PR'ı güncelleyen yeniden koşu önceki bot yorumlarını siler",
           "client.delete_own_pr_comments(repo, int(pr[\"pr_id\"]), BOT_COMMENT_MARKERS)" in mf)
@@ -6656,6 +6656,80 @@ def test_modern_sp():
                   human_reason="Altyapı", infra=["ext:mbstring"])
     out = pm.pack_modern([infra], source="php_modern")
     check("altyapı işi ayrı kalır ve ön koşulu korunur", len(out) == 1 and out[0].infra == ["ext:mbstring"] and out[0].needs_human)
+
+
+def test_tool_fix_build_gate():
+    """#45729: inceleme onayladı, WI Code Review'a geçti ama Core-test kırmızıydı — promotion
+    `public array $config = [];` varsayılanını kaldırmış, parent::__construct'ı çağırmayan Hepsijet'te
+    'must not be accessed before initialization'."""
+    print("\n=== Araç düzeltmesi: promotion varsayılan kaybı + PR build kapısı ===")
+    from agile_sdlc_crew.quality import modern_fix as mf
+    old = ("class A {\n    public string $name;\n    public array $config = [];\n    protected $apiKey = null;\n"
+           "    public function __construct($config, $apiKey) { $this->config = $config; $this->apiKey = $apiKey; }\n}")
+    new = ("class A {\n    public string $name;\n"
+           "    public function __construct(public array $config, protected $apiKey) {}\n}")
+    check("typed + varsayılan kaybı yakalanır, tipsiz = null güvenli", mf.lost_property_defaults(old, new) == ["config"],
+          mf.lost_property_defaults(old, new))
+    check("varsayılan korunuyorsa risk yok", mf.lost_property_defaults(old, old) == [])
+    summ = ("Error: Typed property ...\n/myagent/_work/5/s/app/Integration/IntegrationAbstract.php:26\n"
+            "/myagent/_work/5/s/app/X.php:3")
+    check("build yığınındaki değişen dosya suçlu",
+          mf.build_culprits(summ, ["app/Integration/IntegrationAbstract.php", "app/Y.php"])
+          == ["app/Integration/IntegrationAbstract.php"])
+
+    class C:
+        def __init__(self, builds):
+            self.builds, self.pushes = builds, []
+
+        def get_pr_build(self, repo, pid):
+            return self.builds.pop(0) if len(self.builds) > 1 else self.builds[0]
+
+        def get_build_failure_summary(self, project, bid, max_chars=0):
+            return summ
+
+        def push_changes(self, repo, branch, changes, msg):
+            self.pushes.append([c["path"] for c in changes])
+    old_b = {"build_id": 1, "status": "completed", "result": "failed", "queue_time": "2026-11-04T09:00:00Z",
+             "project": "P"}
+    c = C([old_b, {"build_id": 2, "status": "inProgress", "queue_time": "2026-11-04T10:00:05Z"},
+           {"build_id": 2, "status": "completed", "result": "succeeded", "queue_time": "2026-11-04T10:00:05Z"}])
+    st, b = mf.wait_pr_build(c, "core", 1, "2026-11-04T10:00:00", timeout_s=600, interval_s=1, sleep=lambda s: None)
+    check("push'tan önceki (bayat) build sayılmaz", st == "completed" and b["build_id"] == 2, f"{st} {b}")
+    pc = type("PC", (), {"get": staticmethod(lambda k: 30)})
+    red = {"build_id": 3, "status": "completed", "result": "failed", "queue_time": "2026-11-04T11:00:00Z",
+           "project": "P", "url": "u"}
+    green = {"build_id": 4, "status": "completed", "result": "succeeded", "queue_time": "2099-01-01T00:00:00Z"}
+    c = C([red, green])
+    contents = {"app/Integration/IntegrationAbstract.php": "new", "app/Y.php": "new"}
+    dropped, why = [], {}
+    fail, _ = mf._build_gate(c, "core", {"pr_id": 9}, "b", "1", contents, {}, dropped, why,
+                             "2026-11-04T10:59:00", pc)
+    check("kırmızı build → suçlu dosya PR'dan çıkarılır, yeşil olunca geçer",
+          fail == "" and dropped == ["app/Integration/IntegrationAbstract.php"] and list(contents) == ["app/Y.php"]
+          and c.pushes == [["/app/Integration/IntegrationAbstract.php"]], f"{fail} {dropped} {c.pushes}")
+    c = C([dict(red)])
+    contents = {"app/Z.php": "new", "app/Y.php": "new"}
+    fail, _ = mf._build_gate(c, "core", {"pr_id": 9}, "b", "1", contents, {}, [], {}, "2026-11-04T10:59:00", pc)
+    check("suçlu bulunamazsa insan incelemesi (Code Review'a geçmez)", "değişen dosya yok" in fail and c.pushes == [],
+          fail)
+    class D(C):
+        def __init__(self, builds):
+            super().__init__(builds)
+            self.published = []
+
+        def set_pr_draft(self, repo, pid, draft):
+            self.published.append(draft)
+    d = D([None, None, None, None, None, None, None, None, green])
+    pr = {"pr_id": 9, "draft": True}
+    fail, _ = mf._build_gate(d, "core", pr, "b", "1", {"app/Y.php": "n"}, {}, [], {}, "2026-11-04T10:59:00", pc)
+    check("taslakta build gelmezse PR yayınlanır ve build beklenir", fail == "" and d.published == [False]
+          and pr["draft"] is False, f"{fail} {d.published}")
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern_fix.py").read_text()
+    check("araç PR'ı taslak açılır, yalnız inceleme + build yeşilse yayınlanır",
+          "draft=draft)" in src and src.index("if pr.get(\"draft\"):\n        client.set_pr_draft")
+          > src.index("if build_fail:\n        raise NeedsHumanReview"))
+    check("build kırmızıysa NeedsHumanReview, Code Review'dan önce",
+          src.index("if build_fail:\n        raise NeedsHumanReview") < src.index('plan_transition(info["wi_state"]'))
 
 
 def test_stale_team_status():
@@ -6807,7 +6881,7 @@ def main():
               test_tool_review_diff_context,
               test_tool_fix_leftovers,
               test_scan_line_text_multibyte,
-              test_tool_fix_quiet_comments, test_stale_team_status):
+              test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status):
         try:
             t()
         except Exception as e:

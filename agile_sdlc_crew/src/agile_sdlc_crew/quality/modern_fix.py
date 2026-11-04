@@ -375,6 +375,62 @@ def fix_review_issues(root: Path, issues: list[dict], files: set[str], *, ask=No
     return batch_window_fix(root, items, radius=REVIEW_FIX_RADIUS, ask=ask) if items else 0
 
 
+_PROP_DEFAULT = re.compile(r"^\s*(?:public|protected|private)(?:\s+readonly)?(?:\s+(?P<type>[?\w\\|]+))?"
+                           r"\s+\$(?P<name>\w+)\s*=\s*(?P<val>[^;]+);", re.M)
+
+
+def lost_property_defaults(old: str, new: str) -> list[str]:
+    """Bildirimi varsayılan değer taşıyan ve dönüşümde KAYBOLAN property'ler (promotion).
+    #45729 / PR testleri: `public array $config = [];` + `__construct($config)` →
+    `__construct(public array $config)`. Varsayılan gitti; parent::__construct'ı çağırmayan alt
+    sınıf (Hepsijet) ya da constructor'sız mock'ta property artık başlatılmamış → "must not be
+    accessed before initialization". Tipsiz `= null` güvenli (tipsiz property zaten null başlar)."""
+    kept = {m.group("name") for m in _PROP_DEFAULT.finditer(new)}
+    lost = []
+    for m in _PROP_DEFAULT.finditer(old):
+        if m.group("name") in kept:
+            continue
+        if not m.group("type") and m.group("val").strip().lower() == "null":
+            continue
+        lost.append(m.group("name"))
+    return lost
+
+
+def build_culprits(summary: str, files) -> list[str]:
+    """Kırmızı build özetinde (test hata yığınları) adı geçen, bu PR'ın değiştirdiği dosyalar."""
+    return sorted(f for f in files if f and f in (summary or ""))
+
+
+def wait_pr_build(client, repo: str, pr_id: int, since: str, *, timeout_s: int, interval_s: int = 30,
+                  grace_s: int = 180, sleep=None) -> tuple[str, dict | None]:
+    """PR'ın `since`'ten (UTC ISO) SONRA kuyruğa alınan build'ini bekle — önceki push'un build'i
+    sayılmaz (Azure yeni build'i birkaç saniye geç kuyruğa alır; #189'da bayat sonuç okunmuştu).
+    Dönüş: ("completed", build) | ("no_pipeline", None) | ("timeout", build|None)."""
+    import time as _t
+    sleep = sleep or _t.sleep
+    waited, last = 0, None
+    while waited < timeout_s:
+        try:
+            b = client.get_pr_build(repo, int(pr_id))
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  Build sorgu hatası: {e}")
+            b = None
+        if b is None and waited >= grace_s:
+            return "no_pipeline", None
+        if b and (b.get("queue_time") or "") >= since:
+            last = b
+            if b.get("status") == "completed":
+                return "completed", b
+        sleep(interval_s)
+        waited += interval_s
+    return "timeout", last
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def _changed_in_scope(root: Path, files: list[str]) -> list[str]:
     changed = [ln for ln in _git(root, "diff", "--name-only").stdout.splitlines() if ln]
     stray = [f for f in changed if f not in files]
@@ -530,6 +586,18 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
         # İnceleme TÜM dosyaların diff'ini görsün (pr_review.tool_diff_context) — eski hâl origin/main
         originals = {f: _git(root, "show", f"origin/main:{f}").stdout for f in changed}
         res = verify.verify(root, changed) if changed else {"ok": True, "ran": [], "issues": [], "skipped": []}
+    dropped: list[str] = []
+    dropped_why: dict[str, str] = {}
+    for f in list(changed) if lang == "php" else []:
+        lost = lost_property_defaults(originals.get(f, ""), contents[f])
+        if lost:
+            changed.remove(f)
+            contents.pop(f)
+            dropped.append(f)
+            dropped_why[f] = ("varsayılan değerli property promote edildi (" + ", ".join(f"`${n}`" for n in lost)
+                              + ") — constructor'ı çağırmayan alt sınıf/mock'ta başlatılmamış kalır")
+    if dropped:
+        log.info(f"  🧰 {len(dropped)} dosyada promotion property varsayılanını kaldırıyordu — PR'a alınmadı")
     if not changed:
         _add_wi_comment(client, work_item_id, "## 🧰 Araç düzeltmesi\n\nAraç bu kapsamda değişiklik üretmedi — "
                         "bulgular `main`'de zaten giderilmiş olabilir. PR açılmadı." + sig)
@@ -543,6 +611,7 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
     if left["fixed"]:
         tool += " + LLM pencere"
     branch, reused = _tool_branch(client, repo, work_item_id)
+    pushed_at = _utc_now()
     client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f, "content": c}
                                        for f, c in contents.items()], f"#{work_item_id}: {title[:80]} ({tool})")
     notes = _sites_note(left) if lang == "php" else ""  # yeniden tarama yalnız PHP'de
@@ -550,7 +619,14 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             f"Kurallar: {', '.join(scope)}\n\nDeğişen dosyalar ({len(changed)}):\n"
             + "\n".join(f"- `{f}`" for f in changed)
             + f"\n\nDoğrulama: {', '.join(res['ran']) or 'doğrulayıcı yok'} geçti." + notes + sig)
-    pr = pipeline.create_pull_request(repo, branch, str(work_item_id), f"#{work_item_id} - {title}", desc)
+    # Kullanıcı kararı (2026-11-04): "repoda tanımlıysa unit test çalıştırıp doğrulamadan PR açma".
+    # Testler yalnız PR build politikasında koşuyor (Core-test: MySQL konteyneri + AWS havuzu; YAML
+    # yml-files'ta, core'u `$(Build.SourceBranchName)` ile çekiyor → dal üzerinde elle kuyruklanamaz,
+    # yerelde de koşmaz). Bu yüzden PR TASLAK açılır: insana düşmez, build koşar; inceleme + build
+    # yeşilse yayınlanır, değilse taslak kalır.
+    draft = bool(pc.get("CREW_MODERN_FIX_BUILD_GATE"))
+    pr = pipeline.create_pull_request(repo, branch, str(work_item_id), f"#{work_item_id} - {title}", desc,
+                                      draft=draft)
     if not pr.get("success"):
         raise RuntimeError(f"PR açılamadı: {pr.get('error')}")
     db.update_job(job_id, repo_name=repo, branch_name=branch, pr_id=str(pr["pr_id"]), pr_url=pr["url"])
@@ -577,8 +653,6 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
     # (SoapClient nesneyi bildirim sırasıyla serileştirir → XML eleman sırası). Böyle dosya PR'dan
     # ÇIKARILIR (main hâline döner), geri kalanı yeniden incelenir — insan beklemez.
     non_local = lang == "php" and not any(_pm.llm_line_fixable(rules_by.get(k)) for k in scope)
-    dropped: list[str] = []
-    dropped_why: dict[str, str] = {}
 
     def _rel(i) -> str:
         return str(i.get("file") or "").lstrip("/")
@@ -597,6 +671,7 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
                             add_wi=_add_wi_comment, desc=desc)
                 raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: incelemede değişen dosyaların TÜMÜ "
                                        "davranış riski taşıyor — PR açık, insan karar versin")
+            pushed_at = _utc_now()
             client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f,
                                                 "content": originals.get(f, "")} for f in to_drop],
                                 f"#{work_item_id}: incelemede riskli bulunan {len(to_drop)} dosya PR'dan çıkarıldı")
@@ -631,17 +706,28 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             log.info("  🧰 İnceleme düzeltmesi ilerleme sağlamadı — insan incelemesine")
             break
         contents.update(upd)
+        pushed_at = _utc_now()
         client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f, "content": c}
                                            for f, c in upd.items()],
                             f"#{work_item_id}: inceleme düzeltmesi ({len(upd)} dosya)")
         rv = review(contents)
     still = _blocking(rv.get("issue_list"))
+    build_fail = ""
+    if not still and pc.get("CREW_MODERN_FIX_BUILD_GATE"):
+        build_fail, pushed_at = _build_gate(client, repo, pr, branch, work_item_id, contents, originals,
+                                            dropped, dropped_why, pushed_at, pc)
     _post_final(client, repo, pr, work_item_id, rv, still, tool=tool, changed=sorted(contents), res=res,
                 dropped=dropped, dropped_why=dropped_why, left=left, reused=reused, sig=sig,
-                add_wi=_add_wi_comment, desc=desc)
+                add_wi=_add_wi_comment, desc=desc, build_fail=build_fail)
+    if build_fail:
+        raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: PR build'i kırmızı — {build_fail[:200]}"
+                               + (" (PR taslak kaldı)" if pr.get("draft") else ""))
     if still:
         raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: incelemede {len(still)} bloklayan madde kaldı "
                                f"(otomatik düzeltme turları bitti) — PR açık")
+    if pr.get("draft"):
+        client.set_pr_draft(repo, int(pr["pr_id"]), False)
+        log.info(f"  🧪 İnceleme + testler yeşil — PR #{pr['pr_id']} yayınlandı")
     if lifecycle:
         info = wl.load_wi_context(client, str(work_item_id))
         target = wl.plan_transition(info["wi_state"], info["wi_states"], "review")
@@ -651,11 +737,59 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             "remaining": len(left["remaining"]), "dropped": dropped, "verdict": rv.get("verdict")}
 
 
+BUILD_DROP_ROUNDS = 2
+
+
+def _build_gate(client, repo, pr, branch, work_item_id, contents, originals, dropped, dropped_why,
+                pushed_at, pc) -> tuple[str, str]:
+    """PR'ın CI build'i (testler) yeşil olmadan WI Code Review'a geçmez. #45729: inceleme onayladı,
+    WI Code Review'a geçti, `Core-test` 4 testte kırmızıydı (promotion `$config = []` varsayılanını
+    kaldırmıştı). Kırmızıysa hata yığınında adı geçen değişen dosyalar PR'dan çıkarılır (main hâline
+    döner) ve build yeniden beklenir; suçlu bulunamazsa / turlar biterse iş insan incelemesine.
+    Dönüş: (build_fail — boşsa yeşil / pipeline yok, son push zamanı)."""
+    timeout = int(pc.get("CREW_MODERN_FIX_BUILD_WAIT_MIN") or 0) * 60
+    for _ in range(BUILD_DROP_ROUNDS + 1):
+        st, b = wait_pr_build(client, repo, int(pr["pr_id"]), pushed_at, timeout_s=timeout)
+        if st == "no_pipeline":
+            if pr.get("draft"):
+                # Taslakta build politikası koşmuyor olabilir: yayınla, build gelirse onu bekle
+                client.set_pr_draft(repo, int(pr["pr_id"]), False)
+                pr["draft"] = False
+                pushed_at = _utc_now()
+                log.info("  🧪 Taslak PR'da build gelmedi — PR yayınlandı, build bekleniyor")
+                continue
+            log.info("  🧪 Bu repoda PR build'i yok — build kapısı atlandı")
+            return "", pushed_at
+        if st == "timeout":
+            return f"build {timeout // 60} dk içinde bitmedi ({(b or {}).get('url') or 'build yok'})", pushed_at
+        if b.get("result") in ("succeeded", "partiallySucceeded"):
+            log.info(f"  🧪 PR build'i yeşil ({b.get('result')})")
+            return "", pushed_at
+        try:
+            summary = client.get_build_failure_summary(b["project"], int(b["build_id"]), max_chars=12000)
+        except Exception as e:  # noqa: BLE001
+            summary = f"(özet alınamadı: {e})"
+        culprits = build_culprits(summary, contents)
+        fail = f"build {b.get('result')} ({b.get('url')})"
+        if not culprits or len(culprits) >= len(contents):
+            return fail + (" — hata yığınında değişen dosya yok" if not culprits else " — tüm dosyalar suçlu"), pushed_at
+        pushed_at = _utc_now()
+        client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f, "content": originals.get(f, "")}
+                                           for f in culprits],
+                            f"#{work_item_id}: testleri kıran {len(culprits)} dosya PR'dan çıkarıldı")
+        for f in culprits:
+            contents.pop(f, None)
+            dropped.append(f)
+            dropped_why[f] = f"PR build'inde test kırdı ({b.get('url')})"
+        log.info(f"  🧪 Build kırmızı — {len(culprits)} dosya çıkarıldı, build yeniden bekleniyor")
+    return fail + " — çıkarma turları bitti", pushed_at
+
+
 BOT_COMMENT_MARKERS = ("inceleme katkısı", "İnceleme Katkısı", "Tempo — araç düzeltmesi")
 
 
 def _post_final(client, repo, pr, work_item_id, rv, still, *, tool, changed, res, dropped, dropped_why,
-                left, reused, sig, add_wi, desc: str = "") -> None:
+                left, reused, sig, add_wi, desc: str = "", build_fail: str = "") -> None:
     """Araç düzeltmesinin TEK çıktısı. Kullanıcı kararı (2026-11-04): "atılan her yorum incelenmesi
     gereken bir durum" — #45729'da 14 major yorum, PR'dan zaten çıkarılmış dosyalar üzerindeydi.
     - Bilgi (çıkarılan dosyalar, bilerek bırakılan / LLM'le düzeltilen yerler) PR AÇIKLAMASINA yazılır.
@@ -664,22 +798,33 @@ def _post_final(client, repo, pr, work_item_id, rv, still, *, tool, changed, res
     from agile_sdlc_crew.pr_review import post_review
     info = []
     if dropped:
-        info.append(f"**PR'dan çıkarılan {len(dropped)} dosya** (incelemede davranış riski; kural blok/sınıf "
-                    "düzeyinde olduğu için elle düzeltilmedi, `main` hâlinde kaldı):\n"
+        info.append(f"**PR'dan çıkarılan {len(dropped)} dosya** (davranış riski; elle düzeltilmedi, "
+                    "`main` hâlinde kaldı):\n"
                     + "\n".join(f"- `{f}` — {dropped_why.get(f, '')}" for f in dropped))
     if left.get("skipped"):
         info.append(f"Araç {len(left['skipped'])} yeri güvenli bulmadığı için dönüştürmedi (bilerek bırakıldı).")
     if left.get("fixed"):
         info.append(f"Aracın kaçırdığı yerlerden {left['fixed']} pencere LLM ile düzeltildi.")
     verdict = "✅ onaylandı" if not still else f"🔴 {len(still)} bloklayan madde — insan incelemesi bekliyor"
+    if build_fail:
+        verdict += f"; 🔴 PR build'i: {build_fail}"
     try:
         client.update_pr_description(repo, int(pr["pr_id"]), (desc or "").split("\n\n### Sonuç")[0]
                                      + f"\n\n### Sonuç\nİnceleme: {verdict}. Değişen dosya: {len(changed)}."
                                      + ("\n\n" + "\n\n".join(info) if info else ""))
     except Exception as e:  # noqa: BLE001
         log.info(f"  PR açıklaması güncellenemedi: {e}")
-    if not still:
+    if not still and not build_fail:
         log.info("  🧰 İnceleme onayladı — PR/WI'a yorum yazılmadı (sonuç PR açıklamasında)")
+        return
+    if build_fail and not still:
+        try:
+            add_wi(client, work_item_id,
+                   f"## 🙋 Araç düzeltmesi — insan incelemesi gerekli\n\nPR: [#{pr['pr_id']}]({pr['url']}) — {tool}, "
+                   f"{len(changed)} dosya. İnceleme onayladı ama **PR build'i kırmızı**: {build_fail}. "
+                   "Hatayı değişen bir dosyaya bağlayamadığım için PR'dan çıkarma yapılmadı." + sig)
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  WI yorumu yazılamadı: {e}")
         return
     try:
         post_review(client, repo, int(pr["pr_id"]), str(work_item_id), rv.get("summary") or "", still,
