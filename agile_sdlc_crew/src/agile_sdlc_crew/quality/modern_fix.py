@@ -554,17 +554,21 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
     if not pr.get("success"):
         raise RuntimeError(f"PR açılamadı: {pr.get('error')}")
     db.update_job(job_id, repo_name=repo, branch_name=branch, pr_id=str(pr["pr_id"]), pr_url=pr["url"])
-    _add_wi_comment(client, work_item_id,
-                    f"## 🧰 Araç düzeltmesi\n\nPR: [#{pr['pr_id']}]({pr['url']}) — {tool}, {len(changed)} dosya, "
-                    f"doğrulama ({', '.join(res['ran']) or '-'}) geçti"
-                    + (" (önceki araç PR'ı güncellendi)" if reused else "") + ". LLM incelemesi PR'a yazılıyor."
-                    + f"\n\nDeğişen dosyalar ({len(changed)}):\n" + "\n".join(f"- `{f}`" for f in changed)
-                    + notes + sig)
+    # PR/WI'a YALNIZ sonuç yazılır (#45729: ara turların 16 satır yorumu + 3 özet + çıkarma notları
+    # PR'ı doldurdu; ekip elle sildi). Ara incelemeler sessiz; aynı PR'ı güncelleyen yeniden koşuda
+    # önceki koşunun bot yorumları silinir (insanınkine dokunulmaz).
+    if reused:
+        try:
+            n_del = client.delete_own_pr_comments(repo, int(pr["pr_id"]), BOT_COMMENT_MARKERS)
+            if n_del:
+                log.info(f"  🧹 Önceki koşunun {n_del} bot yorumu silindi")
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  Eski yorumlar silinemedi: {e}")
 
     def review(cur: dict[str, str]) -> dict:
         return run_pr_review(work_item_id=str(work_item_id), pr_id=int(pr["pr_id"]), repo_name=repo, job_id=job_id,
                              changes={f: (originals.get(f, ""), c) for f, c in cur.items()}, tool=tool,
-                             extra_context=notes)
+                             extra_context=notes, post=False)
     rv = review(contents)
     rounds = int(pc.get("CREW_MODERN_FIX_REVIEW_ROUNDS") or 0)
     rules_by = {x.key: x for x in _pm.load_rules()} if lang == "php" else {}
@@ -574,6 +578,7 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
     # ÇIKARILIR (main hâline döner), geri kalanı yeniden incelenir — insan beklemez.
     non_local = lang == "php" and not any(_pm.llm_line_fixable(rules_by.get(k)) for k in scope)
     dropped: list[str] = []
+    dropped_why: dict[str, str] = {}
 
     def _rel(i) -> str:
         return str(i.get("file") or "").lstrip("/")
@@ -587,6 +592,9 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
         fixable = [i for i in blocking if _rel(i) not in to_drop]
         if to_drop and pc.get("CREW_MODERN_FIX_DROP_RISKY"):
             if len(to_drop) >= len(contents):
+                _post_final(client, repo, pr, work_item_id, rv, blocking, tool=tool, changed=sorted(contents),
+                            res=res, dropped=dropped, dropped_why=dropped_why, left=left, reused=reused, sig=sig,
+                            add_wi=_add_wi_comment, desc=desc)
                 raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: incelemede değişen dosyaların TÜMÜ "
                                        "davranış riski taşıyor — PR açık, insan karar versin")
             client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f,
@@ -595,16 +603,9 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             for f in to_drop:
                 contents.pop(f, None)
             dropped += to_drop
-            why = {_rel(i): (i.get("problem") or "")[:200] for i in blocking if _rel(i) in to_drop}
-            msg = (f"## 🧰 Araç düzeltmesi — {len(to_drop)} dosya PR'dan çıkarıldı\n\nİnceleme bu dosyalarda "
-                   "davranış riski buldu; kural blok/sınıf düzeyinde olduğu için elle düzeltilmedi, dosyalar "
-                   "`main` hâline döndü (bilerek bırakıldı):\n"
-                   + "\n".join(f"- `{f}` — {why.get(f, '')}" for f in to_drop) + sig)
-            try:
-                client.add_pr_comment(repo, int(pr["pr_id"]), msg)
-                _add_wi_comment(client, work_item_id, msg)
-            except Exception as e:  # noqa: BLE001
-                log.info(f"  Çıkarma notu yazılamadı: {e}")
+            for i in blocking:
+                if _rel(i) in to_drop:
+                    dropped_why.setdefault(_rel(i), (i.get("problem") or "")[:200])
             log.info(f"  🧰 {len(to_drop)} riskli dosya PR'dan çıkarıldı — kalan {len(contents)} dosya yeniden inceleniyor")
             notes += ("\n\nİNCELEMEDE RİSKLİ BULUNUP PR'DAN ÇIKARILAN dosyalar (main hâlinde, kapsam dışı — "
                       "eksik sayılmaz): " + ", ".join(f"`{f}`" for f in dropped))
@@ -635,6 +636,9 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
                             f"#{work_item_id}: inceleme düzeltmesi ({len(upd)} dosya)")
         rv = review(contents)
     still = _blocking(rv.get("issue_list"))
+    _post_final(client, repo, pr, work_item_id, rv, still, tool=tool, changed=sorted(contents), res=res,
+                dropped=dropped, dropped_why=dropped_why, left=left, reused=reused, sig=sig,
+                add_wi=_add_wi_comment, desc=desc)
     if still:
         raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: incelemede {len(still)} bloklayan madde kaldı "
                                f"(otomatik düzeltme turları bitti) — PR açık")
@@ -645,6 +649,50 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             wl.apply_state(client, str(work_item_id), target, logger=log.info)
     return {"changed": len(contents), "pr_id": pr["pr_id"], "leftover_fixed": left["fixed"],
             "remaining": len(left["remaining"]), "dropped": dropped, "verdict": rv.get("verdict")}
+
+
+BOT_COMMENT_MARKERS = ("inceleme katkısı", "İnceleme Katkısı", "Tempo — araç düzeltmesi")
+
+
+def _post_final(client, repo, pr, work_item_id, rv, still, *, tool, changed, res, dropped, dropped_why,
+                left, reused, sig, add_wi, desc: str = "") -> None:
+    """Araç düzeltmesinin TEK çıktısı. Kullanıcı kararı (2026-11-04): "atılan her yorum incelenmesi
+    gereken bir durum" — #45729'da 14 major yorum, PR'dan zaten çıkarılmış dosyalar üzerindeydi.
+    - Bilgi (çıkarılan dosyalar, bilerek bırakılan / LLM'le düzeltilen yerler) PR AÇIKLAMASINA yazılır.
+    - Yorum yalnız sonda hâlâ bloklayan madde varsa: PR'a tek özet + o maddeler satıra, WI'a tek yorum.
+    - Onaylanan PR'a ve WI'a yorum yazılmaz (WI Code Review'a geçer, PR WI'a bağlı)."""
+    from agile_sdlc_crew.pr_review import post_review
+    info = []
+    if dropped:
+        info.append(f"**PR'dan çıkarılan {len(dropped)} dosya** (incelemede davranış riski; kural blok/sınıf "
+                    "düzeyinde olduğu için elle düzeltilmedi, `main` hâlinde kaldı):\n"
+                    + "\n".join(f"- `{f}` — {dropped_why.get(f, '')}" for f in dropped))
+    if left.get("skipped"):
+        info.append(f"Araç {len(left['skipped'])} yeri güvenli bulmadığı için dönüştürmedi (bilerek bırakıldı).")
+    if left.get("fixed"):
+        info.append(f"Aracın kaçırdığı yerlerden {left['fixed']} pencere LLM ile düzeltildi.")
+    verdict = "✅ onaylandı" if not still else f"🔴 {len(still)} bloklayan madde — insan incelemesi bekliyor"
+    try:
+        client.update_pr_description(repo, int(pr["pr_id"]), (desc or "").split("\n\n### Sonuç")[0]
+                                     + f"\n\n### Sonuç\nİnceleme: {verdict}. Değişen dosya: {len(changed)}."
+                                     + ("\n\n" + "\n\n".join(info) if info else ""))
+    except Exception as e:  # noqa: BLE001
+        log.info(f"  PR açıklaması güncellenemedi: {e}")
+    if not still:
+        log.info("  🧰 İnceleme onayladı — PR/WI'a yorum yazılmadı (sonuç PR açıklamasında)")
+        return
+    try:
+        post_review(client, repo, int(pr["pr_id"]), str(work_item_id), rv.get("summary") or "", still,
+                    rv.get("file_bodies") or {}, only_blocking=True, wi=False)
+    except Exception as e:  # noqa: BLE001
+        log.info(f"  PR özeti yazılamadı: {e}")
+    try:
+        add_wi(client, work_item_id,
+               f"## 🙋 Araç düzeltmesi — insan incelemesi gerekli\n\nPR: [#{pr['pr_id']}]({pr['url']}) — {tool}, "
+               f"{len(changed)} dosya. İncelemede **{len(still)} bloklayan madde** otomatik düzeltilemedi; "
+               "maddeler PR'da satır yorumu olarak duruyor." + sig)
+    except Exception as e:  # noqa: BLE001
+        log.info(f"  WI yorumu yazılamadı: {e}")
 
 
 def _sites_note(left: dict) -> str:

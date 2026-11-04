@@ -7275,19 +7275,9 @@ class AgileSDLCFlow(Flow[PipelineState]):
             except Exception as _e_ft:
                 _log(f"  fix_targets dogrulama hatasi (atlaniyor): {_e_ft}")
             self.state.review_issues = _blocking + _demoted
-            if _demoted:
-                try:
-                    self._client.add_pr_comment(
-                        self.state.repo_name, int(self.state.pr_id),
-                        "## 💡 Bloklamayan İnceleme Notları\n\n"
-                        "Aşağıdaki maddeler bir kabul kriterine bağlanamadığı veya "
-                        "kanıtı/emsali doğrulanamadığı için PR'ı bloklamıyor; "
-                        "değerlendirmenize bırakılıyor:\n\n"
-                        + _format_issues_md(_demoted)
-                        + "\n\n*Tempo — Katman 0 itiraz kapısı*",
-                    )
-                except Exception as _e_dc:
-                    _log(f"  Düşürülen madde yorumu hatası (kritik değil): {_e_dc}")
+            # Düşürülen (bloklamayan) maddeler PR'a YORUM olarak yazılmaz — kullanıcı kararı
+            # (2026-11-04): "atılan her yorum incelenmesi gereken bir durum". Kayıtta kalırlar
+            # (review_issues, REVIEW_STATS), insan incelemesine düşen işin teşhisinde görünürler.
 
         # 🚨 RESPECT REVIEWER VERDICT — if CHANGES_REQUIRED / REJECTED,
         # loop back into dev (max CREW_REVIEW_MAX_RETRIES, default 2).

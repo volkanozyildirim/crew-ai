@@ -2617,8 +2617,8 @@ def test_pr_review_contribution():
     # ÖNERİ TAŞIYAN maddeleri eliyordu (R5 silme önerisi üretildi, doğrulandı,
     # PR'a hiç düşmedi → sayaç yine 0).
     _prv_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
-    check("satır yorumu: doğrulanmış önerisi olan minor da yazılır",
-          'i.get("severity") in INLINE_SEVERITIES or _sugs.get(id(i))' in _prv_src)
+    check("satır yorumu yalnız bloklayan madde (minor + öneri yazılmaz — kullanıcı kararı 2026-11-04)",
+          '_inline = [i for i in issues if i.get("severity") in INLINE_SEVERITIES]' in _prv_src)
     check("satır yorumu: öneri madde başına BİR kez doğrulanır (çift I/O yok)",
           "_sugs = {id(i): verified_suggestion(i, file_bodies) for i in issues}" in _prv_src)
     for name, mod in (("retrospective", "retrospective"), ("sprint_planning", "sprint_planning"), ("daily", "daily")):
@@ -6570,6 +6570,68 @@ def test_scan_line_text_multibyte():
               hits and hits[0]["line"] == 8 and "strpos($s, 'a') !== false" in hits[0]["text"], str(hits))
 
 
+def test_tool_fix_quiet_comments():
+    """PR #45729: iki koşu × (8 satır yorumu + özet) + çıkarma notları PR'ı doldurdu, ekip elle sildi.
+    Araç düzeltmesi PR'a YALNIZ sonucu yazar: tek özet, satıra yalnız kalan bloklayan madde, WI'a tek yorum."""
+    print("\n[araç düzeltmesi: PR'a yalnız sonuç]")
+    from agile_sdlc_crew import pr_review
+    from agile_sdlc_crew.quality import modern_fix
+
+    class C:
+        def __init__(self):
+            self.pr = []
+
+        def add_pr_comment(self, repo, pid, text, file_path=None, line_number=None, end_line=None):
+            self.pr.append((file_path, text))
+    c = C()
+    issues = [{"id": "R1", "file": "app/A.php", "line": 3, "severity": "minor", "problem": "p", "required_fix": "f",
+               "suggested_code": "x", "suggested_line_start": 3, "suggested_line_end": 3},
+              {"id": "R2", "file": "app/B.php", "line": 2, "severity": "major", "problem": "p", "required_fix": "f"}]
+    bodies = {"/app/A.php": "a\nb\nc\n", "/app/B.php": "a\nb\n"}
+    pr_review.post_review(c, "core", 1, "", "ÖZET", issues, bodies, only_blocking=True, wi=False)
+    check("araç PR'ı: tek özet + yalnız bloklayan madde satıra (minor/öneri satıra yazılmaz)",
+          [f for f, _ in c.pr] == [None, "/app/B.php"], str(c.pr))
+    s = pr_review.review_summary_markdown(verdict="APPROVE", issues=[], pr_id=1, pr_url="u", work_item_id="9",
+                                          files=3, tool="rector")
+    check("araç PR'ının özeti 'insan geliştirdi' demez", "insan tarafından" not in s and "rector" in s)
+    c2 = C()
+    pr_review.post_review(c2, "core", 1, "", "ÖZET", [issues[0]], bodies)
+    check("bloklayan madde yoksa PR'a hiç yorum yazılmaz (onay / minor / öneri incelenecek durum değil)", c2.pr == [])
+    s2 = pr_review.review_summary_markdown(verdict="CHANGES_REQUIRED", issues=issues, pr_id=1, pr_url="u",
+                                           work_item_id="9", files=2)
+    check("özet tablosunda yalnız bloklayan maddeler", "| R2 |" in s2 and "| R1 |" not in s2, s2)
+
+    class C3(C):
+        def __init__(self):
+            super().__init__()
+            self.desc = None
+
+        def update_pr_description(self, repo, pid, d):
+            self.desc = d
+    wi = []
+    c3 = C3()
+    modern_fix._post_final(c3, "core", {"pr_id": 5, "url": "u"}, "77528", {"summary": "S", "file_bodies": {}}, [],
+                           tool="rector", changed=["a.php"], res={"ran": ["php -l"]}, dropped=["b.php"],
+                           dropped_why={"b.php": "sıra"}, left={"skipped": [], "fixed": 0}, reused=False, sig="",
+                           add_wi=lambda cl, w, m: wi.append(m), desc="AÇIKLAMA")
+    check("onaylanan araç PR'ı: yorum yok, çıkarılan dosyalar PR açıklamasında",
+          c3.pr == [] and wi == [] and c3.desc and "AÇIKLAMA" in c3.desc and "b.php" in c3.desc, f"{c3.pr} {wi} {c3.desc}")
+    fl = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/flow.py").read_text()
+    check("pipeline incelemesi bloklamayan notları PR'a yorum olarak yazmaz", "Bloklamayan İnceleme Notları" not in fl)
+    mf = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern_fix.py").read_text()
+    check("ara incelemeler sessiz (post=False), sonuç tek kez yazılır",
+          "extra_context=notes, post=False)" in mf and mf.count("_post_final(client, repo, pr, work_item_id") == 3
+          and "client.add_pr_comment(repo, int(pr[\"pr_id\"]), msg)" not in mf)
+    check("PR açılınca WI'a ara yorum yok — WI'a yalnız insan incelemesi gerekince tek yorum",
+          mf.count("add_wi(client, work_item_id,") == 1 and "insan incelemesi gerekli" in mf
+          and "LLM incelemesi PR'a yazılıyor" not in mf)
+    check("aynı PR'ı güncelleyen yeniden koşu önceki bot yorumlarını siler",
+          "client.delete_own_pr_comments(repo, int(pr[\"pr_id\"]), BOT_COMMENT_MARKERS)" in mf)
+    az = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/tools/azure_devops_base.py").read_text()
+    check("eski yorum silme yalnız Tempo'nun kendi yorumları (yazar kimliği eşleşmeli)",
+          '(c.get("author") or {}).get("id") != me' in az)
+
+
 def test_modern_sp():
     """Aynı öneri tek iş, SP iş miktarından, en çok 8 (kullanıcı kararı 2026-10-30)."""
     print("\n[modernleştirme SP]")
@@ -6722,7 +6784,8 @@ def main():
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,
-              test_scan_line_text_multibyte):
+              test_scan_line_text_multibyte,
+              test_tool_fix_quiet_comments):
         try:
             t()
         except Exception as e:
