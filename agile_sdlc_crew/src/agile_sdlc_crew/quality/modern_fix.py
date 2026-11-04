@@ -594,7 +594,7 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             if len(to_drop) >= len(contents):
                 _post_final(client, repo, pr, work_item_id, rv, blocking, tool=tool, changed=sorted(contents),
                             res=res, dropped=dropped, dropped_why=dropped_why, left=left, reused=reused, sig=sig,
-                            add_wi=_add_wi_comment)
+                            add_wi=_add_wi_comment, desc=desc)
                 raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: incelemede değişen dosyaların TÜMÜ "
                                        "davranış riski taşıyor — PR açık, insan karar versin")
             client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f,
@@ -638,7 +638,7 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
     still = _blocking(rv.get("issue_list"))
     _post_final(client, repo, pr, work_item_id, rv, still, tool=tool, changed=sorted(contents), res=res,
                 dropped=dropped, dropped_why=dropped_why, left=left, reused=reused, sig=sig,
-                add_wi=_add_wi_comment)
+                add_wi=_add_wi_comment, desc=desc)
     if still:
         raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: incelemede {len(still)} bloklayan madde kaldı "
                                f"(otomatik düzeltme turları bitti) — PR açık")
@@ -655,35 +655,42 @@ BOT_COMMENT_MARKERS = ("inceleme katkısı", "İnceleme Katkısı", "Tempo — a
 
 
 def _post_final(client, repo, pr, work_item_id, rv, still, *, tool, changed, res, dropped, dropped_why,
-                left, reused, sig, add_wi) -> None:
-    """Araç düzeltmesinin TEK çıktısı: PR'a bir özet (+ yalnız kalan bloklayan maddeler satıra),
-    WI'a bir yorum. Ara turlar, çıkarılan dosyalar ve kalan yerler bu özetin içinde."""
+                left, reused, sig, add_wi, desc: str = "") -> None:
+    """Araç düzeltmesinin TEK çıktısı. Kullanıcı kararı (2026-11-04): "atılan her yorum incelenmesi
+    gereken bir durum" — #45729'da 14 major yorum, PR'dan zaten çıkarılmış dosyalar üzerindeydi.
+    - Bilgi (çıkarılan dosyalar, bilerek bırakılan / LLM'le düzeltilen yerler) PR AÇIKLAMASINA yazılır.
+    - Yorum yalnız sonda hâlâ bloklayan madde varsa: PR'a tek özet + o maddeler satıra, WI'a tek yorum.
+    - Onaylanan PR'a ve WI'a yorum yazılmaz (WI Code Review'a geçer, PR WI'a bağlı)."""
     from agile_sdlc_crew.pr_review import post_review
-    extra = []
+    info = []
     if dropped:
-        extra.append(f"**PR'dan çıkarılan {len(dropped)} dosya** (incelemede davranış riski; kural blok/sınıf "
-                     "düzeyinde olduğu için elle düzeltilmedi, `main` hâlinde kaldı):\n"
-                     + "\n".join(f"- `{f}` — {dropped_why.get(f, '')}" for f in dropped))
+        info.append(f"**PR'dan çıkarılan {len(dropped)} dosya** (incelemede davranış riski; kural blok/sınıf "
+                    "düzeyinde olduğu için elle düzeltilmedi, `main` hâlinde kaldı):\n"
+                    + "\n".join(f"- `{f}` — {dropped_why.get(f, '')}" for f in dropped))
     if left.get("skipped"):
-        extra.append(f"Araç {len(left['skipped'])} yeri güvenli bulmadığı için dönüştürmedi (bilerek bırakıldı).")
+        info.append(f"Araç {len(left['skipped'])} yeri güvenli bulmadığı için dönüştürmedi (bilerek bırakıldı).")
     if left.get("fixed"):
-        extra.append(f"Aracın kaçırdığı yerlerden {left['fixed']} pencere LLM ile düzeltildi.")
-    summary = (rv.get("summary") or "") + ("\n\n" + "\n\n".join(extra) if extra else "")
+        info.append(f"Aracın kaçırdığı yerlerden {left['fixed']} pencere LLM ile düzeltildi.")
+    verdict = "✅ onaylandı" if not still else f"🔴 {len(still)} bloklayan madde — insan incelemesi bekliyor"
     try:
-        post_review(client, repo, int(pr["pr_id"]), str(work_item_id), summary, still, rv.get("file_bodies") or {},
-                    only_blocking=True, wi=False)
+        client.update_pr_description(repo, int(pr["pr_id"]), (desc or "").split("\n\n### Sonuç")[0]
+                                     + f"\n\n### Sonuç\nİnceleme: {verdict}. Değişen dosya: {len(changed)}."
+                                     + ("\n\n" + "\n\n".join(info) if info else ""))
+    except Exception as e:  # noqa: BLE001
+        log.info(f"  PR açıklaması güncellenemedi: {e}")
+    if not still:
+        log.info("  🧰 İnceleme onayladı — PR/WI'a yorum yazılmadı (sonuç PR açıklamasında)")
+        return
+    try:
+        post_review(client, repo, int(pr["pr_id"]), str(work_item_id), rv.get("summary") or "", still,
+                    rv.get("file_bodies") or {}, only_blocking=True, wi=False)
     except Exception as e:  # noqa: BLE001
         log.info(f"  PR özeti yazılamadı: {e}")
-    verdict = "✅ onaylandı" if not still else f"🔴 {len(still)} bloklayan madde — insan incelemesi bekliyor"
-    wi_msg = (f"## 🧰 Araç düzeltmesi\n\nPR: [#{pr['pr_id']}]({pr['url']})"
-              + (" (önceki araç PR'ı güncellendi)" if reused else "")
-              + f" — {tool}, {len(changed)} dosya, doğrulama ({', '.join(res.get('ran') or []) or '-'}) geçti. "
-              f"İnceleme: {verdict}."
-              + ("\n\n" + "\n\n".join(extra) if extra else "")
-              + f"\n\n<details><summary>Değişen dosyalar ({len(changed)})</summary>\n\n"
-              + "\n".join(f"- `{f}`" for f in changed) + "\n\n</details>" + sig)
     try:
-        add_wi(client, work_item_id, wi_msg)
+        add_wi(client, work_item_id,
+               f"## 🙋 Araç düzeltmesi — insan incelemesi gerekli\n\nPR: [#{pr['pr_id']}]({pr['url']}) — {tool}, "
+               f"{len(changed)} dosya. İncelemede **{len(still)} bloklayan madde** otomatik düzeltilemedi; "
+               "maddeler PR'da satır yorumu olarak duruyor." + sig)
     except Exception as e:  # noqa: BLE001
         log.info(f"  WI yorumu yazılamadı: {e}")
 

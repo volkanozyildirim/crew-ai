@@ -102,6 +102,8 @@ def changed_paths(change_entries: list[dict]) -> list[str]:
 
 def review_summary_markdown(*, verdict: str, issues: list[dict], pr_id: int, pr_url: str,
                             work_item_id: str, files: int, text_tail: str = "", tool: str = "") -> str:
+    # Özette yalnız bloklayan maddeler — minor not incelenmesi gereken bir durum değil (2026-11-04)
+    issues = [i for i in issues or [] if i.get("severity") in INLINE_SEVERITIES]
     mark = {"APPROVE": "✅ Onay", "CHANGES_REQUIRED": "🔴 Değişiklik gerekli"}.get(verdict, "⚪ Karar belirsiz")
     L = [f"## 🔍 Pipeline İnceleme Katkısı — PR #{pr_id}", "",
          f"**Karar (danışma):** {mark} · **İncelenen dosya:** {files} · **WI:** #{work_item_id}", ""]
@@ -496,6 +498,12 @@ def post_review(client, rname: str, pid, work_item_id: str, summary: str, issues
     yorumu olmaz — #45729'da ara turların maddeleri PR'ı doldurdu)."""
     from agile_sdlc_crew.main import _add_wi_comment
     posted = {"pr_summary": False, "inline": 0, "wi": False, "suggestions": 0}
+    # Kullanıcı kararı (2026-11-04): "atılan her yorum incelenmesi gereken bir durum". Bloklayan
+    # (blocker/major) madde yoksa PR'a ve WI'a HİÇ yorum yazılmaz — onay/minor not/öneri gürültüdür;
+    # sonuç işin kaydında (job_steps) ve panelde durur.
+    if not [i for i in issues if i.get("severity") in INLINE_SEVERITIES]:
+        log.info("  Bloklayan madde yok — PR/WI'a yorum yazılmadı")
+        return posted
     if True:
         try:
             client.add_pr_comment(rname, pid, summary)
@@ -514,8 +522,9 @@ def post_review(client, rname: str, pid, work_item_id: str, summary: str, issues
         # ama minor oldugu icin PR'a hic dusmedi → sayac yine 0. Tek tiklik bir
         # duzeltme, ozet tablosunda bir satir olmaktan daha degerli.
         _sugs = {id(i): verified_suggestion(i, file_bodies) for i in issues}
-        _inline = [i for i in issues
-                   if i.get("severity") in INLINE_SEVERITIES or (_sugs.get(id(i)) and not only_blocking)]
+        # Satıra yalnız bloklayan madde (minor + öneri de yazılmaz: kullanıcı kararı 2026-11-04).
+        # Bloklayan maddenin doğrulanmış önerisi varsa tek tık "Apply" olarak yine eklenir.
+        _inline = [i for i in issues if i.get("severity") in INLINE_SEVERITIES]
         for it in _inline[:MAX_INLINE_COMMENTS]:
             try:
                 fp = it.get("file") or ""

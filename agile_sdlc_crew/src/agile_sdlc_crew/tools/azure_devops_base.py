@@ -637,6 +637,17 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
+    def update_pr_description(self, repo_id_or_name: str, pull_request_id: int, description: str) -> dict:
+        """PR açıklamasını değiştir (4000 sınırına sığdırılır). Bilgi notları yorum yerine buraya
+        yazılır — yorum, incelenmesi gereken bir durum içindir (kullanıcı kararı 2026-11-04)."""
+        if len(description or "") > PR_DESCRIPTION_MAX:
+            description = description[:PR_DESCRIPTION_MAX - 1] + "…"
+        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}"
+        resp = requests.patch(url, headers=self._headers, json={"description": description},
+                              params={"api-version": self.API_VERSION}, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
     def delete_own_pr_comments(self, repo_id_or_name: str, pull_request_id: int, markers: tuple[str, ...]) -> int:
         """Bu PAT'in (Tempo) PR'a yazdığı, `markers`'dan birini taşıyan yorumları sil — aynı PR'ı
         güncelleyen yeniden koşuda eski (artık geçersiz) inceleme yorumları kalmasın (#45729: iki
