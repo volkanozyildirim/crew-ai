@@ -184,10 +184,27 @@ async def get_status():
     if STATUS_FILE.exists():
         try:
             data = json.loads(STATUS_FILE.read_text(encoding="utf-8"))
-            return JSONResponse(data)
+            return JSONResponse(_idle_if_stale(data))
         except (json.JSONDecodeError, OSError):
             pass
     return JSONResponse({"status": "idle"})
+
+
+def _idle_if_stale(data: dict) -> dict:
+    """status.json'u yalnız `StatusTracker.finish()` boşaltır — o da yalnız başarılı bitişte çağrılır.
+    Durdurulan / hata veren / sunucu restart'ında orphan-fail olan iş dosyayı 'working' bırakır ve
+    Ekip paneli kuyruk boşken ajanları çalışıyor gösterir (2026-11-04: 11-03'te durdurulan #77527'nin
+    mimar + inceleyicisi bir gün 'aktif' kaldı). Çalışan iş yoksa ajanlar boşta sayılır; log kalır."""
+    if data.get("finished_at") or not data.get("agents"):
+        return data
+    try:
+        if db.get_queue_stats().get("running"):
+            return data
+    except Exception:  # noqa: BLE001
+        return data
+    for a in data["agents"].values():
+        a["status"], a["current_task"] = "idle", None
+    return data
 
 
 @app.post("/api/run")
