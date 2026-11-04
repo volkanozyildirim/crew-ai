@@ -833,6 +833,7 @@ class AzureDevOpsClient:
             "definition": (b.get("definition") or {}).get("name"),
             "url": ((b.get("_links") or {}).get("web") or {}).get("href"),
             "project": project,
+            "queue_time": b.get("queueTime") or "",
         }
 
     def get_build_failure_summary(
