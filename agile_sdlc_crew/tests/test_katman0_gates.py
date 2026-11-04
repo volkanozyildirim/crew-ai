@@ -6658,6 +6658,25 @@ def test_modern_sp():
     check("altyapı işi ayrı kalır ve ön koşulu korunur", len(out) == 1 and out[0].infra == ["ext:mbstring"] and out[0].needs_human)
 
 
+def test_stale_team_status():
+    """Durdurulan / orphan-fail olan işin status.json'u ajanları 'working' bırakıyordu; kuyruk boşken
+    Ekip paneli mimarı ve inceleyiciyi aktif gösterdi (2026-11-04)."""
+    print("\n=== Boştayken Ekip paneli eski işi göstermez ===")
+    from agile_sdlc_crew import server
+    stale = lambda: {"finished_at": "", "log": [{"m": 1}],
+                     "agents": {"software_architect": {"status": "working", "current_task": "Kod Tabanı Analizi"}}}
+    orig = server.db.get_queue_stats
+    try:
+        server.db.get_queue_stats = lambda: {"running": 0}
+        d = server._idle_if_stale(stale())
+        check("çalışan iş yoksa ajanlar boşta", d["agents"]["software_architect"] == {"status": "idle", "current_task": None})
+        check("aktivite logu korunur", d["log"] == [{"m": 1}])
+        server.db.get_queue_stats = lambda: {"running": 1}
+        check("çalışan iş varsa durum aynen", server._idle_if_stale(stale())["agents"]["software_architect"]["status"] == "working")
+    finally:
+        server.db.get_queue_stats = orig
+
+
 def test_php_modern_82_84():
     """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
     denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
@@ -6788,7 +6807,7 @@ def main():
               test_tool_review_diff_context,
               test_tool_fix_leftovers,
               test_scan_line_text_multibyte,
-              test_tool_fix_quiet_comments):
+              test_tool_fix_quiet_comments, test_stale_team_status):
         try:
             t()
         except Exception as e:
