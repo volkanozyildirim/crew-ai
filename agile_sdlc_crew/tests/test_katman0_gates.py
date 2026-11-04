@@ -6568,6 +6568,9 @@ def test_scan_line_text_multibyte():
         hits = [h for h in php_modern.scan_files(root, ["app/D.php"]) if h["rule"] == "str_contains"]
         check("bulgunun satır metni gerçekten o satır (0x85 baytı satır sonu sayılmaz)",
               hits and hits[0]["line"] == 8 and "strpos($s, 'a') !== false" in hits[0]["text"], str(hits))
+    pm = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/php_modern.py").read_text()
+    check("Yeniden tara hedef sürüm önbelleğini de atlar (flo-dashboard 8.4'e alındı, kart 8.3 gösterdi)",
+          "max_age_h=0 if force else" in pm and "index=_safe_index(client, app_map_cache), force=force)" in pm)
 
 
 def test_tool_fix_quiet_comments():

@@ -741,9 +741,13 @@ def _root(cfg: dict, repo: str, deps) -> Path:
 
 
 def _target(client, repo: str, root: Path, cfg: dict, app_map_cache: dict | None, *, write_cache: bool = True,
-            index: dict | None = None) -> dict:
+            index: dict | None = None, force: bool = False) -> dict:
+    """force (kartın *Yeniden tara*'sı): hedef sürüm önbelleği atlanır. flo-dashboard iki ortamda
+    8.4'e alındı, kart 24 saatlik önbellekten 8.3 göstermeye devam etti — yeniden tarama yalnız
+    bulguları tazeliyor, hedef sürümü tazelemiyordu."""
     return target_version(client, repo, app_map_cache=app_map_cache, repo_root=root,
-                          cache_path=Path(cfg["targets_cache"]), max_age_h=int(cfg.get("scan_ttl_h", 24)),
+                          cache_path=Path(cfg["targets_cache"]),
+                          max_age_h=0 if force else int(cfg.get("scan_ttl_h", 24)),
                           write_cache=write_cache, index=index)
 
 
@@ -899,7 +903,7 @@ def scan(client, repo: str, *, team: str = "", force: bool = False, deps=None, s
     cfg = deps.cfg()
     root = _root(cfg, repo, deps)
     repo = root.name  # kanonik: WEBSERVICE ve webservice aynı parmak izini üretsin
-    tv = _target(client, repo, root, cfg, app_map_cache, index=_safe_index(client, app_map_cache))
+    tv = _target(client, repo, root, cfg, app_map_cache, index=_safe_index(client, app_map_cache), force=force)
     fresh = freshen_clone(root, force=force) if cfg.get("freshen", True) and scan_fn is None else {}
     with _scan_lock(repo):  # aynı repo için paralel 300 sn'lik php süreçleri açılmasın
         res = scan_cached(repo, root, cache_dir=Path(cfg["scan_cache"]), scan_fn=scan_fn, head_sha_fn=head_sha_fn,
