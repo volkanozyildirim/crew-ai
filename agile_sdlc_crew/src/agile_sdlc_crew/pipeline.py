@@ -213,19 +213,20 @@ def delete_file(
         return {"success": False, "error": str(e)}
 
 
-def create_pull_request(repo_name: str, branch: str, work_item_id: str, title: str, description: str) -> dict:
+def create_pull_request(repo_name: str, branch: str, work_item_id: str, title: str, description: str,
+                        draft: bool = False) -> dict:
     client = AzureDevOpsClient()
     try:
         result = client.create_pull_request(
             repo_name, branch, "main", title, description,
-            [int(work_item_id)] if work_item_id else None,
+            [int(work_item_id)] if work_item_id else None, draft=draft,
         )
         pr_id = result.get("pullRequestId")
         repo_data = result.get("repository", {})
         project = repo_data.get("project", {}).get("name", "")
         repo = repo_data.get("name", repo_name)
         web_url = f"{client.org_url}/{project}/_git/{repo}/pullrequest/{pr_id}"
-        return {"success": True, "pr_id": pr_id, "url": web_url}
+        return {"success": True, "pr_id": pr_id, "url": web_url, "draft": bool(result.get("isDraft"))}
     except Exception as e:
         error_str = str(e)
         # 409 Conflict: ayni branch'ten aktif PR zaten var, mevcut PR'i bul
@@ -276,6 +277,7 @@ def _find_existing_pr(client: AzureDevOpsClient, repo_name: str, branch: str) ->
                 "title": pr.get("title", ""),
                 "work_item_ids": wi_ids,
                 "note": "mevcut PR kullanıldı",
+                "draft": bool(pr.get("isDraft")),
             }
     except Exception:
         pass

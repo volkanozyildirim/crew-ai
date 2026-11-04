@@ -6712,7 +6712,22 @@ def test_tool_fix_build_gate():
     fail, _ = mf._build_gate(c, "core", {"pr_id": 9}, "b", "1", contents, {}, [], {}, "2026-11-04T10:59:00", pc)
     check("suçlu bulunamazsa insan incelemesi (Code Review'a geçmez)", "değişen dosya yok" in fail and c.pushes == [],
           fail)
+    class D(C):
+        def __init__(self, builds):
+            super().__init__(builds)
+            self.published = []
+
+        def set_pr_draft(self, repo, pid, draft):
+            self.published.append(draft)
+    d = D([None, None, None, None, None, None, None, None, green])
+    pr = {"pr_id": 9, "draft": True}
+    fail, _ = mf._build_gate(d, "core", pr, "b", "1", {"app/Y.php": "n"}, {}, [], {}, "2026-11-04T10:59:00", pc)
+    check("taslakta build gelmezse PR yayınlanır ve build beklenir", fail == "" and d.published == [False]
+          and pr["draft"] is False, f"{fail} {d.published}")
     src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/modern_fix.py").read_text()
+    check("araç PR'ı taslak açılır, yalnız inceleme + build yeşilse yayınlanır",
+          "draft=draft)" in src and src.index("if pr.get(\"draft\"):\n        client.set_pr_draft")
+          > src.index("if build_fail:\n        raise NeedsHumanReview"))
     check("build kırmızıysa NeedsHumanReview, Code Review'dan önce",
           src.index("if build_fail:\n        raise NeedsHumanReview") < src.index('plan_transition(info["wi_state"]'))
 

@@ -619,7 +619,14 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             f"Kurallar: {', '.join(scope)}\n\nDeğişen dosyalar ({len(changed)}):\n"
             + "\n".join(f"- `{f}`" for f in changed)
             + f"\n\nDoğrulama: {', '.join(res['ran']) or 'doğrulayıcı yok'} geçti." + notes + sig)
-    pr = pipeline.create_pull_request(repo, branch, str(work_item_id), f"#{work_item_id} - {title}", desc)
+    # Kullanıcı kararı (2026-11-04): "repoda tanımlıysa unit test çalıştırıp doğrulamadan PR açma".
+    # Testler yalnız PR build politikasında koşuyor (Core-test: MySQL konteyneri + AWS havuzu; YAML
+    # yml-files'ta, core'u `$(Build.SourceBranchName)` ile çekiyor → dal üzerinde elle kuyruklanamaz,
+    # yerelde de koşmaz). Bu yüzden PR TASLAK açılır: insana düşmez, build koşar; inceleme + build
+    # yeşilse yayınlanır, değilse taslak kalır.
+    draft = bool(pc.get("CREW_MODERN_FIX_BUILD_GATE"))
+    pr = pipeline.create_pull_request(repo, branch, str(work_item_id), f"#{work_item_id} - {title}", desc,
+                                      draft=draft)
     if not pr.get("success"):
         raise RuntimeError(f"PR açılamadı: {pr.get('error')}")
     db.update_job(job_id, repo_name=repo, branch_name=branch, pr_id=str(pr["pr_id"]), pr_url=pr["url"])
@@ -713,10 +720,14 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
                 dropped=dropped, dropped_why=dropped_why, left=left, reused=reused, sig=sig,
                 add_wi=_add_wi_comment, desc=desc, build_fail=build_fail)
     if build_fail:
-        raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: PR build'i kırmızı — {build_fail[:200]}")
+        raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: PR build'i kırmızı — {build_fail[:200]}"
+                               + (" (PR taslak kaldı)" if pr.get("draft") else ""))
     if still:
         raise NeedsHumanReview(f"Araç düzeltmesi PR #{pr['pr_id']}: incelemede {len(still)} bloklayan madde kaldı "
                                f"(otomatik düzeltme turları bitti) — PR açık")
+    if pr.get("draft"):
+        client.set_pr_draft(repo, int(pr["pr_id"]), False)
+        log.info(f"  🧪 İnceleme + testler yeşil — PR #{pr['pr_id']} yayınlandı")
     if lifecycle:
         info = wl.load_wi_context(client, str(work_item_id))
         target = wl.plan_transition(info["wi_state"], info["wi_states"], "review")
@@ -740,6 +751,13 @@ def _build_gate(client, repo, pr, branch, work_item_id, contents, originals, dro
     for _ in range(BUILD_DROP_ROUNDS + 1):
         st, b = wait_pr_build(client, repo, int(pr["pr_id"]), pushed_at, timeout_s=timeout)
         if st == "no_pipeline":
+            if pr.get("draft"):
+                # Taslakta build politikası koşmuyor olabilir: yayınla, build gelirse onu bekle
+                client.set_pr_draft(repo, int(pr["pr_id"]), False)
+                pr["draft"] = False
+                pushed_at = _utc_now()
+                log.info("  🧪 Taslak PR'da build gelmedi — PR yayınlandı, build bekleniyor")
+                continue
             log.info("  🧪 Bu repoda PR build'i yok — build kapısı atlandı")
             return "", pushed_at
         if st == "timeout":

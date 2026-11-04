@@ -522,8 +522,9 @@ class AzureDevOpsClient:
         title: str = "",
         description: str = "",
         work_item_ids: list[int] | None = None,
+        draft: bool = False,
     ) -> dict:
-        """Pull request olusturur.
+        """Pull request olusturur (`draft` → taslak: incelemeciye düşmez, build politikası koşar).
 
         Azure PR aciklamasi en cok 4000 karakter; asilirsa govdesiz bir 400 Bad Request doner —
         #268: 41 dosyalik arac PR'inin listesi siniri asti, PR acilmadi. Aciklama burada
@@ -541,6 +542,8 @@ class AzureDevOpsClient:
         }
         if work_item_ids:
             body["workItemRefs"] = [{"id": str(wid)} for wid in work_item_ids]
+        if draft:
+            body["isDraft"] = True
         resp = requests.post(
             url, headers=self._headers, json=body, params=params, timeout=30
         )
@@ -634,6 +637,14 @@ class AzureDevOpsClient:
         resp = requests.post(
             url, headers=self._headers, json=thread, params=params, timeout=30
         )
+        resp.raise_for_status()
+        return resp.json()
+
+    def set_pr_draft(self, repo_id_or_name: str, pull_request_id: int, draft: bool) -> dict:
+        """Taslak PR'ı yayınla (draft=False) ya da taslağa çek."""
+        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}"
+        resp = requests.patch(url, headers=self._headers, json={"isDraft": bool(draft)},
+                              params={"api-version": self.API_VERSION}, timeout=30)
         resp.raise_for_status()
         return resp.json()
 
