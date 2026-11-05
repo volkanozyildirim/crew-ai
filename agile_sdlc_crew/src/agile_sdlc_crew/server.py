@@ -194,17 +194,60 @@ def _idle_if_stale(data: dict) -> dict:
     """status.json'u yalnız `StatusTracker.finish()` boşaltır — o da yalnız başarılı bitişte çağrılır.
     Durdurulan / hata veren / sunucu restart'ında orphan-fail olan iş dosyayı 'working' bırakır ve
     Ekip paneli kuyruk boşken ajanları çalışıyor gösterir (2026-11-04: 11-03'te durdurulan #77527'nin
-    mimar + inceleyicisi bir gün 'aktif' kaldı). Çalışan iş yoksa ajanlar boşta sayılır; log kalır."""
-    if data.get("finished_at") or not data.get("agents"):
-        return data
-    try:
-        if db.get_queue_stats().get("running"):
-            return data
-    except Exception:  # noqa: BLE001
-        return data
-    for a in data["agents"].values():
-        a["status"], a["current_task"] = "idle", None
+    mimar + inceleyicisi bir gün 'aktif' kaldı).
+
+    `live`: dosya ŞU AN çalışan bir pipeline işine mi ait. Yalnız o zaman log canlı aktivitedir;
+    değilse panel /api/activity'ye döner. Araç düzeltmesi / PR inceleme StatusTracker kullanmaz,
+    dosya eski pipeline işinde kalır (2026-11-05: Aktivite 03.11'deki #77527'yi gösteriyordu)."""
+    live = False
+    if not data.get("finished_at"):
+        try:
+            wid = str(data.get("work_item_id") or "")
+            live = any((j.get("job_kind") or "pipeline") == "pipeline" and str(j.get("work_item_id")) == wid
+                       for j in db.list_running_jobs())
+        except Exception:  # noqa: BLE001
+            live = True
+    data["live"] = live
+    if not live and not data.get("finished_at"):
+        for a in (data.get("agents") or {}).values():
+            a["status"], a["current_task"] = "idle", None
     return data
+
+
+_ACT_DONE = {"completed": "tamamlandı", "failed": "başarısız", "needs_human": "insan incelemesine",
+             "needs_info": "bilgi bekliyor", "skipped": "atlandı"}
+_ACT_KIND = {"pipeline": "pipeline", "modern_fix": "araç düzeltmesi", "pr_review": "PR inceleme",
+             "refinement": "refinement"}
+
+
+def activity_events(steps: list[dict], jobs: list[dict], limit: int = 40, now=None) -> list[dict]:
+    """İş + adım olaylarından kronolojik aktivite (her iş türü). Bugünse saat, değilse gün.ay saat."""
+    from datetime import datetime as _dt
+    now = now or _dt.now()
+    ev = []
+    for j in jobs:
+        kind = _ACT_KIND.get(j.get("job_kind") or "pipeline", j.get("job_kind") or "")
+        ev.append((j["started_at"], f"#{j['work_item_id']} {kind} başladı"))
+        if j.get("finished_at"):
+            ev.append((j["finished_at"], f"#{j['work_item_id']} {kind} {_ACT_DONE.get(j.get('status'), j.get('status'))}"))
+    for s in steps:
+        ev.append((s["started_at"], f"#{s['work_item_id']} {s['step_name']} başladı"))
+        if s.get("finished_at"):
+            ev.append((s["finished_at"], f"#{s['work_item_id']} {s['step_name']} "
+                                         f"{_ACT_DONE.get(s.get('status'), s.get('status'))}"))
+    ev = sorted((e for e in ev if e[0]), key=lambda e: e[0])[-limit:]
+    return [{"time": t.strftime("%H:%M:%S") if t.date() == now.date() else t.strftime("%d.%m %H:%M"),
+             "message": m} for t, m in ev]
+
+
+@app.get("/api/activity")
+async def get_activity(limit: int = 40):
+    """Genel bakış 'Aktivite': çalışan pipeline işi yokken son iş/adım olayları (DB'den, her tür)."""
+    try:
+        steps, jobs = db.recent_activity_rows(min(max(limit, 1), 200))
+        return JSONResponse({"log": activity_events(steps, jobs, limit)})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"log": [], "error": str(e)})
 
 
 @app.post("/api/run")

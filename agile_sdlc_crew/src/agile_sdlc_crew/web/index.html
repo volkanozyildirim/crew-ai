@@ -894,7 +894,16 @@ setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocal
 
 // ── Status polling → log only ──
 async function fetchStatus(){
-  try{const r=await fetch('/api/status?t='+Date.now());if(r.ok){const d=await r.json();_status=d;renderLog(d.log);renderTeam(d.agents)}}catch(e){}
+  try{const r=await fetch('/api/status?t='+Date.now());if(r.ok){const d=await r.json();_status=d;
+    // Canlı pipeline işi varsa onun logu; yoksa DB'den son iş/adım olayları (araç düzeltmesi, PR
+    // inceleme dahil) — status.json'daki eski pipeline logu "aktivite" sanılıyordu.
+    if(d.live!==false)renderLog(d.log);else fetchActivity();
+    renderTeam(d.agents)}}catch(e){}
+}
+let _actAt=0;
+async function fetchActivity(){
+  if(Date.now()-_actAt<10000)return;_actAt=Date.now();
+  try{const r=await fetch('/api/activity?limit=30&t='+Date.now());if(r.ok){const d=await r.json();renderLog(d.log)}}catch(e){}
 }
 function renderLog(log){
   const c=document.getElementById('logContainer');
