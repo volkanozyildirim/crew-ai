@@ -1408,12 +1408,14 @@ function renderOverview(jobs){
   refreshHero();
 }
 async function refreshHero(){
-  // Hero pipeline isini gosterir; refinement/pr_review gibi yardimci isler 13 adimli
-  // seridi bos gosterdigi icin ancak baska is yoksa one cikar.
+  // Hero EN GÜNCEL işi gösterir: çalışan (pipeline önce) → kuyruktaki → en son iş, türü ne olursa
+  // olsun. Eskiden çalışan iş yokken "en son PIPELINE işi" seçiliyordu: araç düzeltmesi / PR
+  // inceleme dönemi başlayınca 27.10'daki #76578 günlerce üstte kaldı (2026-11-05). Pipeline
+  // dışı işlerde 13 adımlı şerit yerine yalnız koşan adımlar çizilir (renderHero).
   const isPipe=j=>!j.job_kind||j.job_kind==='pipeline';
   const byNew=a=>a.slice().sort((x,y)=>y.id-x.id);
-  const pick=_jobs.find(j=>j.status==='running'&&isPipe(j))||_jobs.find(j=>j.status==='queued'&&isPipe(j))
-    ||byNew(_jobs.filter(isPipe))[0]||_jobs.find(j=>j.status==='running')||byNew(_jobs)[0];
+  const pick=_jobs.find(j=>j.status==='running'&&isPipe(j))||_jobs.find(j=>j.status==='running')
+    ||_jobs.find(j=>j.status==='queued'&&isPipe(j))||_jobs.find(j=>j.status==='queued')||byNew(_jobs)[0];
   const hero=document.getElementById('hero');if(!hero)return;
   if(!pick){hero.innerHTML='<div class="board-empty" style="padding:28px">Çalışan iş yok. Üstten bir iş öğesi numarası girip başlatın ya da board\'dan seçin.</div>';_heroId=null;return}
   if(pick.status==='queued'&&!pick.started_at){_heroId=pick.id;renderHero(pick,[],null);return}
@@ -1423,7 +1425,11 @@ function renderHero(j,steps,cost){
   const hero=document.getElementById('hero');if(!hero)return;
   const byKey={};steps.forEach(s=>{byKey[s.step_key]=s});
   let activeIdx=-1;
-  const stepsHtml=STEP_KEYS.map((k,i)=>{
+  const pipe=!j.job_kind||j.job_kind==='pipeline';
+  // Pipeline dışı iş (araç düzeltmesi, PR inceleme, refinement) 13 adımın çoğunu hiç koşmaz —
+  // boş daireler "bekliyor" gibi okunur; yalnız koşan adımlar gösterilir.
+  const keys=pipe?STEP_KEYS:STEP_KEYS.filter(k=>byKey[k]&&byKey[k].status!=='pending');
+  const stepsHtml=keys.map((k,i)=>{
     const s=byKey[k];let st=s?s.status:'pending';
     if(j.status==='queued')st='pending';
     if(st==='running'||(st==='failed'&&activeIdx<0))activeIdx=i;
@@ -1431,7 +1437,7 @@ function renderHero(j,steps,cost){
     const has=s&&(s.output||s.error_message);
     return `<div class="step${has?' clickable':''}" ${has?`onclick="heroStep(${s.id})"`:''} title="${esc(stepLabel(k))}${s&&s.started_at?' · '+fmtDur(s.started_at,s.finished_at):''}"><div class="dot ${st}">${ic}</div><div class="lbl ${st==='running'?'running':''}">${esc(stepLabel(k))}</div></div>`;
   }).join('');
-  const cur=activeIdx>=0?byKey[STEP_KEYS[activeIdx]]:null;
+  const cur=activeIdx>=0?byKey[keys[activeIdx]]:null;
   const agentKey=cur&&cur.agent||'';
   const lastLog=(_status&&_status.log&&_status.log.length)?_status.log[_status.log.length-1]:null;
   let nowLine='';
@@ -1449,13 +1455,13 @@ function renderHero(j,steps,cost){
       <span class="chip ${JS_CHIP[j.status]||'dim'}" style="text-transform:uppercase">${esc(JS_LABEL[j.status]||j.status)}</span>
       ${wiLink(j.work_item_id,{cls:"mono",style:"font-size:13px"})}
       <span class="hero-title" title="${esc(j.wi_title||'')}">${esc(j.wi_title||j.repo_name||'')}</span>
-      ${j.job_kind==='pr_review'?'<span class="chip acc" title="PR inceleme katkısı (danışma)">İNCELEME</span>':''}${j.job_kind==='refinement'?'<span class="chip dim" title="Backlog refinement — netleştirme soruları">REFINEMENT</span>':''}${Number(j.dry_run)===1?'<span class="chip dim">Dry run</span>':''}
+      ${j.job_kind==='pr_review'?'<span class="chip acc" title="PR inceleme katkısı (danışma)">İNCELEME</span>':''}${j.job_kind==='refinement'?'<span class="chip dim" title="Backlog refinement — netleştirme soruları">REFINEMENT</span>':''}${j.job_kind==='modern_fix'?'<span class="chip acc" title="Araç düzeltmesi (Rector / modernize / ruff) — LLM pipeline değil">ARAÇ DÜZELTMESİ</span>':''}${Number(j.dry_run)===1?'<span class="chip dim">Dry run</span>':''}
       ${repo?`<span class="hero-meta mono" title="${esc(repo)}">${SVG_PR.replace('width:13px;height:13px','width:14px;height:14px')}${esc(repo.length>48?repo.slice(0,46)+'…':repo)}</span>`:''}
       ${dur?`<span class="hero-meta"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg>${dur}</span>`:''}
       ${(!Number(j.dry_run)&&j.pr_url)?`<a class="sm-btn ghost small" href="${esc(j.pr_url)}" target="_blank" style="text-decoration:none">PR${j.pr_id?' '+esc(String(j.pr_id)):''}</a>`:''}
       <button class="sm-btn ghost small" onclick="viewJob(${j.id})">Detay</button>
     </div>
-    <div class="steps">${stepsHtml}</div>
+    ${stepsHtml?`<div class="steps">${stepsHtml}</div>`:''}
     <div class="hero-now">
       <div class="av ${j.status==='running'?'':'idle'}" style="${j.status==='running'?'':'background:var(--faint)'}">${esc(AGENT_INI[agentKey]||'—')}</div>
       <div style="flex:1;min-width:0">${nowLine}${logLine}</div>
