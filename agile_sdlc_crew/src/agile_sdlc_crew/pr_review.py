@@ -73,6 +73,60 @@ def _plain(html: str) -> str:
     return re.sub(r"[ \t]+", " ", re.sub(r"\n{3,}", "\n\n", s)).strip()
 
 
+_RESOLVED = {"fixed", "closed", "wontFix", "byDesign"}
+
+
+def _is_tempo_comment(text: str) -> bool:
+    from agile_sdlc_crew.branding import is_bot_comment
+    return is_bot_comment(text) or "inceleme katkısı" in text.lower() or "İnceleme Katkısı" in text
+
+
+def pr_discussion_block(threads: list[dict], cap: int = 5000) -> str:
+    """PR'da DAHA ÖNCE konuşulmuş konular (insan + önceki Tempo incelemesi), kronolojik.
+
+    #45843 (job #273): üç major yorumun ikisi ("10 günlük geçmiş", "günlük sipariş limiti") bir gün
+    önce PR'da insanlarca tartışılıp çözülmüştü — iş kalemi SÖZLÜ güncellenmiş, karar yalnız PR
+    thread'inde. İnceleyici thread'leri hiç görmüyordu; WI metnine bakıp aynı konuyu yeniden açtı,
+    geliştirici "geçersiz öneri, resolved maddelerde değinildi" diye yanıtladı. Önceki Tempo bulguları
+    da (kısaltılmış) girer: insanın reddettiği bulgu yeniden açılmasın."""
+    rows = []
+    for t in sorted(threads or [], key=lambda x: x.get("publishedDate") or ""):
+        if (t.get("properties") or {}).get("CodeReviewThreadType"):
+            continue
+        cms = [c for c in t.get("comments") or [] if not c.get("isDeleted")
+               and c.get("commentType") != "system" and (c.get("content") or "").strip()]
+        if not cms:
+            continue
+        ctx = t.get("threadContext") or {}
+        loc = ctx.get("filePath") or "genel"
+        if ctx.get("filePath") and (ctx.get("rightFileStart") or {}).get("line"):
+            loc += f":{ctx['rightFileStart']['line']}"
+        lines = [f"- [{t.get('status') or '?'}] {loc}"]
+        for c in cms:
+            txt = re.sub(r"@<[0-9A-Fa-f-]{36}>", "@(kişi)", c.get("content") or "")  # Azure mention
+            txt = re.sub(r"<[^>]+>", " ", unescape(txt))
+            txt = re.sub(r"\s+", " ", txt).strip()
+            bot = _is_tempo_comment(c.get("content") or "")
+            who = "Tempo (önceki inceleme)" if bot else ((c.get("author") or {}).get("displayName") or "?")
+            lines.append(f"    · {who} ({(c.get('publishedDate') or '')[:10]}): {txt[:300] if bot else txt[:1200]}")
+        rows.append("\n".join(lines))
+    if not rows:
+        return ""
+    out, total = [], 0
+    for r in rows:
+        if total + len(r) > cap:
+            out.append(f"- … ({len(rows) - len(out)} thread daha, yer kalmadı)")
+            break
+        out.append(r)
+        total += len(r)
+    return ("\n\n# PRIOR PR DISCUSSION (already happened on this PR — chronological)\n"
+            "Decisions recorded here — especially in resolved threads (fixed/closed/wontFix/byDesign) and the "
+            "author's replies — OVERRIDE the work item text: requirements are often changed verbally and recorded "
+            "only here. Do NOT raise an issue these threads already discussed, and do NOT repeat an earlier Tempo "
+            "finding that a human rejected or explained. Raise such a point again ONLY if the current code "
+            "contradicts the decision recorded in the thread, and then cite that thread.\n" + "\n".join(out))
+
+
 def wi_requirements_text(fields: dict) -> str:
     """WI'dan doğrudan gereksinim metni (BA çağrısı yok — insan işinin kendi tarifi)."""
     title = fields.get("System.Title", "") or ""
@@ -432,6 +486,21 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
         except Exception as e:  # noqa: BLE001
             log.info(f"  WI okunamadı: {e}")
     requirements = wi_requirements_text(wi_fields) if wi_fields else f"# Iş Kalemi\n{pr.get('title', '')}"
+    from agile_sdlc_crew import pipeline_config as _pc
+    discussion = ""
+    if not changes and _pc.get("CREW_PR_REVIEW_DISCUSSION"):
+        # Kapsam kararları WI yorumlarında ve PR thread'lerinde — ikisi de inceleyiciye girer
+        try:
+            from agile_sdlc_crew import context_budget as _cb
+            from agile_sdlc_crew.flow import wi_comments_block
+            if work_item_id and _pc.get("CREW_WI_COMMENTS"):
+                requirements += wi_comments_block(client.get_work_item_comments(int(work_item_id)),
+                                                  cap=_cb.cap("WI_COMMENTS"))[0]
+            discussion = pr_discussion_block(client.get_pr_threads(rname, pid), cap=_cb.cap("PR_DISCUSSION"))
+            if discussion:
+                log.info(f"  💬 PR'daki önceki tartışma inceleyiciye eklendi ({len(discussion)} karakter)")
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  PR tartışması / WI yorumları okunamadı: {e}")
     file_bodies: dict[str, str] = {}
     if changes:
         file_bodies.update({"/" + p.lstrip("/"): new for p, (_old, new) in changes.items()})
@@ -443,7 +512,7 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
         who = ("Bu PR insan tarafından geliştirildi. İncelemen DANIŞMA "
                "niteliğindedir: kodu sen değiştirmeyeceksin; bulgular PR yorumu olarak geliştiriciye gidecek. "
                "Somut, dosya/satır referanslı, uygulanabilir yaz.")
-    ctx = requirements + "\n\n# İNCELEME KAPSAMI\n" + who + (extra_context or "") + pr_ctx
+    ctx = requirements + "\n\n# İNCELEME KAPSAMI\n" + who + (extra_context or "") + discussion + pr_ctx
     if job_id:
         db.update_job(job_id, repo_name=rname, branch_name=branch, pr_id=str(pid), pr_url=pr_url,
                       wi_title=(wi_fields.get("System.Title", "") or pr.get("title", "") or "")[:200],

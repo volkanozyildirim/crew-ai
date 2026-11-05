@@ -713,6 +713,13 @@ SCHEMA: list[dict] = [
         "default": True,
         "desc": "Board'da başlanmış işlerin (In Progress / Code Review / QA…) kartındaki 🔍 İncele butonu ve POST /api/pr-review: WI'a bağlı aktif PR bulunur, değişen dosyalar context'e alınır, code_reviewer TEK çağrıyla inceler; karar + madde tablosu PR'a genel yorum, blocker/major maddeler dosya/satır yorumu, özet WI yorumu olarak yazılır. Kod değiştirmez, push etmez, oy vermez, WI durumuna dokunmaz — danışma. Pipeline sahiplik kuralı (başlanmış WI'a dokunma) korunur; katkı yalnızca review sürecine. İnsan butona basınca çalışır, otomatik tetiklenmez; iş listesinde 🔍 rozetiyle görünür, maliyeti llm_calls'a yazılır.",
     },
+    {
+        "key": "CREW_PR_REVIEW_DISCUSSION",
+        "label": "PR İnceleme · önceki tartışmayı gör",
+        "type": "bool",
+        "default": True,
+        "desc": "İnceleyici PR'daki mevcut thread'leri (insan yorumları, çözülmüş kararlar, önceki Tempo bulgularına verilen yanıtlar) ve WI yorumlarını görür; tartışılıp karara bağlanmış konuyu yeniden açmaz. #45843: sözlü güncellenen gereksinim yalnız PR thread'indeydi, iki major yorum tekrar açıldı.",
+    },
     # ── Scrum islevleri — Faz 6: backlog refinement ──
     {
         "key": "CREW_BACKLOG_REFINEMENT",
