@@ -530,7 +530,7 @@ class AzureDevOpsClient:
         #268: 41 dosyalik arac PR'inin listesi siniri asti, PR acilmadi. Aciklama burada
         sigdirilir; yine hata olursa Azure'un yaniti mesaja eklenir."""
         if len(description or "") > PR_DESCRIPTION_MAX:
-            note = "\n\n… (açıklama Azure'un 4000 karakter sınırına sığdırıldı — tam liste WI yorumunda)"
+            note = "\n\n… (açıklama Azure'un 4000 karakter sınırına sığdırıldı — liste kısaltıldı)"
             description = description[:PR_DESCRIPTION_MAX - len(note)] + note
         url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests"
         params = {"api-version": self.API_VERSION}

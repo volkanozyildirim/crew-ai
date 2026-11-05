@@ -19,7 +19,7 @@ import re
 import subprocess
 from pathlib import Path
 
-log = logging.getLogger("agile_sdlc_crew.pipeline")
+log = logging.getLogger("pipeline")  # server._setup_logging handler'ı bu adda
 
 
 _REPO = re.compile(r"^[A-Za-z0-9][\w.-]*$")
@@ -842,6 +842,22 @@ def _build_gate(client, repo, pr, branch, work_item_id, contents, originals, dro
     return fail + " — çıkarma turları bitti", pushed_at
 
 
+def description_with_result(desc: str, result: str) -> str:
+    """PR açıklaması + `### Sonuç`, Azure'un 4000 sınırına SONUÇ KORUNARAK sığdırılır. Eskiden ikisi
+    birleştirilip sondan kesiliyordu: #45893'te bırakılan yerler listesi sınırı doldurdu, sona eklenen
+    Sonuç (karar, PR'dan çıkarılan dosyalar ve nedenleri) hiç görünmedi. Kısaltılan gövde olur."""
+    from agile_sdlc_crew.tools.azure_devops_base import PR_DESCRIPTION_MAX
+    tail = "\n\n### Sonuç\n" + (result or "")
+    if len(tail) > PR_DESCRIPTION_MAX // 2:
+        tail = tail[:PR_DESCRIPTION_MAX // 2 - 1] + "…"
+    body = (desc or "").split("\n\n### Sonuç")[0]
+    room = PR_DESCRIPTION_MAX - len(tail)
+    if len(body) > room:
+        note = "\n\n… (liste kısaltıldı — Azure açıklama sınırı)"
+        body = body[:room - len(note)].rsplit("\n", 1)[0] + note
+    return body + tail
+
+
 BOT_COMMENT_MARKERS = ("inceleme katkısı", "İnceleme Katkısı", "Tempo — araç düzeltmesi")
 
 
@@ -866,9 +882,8 @@ def _post_final(client, repo, pr, work_item_id, rv, still, *, tool, changed, res
     if build_fail:
         verdict += f"; 🔴 PR build'i: {build_fail}"
     try:
-        client.update_pr_description(repo, int(pr["pr_id"]), (desc or "").split("\n\n### Sonuç")[0]
-                                     + f"\n\n### Sonuç\nİnceleme: {verdict}. Değişen dosya: {len(changed)}."
-                                     + ("\n\n" + "\n\n".join(info) if info else ""))
+        client.update_pr_description(repo, int(pr["pr_id"]), description_with_result(
+            desc, f"İnceleme: {verdict}. Değişen dosya: {len(changed)}." + ("\n\n" + "\n\n".join(info) if info else "")))
     except Exception as e:  # noqa: BLE001
         log.info(f"  PR açıklaması güncellenemedi: {e}")
     if not still and not build_fail:
