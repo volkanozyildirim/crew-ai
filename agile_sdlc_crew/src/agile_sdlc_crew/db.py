@@ -289,8 +289,22 @@ def set_wi_state_before(job_id: int, state: str):
 def list_running_jobs() -> list[dict]:
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, work_item_id, wi_state_before, repo_name FROM jobs WHERE status='running'")
+        cur.execute("SELECT id, work_item_id, wi_state_before, repo_name, job_kind FROM jobs WHERE status='running'")
         return list(cur.fetchall() or [])
+
+
+def recent_activity_rows(limit: int = 40) -> tuple[list[dict], list[dict]]:
+    """Genel bakış 'Aktivite' paneli için son adım ve iş olayları (her iş türü)."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT s.job_id, j.work_item_id, s.step_name, s.status, s.started_at, s.finished_at "
+                    "FROM job_steps s JOIN jobs j ON j.id = s.job_id WHERE s.started_at IS NOT NULL "
+                    "ORDER BY COALESCE(s.finished_at, s.started_at) DESC LIMIT %s", (int(limit),))
+        steps = list(cur.fetchall() or [])
+        cur.execute("SELECT id, work_item_id, job_kind, status, started_at, finished_at FROM jobs "
+                    "WHERE started_at IS NOT NULL ORDER BY COALESCE(finished_at, started_at) DESC LIMIT %s",
+                    (int(limit),))
+        return steps, list(cur.fetchall() or [])
 
 
 def delete_job(job_id: int):

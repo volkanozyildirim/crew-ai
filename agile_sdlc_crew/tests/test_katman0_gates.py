@@ -6734,21 +6734,44 @@ def test_tool_fix_build_gate():
 
 def test_stale_team_status():
     """Durdurulan / orphan-fail olan işin status.json'u ajanları 'working' bırakıyordu; kuyruk boşken
-    Ekip paneli mimarı ve inceleyiciyi aktif gösterdi (2026-11-04)."""
-    print("\n=== Boştayken Ekip paneli eski işi göstermez ===")
+    Ekip paneli mimarı ve inceleyiciyi aktif gösterdi (2026-11-04). Aktivite de o eski logu
+    gösteriyordu (2026-11-05) — `live` yalnız dosya çalışan pipeline işine aitse doğru."""
+    print("\n=== Boştayken Ekip/Aktivite paneli eski işi göstermez ===")
+    from datetime import datetime
     from agile_sdlc_crew import server
-    stale = lambda: {"finished_at": "", "log": [{"m": 1}],
+    stale = lambda: {"finished_at": "", "work_item_id": "77527", "log": [{"m": 1}],
                      "agents": {"software_architect": {"status": "working", "current_task": "Kod Tabanı Analizi"}}}
-    orig = server.db.get_queue_stats
+    orig = server.db.list_running_jobs
     try:
-        server.db.get_queue_stats = lambda: {"running": 0}
+        server.db.list_running_jobs = lambda: []
         d = server._idle_if_stale(stale())
-        check("çalışan iş yoksa ajanlar boşta", d["agents"]["software_architect"] == {"status": "idle", "current_task": None})
-        check("aktivite logu korunur", d["log"] == [{"m": 1}])
-        server.db.get_queue_stats = lambda: {"running": 1}
-        check("çalışan iş varsa durum aynen", server._idle_if_stale(stale())["agents"]["software_architect"]["status"] == "working")
+        check("çalışan iş yoksa ajanlar boşta, log canlı değil",
+              d["agents"]["software_architect"] == {"status": "idle", "current_task": None} and d["live"] is False)
+        server.db.list_running_jobs = lambda: [{"work_item_id": "77528", "job_kind": "modern_fix"}]
+        d = server._idle_if_stale(stale())
+        check("başka bir (araç) iş çalışıyorsa eski pipeline logu canlı sayılmaz",
+              d["live"] is False and d["agents"]["software_architect"]["status"] == "idle")
+        server.db.list_running_jobs = lambda: [{"work_item_id": "77527", "job_kind": "pipeline"}]
+        d = server._idle_if_stale(stale())
+        check("dosyanın pipeline işi çalışıyorsa durum aynen, log canlı",
+              d["live"] is True and d["agents"]["software_architect"]["status"] == "working")
     finally:
-        server.db.get_queue_stats = orig
+        server.db.list_running_jobs = orig
+    now = datetime(2026, 11, 5, 13, 0)
+    ev = server.activity_events(
+        [{"work_item_id": "77528", "step_name": "Kod İnceleme", "status": "completed",
+          "started_at": datetime(2026, 11, 5, 12, 0, 16), "finished_at": datetime(2026, 11, 5, 12, 0, 55)}],
+        [{"work_item_id": "77528", "job_kind": "modern_fix", "status": "completed",
+          "started_at": datetime(2026, 11, 5, 12, 0, 3), "finished_at": datetime(2026, 11, 5, 12, 12, 37)},
+         {"work_item_id": "77527", "job_kind": "pipeline", "status": "failed",
+          "started_at": datetime(2026, 11, 3, 11, 17), "finished_at": None}], now=now)
+    check("aktivite her iş türünden, kronolojik; bugün saat, önceki gün tarih",
+          [e["message"] for e in ev] == ["#77527 pipeline başladı", "#77528 araç düzeltmesi başladı",
+                                          "#77528 Kod İnceleme başladı", "#77528 Kod İnceleme tamamlandı",
+                                          "#77528 araç düzeltmesi tamamlandı"]
+          and ev[0]["time"] == "03.11 11:17" and ev[-1]["time"] == "12:12:37", ev)
+    h = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    check("panel canlı değilse /api/activity'den okur", "if(d.live!==false)renderLog(d.log);else fetchActivity();" in h)
 
 
 def test_pr_review_prior_discussion():
