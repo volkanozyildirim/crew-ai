@@ -42,8 +42,22 @@ def _sp(f: dict):
 
 
 def _job_status(ids: list[str]) -> dict:
+    """Teknik borç işi pipeline'da DA araç düzeltmesinde (modern_fix) de yapılır. Yalnız pipeline
+    sayılınca Rector'un PR'ını açıp Code Review'a taşıdığı kart "kuyruğa alınabilir" görünüyordu."""
     from agile_sdlc_crew.sprint_planning import latest_job_status
-    return latest_job_status(ids)
+    return latest_job_status(ids, kinds=("pipeline", "modern_fix"))
+
+
+def _proposed_states(client, types) -> dict[str, set[str]]:
+    """Tip → 'henüz başlanmamış' (Proposed kategorisi) durum adları; okunamayan tip yok sayılır."""
+    out = {}
+    for t in types:
+        try:
+            out[t] = {s.get("name", "") for s in client.get_work_item_type_states(t)
+                      if (s.get("category") or "") == "Proposed"}
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def list_items(client, *, team: str = "", job_status=None) -> dict:
@@ -61,6 +75,8 @@ def list_items(client, *, team: str = "", job_status=None) -> dict:
             "ORDER BY [System.Id] DESC")
     wis = client.query_work_items(wiql, limit=300) or []
     jobs = (job_status or _job_status)([str(w.get("id")) for w in wis])
+    proposed = _proposed_states(client, {(w.get("fields") or {}).get("System.WorkItemType", "") for w in wis}) \
+        if hasattr(client, "get_work_item_type_states") else {}
     rows = []
     for w in wis:
         f = w.get("fields") or {}
@@ -68,12 +84,20 @@ def list_items(client, *, team: str = "", job_status=None) -> dict:
         job = jobs.get(str(w.get("id")))
         human = render.HUMAN_TAG in tags
         busy = bool(job and job.get("status") in NOT_QUEUEABLE_JOB)
+        # Kart başlanmış (In Progress / Code Review / QA …) ise kimin yaptığından bağımsız kuyruğa
+        # alınmaz — elle ya da pipeline'la ilerletilmiş iş yeniden yapılmasın (2026-11-05).
+        st = f.get("System.State", "")
+        prop = proposed.get(f.get("System.WorkItemType", ""))
+        started = bool(prop) and st not in prop
+        reason = ("insan işi (needs-human)" if human else
+                  f"son iş #{job.get('id')} {job.get('status')}" if busy else
+                  f"iş ilerlemiş ({st})" if started else "")
         rows.append({
             "id": int(w.get("id")), "title": f.get("System.Title", ""), "type": f.get("System.WorkItemType", ""),
             "state": f.get("System.State", ""),
             "iteration": (f.get("System.IterationPath") or "").rsplit("\\", 1)[-1],
             "sp": _sp(f), "repo": render.repo_from_description(f.get("System.Description") or ""),
-            "needs_human": human, "job": job, "queueable": not human and not busy,
+            "needs_human": human, "job": job, "queueable": not reason, "reason": reason,
             "fingerprints": render.parse_fingerprints(f.get("System.Description") or ""),
         })
     rows.sort(key=lambda r: (not r["queueable"], -r["id"]))
@@ -119,8 +143,7 @@ def _queue_locked(client, ids, team, max_queue, job_status, queue_fn, tool_fn=No
         elif row["needs_human"]:
             skipped.append({"wi": str(wid), "reason": "insan işi (needs-human) — kuyruğa alınmaz"})
         elif not row["queueable"]:
-            j = row.get("job") or {}
-            skipped.append({"wi": str(wid), "reason": f"son iş #{j.get('id')} {j.get('status')} — yeniden alınmaz"})
+            skipped.append({"wi": str(wid), "reason": f"{row.get('reason')} — yeniden alınmaz"})
         elif len(take) >= max(1, int(max_queue)):
             skipped.append({"wi": str(wid), "reason": f"istek başı tavan ({max_queue})"})
         else:

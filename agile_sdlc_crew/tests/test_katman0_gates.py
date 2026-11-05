@@ -4486,6 +4486,24 @@ def test_techdebt_review_fixes():
     check("tamamlanmış / insan bekleyen işi olan WI kuyruklanamaz; failed tekrar alınabilir",
           not rows[1]["queueable"] and not rows[2]["queueable"] and not rows[3]["queueable"]
           and rows[4]["queueable"] and rows[5]["queueable"])
+
+    class CS(C):
+        def query_work_items(self, wiql, limit=0):
+            return [{"id": i, "fields": {"System.Title": f"t{i}", "System.Tags": "tech-debt", "System.State": st,
+                                          "System.WorkItemType": "Task"}}
+                    for i, st in ((1, "To Do"), (2, "QA To Do"), (3, "Code Review"), (4, "New"))]
+
+        def get_work_item_type_states(self, t):
+            return [{"name": "New", "category": "Proposed"}, {"name": "To Do", "category": "Proposed"},
+                    {"name": "In Progress", "category": "InProgress"}, {"name": "Code Review", "category": "InProgress"},
+                    {"name": "QA To Do", "category": "InProgress"}]
+    rows = {r["id"]: r for r in techdebt.list_items(CS(), team="T", job_status=lambda ids: {})["items"]}
+    check("başlanmış kart (Code Review / QA To Do) işi olmasa da kuyruklanamaz, gerekçesiyle",
+          rows[1]["queueable"] and rows[4]["queueable"] and not rows[2]["queueable"] and not rows[3]["queueable"]
+          and rows[2]["reason"] == "iş ilerlemiş (QA To Do)", rows)
+    import inspect as _insp
+    check("araç düzeltmesi (modern_fix) işi de 'yapıldı' sayılır",
+          'kinds=("pipeline", "modern_fix")' in _insp.getsource(techdebt._job_status))
     try:
         techdebt.list_items(C(area=""), team="", job_status=lambda ids: {})
         scoped = False
