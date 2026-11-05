@@ -3394,7 +3394,8 @@ def test_quality_app_map():
              "$(php-config --ini-dir)/newrelic.ini \\\n")
     e = app_map.parse_build_dir(jf_tr, df_tr)
     check("literal appname + gitOriginApp",
-          e == {"project": "ecombackend", "repo": "webservice", "apps": ["[Prod] tr-stocks.flo.com.tr"]}, str(e))
+          e == {"project": "ecombackend", "repo": "webservice", "apps": ["[Prod] tr-stocks.flo.com.tr"],
+                "fallback": False}, str(e))
     jf_web = ('String gitOriginApp = "git@ssh.dev.azure.com:v3/flotechnology/ecombackend/webservice"\n'
               "   flokz       : [website: 'flo.com.kz', themePath: 'flo-kz'],\n"
               "   floma       : [website: 'flo.co.ma', themePath: 'flo-ma'],\n"
@@ -3406,6 +3407,36 @@ def test_quality_app_map():
     check("${website} şablonu her siteye açılır, ${newrelic_app_name} yok sayılır",
           e2 and e2["apps"] == ["[Prod] flo.com.kz", "[Prod] flo.co.ma"], str(e2))
     check("gitOriginApp yoksa None", app_map.parse_build_dir("", df_tr) is None)
+    # 2026-11-05: NR'de en çok hata veren uygulamalar eşlenemiyordu (sneakerbox.ru 35K, brd/proskater/
+    # billabong.ru ~12K) — russia/build/websites siteleri bir Map'ten seçiyor.
+    jf_ru = ('String gitOriginApp = "git@ssh.dev.azure.com:v3/FloTechnology/ecombackend/webservice"\n'
+             "Map brandDomains = [\n    sneakerbox: 'sneakerbox.ru',\n    brd       : 'brd.ru',\n]\n"
+             "    website = brandDomains[params.brand]\n"
+             '    newrelic_app_name = "[Prod] ${website}"\n')
+    e3 = app_map.parse_build_dir(jf_ru, "ARG website\n")
+    check("Map'ten seçilen siteler şablona açılır (russia websites)",
+          e3["apps"] == ["[Prod] sneakerbox.ru", "[Prod] brd.ru"] and not e3["fallback"], str(e3))
+    jf_seg = ('String gitOriginApp = "git@ssh.dev.azure.com:v3/FloTechnology/EcomBackend/SegFlo"\n'
+              'String website = "seg.flo.com.tr"\n')
+    e4 = app_map.parse_build_dir(jf_seg, "")
+    check("NR adı yoksa siteden tahmin ('[Prod] x' ve NR'deki boşluksuz '[Prod]x')",
+          e4["apps"] == ["[Prod] seg.flo.com.tr", "[Prod]seg.flo.com.tr"] and e4["fallback"], str(e4))
+
+    class FC:
+        def get_items_in_path(self, devrepo, path, **kw):
+            return [{"path": "/build/a", "isFolder": True}, {"path": "/build/b", "isFolder": True}] \
+                if devrepo == "anatolia" else []
+
+        def get_file_content(self, devrepo, path, **kw):
+            if path == "/build/a/JenkinsfileBuild":  # tahmin: site adı sneakerbox.ru, NR ayarı yok
+                return ('String gitOriginApp = "git@x:v3/O/EcomFrontend/sites"\n'
+                        'String website = "sneakerbox.ru"\n')
+            if path == "/build/b/JenkinsfileBuild":
+                return jf_ru
+            return ""
+    m = app_map.build_map(FC())
+    check("tahmin edilen ad, başka dizinin açık NR adını ezmez",
+          m["[Prod] sneakerbox.ru"]["repo"] == "webservice" and m["[Prod]sneakerbox.ru"]["repo"] == "sites", m)
 
     calls = {"n": 0}
 
