@@ -6786,6 +6786,61 @@ def test_pr_review_prior_discussion():
           and "wi_comments_block(client.get_work_item_comments" in src)
 
 
+def test_tool_branch_conflicts():
+    """#45729: #45728 aynı Ekol kurucularını değiştirip merge edildi → 7 dosya çakıştı. Yeniden koşu
+    çakışan PR'ın dalına itseydi çakışma kalırdı (iki taraf aynı satırı farklı değiştiriyor)."""
+    print("\n=== Araç düzeltmesi: main ile çakışan PR yeniden kullanılmaz ===")
+    from agile_sdlc_crew import db, pipeline
+    from agile_sdlc_crew.quality import modern_fix as mf
+
+    class Cur:
+        def execute(self, *a):
+            pass
+
+        def fetchall(self):
+            return [{"branch_name": "feature/77528-tool-98859", "pr_id": "45729"}]
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def cursor(self):
+            return Cur()
+
+    class C:
+        def __init__(self, merge):
+            self.merge, self.abandoned, self.created = merge, [], []
+
+        def list_branches(self, repo):
+            return [{"name": "refs/heads/feature/77528-tool-98859"}, {"name": "refs/heads/feature/77528"}]
+
+        def get_pull_request(self, repo, pid):
+            return {"mergeStatus": self.merge}
+
+        def abandon_pull_request(self, repo, pid, reason=""):
+            self.abandoned.append((pid, reason))
+
+        def create_branch(self, repo, br):
+            self.created.append(br)
+    og, of = db.get_conn, pipeline._find_existing_pr
+    try:
+        db.get_conn = lambda: Conn()
+        pipeline._find_existing_pr = lambda cl, r, b: {"pr_id": 45729}
+        c = C("succeeded")
+        check("çakışmasız açık PR'ın dalı yeniden kullanılır",
+              mf._tool_branch(c, "core", "77528") == ("feature/77528-tool-98859", True, "") and not c.abandoned)
+        c = C("conflicts")
+        br, reused, sup = mf._tool_branch(c, "core", "77528")
+        check("çakışan PR terk edilir (yorumsuz), main'den taze dal açılır",
+              not reused and sup == "45729" and c.abandoned == [(45729, "")] and c.created == [br]
+              and br.startswith("feature/77528-tool-"), f"{br} {reused} {sup} {c.abandoned}")
+    finally:
+        db.get_conn, pipeline._find_existing_pr = og, of
+
+
 def test_php_modern_82_84():
     """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
     denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
@@ -6917,7 +6972,7 @@ def main():
               test_tool_fix_leftovers,
               test_scan_line_text_multibyte,
               test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status,
-              test_pr_review_prior_discussion):
+              test_pr_review_prior_discussion, test_tool_branch_conflicts):
         try:
             t()
         except Exception as e:
