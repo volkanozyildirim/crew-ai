@@ -6876,6 +6876,19 @@ def test_tool_branch_conflicts():
         check("geçici worktree temizlenir", "tempo-merge-" not in sh(w, "worktree", "list").stdout)
 
 
+def test_hero_latest_job():
+    """Genel bakış kartı çalışan iş yokken 'en son PIPELINE işi'ni seçiyordu: araç düzeltmesi / PR
+    inceleme dönemi başlayınca 27.10'daki #76578 günlerce üstte kaldı (2026-11-05)."""
+    print("\n=== Genel bakış kartı en güncel işi gösterir ===")
+    h = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    i = h.index("async function refreshHero(){")
+    body = h[i:h.index("function renderHero(", i)]
+    check("çalışan/kuyruk yoksa türüne bakmadan en son iş seçilir",
+          "||byNew(_jobs)[0];" in body and "byNew(_jobs.filter(isPipe))" not in body, body[:600])
+    check("pipeline dışı işte yalnız koşan adımlar çizilir",
+          "STEP_KEYS.filter(k=>byKey[k]&&byKey[k].status!=='pending')" in h and "ARAÇ DÜZELTMESİ" in h)
+
+
 def test_php_modern_82_84():
     """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
     denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
@@ -7007,7 +7020,7 @@ def main():
               test_tool_fix_leftovers,
               test_scan_line_text_multibyte,
               test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status,
-              test_pr_review_prior_discussion, test_tool_branch_conflicts):
+              test_pr_review_prior_discussion, test_tool_branch_conflicts, test_hero_latest_job):
         try:
             t()
         except Exception as e:
