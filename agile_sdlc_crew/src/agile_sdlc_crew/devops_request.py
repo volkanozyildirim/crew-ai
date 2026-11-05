@@ -24,7 +24,7 @@ from pathlib import Path
 
 import yaml
 
-log = logging.getLogger("agile_sdlc_crew.pipeline")
+log = logging.getLogger("pipeline")  # server._setup_logging handler'ı bu adda
 
 TAG = "tempo-devops"
 KEY_PREFIX = "tempo-devops-key:"

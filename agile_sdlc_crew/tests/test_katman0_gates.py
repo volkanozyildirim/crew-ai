@@ -6930,6 +6930,25 @@ def test_hero_latest_job():
           "STEP_KEYS.filter(k=>byKey[k]&&byKey[k].status!=='pending')" in h and "ARAÇ DÜZELTMESİ" in h)
 
 
+def test_tool_fix_result_and_logs():
+    """#45893: bırakılan yerler listesi açıklamayı doldurdu, sona eklenen Sonuç kesildi; araç
+    düzeltmesinin INFO logları handler'sız bir logger'a gidip hiçbir dosyaya düşmedi."""
+    print("\n=== Araç düzeltmesi: Sonuç bölümü sınırda korunur, loglar dosyaya düşer ===")
+    import logging
+    from agile_sdlc_crew.quality import modern_fix as mf
+    from agile_sdlc_crew.tools.azure_devops_base import PR_DESCRIPTION_MAX
+    body = "Araçla uygulanan…\n" + "\n".join(f"- `app/Lib/F{i}.php:16` (ctor_promotion)" for i in range(200))
+    out = mf.description_with_result(body, "İnceleme: ✅ onaylandı.\n\n**PR'dan çıkarılan 2 dosya**")
+    check("uzun gövdede Sonuç tam korunur, toplam sınırın altında, gövde kısaltma notlu",
+          len(out) <= PR_DESCRIPTION_MAX and out.endswith("**PR'dan çıkarılan 2 dosya**")
+          and "### Sonuç" in out and "liste kısaltıldı" in out, len(out))
+    again = mf.description_with_result(out, "İnceleme: 🔴")
+    check("tekrar yazımda eski Sonuç değiştirilir, çoğalmaz", again.count("### Sonuç") == 1 and again.endswith("🔴"))
+    check("kısa gövde aynen kalır", mf.description_with_result("kısa", "ok") == "kısa\n\n### Sonuç\nok")
+    check("araç düzeltmesi logları pipeline log handler'ının logger'ında",
+          mf.log is logging.getLogger("pipeline"))
+
+
 def test_php_modern_82_84():
     """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
     denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
@@ -7061,7 +7080,8 @@ def main():
               test_tool_fix_leftovers,
               test_scan_line_text_multibyte,
               test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status,
-              test_pr_review_prior_discussion, test_tool_branch_conflicts, test_hero_latest_job):
+              test_pr_review_prior_discussion, test_tool_branch_conflicts, test_hero_latest_job,
+              test_tool_fix_result_and_logs):
         try:
             t()
         except Exception as e:

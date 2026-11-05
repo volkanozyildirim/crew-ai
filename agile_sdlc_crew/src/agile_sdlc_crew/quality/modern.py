@@ -29,7 +29,7 @@ import yaml
 
 from agile_sdlc_crew.quality import php_modern
 
-log = logging.getLogger("agile_sdlc_crew.pipeline")
+log = logging.getLogger("pipeline")  # server._setup_logging handler'ı bu adda
 
 _CONFIG = Path(__file__).resolve().parent.parent / "config"
 LANGS = {
