@@ -6751,6 +6751,41 @@ def test_stale_team_status():
         server.db.get_queue_stats = orig
 
 
+def test_pr_review_prior_discussion():
+    """#45843 (job #273): iki major yorum, bir gün önce PR'da tartışılıp çözülmüş konulardı."""
+    print("\n=== PR incelemesi önceki tartışmayı görür ===")
+    from agile_sdlc_crew import pr_review
+    th = [
+        {"id": 2, "status": "fixed", "publishedDate": "2026-11-05T07:05",
+         "threadContext": {"filePath": "/app/Model/StockSource.php", "rightFileStart": {"line": 428}},
+         "comments": [{"content": "🤖 **[R3] MAJOR — EKSİK** (pipeline inceleme katkısı, danışma) limit eksik",
+                       "author": {"displayName": "Volkan"}, "publishedDate": "2026-11-05T07:05"},
+                      {"content": "Sözlü güncellendi, limite bakılmasına gerek yok @<C9BDD24E-455C-681C-AA55-CBE97089CD89>",
+                       "author": {"displayName": "Ömer"}, "publishedDate": "2026-11-05T07:13"}]},
+        {"id": 1, "status": "fixed", "publishedDate": "2026-11-04T12:32",
+         "threadContext": {"filePath": "/app/Model/NextDayShipping.php", "rightFileStart": {"line": 96}},
+         "comments": [{"content": "stok limiti dolmuş depoları çıkarmak gerekmiyor mu?",
+                       "author": {"displayName": "Emre"}, "publishedDate": "2026-11-04T12:32"},
+                      {"content": "gerek yok dedi", "author": {"displayName": "Ömer"},
+                       "publishedDate": "2026-11-04T13:03"}]},
+        {"id": 3, "properties": {"CodeReviewThreadType": {"$value": "VoteUpdate"}},
+         "comments": [{"content": "voted", "commentType": "system"}]},
+    ]
+    b = pr_review.pr_discussion_block(th)
+    check("çözülmüş insan kararı ve konumu bağlamda", "[fixed] /app/Model/NextDayShipping.php:96" in b
+          and "gerek yok dedi" in b, b)
+    check("önceki Tempo bulgusu + insanın reddi bağlamda, Tempo etiketli",
+          "Tempo (önceki inceleme)" in b and "Sözlü güncellendi" in b and "@(kişi)" in b, b)
+    check("kronolojik, sistem thread'i yok", b.index("NextDayShipping.php:96") < b.index("StockSource.php:428")
+          and "voted" not in b)
+    check("kural: çözülmüş konu yeniden açılmaz", "Do NOT raise an issue these threads already discussed" in b)
+    check("tartışma yoksa blok yok", pr_review.pr_discussion_block([]) == "")
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
+    check("insan PR incelemesine tartışma + WI yorumları girer, araç PR'ına girmez",
+          'if not changes and _pc.get("CREW_PR_REVIEW_DISCUSSION")' in src and "+ discussion + pr_ctx" in src
+          and "wi_comments_block(client.get_work_item_comments" in src)
+
+
 def test_php_modern_82_84():
     """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
     denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
@@ -6881,7 +6916,8 @@ def main():
               test_tool_review_diff_context,
               test_tool_fix_leftovers,
               test_scan_line_text_multibyte,
-              test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status):
+              test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status,
+              test_pr_review_prior_discussion):
         try:
             t()
         except Exception as e:
