@@ -42,8 +42,8 @@ def is_proposed(state: str, type_states: list[dict] | None) -> bool:
     return s in PROPOSED_FALLBACK
 
 
-def latest_job_status(wi_ids: list[str]) -> dict[str, dict]:
-    """WI → en son işin {id, status}. DB yoksa boş."""
+def latest_job_status(wi_ids: list[str], kinds: tuple[str, ...] = ("pipeline",)) -> dict[str, dict]:
+    """WI → en son işin {id, status}. DB yoksa boş. `kinds`: sayılan iş türleri (varsayılan pipeline)."""
     if not wi_ids:
         return {}
     try:
@@ -53,10 +53,11 @@ def latest_job_status(wi_ids: list[str]) -> dict[str, dict]:
             cur.execute(
                 "SELECT j.work_item_id, j.id, j.status FROM jobs j "
                 "JOIN (SELECT work_item_id, MAX(id) AS mid FROM jobs "
-                "      WHERE COALESCE(kickoff_only,0)=0 AND COALESCE(dry_run,0)=0 AND COALESCE(job_kind,'pipeline')='pipeline' "
+                "      WHERE COALESCE(kickoff_only,0)=0 AND COALESCE(dry_run,0)=0 "
+                "      AND COALESCE(job_kind,'pipeline') IN (" + ",".join(["%s"] * len(kinds)) + ") "
                 "      AND work_item_id IN (" + ",".join(["%s"] * len(wi_ids)) + ") "
                 "      GROUP BY work_item_id) m ON m.mid = j.id",
-                [str(w) for w in wi_ids],
+                [*kinds, *[str(w) for w in wi_ids]],
             )
             return {str(r["work_item_id"]): {"id": r["id"], "status": r["status"]} for r in cur.fetchall() or []}
     except Exception as e:  # noqa: BLE001
