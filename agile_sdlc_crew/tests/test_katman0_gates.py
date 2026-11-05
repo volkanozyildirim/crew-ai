@@ -6787,9 +6787,11 @@ def test_pr_review_prior_discussion():
 
 
 def test_tool_branch_conflicts():
-    """#45729: #45728 aynı Ekol kurucularını değiştirip merge edildi → 7 dosya çakıştı. Yeniden koşu
-    çakışan PR'ın dalına itseydi çakışma kalırdı (iki taraf aynı satırı farklı değiştiriyor)."""
-    print("\n=== Araç düzeltmesi: main ile çakışan PR yeniden kullanılmaz ===")
+    """#45729: #45728 aynı Ekol kurucularını değiştirip merge edildi → 7 dosya çakıştı. Kullanıcı kararı
+    (2026-11-05): çakışma AYNI PR'da çözülür — PR terk edilip yenisi açılırsa review ve yorumlar kaybolur."""
+    print("\n=== Araç düzeltmesi: main ile çakışan PR aynı PR'da çözülür ===")
+    import subprocess
+    import tempfile
     from agile_sdlc_crew import db, pipeline
     from agile_sdlc_crew.quality import modern_fix as mf
 
@@ -6821,24 +6823,57 @@ def test_tool_branch_conflicts():
             return {"mergeStatus": self.merge}
 
         def abandon_pull_request(self, repo, pid, reason=""):
-            self.abandoned.append((pid, reason))
+            self.abandoned.append(pid)
 
         def create_branch(self, repo, br):
             self.created.append(br)
-    og, of = db.get_conn, pipeline._find_existing_pr
+    og, of, om = db.get_conn, pipeline._find_existing_pr, mf.merge_main_into_branch
+    merged = []
     try:
         db.get_conn = lambda: Conn()
         pipeline._find_existing_pr = lambda cl, r, b: {"pr_id": 45729}
+        mf.merge_main_into_branch = lambda root, br: merged.append(br) or ["a.php", "b.php"]
         c = C("succeeded")
-        check("çakışmasız açık PR'ın dalı yeniden kullanılır",
-              mf._tool_branch(c, "core", "77528") == ("feature/77528-tool-98859", True, "") and not c.abandoned)
+        check("çakışmasız açık PR'ın dalı yeniden kullanılır, main birleştirilmez",
+              mf._tool_branch(c, "core", "77528", Path("/x")) == ("feature/77528-tool-98859", True, "")
+              and not merged)
         c = C("conflicts")
-        br, reused, sup = mf._tool_branch(c, "core", "77528")
-        check("çakışan PR terk edilir (yorumsuz), main'den taze dal açılır",
-              not reused and sup == "45729" and c.abandoned == [(45729, "")] and c.created == [br]
-              and br.startswith("feature/77528-tool-"), f"{br} {reused} {sup} {c.abandoned}")
+        br, reused, note = mf._tool_branch(c, "core", "77528", Path("/x"))
+        check("çakışan PR terk EDİLMEZ, yeni dal açılmaz; main aynı dala birleştirilir",
+              br == "feature/77528-tool-98859" and reused and not c.abandoned and not c.created
+              and merged == ["feature/77528-tool-98859"] and "2 dosya" in note, f"{br} {reused} {note} {c.abandoned}")
     finally:
-        db.get_conn, pipeline._find_existing_pr = og, of
+        db.get_conn, pipeline._find_existing_pr, mf.merge_main_into_branch = og, of, om
+
+    # Gerçek git ile: origin(bare) — main ve dal aynı satırı farklı değiştirir → çakışan dosya main'den
+    # alınır, çakışmayan dal değişikliği korunur, birleştirme origin'e itilir.
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+
+        def sh(cwd, *a):
+            return subprocess.run(["git", *mf.MERGE_IDENT, *a], cwd=cwd, capture_output=True, text=True, check=True)
+        sh(d, "init", "-q", "--bare", "-b", "main", "origin.git")
+        sh(d, "clone", "-q", str(d / "origin.git"), "w")
+        w = d / "w"
+        (w / "a.php").write_text("ctor($k)\n")
+        (w / "b.php").write_text("x\n")
+        sh(w, "add", "."), sh(w, "commit", "-qm", "base"), sh(w, "push", "-q", "origin", "HEAD:main")
+        sh(w, "checkout", "-qb", "tool")
+        (w / "a.php").write_text("ctor(protected $k)\n")
+        (w / "b.php").write_text("x-tool\n")
+        sh(w, "commit", "-qam", "tool"), sh(w, "push", "-q", "origin", "tool")
+        sh(w, "checkout", "-q", "main")
+        (w / "a.php").write_text("ctor(#[S] $k)\n")
+        sh(w, "commit", "-qam", "sensitive"), sh(w, "push", "-q", "origin", "main")
+        files = mf.merge_main_into_branch(w, "tool")
+        sh(w, "fetch", "-q", "origin")
+        a = sh(w, "show", "origin/tool:a.php").stdout
+        b = sh(w, "show", "origin/tool:b.php").stdout
+        parents = sh(w, "rev-list", "--parents", "-n1", "origin/tool").stdout.split()
+        check("gerçek git: çakışan dosya main'den, çakışmayan dal değişikliği korunur, birleştirme itilir",
+              files == ["a.php"] and a == "ctor(#[S] $k)\n" and b == "x-tool\n" and len(parents) == 3,
+              f"{files} {a!r} {b!r} {parents}")
+        check("geçici worktree temizlenir", "tempo-merge-" not in sh(w, "worktree", "list").stdout)
 
 
 def test_php_modern_82_84():

@@ -478,16 +478,54 @@ def _detached(root: Path):
     return _cm()
 
 
-def _tool_branch(client, repo: str, work_item_id: str) -> tuple[str, bool, str]:
-    """(dal, mevcut araç PR'ı yeniden kullanılıyor mu, yerine geçilen PR). Aynı WI'ın ÖNCEKİ araç
+MERGE_IDENT = ("-c", "user.name=Tempo", "-c", "user.email=tempo@noreply.local", "-c", "core.hooksPath=/dev/null")
+
+
+def merge_main_into_branch(root: Path, branch: str) -> list[str]:
+    """main'i araç PR'ının dalına birleştir ve İT (git, klonun kimlik bilgili origin'i). Çakışan
+    dosyalar main'in hâline alınır — ardından araç güncel main üzerinde yeniden uygulanıp REST ile
+    itilir, yani son hâl "main + araç" olur. Paylaşılan klonun çalışma ağacına dokunmamak için
+    geçici bir git worktree'de yapılır. Dönüş: main'den alınan (çakışan) dosyalar."""
+    import shutil
+    import tempfile
+    _git(root, "fetch", "-q", "origin", "main", f"+refs/heads/{branch}:refs/remotes/origin/{branch}", check=True)
+    tmp = Path(tempfile.mkdtemp(prefix="tempo-merge-"))
+    wt = tmp / "wt"
+    _git(root, "worktree", "add", "-q", "--detach", str(wt), f"origin/{branch}", check=True)
+    try:
+        def g(*a, check=False):
+            return _git(wt, *MERGE_IDENT, *a, check=check)
+        r = g("merge", "--no-ff", "--no-edit", "-m", f"Merge main into {branch} (çakışma: araç güncel main "
+              "üzerinde yeniden uygulanıyor)", "origin/main")
+        conflicted = [f for f in g("diff", "--name-only", "--diff-filter=U").stdout.splitlines() if f]
+        if r.returncode != 0 and not conflicted:
+            raise RuntimeError(f"main birleştirilemedi: {(r.stderr or r.stdout).strip()[:300]}")
+        for f in conflicted:
+            if g("checkout", "--theirs", "--", f).returncode == 0:
+                g("add", "--", f, check=True)
+            else:  # main'de silinmiş
+                g("rm", "-q", "--", f, check=True)
+        if conflicted:
+            g("commit", "-q", "--no-edit", check=True)
+        g("push", "-q", "origin", f"HEAD:refs/heads/{branch}", check=True)
+        return conflicted
+    finally:
+        _git(root, "worktree", "remove", "--force", str(wt))
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _tool_branch(client, repo: str, work_item_id: str, root: Path | None = None) -> tuple[str, bool, str]:
+    """(dal, mevcut araç PR'ı yeniden kullanılıyor mu, PR açıklamasına not). Aynı WI'ın ÖNCEKİ araç
     düzeltmesinin PR'ı hâlâ açıksa onun dalına itilir (PR güncellenir, yeni PR/terk gerekmez).
     Başka bir koşunun (ör. LLM pipeline'ı) dalı varsa main'den taze dal açılır. Varlık AÇIKÇA
     sorulur: Azure refs API var olan dal için 200 + success=false döner, hata fırlatmaz (#45721).
 
-    Açık PR main ile ÇAKIŞIYORSA (mergeStatus=conflicts) dalı yeniden kullanılmaz: yeni içerik
-    güncel main'den üretilse de üç yollu birleştirmede aynı satırlar iki tarafta farklı değiştiği
-    için çakışma kalır. #45729: #45728 (`#[\SensitiveParameter]`) aynı Ekol kurucularını değiştirip
-    merge edildi, 7 dosya çakıştı. Eski PR terk edilir, main'den taze dal + PR açılır."""
+    Açık PR main ile ÇAKIŞIYORSA (mergeStatus=conflicts) çakışma AYNI PR'da çözülür: main dala
+    birleştirilir (`merge_main_into_branch`), sonra araç güncel main üzerinde yeniden uygulanır.
+    Yalnız yeni içeriği itmek yetmez — aynı satır iki tarafta farklı değiştiği için çakışma kalır.
+    #45729: #45728 (`#[\\SensitiveParameter]`) aynı Ekol kurucularını değiştirip merge edildi, 7 dosya
+    çakıştı. İlk çözüm PR'ı terk edip yenisini açıyordu; kullanıcı kararı (2026-11-05): "PR'daki review
+    ve yorumları kaybediyoruz, boşuna PR açıp abandon etmiş oluyoruz" — PR korunur."""
     from agile_sdlc_crew import db, pipeline
     base = f"feature/{work_item_id}"
     heads = {b.get("name") for b in client.list_branches(repo)}
@@ -497,32 +535,34 @@ def _tool_branch(client, repo: str, work_item_id: str) -> tuple[str, bool, str]:
         cur.execute("SELECT branch_name, pr_id FROM jobs WHERE work_item_id=%s AND job_kind='modern_fix' "
                     "AND COALESCE(pr_id,'')<>''", (str(work_item_id),))
         mine = {(r["branch_name"], str(r["pr_id"])) for r in cur.fetchall() or []}
-    superseded = ""
     for br, pid in sorted(mine, reverse=True):
         if f"refs/heads/{br}" in heads:
             pr = pipeline._find_existing_pr(client, repo, br)
             if pr and str(pr.get("pr_id")) == pid:
+                note = ""
                 try:
                     merge = client.get_pull_request(repo, int(pid)).get("mergeStatus")
                 except Exception:  # noqa: BLE001
                     merge = ""
                 if merge == "conflicts":
-                    client.abandon_pull_request(repo, int(pid))
-                    log.info(f"  Önceki araç PR #{pid} main ile çakışıyor — terk edildi, main'den taze dal")
-                    superseded = pid
-                    break
+                    if root is None:
+                        raise RuntimeError(f"PR #{pid} main ile çakışıyor ve klon yok — çözülemedi")
+                    files = merge_main_into_branch(root, br)
+                    note = (f"main ile çakışma bu PR'da çözüldü: main birleştirildi, çakışan {len(files)} dosya "
+                            "main'den alınıp araç güncel main üzerinde yeniden uygulandı.")
+                    log.info(f"  PR #{pid} main ile çakışıyordu — main dala birleştirildi ({len(files)} dosya)")
                 log.info(f"  Önceki araç düzeltmesinin PR #{pid} açık — dalına ({br}) itiliyor")
-                return br, True, ""
+                return br, True, note
     if f"refs/heads/{base}" in heads:
         import time
         br = f"{base}-tool-{int(time.time()) % 100000}"
         client.create_branch(repo, br)
         log.info(f"  {base} zaten var (önceki koşu) — taze dal: {br}")
-        return br, False, superseded
+        return br, False, ""
     res = pipeline.create_branch(repo, str(work_item_id))
     if not res.get("success"):
         raise RuntimeError(f"Branch açılamadı: {res.get('error')}")
-    return res["branch"], False, superseded
+    return res["branch"], False, ""
 
 
 def _blocking(issues: list[dict]) -> list[dict]:
@@ -625,7 +665,7 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
     tool = {"go": "modernize -fix", "php": "tempo-fixer" if _own else "rector"}.get(lang, "ruff --fix")
     if left["fixed"]:
         tool += " + LLM pencere"
-    branch, reused, superseded = _tool_branch(client, repo, work_item_id)
+    branch, reused, branch_note = _tool_branch(client, repo, work_item_id, root)
     pushed_at = _utc_now()
     client.push_changes(repo, branch, [{"changeType": "edit", "path": "/" + f, "content": c}
                                        for f, c in contents.items()], f"#{work_item_id}: {title[:80]} ({tool})")
@@ -634,7 +674,7 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             f"Kurallar: {', '.join(scope)}\n\nDeğişen dosyalar ({len(changed)}):\n"
             + "\n".join(f"- `{f}`" for f in changed)
             + f"\n\nDoğrulama: {', '.join(res['ran']) or 'doğrulayıcı yok'} geçti." + notes
-            + (f"\n\nBu PR, main ile çakışan #{superseded}'in yerine güncel main'den açıldı." if superseded else "")
+            + (f"\n\n{branch_note}" if branch_note else "")
             + sig)
     # Kullanıcı kararı (2026-11-04): "repoda tanımlıysa unit test çalıştırıp doğrulamadan PR açma".
     # Testler yalnız PR build politikasında koşuyor (Core-test: MySQL konteyneri + AWS havuzu; YAML
