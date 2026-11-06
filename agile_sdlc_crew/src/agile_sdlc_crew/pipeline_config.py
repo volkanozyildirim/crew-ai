@@ -611,6 +611,13 @@ SCHEMA: list[dict] = [
         "desc": "PR build'inin bitmesi için en fazla beklenen süre (her tur için). Süre dolarsa iş needs_human olur.",
     },
     {
+        "key": "CREW_QUALITY_NR_INFER",
+        "label": "Kalite · New Relic uygulamasının reposunu hatalarından bul",
+        "type": "bool",
+        "default": True,
+        "desc": "FLODevOps build dosyalarında tanımı olmayan NR uygulaması (ör. checkout-be.<marka>) için repo, hatalarının işlem adlarından (Api/V1/Basket::retrieveCardLoyalty → *Api/V1/Basket.php içinde function retrieveCardLoyalty) ve mesajlardaki dosya yollarından yerel klonlarda aranır. En az 2 kanıt ve ikinci adayın 2 katı gerekir; belirsizse eşlenmez. Sonuç 24 saat önbelleklenir.",
+    },
+    {
         "key": "CREW_TECHDEBT_MODERN_MAX_TAKE",
         "label": "Teknik borç · modernleştirmede istek başı en çok iş",
         "type": "int",

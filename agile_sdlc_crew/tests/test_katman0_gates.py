@@ -6980,6 +6980,64 @@ def test_tool_fix_result_and_logs():
           mf.log is logging.getLogger("pipeline"))
 
 
+def test_nr_app_infer():
+    """2026-11-06: FLODevOps'ta tanımı olmayan NR uygulamaları (checkout-be.<marka> ~7.3K hata,
+    loyalty.instreet) elle eşleme istiyordu; repo hatanın kendi izinden bulunur."""
+    print("\n=== New Relic uygulamasının reposu hatalarından bulunur ===")
+    import subprocess
+    import tempfile
+    from agile_sdlc_crew.quality import app_infer
+    from agile_sdlc_crew.quality.model import Finding
+
+    def mk(base, name, files):
+        r = base / name
+        for rel, body in files.items():
+            (r / rel).parent.mkdir(parents=True, exist_ok=True)
+            (r / rel).write_text(body)
+        subprocess.run(["git", "init", "-q"], cwd=r, check=True)
+        subprocess.run(["git", "add", "."], cwd=r, check=True)
+        return r
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        mk(base, "webservice", {"app/Controller/Api/V1/Basket.php": "<?php function retrieveCardLoyalty(){}",
+                                "app/Controller/Api/V1/Order.php": "<?php function complete(){}"})
+        mk(base, "orkestra", {"app/Controller/Api/V1/Order.php": "<?php function cancel(){}"})
+        mk(base, "loyalty360", {"go.mod": "module loyalty-360\n\ngo 1.26\n",
+                                "internal/api/ltyv1/delivery_points.go": "package ltyv1"})
+        fs = [Finding(source="newrelic", app="[Prod] checkout-be.flo.com.tr", action="Api/V1/Basket::retrieveCardLoyalty",
+                      count=6000),
+              Finding(source="newrelic", app="[Prod] checkout-be.flo.com.tr", action="Api/V1/Order::complete",
+                      message="Uncaught … in /var/www/app/app/Controller/Api/V1/Order.php:1625", count=5)]
+        cl = app_infer.clues(fs)
+        check("izler: işlem adı → dosya son eki + metot, mesajdaki yol",
+              ("method", "Api/V1/Basket.php|retrieveCardLoyalty") in cl
+              and ("path", "app/Controller/Api/V1/Order.php") in cl, cl)
+        repos = app_infer._repos(base)
+        r = app_infer.infer(cl, repos)
+        check("kanıtla en güçlü repo: webservice (orkestra'da Order.php var ama metot yok)",
+              r and r["repo"] == "webservice" and r["score"] == 3 and r["runner_up"] == 1, r)
+        check("tek iz yetmez (belirsiz → eşlenmez)",
+              app_infer.infer([("method", "Api/V1/Basket.php|retrieveCardLoyalty")], repos) is None)
+        check("Go modül adı + kod yolu → loyalty360",
+              (app_infer.infer([("module", "loyalty-360"), ("path", "internal/api/ltyv1/delivery_points.go")], repos)
+               or {}).get("repo") == "loyalty360")
+        by_app = {"[Prod] checkout-be.flo.com.tr": fs,
+                  "[Prod] checkout-be.butigo.com.tr": [Finding(source="newrelic", app="[Prod] checkout-be.butigo.com.tr",
+                                                               action="Api/V1/Basket::retrieveCardLoyalty", count=5)],
+                  "[Prod] bilinmeyen.flo.com.tr": [Finding(source="newrelic", app="x", action="A::b", count=9)]}
+        cache = base / "inferred.yaml"
+        out = app_infer.resolve_unmapped(by_app, base=base, cache_path=cache, code=lambda app: [])
+        check("az hatalı kardeş (tek iz) ailenin eşlendiği repoya bağlanır; kanıtsız eşlenmez",
+              out == {"[Prod] checkout-be.flo.com.tr": "webservice", "[Prod] checkout-be.butigo.com.tr": "webservice"},
+              out)
+        calls = []
+        out2 = app_infer.resolve_unmapped(by_app, base=base, cache_path=cache, code=lambda app: calls.append(app) or [])
+        check("sonuç önbelleklenir (ikinci çağrıda arama yok)", out2 == out and calls == [])
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/quality/intake.py").read_text()
+    check("gather eşlenemeyen uygulamada çıkarımı dener (bayrakla)",
+          'pipeline_config.get("CREW_QUALITY_NR_INFER")' in src and "app_infer.resolve_unmapped(orphans)" in src)
+
+
 def test_php_modern_82_84():
     """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
     denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
@@ -7112,7 +7170,7 @@ def main():
               test_scan_line_text_multibyte,
               test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status,
               test_pr_review_prior_discussion, test_tool_branch_conflicts, test_hero_latest_job,
-              test_tool_fix_result_and_logs):
+              test_tool_fix_result_and_logs, test_nr_app_infer):
         try:
             t()
         except Exception as e:
