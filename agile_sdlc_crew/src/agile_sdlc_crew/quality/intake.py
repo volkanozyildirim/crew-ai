@@ -212,10 +212,10 @@ def default_deps() -> Deps:
     )
 
 
-def _row(g: Group) -> dict:
+def _row(g: Group, nr_days: int = 7) -> dict:
     return {"id": None, "title": render.task_title(g), "repo": g.repo, "sp": g.sp,
             "score": round(g.score, 2), "needs_human": g.needs_human, "human_reason": g.human_reason,
-            "fingerprints": g.fingerprints,
+            "fingerprints": g.fingerprints, "detail": render.group_detail(g, nr_days=nr_days),
             "job_id": None}
 
 
@@ -254,7 +254,8 @@ def _plan(client, source: str, sp: int, deps: Deps, repos: list[str] | None = No
     result = {
         "source": source, "budget_sp": int(sp), "total_sp": total,
         "candidates": len(auto), "human_candidates": sum(1 for g in groups if g.needs_human),
-        "tasks": [_row(g) for g in picked_auto], "human_tasks": [_row(g) for g in human],
+        "tasks": [_row(g, cfg.get("nr_days", 7)) for g in picked_auto],
+        "human_tasks": [_row(g, cfg.get("nr_days", 7)) for g in human],
         "human_sp": sum(g.sp for g in human), "cap_reached": cap_reached,
         "skipped": skipped[:50],
         "skipped_counts": dict(Counter(s["reason"] if not s["reason"].startswith(("açık WI", "iptal"))
@@ -394,7 +395,7 @@ def _open_tasks(client, groups: list[Group], story: dict, cfg: dict, deps: Deps,
     rows: list[dict] = []
     added = 0
     for g in groups:
-        row = _row(g)
+        row = _row(g, cfg.get("nr_days", 7))
         fields = {"System.Title": row["title"],
                   "System.Description": render.task_description(g, sonar_url=cfg.get("sonar_url", ""),
                                                                 nr_days=cfg.get("nr_days", 7),

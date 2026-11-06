@@ -7038,6 +7038,31 @@ def test_nr_app_infer():
           'pipeline_config.get("CREW_QUALITY_NR_INFER")' in src and "app_infer.resolve_unmapped(orphans)" in src)
 
 
+def test_quality_detail():
+    """Kullanıcı (2026-11-06): NR/Sonar işlerinde kritiklik ve sıklık görünmüyordu."""
+    print("\n=== Kalite önizlemesi: kritiklik + sıklık ===")
+    from agile_sdlc_crew.quality import intake, render
+    from agile_sdlc_crew.quality.model import Finding, Group
+
+    def nr(cls, count, rate=0.02):
+        return Finding(source="newrelic", app="[Prod] flo.com.tr", err_class=cls, count=count, error_rate=rate,
+                       first_seen=1.0, last_seen=2.0)
+    g = Group(source="newrelic", repo="webservice", title="t", fingerprints=["x"], findings=[nr("E_WARNING", 128466)])
+    d = render.group_detail(g, nr_days=7)
+    check("uyarı çok sık olsa da en çok 'yüksek' (istek çökmez)", d["level"] == "yüksek" and d["per_day"] == 18352.3, d)
+    g2 = Group(source="newrelic", repo="w", title="t", fingerprints=["y"], findings=[nr("TypeError", 900)])
+    check("yakalanmamış istisna bir kademe yukarı ve tek 'kritik' yolu",
+          render.group_detail(g2, nr_days=7)["level"] == "yüksek"
+          and render.group_detail(Group(source="newrelic", repo="w", title="t", fingerprints=["z"],
+                                        findings=[nr("TypeError", 7000)]), nr_days=7)["level"] == "kritik")
+    s1 = Group(source="sonar", repo="o", title="t", fingerprints=["s"],
+               findings=[Finding(source="sonar", itype="BUG", severity="BLOCKER", count=2)])
+    check("Sonar: önem → seviye, tür + önem etiketi",
+          render.group_detail(s1) == {"level": "kritik", "kind": "BUG · BLOCKER", "count": 2})
+    check("önizleme satırı detayı taşır", intake._row(g, 7)["detail"]["count"] == 128466)
+    check("Task açıklamasında da kritiklik satırı", "<b>Kritiklik:</b> Yüksek · E_WARNING" in render.task_description(g))
+
+
 def test_php_modern_82_84():
     """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
     denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
@@ -7170,7 +7195,7 @@ def main():
               test_scan_line_text_multibyte,
               test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status,
               test_pr_review_prior_discussion, test_tool_branch_conflicts, test_hero_latest_job,
-              test_tool_fix_result_and_logs, test_nr_app_infer):
+              test_tool_fix_result_and_logs, test_nr_app_infer, test_quality_detail):
         try:
             t()
         except Exception as e:
