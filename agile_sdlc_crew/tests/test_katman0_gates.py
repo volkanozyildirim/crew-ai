@@ -1458,6 +1458,35 @@ def test_call_context_cross_thread():
     check("iki iş de bitince genel yedek boşalır", cli._get_call_context()[0] is None)
     check("ölü thread'in bağı kayıtta kalmaz", not cli._acct_active, str(cli._acct_active))
 
+    # 2026-11-06 #275/#276: iki PR incelemesi 7 sn arayla. crewai çağrıyı kendi thread'inde koşturur
+    # ama contextvars'ı kopyalar. A'nın çağrısı B bağını set ETTİKTEN sonra bitti → süreç-genel yedek
+    # "en son set eden"i (B) söylüyordu: #275'in $0.58'i #276'ya yazıldı.
+    import contextvars
+    ev_b_set, res2 = threading.Event(), {}
+
+    def _crewai_call(key):  # crewai: yeni thread, kopyalanmış bağlam, thread-local boş
+        ctx = contextvars.copy_context()
+        t = threading.Thread(target=lambda: ctx.run(lambda: res2.update({key: cli._get_call_context()})))
+        t.start(); t.join()
+
+    def _rev_a():
+        cli.set_call_context(275, "review_pr_task", "code_reviewer")
+        ev_b_set.wait(5)          # B başladı, yedek artık 276'yı gösteriyor
+        _crewai_call("a")
+        cli.clear_call_context()
+
+    def _rev_b():
+        cli.set_call_context(276, "review_pr_task", "code_reviewer")
+        ev_b_set.set()
+        _crewai_call("b")
+        cli.clear_call_context()
+    ta = threading.Thread(target=_rev_a); ta.start()
+    import time as _time
+    _time.sleep(0.05)
+    tb = threading.Thread(target=_rev_b); tb.start(); ta.join(6); tb.join(6)
+    check("eşzamanlı PR incelemeleri: her çağrı KENDİ işine yazılır (#275 → 275, #276 → 276)",
+          res2.get("a", (None,))[0] == 275 and res2.get("b", (None,))[0] == 276, str(res2))
+
     # WI yorumu: _md_to_html '###' ve '|' tablo bilmez — yorum bunları kullanmamalı
     c = _readiness_comment(48, 60, [{"topic": "T", "why_needed": "W", "question": "Q?"}],
                            stage="requirements", penalties=["AC alanı boş (−15)"])

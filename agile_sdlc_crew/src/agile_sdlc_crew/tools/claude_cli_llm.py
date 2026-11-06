@@ -115,6 +115,13 @@ _acct_global = {"job_id": None, "step_key": "", "agent": ""}
 # maliyet ozeti ve retro onu hic gormedi. Kayitla birlikte clear yalnizca KENDI
 # girisini dusuruyor, genel yedek kalan aktif baglamlarin en yenisine donuyor.
 _acct_active: dict = {}
+# Asıl taşıyıcı: ContextVar. crewai LLM çağrısını adımın thread'inden FARKLI bir thread'de koşturur ama
+# contextvars'ı kopyalar (repo bağlamı için ölçüldü, `_repo_cv`). Süreç-genel yedek yalnız "en son
+# set eden"i bilir; iki iş aynı anda koşunca biten çağrı kardeşine yazılıyordu — 2026-11-06 #275/#276
+# (iki PR incelemesi 7 sn arayla): #275'in $0.58'lik çağrısı #276'ya yazıldı, #275 maliyetsiz kaldı.
+# ContextVar her işin kendi bağını kendi çağrı thread'ine taşır; yedek yalnız bağın hiç taşınmadığı
+# yolda (eski crewai / elle açılmış thread) devreye girer.
+_acct_cv: contextvars.ContextVar = contextvars.ContextVar("crew_cli_call_ctx", default=None)
 _acct_seq = 0
 _acct_lock = threading.Lock()
 _call_sink = None
@@ -137,6 +144,7 @@ def set_call_context(job_id=None, step_key: str = "", agent: str = "") -> None:
     _acct_ctx.step_key = step_key or ""
     _acct_ctx.agent = agent or ""
     ctx = {"job_id": job_id, "step_key": step_key or "", "agent": agent or ""}
+    _acct_cv.set(ctx)  # aynı dict: set_call_agent yerinde günceller, kopyalanmış bağlamlar da görür
     th = threading.current_thread()
     with _acct_lock:
         _acct_seq += 1
@@ -145,6 +153,7 @@ def set_call_context(job_id=None, step_key: str = "", agent: str = "") -> None:
 
 
 def clear_call_context() -> None:
+    _acct_cv.set(None)
     _acct_ctx.job_id = None
     _acct_ctx.step_key = ""
     _acct_ctx.agent = ""
@@ -157,6 +166,9 @@ def set_call_agent(agent: str) -> None:
     """Sadece agent alanini guncelle (job_id/step_key korunur). Kickoff gibi
     cok-personali adimlarda her persona icin ayri atif yapmaya yarar."""
     _acct_ctx.agent = agent or ""
+    cv = _acct_cv.get()
+    if cv is not None:
+        cv["agent"] = agent or ""
     th = threading.current_thread()
     with _acct_lock:
         rec = _acct_active.get(th.ident)
@@ -169,11 +181,14 @@ def set_call_agent(agent: str) -> None:
 
 
 def _get_call_context() -> tuple:
-    """Bu thread bag set ettiyse o; yoksa surec-genel yedek."""
+    """Bu thread bag set ettiyse o; yoksa bu çağrıya taşınan bağ (ContextVar); yoksa süreç-genel yedek."""
     if getattr(_acct_ctx, "job_id", None) is not None:
         return (_acct_ctx.job_id,
                 getattr(_acct_ctx, "step_key", ""),
                 getattr(_acct_ctx, "agent", ""))
+    cv = _acct_cv.get()
+    if cv is not None and cv.get("job_id") is not None:
+        return (cv["job_id"], cv.get("step_key", ""), cv.get("agent", ""))
     return (_acct_global["job_id"], _acct_global["step_key"], _acct_global["agent"])
 
 
