@@ -13,13 +13,3 @@
 "[PROD] kinetix.com.tr": webservice
 "[PROD] ninewest.com.tr": webservice
 "[PROD] butigo.com.tr": webservice
-
-# checkout-be.<marka> de webservice (kullanıcı, 2026-11-06). FLODevOps'ta build dizini yok;
-# NR'de ~7.3K hata bu adlarla eşlenemiyordu.
-"[Prod] checkout-be.flo.com.tr": webservice
-"[Prod] checkout-be.lumberjack.com.tr": webservice
-"[Prod] checkout-be.reebok.com.tr": webservice
-"[Prod] checkout-be.instreet.com.tr": webservice
-"[Prod] checkout-be.kinetix.com.tr": webservice
-"[Prod] checkout-be.ninewest.com.tr": webservice
-"[Prod] checkout-be.butigo.com.tr": webservice

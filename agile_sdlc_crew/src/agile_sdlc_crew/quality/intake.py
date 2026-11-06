@@ -98,13 +98,29 @@ def gather(source: str, client, cfg: dict) -> tuple[list[Finding], list[dict]]:
                                is_prod=lambda a: newrelic.is_prod_name(a) or a.lower() in mapping)
         out: list[Finding] = []
         unmapped: Counter = Counter()
+        orphans: dict[str, list[Finding]] = {}
         for f in found:
             repo = app_map.resolve(f.app, mapping)
             if not repo:
-                unmapped[f.app] += f.count
+                orphans.setdefault(f.app, []).append(f)
                 continue
             f.repo = repo
             out.append(f)
+        # FLODevOps'ta tanımı olmayan uygulama: repoyu hatalarının izinden bul (app_infer)
+        inferred = {}
+        if orphans and pipeline_config.get("CREW_QUALITY_NR_INFER"):
+            from agile_sdlc_crew.quality import app_infer
+            try:
+                inferred = app_infer.resolve_unmapped(orphans)
+            except Exception as e:  # noqa: BLE001
+                log.info(f"  NR repo çıkarımı başarısız: {e}")
+        for app, fs in orphans.items():
+            if inferred.get(app):
+                for f in fs:
+                    f.repo = inferred[app]
+                out += fs
+            else:
+                unmapped[app] += sum(f.count for f in fs)
         skipped += [{"app": a, "reason": "eşlenemedi", "count": n} for a, n in unmapped.most_common()]
         return out, skipped
     issues, rules = sonar.fetch_issues()
