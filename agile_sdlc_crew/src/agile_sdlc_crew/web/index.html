@@ -1602,8 +1602,8 @@ async function qualityRun(take){
       :await fetch(`/api/quality/preview?source=${encodeURIComponent(source)}&sp=${sp}&team=${encodeURIComponent(team)}&repos=${encodeURIComponent(repos.join(','))}`);
     const r=await resp.json();
     if(!resp.ok){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(r.error||('HTTP '+resp.status))}</div>`;return}
-    const row=t=>`<tr><td>${t.id?wiLink(t.id):'—'}</td><td>${esc(t.title)}</td><td class="num">${t.sp}</td><td>${t.needs_human?humanChip(t.human_reason):(t.job_id?`<span class="chip dim">Kuyrukta · iş #${t.job_id}</span>`:(t.error?`<span style="color:var(--danger)">${esc(t.error)}</span>`:(t.id?'':'<span class="chip dim" title="Al denince Task açılır ve pipeline kuyruğuna alınır">Pipeline kuyruğuna alınır</span>')))}</td></tr>`;
-    const tbl=list=>`<table class="perf"><tr><th>WI</th><th>İş</th><th class="num">SP</th><th>Durum</th></tr>${list.map(row).join('')}</table>`;
+    const row=t=>`<tr><td>${t.id?wiLink(t.id):'—'}</td><td>${esc(t.title)}</td><td>${qLevel(t.detail)}</td><td style="font-size:12px;color:var(--text-dim)">${qFreq(t.detail)}</td><td class="num">${t.sp}</td><td>${t.needs_human?humanChip(t.human_reason):(t.job_id?`<span class="chip dim">Kuyrukta · iş #${t.job_id}</span>`:(t.error?`<span style="color:var(--danger)">${esc(t.error)}</span>`:(t.id?'':'<span class="chip dim" title="Al denince Task açılır ve pipeline kuyruğuna alınır">Pipeline kuyruğuna alınır</span>')))}</td></tr>`;
+    const tbl=list=>`<table class="perf"><tr><th>WI</th><th>İş</th><th>Kritiklik</th><th>Sıklık</th><th class="num">SP</th><th>Durum</th></tr>${list.map(row).join('')}</table>`;
     const auto=r.tasks||[],hum=r.human_tasks||[];
     const head=r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'';
     const sk=Object.entries(r.skipped_counts||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(' · ');
@@ -1616,6 +1616,16 @@ async function qualityRun(take){
       +(hum.length?sec('İnsan işi gerektiren önemli maddeler',`— Task açılır, kuyruğa alınmaz, bütçeden düşmez${r.human_candidates>hum.length?` (en önemli ${hum.length} / ${r.human_candidates})`:''}`)+tbl(hum):'');
     if(take)loadQuality();
   }catch(e){box.innerHTML=`<div class="board-empty" style="padding:12px 0;color:var(--danger)">${esc(String(e))}</div>`}
+}
+// Kalite önizlemesi: kritiklik + sıklık. Seviye sunucuda hesaplanır (render.group_detail); burada yalnız çizilir.
+const Q_LEVEL={kritik:'fail',yüksek:'human',orta:'acc','düşük':'dim'};
+function qLevel(d){if(!d)return '—';return `<span class="chip ${Q_LEVEL[d.level]||'dim'}" title="${esc(d.kind||'')}">${esc(d.level.charAt(0).toLocaleUpperCase('tr-TR')+d.level.slice(1))}</span>`}
+function qAgo(ep){if(!ep)return '';const m=Math.max(0,Math.round((Date.now()/1000-ep)/60));return m<60?m+' dk önce':m<1440?Math.round(m/60)+' sa önce':Math.round(m/1440)+' gün önce'}
+function qFreq(d){
+  if(!d)return '—';
+  const n=x=>Number(x).toLocaleString('tr-TR');
+  if(d.per_day===undefined)return `${esc(d.kind||'')} · ${n(d.count)} yer`;
+  return `${n(d.count)} hata · ~${n(d.per_day)}/gün${d.apps>1?` · ${d.apps} uyg.`:''}${d.error_rate?` · %${n(d.error_rate)}`:''}${d.last_seen?` · son ${qAgo(d.last_seen)}`:''}<div>${esc(d.kind||'')}${d.crash?' — istek çöküyor':''}</div>`;
 }
 // Teknik borç sekmesi: takımın tech-debt etiketli işleri (Azure tek kayıt
 // kaynağı) ve çoklu seçimle kuyruğa alma. Kurallar sunucuda.
