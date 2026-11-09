@@ -845,6 +845,9 @@ class AzureDevOpsClient:
             "url": ((b.get("_links") or {}).get("web") or {}).get("href"),
             "project": project,
             "queue_time": b.get("queueTime") or "",
+            # PR build'i refs/pull/N/merge'i derler: bu, PR'ın lastMergeCommit'idir. Eşit değilse
+            # build PR'ın daha eski bir hâli içindir (pr_review bunu "eski commit" diye işaretler).
+            "source_version": b.get("sourceVersion") or "",
         }
 
     def get_build_failure_summary(

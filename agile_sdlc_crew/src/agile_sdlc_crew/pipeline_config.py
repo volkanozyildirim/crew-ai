@@ -727,6 +727,34 @@ SCHEMA: list[dict] = [
         "default": True,
         "desc": "İnceleyici PR'daki mevcut thread'leri (insan yorumları, çözülmüş kararlar, önceki Tempo bulgularına verilen yanıtlar) ve WI yorumlarını görür; tartışılıp karara bağlanmış konuyu yeniden açmaz. #45843: sözlü güncellenen gereksinim yalnız PR thread'indeydi, iki major yorum tekrar açıldı.",
     },
+    {
+        "key": "CREW_PR_REVIEW_FULL_SCOPE",
+        "label": "PR İnceleme · tüm dosyalar",
+        "type": "bool",
+        "default": True,
+        "desc": "İnceleyici değişen dosyaların HEPSİNİ görür (önce kaynak kod, sonra testler, en son doküman; toplam bütçe CREW_CTX_PR_FILES). Yeni dosyalar baştan kırpılmaz. Sığmayan dosya adıyla 'incelenmedi' diye yazılır. Kapalıysa eski davranış: Azure sırasıyla ilk 12 dosya. #45776: 34 dosyanın 22'si hiç girmedi, hata o dosyalardaydı.",
+    },
+    {
+        "key": "CREW_PR_REVIEW_REPO_RULES",
+        "label": "PR İnceleme · repo kuralları",
+        "type": "bool",
+        "default": True,
+        "desc": "Hedef reponun kendi CLAUDE.md / AGENTS.md dosyası (hedef daldaki güncel hâli, ilgili bölümler) inceleyiciye girer. #46052: üç bulgu doğrudan channel reposunun kurallarından çıkıyordu.",
+    },
+    {
+        "key": "CREW_PR_REVIEW_BASE_CONTRACTS",
+        "label": "PR İnceleme · ana dal sözleşmeleri",
+        "type": "bool",
+        "default": True,
+        "desc": "PR'ın extends/implements ettiği ama değiştirmediği sınıflar hedef daldaki güncel hâliyle inceleyiciye girer; PR açıldıktan sonra değişmişlerse fark gösterilir (şimdilik PHP). #46052: stage sözleşmesi main'de değişmişti, PR eski sözleşmeyle yazıldı, Azure 'çakışma yok' dedi.",
+    },
+    {
+        "key": "CREW_PR_REVIEW_BUILD",
+        "label": "PR İnceleme · build sonucu",
+        "type": "bool",
+        "default": True,
+        "desc": "PR'ın CI build sonucu (kırmızıysa hata özeti) inceleyiciye girer; PR'ın neden olduğu kırmızı build blocker sayılır. Build PR'ın eski bir hâline aitse belirtilir. #46052: build kırmızıydı, inceleme bundan söz etmedi.",
+    },
     # ── Scrum islevleri — Faz 6: backlog refinement ──
     {
         "key": "CREW_BACKLOG_REFINEMENT",
