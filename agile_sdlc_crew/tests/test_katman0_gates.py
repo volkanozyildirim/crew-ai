@@ -7151,6 +7151,20 @@ def test_pr_review_tracking():
           cleaned)
     check("karar türü: insan kararını yok sayıp yeniden açma",
           "ignores_decision" in prv.OTHER_VERDICTS and "ignores_decision" in cb)
+    # İş #280 (#46052): 33 bulgunun 17'si 16K'ya sığmadı, hiç girmedi — hepsi aracın KENDİ kapattıkları.
+    many = [{"ref": f"{i:08x}", "status": "active" if i < 5 else "fixed", "closed_by_tool": i >= 5,
+             "file": f"/app/F{i}.php", "line": i, "date": "2026-11-09", "humans": [], "tool_note": "",
+             "text": f"**Başlık {i}** " + "ayrıntı " * 300} for i in range(40)]
+    rows = prv._other_rows(many, cap=12_000)
+    check("öteki aracın bulgularının HİÇBİRİ düşmez: sığmayan tek satır (ref · durum · yer · başlık) girer",
+          all(f"ref={m['ref']} " in rows for m in many) and "Başlık 39" in rows and "yalnız başlığıyla" in rows
+          and len(rows) <= 12_500, str(len(rows)))
+    check("öncelik: açık bulgular tam gövdeyle", all(rows.split(f"ref={m['ref']} ")[1].split("\n")[1].startswith("    ")
+                                                    for m in many[:5]))
+    summ_cnt = prv.tracked_summary_markdown(verdict="APPROVE", issues=[], others=many, assessments=asm[:1],
+                                            pr_id=1, work_item_id="1", files=1, head="abc")
+    check("özet sayısı yanıltmaz: toplam / açık / değerlendirilen ayrı",
+          "40 bulgusu var — 5 açık; 1 tanesi değerlendirildi" in summ_cnt)
 
     issues = [
         {"id": "R1", "file": "app/A.php", "line": 3, "severity": "major", "key": "stage-returns-array",

@@ -30,7 +30,7 @@ _DEFAULTS = {
     "REPO_RULES": 12000,     # hedef reponun CLAUDE.md/AGENTS.md'si, ilgili bolumler
     "BASE_CONTRACTS": 16000, # PR'in extends/implements ettigi, degistirmedigi siniflar (hedef dal)
     "PR_BUILD": 3000,        # PR build hata ozeti
-    "OTHER_REVIEW": 16000,   # PR'daki baska inceleme aracinin bulgulari (degerlendirilmek uzere)
+    "OTHER_REVIEW": 24000,   # PR'daki baska inceleme aracinin bulgulari (16000: #46052 33 bulgunun 17'si girmedi)
     # Kalite dogrudan akisinda mimara giden Task metni. 3000'di: #249'un 64 dosyalik Task'inin
     # 17 dosyasi gorundu, plan 9 dosyada kaldi. ~16K char Task ≈ 4K token (Sonnet'te kurus).
     "QUALITY_TASK_TEXT": 20000,
