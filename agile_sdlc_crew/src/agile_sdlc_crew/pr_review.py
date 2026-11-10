@@ -1146,9 +1146,13 @@ _OTHER_REF_RE = re.compile(r"claude-review:finding:([0-9a-f]{6,16})", re.IGNOREC
 def apply_questions(issues: list[dict], verdict: str) -> str:
     """Yalnız iş kaleminin YORUMUNA dayanan madde (basis=interpretation) bloklamaz: önemi 'question'
     olur, özette yazara soru olarak durur. #45776: 'statü süreç adımlarını yansıtmalı' major açıldı,
-    yazar 'statünün paketleme adımlarıyla ilgisi yok' diye reddetti. Karar buna göre yeniden kurulur."""
+    yazar 'statünün paketleme adımlarıyla ilgisi yok' diye reddetti. Karar buna göre yeniden kurulur.
+
+    Yalnız BLOKLAYACAK olan (blocker/major) yorum maddesi soru olur; minor yorum maddesi minor kalır ve
+    PR'a yazılmaz. #46055 (iş #284): iki minor 'soru' (biri aslında bir katman önerisi) onaylanan PR'a özet
+    yorumu açtırdı — 'her yorum insanın bakması gereken bir durum' kuralını soru kılığında deliyordu."""
     for it in issues:
-        if it.get("basis") == "interpretation":
+        if it.get("basis") == "interpretation" and it.get("severity") in INLINE_SEVERITIES:
             it["severity"] = "question"
     if verdict == "CHANGES_REQUIRED" and not any(i.get("severity") in INLINE_SEVERITIES for i in issues):
         return "QUESTIONS" if any(i.get("severity") == "question" for i in issues) else "APPROVE"
@@ -1236,32 +1240,51 @@ def other_reviewer_findings(threads: list[dict]) -> list[dict]:
     return out
 
 
+def _other_title(text: str) -> str:
+    m = re.search(r"\*\*(.+?)\*\*", text or "")
+    return (m.group(1) if m else (text or ""))[:140]
+
+
 def _other_rows(others: list[dict], cap: int) -> str:
+    """Öteki aracın bulguları, HİÇBİRİ düşmeden. #46052 (iş #280): 33 bulgunun 17'si 16K'ya sığmadığı için
+    hiç girmedi — hepsi aracın KENDİ kapattıkları, yani 'yanlışlıkla kapatılmış'ın çıkabileceği tek grup.
+    Gövde açık bulguda 700, kapalıda 350 karakter; yine sığmayan tek satır (ref · durum · yer · başlık)
+    olarak girer — model koda bakarak onu da değerlendirebilir."""
+    def loc(f: dict) -> str:
+        return f"{f['file']}:{f['line']}" if f["file"] else "genel"
+
+    def st(f: dict) -> str:
+        return f["status"] + (" — o araç kendisi kapattı" if f["closed_by_tool"] else "")
+
     def row(f: dict) -> str:
-        st = f["status"] + (" — o araç kendisi kapattı" if f["closed_by_tool"] else "")
-        loc = f"{f['file']}:{f['line']}" if f["file"] else "genel"
-        lines = [f"- ref={f['ref']} · [{st}] · {loc} · {f['date']}", f"    {f['text'][:900]}"]
+        lim = 700 if f["status"] in _OPEN else 350
+        lines = [f"- ref={f['ref']} · [{st(f)}] · {loc(f)} · {f['date']}", f"    {f['text'][:lim]}"]
         if f["tool_note"]:
             lines.append(f"    · o aracın son notu: {f['tool_note']}")
-        lines += [f"    · İNSAN yanıtı ({who}): {txt}" for who, txt in f["humans"]]
+        lines += [f"    · İNSAN yanıtı ({who}): {txt[:300]}" for who, txt in f["humans"]]
         return "\n".join(lines)
+
+    def short(f: dict) -> str:
+        return f"- ref={f['ref']} · [{st(f)}] · {loc(f)} · {_other_title(f['text'])}"
+
     order = sorted(range(len(others)), key=lambda i: (0 if others[i]["status"] in _OPEN else
                                                        1 if others[i]["closed_by_tool"] else 2, i))
-    keep, total = set(), 0
+    full, total = set(), sum(len(short(f)) + 1 for f in others)   # kısa satırlar için yer ayrılır
     for i in order:
-        r = row(others[i])
-        if total + len(r) > cap:
+        extra = len(row(others[i])) - len(short(others[i]))
+        if total + extra > cap:
             continue
-        keep.add(i)
-        total += len(r)
-    rows = [row(others[i]) for i in range(len(others)) if i in keep]
-    if len(keep) < len(others):
-        rows.append(f"- … ({len(others) - len(keep)} bulgu daha yer kalmadığı için alınmadı)")
+        full.add(i)
+        total += extra
+    rows = [row(others[i]) if i in full else short(others[i]) for i in range(len(others))]
+    if len(full) < len(others):
+        rows.append(f"(Yer kalmadığı için {len(others) - len(full)} bulgu yalnız başlığıyla verildi; "
+                    "yine de değerlendir — kod bağlamda.)")
     return "\n".join(rows)
 
 
 def review_contract_block(*, prior: dict, others: list[dict], incremental: tuple | None,
-                          questions: bool = True, cap_other: int = 16_000) -> str:
+                          questions: bool = True, cap_other: int = 24_000) -> str:
     """İnsan PR'ı incelemesinin ek çıktı sözleşmesi: anahtar/dayanak, önceki Tempo bulguları,
     artımlı kapsam, öteki aracın bulgularının değerlendirilmesi."""
     out = ["\n\n# OUTPUT CONTRACT FOR THIS REVIEW (in addition to the task's format)",
@@ -1368,7 +1391,11 @@ def tracked_summary_markdown(*, verdict: str, issues: list[dict], others: list[d
         for a in assessments:
             by.setdefault(a["verdict"], []).append(a)
         known = {f["ref"].lstrip("#"): f for f in others}
-        lines += ["", f"### Öteki inceleme aracı hakkında ({len(others)} bulgusu değerlendirildi)"]
+        open_n = sum(1 for f in others if f["status"] in _OPEN)
+        settled = sum(1 for f in others if f["humans"])
+        lines += ["", f"### Öteki inceleme aracı hakkında ({len(others)} bulgusu var — {open_n} açık"
+                      + (f", {settled} tanesini geliştirici yanıtlamış" if settled else "")
+                      + f"; {len(assessments)} tanesi değerlendirildi)"]
         for v in ("wrong", "wrongly_closed", "conflicting", "ignores_decision", "outdated", "partly"):
             for a in by.get(v, []):
                 f = known.get(a["ref"], {})
@@ -1381,7 +1408,10 @@ def tracked_summary_markdown(*, verdict: str, issues: list[dict], others: list[d
             lines.append("- **Kaçırdıkları:**")
             lines += [f"  - [{i.get('severity')}] {_issue_row(i)}" for i in missed]
         if not assessments:
-            lines.append("- _Bulguları bu koşuda değerlendirilemedi._")
+            # #46055 (iş #284): 4 bulgunun 4'ünü de geliştirici "kapsam dışı" diye yanıtlamıştı; model hepsini
+            # değerlendirdi, süzgeç (insan yanıtı = karar) hepsini attı — "değerlendirilemedi" bir arıza gibi okundu.
+            lines.append("- _Bulgularının hepsini geliştirici yanıtlamış; konular karara bağlı, ikinci görüş gerekmedi._"
+                         if settled == len(others) else "- _Bulguları bu koşuda değerlendirilemedi._")
     lines += ["", "---", f"*Tempo — PR İnceleme (danışma) · son incelenen commit: {head7} · {SUMMARY_MARK}*"]
     return "\n".join(lines)
 
