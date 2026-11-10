@@ -1146,9 +1146,13 @@ _OTHER_REF_RE = re.compile(r"claude-review:finding:([0-9a-f]{6,16})", re.IGNOREC
 def apply_questions(issues: list[dict], verdict: str) -> str:
     """Yalnız iş kaleminin YORUMUNA dayanan madde (basis=interpretation) bloklamaz: önemi 'question'
     olur, özette yazara soru olarak durur. #45776: 'statü süreç adımlarını yansıtmalı' major açıldı,
-    yazar 'statünün paketleme adımlarıyla ilgisi yok' diye reddetti. Karar buna göre yeniden kurulur."""
+    yazar 'statünün paketleme adımlarıyla ilgisi yok' diye reddetti. Karar buna göre yeniden kurulur.
+
+    Yalnız BLOKLAYACAK olan (blocker/major) yorum maddesi soru olur; minor yorum maddesi minor kalır ve
+    PR'a yazılmaz. #46055 (iş #284): iki minor 'soru' (biri aslında bir katman önerisi) onaylanan PR'a özet
+    yorumu açtırdı — 'her yorum insanın bakması gereken bir durum' kuralını soru kılığında deliyordu."""
     for it in issues:
-        if it.get("basis") == "interpretation":
+        if it.get("basis") == "interpretation" and it.get("severity") in INLINE_SEVERITIES:
             it["severity"] = "question"
     if verdict == "CHANGES_REQUIRED" and not any(i.get("severity") in INLINE_SEVERITIES for i in issues):
         return "QUESTIONS" if any(i.get("severity") == "question" for i in issues) else "APPROVE"
@@ -1388,8 +1392,10 @@ def tracked_summary_markdown(*, verdict: str, issues: list[dict], others: list[d
             by.setdefault(a["verdict"], []).append(a)
         known = {f["ref"].lstrip("#"): f for f in others}
         open_n = sum(1 for f in others if f["status"] in _OPEN)
-        lines += ["", f"### Öteki inceleme aracı hakkında ({len(others)} bulgusu var — {open_n} açık; "
-                      f"{len(assessments)} tanesi değerlendirildi)"]
+        settled = sum(1 for f in others if f["humans"])
+        lines += ["", f"### Öteki inceleme aracı hakkında ({len(others)} bulgusu var — {open_n} açık"
+                      + (f", {settled} tanesini geliştirici yanıtlamış" if settled else "")
+                      + f"; {len(assessments)} tanesi değerlendirildi)"]
         for v in ("wrong", "wrongly_closed", "conflicting", "ignores_decision", "outdated", "partly"):
             for a in by.get(v, []):
                 f = known.get(a["ref"], {})
@@ -1402,7 +1408,10 @@ def tracked_summary_markdown(*, verdict: str, issues: list[dict], others: list[d
             lines.append("- **Kaçırdıkları:**")
             lines += [f"  - [{i.get('severity')}] {_issue_row(i)}" for i in missed]
         if not assessments:
-            lines.append("- _Bulguları bu koşuda değerlendirilemedi._")
+            # #46055 (iş #284): 4 bulgunun 4'ünü de geliştirici "kapsam dışı" diye yanıtlamıştı; model hepsini
+            # değerlendirdi, süzgeç (insan yanıtı = karar) hepsini attı — "değerlendirilemedi" bir arıza gibi okundu.
+            lines.append("- _Bulgularının hepsini geliştirici yanıtlamış; konular karara bağlı, ikinci görüş gerekmedi._"
+                         if settled == len(others) else "- _Bulguları bu koşuda değerlendirilemedi._")
     lines += ["", "---", f"*Tempo — PR İnceleme (danışma) · son incelenen commit: {head7} · {SUMMARY_MARK}*"]
     return "\n".join(lines)
 

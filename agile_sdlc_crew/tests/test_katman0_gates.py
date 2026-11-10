@@ -7077,6 +7077,10 @@ def test_pr_review_tracking():
           prv.apply_questions(iss, "CHANGES_REQUIRED") == "QUESTIONS" and iss[0]["severity"] == "question")
     check("kod kusuru bloklamaya devam eder",
           prv.apply_questions([{"severity": "blocker", "basis": "code"}], "CHANGES_REQUIRED") == "CHANGES_REQUIRED")
+    minor_q = [{"severity": "minor", "basis": "interpretation"}, {"severity": "minor", "basis": "interpretation"}]
+    check("#46055: minor yorum maddesi soru OLMAZ (PR'a yorum açtırmaz), onay onay kalır",
+          prv.apply_questions(minor_q, "APPROVE") == "APPROVE" and all(i["severity"] == "minor" for i in minor_q)
+          and not prv._worth_posting(minor_q, [], []))
 
     # ── PR'daki izler ──
     me = "me-1"
@@ -7165,6 +7169,12 @@ def test_pr_review_tracking():
                                             pr_id=1, work_item_id="1", files=1, head="abc")
     check("özet sayısı yanıltmaz: toplam / açık / değerlendirilen ayrı",
           "40 bulgusu var — 5 açık; 1 tanesi değerlendirildi" in summ_cnt)
+    answered = [dict(m, humans=[("Dev", "kapsam dışı")]) for m in many[:4]]
+    summ_ans = prv.tracked_summary_markdown(verdict="APPROVE", issues=[], others=answered, assessments=[],
+                                            pr_id=1, work_item_id="1", files=1, head="abc")
+    check("#46055: hepsini geliştirici yanıtladıysa 'değerlendirilemedi' (arıza) değil 'karara bağlı' yazar",
+          "4 tanesini geliştirici yanıtlamış" in summ_ans and "karara bağlı" in summ_ans
+          and "değerlendirilemedi" not in summ_ans)
 
     issues = [
         {"id": "R1", "file": "app/A.php", "line": 3, "severity": "major", "key": "stage-returns-array",
