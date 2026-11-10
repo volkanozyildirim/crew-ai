@@ -57,16 +57,25 @@ def clear_repo_ctx() -> None:
     _repo_cv.set(((), ""))
 
 
+# Cagri-basi $ cap'inin bu baglama ozel degeri (None = CREW_CLI_CALL_MAX_USD). Cap vurunca sonuc
+# BOS doner (bkz. CLAUDE.md), yani buyuk bir pre-fetch context tasiyan arac'li inceleme 1.5'e
+# takilirsa butun is kaybolur — pr_review kendi (daha genis) sinirini verir.
+_cap_cv: contextvars.ContextVar = contextvars.ContextVar("crew_cli_call_cap", default=None)
+
+
 @contextmanager
-def repo_tools_context(add_dirs: list, allowed_tools: str = "Read,Grep,Glob,LS"):
+def repo_tools_context(add_dirs: list, allowed_tools: str = "Read,Grep,Glob,LS", max_usd: float | None = None):
     """Bu blok icindeki claude_cli cagrilari verilen repolari --add-dir ile
-    gorur ve allowed_tools'u kullanabilir. Cikista onceki baglam geri gelir."""
+    gorur ve allowed_tools'u kullanabilir. Cikista onceki baglam geri gelir.
+    `max_usd` verilirse bu bloktaki cagrilarin $ cap'i odur (0 = limitsiz)."""
     prev = _repo_cv.get()
+    tok = _cap_cv.set(max_usd)
     set_repo_ctx(add_dirs, allowed_tools)
     try:
         yield
     finally:
         _repo_cv.set(prev)
+        _cap_cv.reset(tok)
 
 
 # ── Tool'suz (emit) mod ──────────────────────────────────────────────────
@@ -592,7 +601,8 @@ def claude_cli_completion(
     if add_dirs:
         try:
             from agile_sdlc_crew import pipeline_config as _pc_cap
-            _cap = float(_pc_cap.get("CREW_CLI_CALL_MAX_USD") or 0)
+            _cap = _cap_cv.get()
+            _cap = float(_pc_cap.get("CREW_CLI_CALL_MAX_USD") or 0) if _cap is None else float(_cap)
         except Exception:
             _cap = 0.0
         if _cap > 0:

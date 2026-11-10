@@ -6883,8 +6883,477 @@ def test_pr_review_prior_discussion():
     check("tartışma yoksa blok yok", pr_review.pr_discussion_block([]) == "")
     src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
     check("insan PR incelemesine tartışma + WI yorumları girer, araç PR'ına girmez",
-          'if not changes and _pc.get("CREW_PR_REVIEW_DISCUSSION")' in src and "+ discussion + pr_ctx" in src
+          'if human and _pc.get("CREW_PR_REVIEW_DISCUSSION")' in src and "+ discussion" in src and "+ repo_ctx + contract + pr_ctx" in src
           and "wi_comments_block(client.get_work_item_comments" in src)
+
+
+def test_pr_review_coverage():
+    """#45776 / #46052'yi başka bir inceleme aracıyla kıyasladık; kaçırdıklarımızın sebebi sistemseldi:
+    ilk 12 dosya (Azure sırası) · yeni dosya baştan kırpılıyor · hedef reponun kuralları yok · PR'ın
+    extends ettiği, main'de sonradan değişen sözleşme yok · build sonucu yok · öteki bot insan sanılıyor."""
+    print("\n=== PR incelemesi: kapsam, repo kuralları, ana dal sözleşmeleri, build, öteki bot ===")
+    import os
+    from agile_sdlc_crew import pr_review as prv
+
+    check("öncelik: kaynak < yapılandırma < test < doküman",
+          [prv.file_priority(p) for p in ("/app/Command/Pull.php", "/app/module.yaml", "/app/Test/Command/PullTest.php",
+                                         "/app/Controller/Api/docs/swagger.json", "/app/Migration/Upgrade.php",
+                                         "/pkg/x_test.go", "/README.md")] == [0, 1, 2, 3, 1, 2, 3])
+
+    big_new = "<?php\n" + "\n".join(f"$line{i} = {i};" for i in range(2, 316))          # 315 satır, yeni
+    files = {"/app/Test/Command/PullTest.php": ("add", "<?php\n" + "\n".join(f"// t{i}" for i in range(3000))),
+             "/app/Controller/Api/docs/swagger.json": ("edit", "{}"),
+             "/app/Command/Pull.php": ("add", big_new)}
+    files.update({f"/app/Core/S{i:02d}.php": ("edit", f"<?php\nclass S{i} {{}}\n") for i in range(14)})
+
+    class FakePR:
+        def __init__(self, files, base_files=None, build=None, tasks=None):
+            self.files, self.base, self.build, self.tasks, self.calls = files, base_files or {}, build, tasks, []
+
+        def get_pull_request_changes(self, repo, pid):
+            return [{"item": {"path": p}, "changeType": ct} for p, (ct, _b) in self.files.items()]
+
+        def get_file_content(self, repo, path, ref):
+            self.calls.append((path, ref))
+            if ref == "main":
+                if path in self.base:
+                    return self.base[path]
+                raise RuntimeError("404")
+            if path in self.files:
+                return self.files[path][1]
+            if path in self.base.get("__branch__", {}):
+                return self.base["__branch__"][path]
+            raise RuntimeError("404")
+
+        def get_pr_build(self, repo, pid):
+            return self.build
+
+        def get_build_issue_tasks(self, project, bid):
+            return self.tasks or []
+
+        def get_build_failure_summary(self, project, bid, max_chars=4000):
+            return "Failed asserting that 0 is identical to 1.\n/azp/_work/1/s/app/Test/Command/PullTest.php:69"
+
+    pr = {"pullRequestId": 7, "sourceRefName": "refs/heads/feat", "targetRefName": "refs/heads/main",
+          "lastMergeCommit": {"commitId": "m2"}}
+    fc = FakePR(files)
+    bodies = {}
+    ctx, used = prv.build_pr_context(fc, "channel", pr, bodies=bodies)
+    check("17 dosyanın hepsi bağlamda (12 dosya sınırı yok)", len(used) == 17, str(len(used)))
+    check("kaynak kod testten ve dokümandan önce", used[0] == "/app/Command/Pull.php"
+          and used[-1] == "/app/Controller/Api/docs/swagger.json" and used[-2] == "/app/Test/Command/PullTest.php", used)
+    check("yeni dosya baştan kırpılmaz (315 satırın 221. satırı da görünür)",
+          " 221| $line221 = 221;" in ctx and "(YENİ DOSYA)" in ctx and "kısaltıldı" not in ctx.split("## /app/Core")[0])
+    check("yeni dosya için ana daldan eski hâl istenmez", ("/app/Command/Pull.php", "main") not in fc.calls)
+    small, used2 = prv.build_pr_context(FakePR(files), "channel", pr, budget=9000, bodies={})
+    check("bütçe yetmezse sığmayan dosya ADIYLA 'İNCELENMEDİ' yazılır, önce testler düşer",
+          "İNCELENMEDİ" in small and "/app/Test/Command/PullTest.php" in small.split("BAĞLAM SINIRI")[1]
+          and "/app/Command/Pull.php" in used2)
+    os.environ["CREW_PR_REVIEW_FULL_SCOPE"] = "0"
+    try:
+        _old, used3 = prv.build_pr_context(FakePR(files), "channel", pr, bodies={})
+    finally:
+        os.environ.pop("CREW_PR_REVIEW_FULL_SCOPE", None)
+    check("bayrak kapalıysa eski davranış: Azure sırasıyla ilk 12", len(used3) == 12
+          and used3[0] == "/app/Test/Command/PullTest.php", used3[:2])
+
+    # ── Repo kuralları: ilgili bölümler, hedef daldan ──
+    md = ("# Channel API\nGiriş.\n\n## Kimlik Doğrulama\n" + "token " * 400 +
+          "\n\n## Channel Events\nStage metodu her zaman StageResponse döner. ChannelEvents Hepsiburada.\n"
+          "```\n# kod içindeki başlık sayılmaz\n```\n\n## Swagger\n" + "swagger " * 400)
+    sel = prv.select_rule_sections(md, {"channelevents", "hepsiburada", "stage"}, cap=1200)
+    check("kural dosyası sığmıyorsa: giriş + değişen kodla örtüşen bölüm, atlananlar adıyla",
+          sel.startswith("# Channel API") and "StageResponse" in sel and "token token" not in sel
+          and "atlanan bölümler: Kimlik Doğrulama, Swagger" in sel, sel[-200:])
+    check("kod bloğundaki '#' başlık sayılmaz", "# kod içindeki başlık sayılmaz" in sel)
+    check("sığan kural dosyası olduğu gibi", prv.select_rule_sections("# A\nx", set(), cap=100) == "# A\nx")
+    rc = FakePR(files, base_files={"/CLAUDE.md": md})
+    rb = prv.repo_rules_block(rc, "channel", "main", ["/app/Core/Channels/Hepsiburada/Events/X.php"],
+                              {"/x.php": "<?php\nuse App\\Services\\ChannelEvents\\Event;\n"}, cap=1200)
+    check("repo kuralları hedef daldan okunur ve veri olarak çerçevelenir",
+          "TARGET REPO RULES (channel/CLAUDE.md on `main`" in rb and "StageResponse" in rb
+          and "reference data" in rb and ("/CLAUDE.md", "main") in rc.calls)
+    check("kural dosyası yoksa blok yok", prv.repo_rules_block(FakePR(files), "channel", "main", [], {}) == "")
+
+    # ── Ana dal sözleşmeleri ──
+    ev_body = ("<?php\nnamespace App\\Core\\Channels\\Hepsiburada\\Events;\n\nuse App\\Services\\ChannelEvents\\EventAbstract;\n"
+               "use App\\Repository\\Services\\BaseRepository as Repo;\n\nclass CancelReceived extends EventAbstract\n{\n}\n"
+               "final class Helper extends Repo implements \\JsonSerializable, LocalIface\n{\n}\n")
+    check("extends/implements tam ada çözülür (use, takma ad, aynı namespace, kök \\)",
+          prv._php_parents(ev_body) == ["App\\Services\\ChannelEvents\\EventAbstract", "App\\Repository\\Services\\BaseRepository",
+                                        "JsonSerializable", "App\\Core\\Channels\\Hepsiburada\\Events\\LocalIface"],
+          str(prv._php_parents(ev_body)))
+    new_contract = ("<?php\nabstract class EventAbstract\n{\n    public function run(string $s, Event $e): StageResponse\n    {\n"
+                    "        if (!$r instanceof StageResponse) {\n            throw new \\LogicException('must return StageResponse');\n"
+                    "        }\n    }\n}\n")
+    old_contract = "<?php\nabstract class EventAbstract\n{\n    public function run(string $s, Event $e): bool|array\n    {\n    }\n}\n"
+    base_files = {"/composer.json": '{"autoload": {"psr-4": {"App\\\\": "app"}}}',
+                  "/app/Services/ChannelEvents/EventAbstract.php": new_contract,
+                  "/app/Repository/Services/BaseRepository.php": "<?php\nclass BaseRepository {}\n",
+                  "__branch__": {"/app/Services/ChannelEvents/EventAbstract.php": old_contract,
+                                 "/app/Repository/Services/BaseRepository.php": "<?php\nclass BaseRepository {}\n"}}
+    cc = FakePR(files, base_files=base_files)
+    bc = prv.base_contracts_block(cc, "channel", "main", "feat", {"/app/Core/Channels/Hepsiburada/Events/CancelReceived.php": ev_body},
+                                  {"/app/Core/Channels/Hepsiburada/Events/CancelReceived.php"})
+    check("PR'ın extends ettiği sınıf hedef daldaki GÜNCEL hâliyle girer",
+          "BASE CONTRACTS (`main`" in bc and "must return StageResponse" in bc and "blocker" in bc)
+    check("dal açıldıktan sonra değişen sözleşme işaretlenir ve en başa gelir",
+          "DEĞİŞTİ" in bc and "-    public function run(string $s, Event $e): bool|array" in bc
+          and bc.index("EventAbstract.php") < bc.index("BaseRepository.php"))
+    check("çözülemeyen (composer'da olmayan) ad ve PR'ın değiştirdiği dosya alınmaz",
+          "JsonSerializable" not in bc and "LocalIface.php" not in bc)
+    chg = prv.base_contracts_block(cc, "channel", "main", "feat", {"/a/X.php": ev_body},
+                                   {"/a/X.php", "/app/Services/ChannelEvents/EventAbstract.php"})
+    check("PR sözleşmeyi kendisi değiştiriyorsa tekrar eklenmez", "EventAbstract.php" not in chg)
+    check("PHP değilse blok yok", prv.base_contracts_block(cc, "x", "main", "feat", {"/m.go": "package m"}, set()) == "")
+
+    # ── Build ──
+    red = {"build_id": 9, "status": "completed", "result": "failed", "definition": "channel-test", "project": "P",
+           "source_version": "m2"}
+    blk, info = prv.build_status_block(FakePR(files, build=red), "channel", pr)
+    check("kırmızı build: hata özeti + 'PR'ın neden olduğu hata blocker' kuralı",
+          "PR BUILD — FAILED" in blk and "PullTest.php:69" in blk and "blocker" in blk and info["effective"] == "failed"
+          and not info["stale"])
+    _blk, info = prv.build_status_block(FakePR(files, build=dict(red, source_version="m1")), "channel", pr)
+    check("build PR'ın eski hâline aitse 'eski' diye işaretlenir", info["stale"] and "OLDER state" in _blk)
+    part = dict(red, result="partiallySucceeded")
+    blk, info = prv.build_status_block(FakePR(files, build=part,
+                                              tasks=[{"name": "SonarQube Analysis", "result": "succeededWithIssues"}]),
+                                       "channel", pr)
+    check("yalnız Sonar uyarısıyla kısmi başarı = testler geçti", "tests PASSED" in blk and info["effective"] == "succeeded")
+    blk, _ = prv.build_status_block(FakePR(files, build=dict(red, status="inProgress", result=None)), "channel", pr)
+    check("build sürüyorsa 'geçti' sanılmaz", "no result yet" in blk and "Do not assume" in blk)
+    check("build pipeline'ı yoksa blok yok", prv.build_status_block(FakePR(files), "channel", pr) == ("", {}))
+
+    # ── Öteki bot ──
+    th = [{"id": 1, "status": "fixed", "publishedDate": "2026-11-09T09:02",
+           "comments": [{"content": "**🔴 Kritik — x** açıklama\n---\n🤖 claude-review:finding:fe165d5a",
+                         "author": {"displayName": "EcomBackend Build Service (FloTechnology)"}},
+                        {"content": "✅ çözülmüş görünüyor", "author": {"displayName": "EcomBackend Build Service (FloTechnology)"}}]},
+          {"id": 2, "status": "active", "publishedDate": "2026-11-09T10:00",
+           "comments": [{"content": "bot " * 300 + " claude-review:finding:aa", "author": {"displayName": "X Build Service"}}]},
+          {"id": 3, "status": "fixed", "publishedDate": "2026-11-09T11:00",
+           "comments": [{"content": "statü kaldırıldı, gerek yok", "author": {"displayName": "Celal"}}]}]
+    b = prv.pr_discussion_block(th)
+    check("öteki aracın yorumu 'bulgu, karar değil' diye etiketlenir",
+          b.count("İNCELEME ARACI (bulgu, karar değil)") == 3 and "not decisions" in b, b[:600])
+    check("insan yanıtı olmayan 'fixed' karar sayılmaz, insanın kararı öyle işaretlenmez",
+          "[fixed · insan yanıtı yok, karar sayılmaz]" in b and "- [fixed] genel\n    · Celal" in b, b)
+    tight = prv.pr_discussion_block(th, cap=700)
+    check("yer yetmezse önce insan thread'i alınır, çıkarılanlar sayılır",
+          "statü kaldırıldı" in tight and "thread daha yer kalmadığı için alınmadı" in tight, tight[-300:])
+
+    src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
+    check("insan PR'ına hedef repo bağlamı girer, araç PR'ına girmez",
+          "human = not changes" in src and "_target_repo_context(client, rname, pr, files, file_bodies) if human" in src
+          and "+ repo_ctx + contract + pr_ctx" in src)
+
+
+def test_pr_review_tracking():
+    """Kullanıcı (2026-11-10): 2. ve 3. grup + 'farklı bir agent yorumlarda dahil ise onun hatalı yorumlarını,
+    yanlışlarını, kaçırdıklarını yaz'. Parmak izli bulgu, push başına artımlı inceleme, yorum=soru, PR'ın
+    birleşmiş hâli üzerinde repo araçları, öteki aracın değerlendirilmesi."""
+    print("\n=== PR incelemesi: takip, artımlı, soru, repo araçları, öteki araç ===")
+    import os
+    import subprocess
+    import tempfile
+    from datetime import datetime, timedelta
+    from agile_sdlc_crew import pr_review as prv
+    from agile_sdlc_crew import flow
+
+    txt = ('REVIEW_ISSUES_JSON:\n```json\n{"issues": [{"file": "app/A.php", "line": 3, "severity": "major", '
+           '"problem": "p", "key": "Stage Returns Array!", "basis": "Interpretation", "other_ref": "#Fe165D5A"}]}\n```')
+    it = flow._parse_review_issues(txt)[0]
+    check("ayrıştırıcı key/basis/other_ref taşır (normalize)",
+          it["key"] == "stage-returns-array" and it["basis"] == "interpretation" and it["other_ref"] == "Fe165D5A", it)
+    a = {"file": "/app/A.php", "key": "stage-returns-array", "problem": "x"}
+    check("parmak izi: dosya + anahtar, satır/metin değişse de sabit",
+          prv.fingerprint(a) == prv.fingerprint({**a, "file": "app/A.php", "problem": "başka", "line": 9})
+          and prv.fingerprint(a) != prv.fingerprint({**a, "key": "baska"}))
+
+    # ── S9: yorum = soru ──
+    iss = [{"severity": "major", "basis": "interpretation"}, {"severity": "minor", "basis": "code"}]
+    check("yalnız WI yorumuna dayanan major soru olur, karar yeniden kurulur",
+          prv.apply_questions(iss, "CHANGES_REQUIRED") == "QUESTIONS" and iss[0]["severity"] == "question")
+    check("kod kusuru bloklamaya devam eder",
+          prv.apply_questions([{"severity": "blocker", "basis": "code"}], "CHANGES_REQUIRED") == "CHANGES_REQUIRED")
+
+    # ── PR'daki izler ──
+    me = "me-1"
+    ours = lambda c: {"content": c, "author": {"id": me, "displayName": "Volkan"}}
+    bot = lambda c: {"content": c, "author": {"displayName": "EcomBackend Build Service (FloTechnology)"}}
+    _f = lambda path, key: prv.fingerprint({"file": path, "key": key})
+    fp_open, fp_fixed, fp_human, fp_stale = (_f("app/A.php", "stage-returns-array"), _f("app/B.php", "k2"),
+                                             _f("app/C.php", "k3"), _f("app/D.php", "k4"))
+    threads = [
+        {"id": 1, "status": "active", "comments": [ours("## Tempo\n*Tempo — PR İnceleme · son incelenen commit: "
+                                                         "abc1234 · tempo-review-summary*")]},
+        {"id": 2, "status": "active", "threadContext": {"filePath": "/app/A.php", "rightFileStart": {"line": 3}},
+         "comments": [ours(f"MAJOR\n\n*tempo-finding:{fp_open} key:stage-returns-array*")]},
+        {"id": 3, "status": "fixed", "threadContext": {"filePath": "/app/B.php"},
+         "comments": [ours(f"x\n\n*tempo-finding:{fp_fixed} key:k2*")]},
+        {"id": 4, "status": "wontFix", "threadContext": {"filePath": "/app/C.php"},
+         "comments": [ours(f"x\n\n*tempo-finding:{fp_human} key:k3*"),
+                      {"content": "bilinçli karar", "author": {"displayName": "Celal"}}]},
+        {"id": 5, "status": "active", "threadContext": {"filePath": "/app/D.php"},
+         "comments": [ours(f"x\n\n*tempo-finding:{fp_stale} key:k4*")]},
+        {"id": 6, "status": "active", "comments": [{"content": "*tempo-finding:eeeeeeeeee key:z*",
+                                                    "author": {"id": "someone", "displayName": "Ali"}}]},
+        {"id": 10, "status": "active", "publishedDate": "2026-11-09T12:01",
+         "threadContext": {"filePath": "/app/E.php", "rightFileStart": {"line": 65}},
+         "comments": [bot("**🔴 Kritik — stage** ...\n---\n🤖 claude-review:finding:abb5ea1f")]},
+        {"id": 11, "status": "fixed", "publishedDate": "2026-11-09T11:18",
+         "threadContext": {"filePath": "/app/F.php", "rightFileStart": {"line": 70}},
+         "comments": [bot("**🟠 Orta — kısmi iptal**\n---\n🤖 claude-review:finding:52c1ac8f"),
+                      bot("✅ `8e85507` commit'inde çözülmüş görünüyor, thread kapatıldı.")]},
+        {"id": 12, "status": "fixed", "publishedDate": "2026-11-08T20:57",
+         "threadContext": {"filePath": "/app/G.php", "rightFileStart": {"line": 34}},
+         "comments": [bot("**🟡 Düşük — items[0]**\n🤖 claude-review:finding:870dc2ea"),
+                      {"content": "sözleşme gereği tek sipariş, bilinçli", "author": {"displayName": "Celal"}}]},
+        {"id": 13, "status": "active", "comments": [bot("## 🤖 Claude Code Review\n🤖 claude-review:summary")]},
+    ]
+    st = prv.tempo_state(threads, me)
+    check("Tempo izi: özet thread'i + son incelenen commit", st["summary"]["thread_id"] == 1 and st["commit"] == "abc1234")
+    check("Tempo izi: bulgu parmak izi, anahtarı, durumu, insan yanıtı",
+          st["findings"][fp_open]["key"] == "stage-returns-array" and st["findings"][fp_fixed]["status"] == "fixed"
+          and st["findings"][fp_human]["human_replied"] and not st["findings"][fp_open]["human_replied"])
+    check("başkasının yazdığı (alıntılanmış) işaret Tempo'nun sayılmaz", "eeeeeeeeee" not in st["findings"])
+    others = prv.other_reviewer_findings(threads)
+    refs = {o["ref"]: o for o in others}
+    check("öteki aracın bulguları: özet hariç, ref/konum/durum",
+          set(refs) == {"abb5ea1f", "52c1ac8f", "870dc2ea"} and refs["abb5ea1f"]["file"] == "/app/E.php")
+    check("kendi kapattığı bulgu 'o araç kapattı', insanın yanıtladığı değil",
+          refs["52c1ac8f"]["closed_by_tool"] and not refs["870dc2ea"]["closed_by_tool"]
+          and refs["870dc2ea"]["humans"][0][0] == "Celal" and "çözülmüş görünüyor" in refs["52c1ac8f"]["tool_note"])
+    disc = prv.pr_discussion_block(threads, skip_other_bot_only=True)
+    check("öteki aracın tek başına açtığı thread tartışmada tekrar edilmez, insanın yanıtladığı kalır",
+          "abb5ea1f" not in disc and "bilinçli" in disc)
+
+    cb = prv.review_contract_block(prior=st["findings"], others=others, incremental=("abc1234", ["app/A.php"]))
+    check("sözleşme: key + basis kuralı, soru dili",
+          '"key"' in cb and '"interpretation"' in cb and "never blocks" in cb)
+    check("sözleşme: önceki bulgu anahtarı aynen yeniden kullanılır",
+          "key=stage-returns-array" in cb and "EXACTLY the same key" in cb and "key=k2" not in cb)
+    check("sözleşme: artımlı kapsam ve öteki aracın bulguları + karar türleri",
+          "INCREMENTAL REVIEW" in cb and "abc1234" in cb and "ref=abb5ea1f" in cb and "wrongly_closed" in cb
+          and "OTHER_REVIEWER_JSON" in cb and "MISSED" in cb)
+    out = ('OTHER_REVIEWER_JSON:\n```json\n{"assessments": [{"ref": "abb5ea1f", "verdict": "valid", "reason": "doğru"},'
+           '{"ref": "52c1ac8f", "verdict": "wrongly_closed", "reason": "F.php:70 hâlâ tüm satırları sayıyor"},'
+           '{"ref": "870dc2ea", "verdict": "wrong", "reason": "yazar kararı"},'
+           '{"ref": "x", "verdict": "bilmem", "reason": "-"}]}\n```')
+    asm = prv.parse_other_assessment(out)
+    check("öteki araç değerlendirmesi ayrıştırılır, geçersiz karar atılır",
+          [a["verdict"] for a in asm] == ["valid", "wrongly_closed", "wrong"])
+    cleaned = prv.clean_assessments(asm + [{"ref": "52c1ac8f", "verdict": "outdated", "reason": "-"},
+                                           {"ref": "zzz", "verdict": "wrong", "reason": "-"}], others)
+    check("süzgeç: insanın yanıtladığı thread değerlendirilmez, kapalı thread 'outdated' olamaz, bilinmeyen ref atılır",
+          [(a["ref"], a["verdict"]) for a in cleaned] == [("abb5ea1f", "valid"), ("52c1ac8f", "wrongly_closed")],
+          cleaned)
+    check("karar türü: insan kararını yok sayıp yeniden açma",
+          "ignores_decision" in prv.OTHER_VERDICTS and "ignores_decision" in cb)
+
+    issues = [
+        {"id": "R1", "file": "app/A.php", "line": 3, "severity": "major", "key": "stage-returns-array",
+         "problem": "hâlâ var", "basis": "code"},
+        {"id": "R2", "file": "app/E.php", "line": 65, "severity": "blocker", "key": "stage-contract",
+         "problem": "stage", "basis": "code", "other_ref": "abb5ea1f"},
+        {"id": "R3", "file": "app/B.php", "line": 5, "severity": "major", "key": "k2", "problem": "geri geldi",
+         "basis": "code"},
+        {"id": "R4", "file": "app/H.php", "line": 8, "severity": "major", "key": "yeni-kusur", "problem": "yeni",
+         "basis": "code", "evidence": {}},
+        {"id": "R5", "file": "app/C.php", "line": 1, "severity": "major", "key": "k3", "problem": "insan reddetti",
+         "basis": "code"},
+        {"id": "R6", "file": "app/I.php", "line": 1, "severity": "question", "key": "q", "problem": "statü?",
+         "basis": "interpretation"},
+    ]
+    summ = prv.tracked_summary_markdown(verdict="CHANGES_REQUIRED", issues=issues, others=others, assessments=asm,
+                                        pr_id=7, work_item_id="77", files=3, head="def5678abc",
+                                        incremental=("abc1234", 2))
+    from agile_sdlc_crew.branding import is_bot_comment
+    check("özet: açık bulgular, öteki aracın doğrulanan bulgusu işaretli, sorular ayrı",
+          "### Açık bulgular" in summ and "öteki aracın bulgusu `abb5ea1f`, doğrulandı" in summ
+          and "### Yazara sorular" in summ and "statü?" in summ)
+    check("özet: öteki aracın yanlışları + yanlış kapattığı + doğru sayısı + kaçırdıkları",
+          "**Hatalı** — `870dc2ea`" in summ and "Yanlışlıkla kapatılmış" in summ and "1 bulgusu doğrulandı" in summ
+          and "**Kaçırdıkları:**" in summ and "app/H.php:8" in summ and "app/E.php:65` — stage" not in summ.split("Kaçırdıkları")[1])
+    check("özet: son incelenen commit + işaret, Tempo yorumu olarak tanınır",
+          "son incelenen commit: def5678" in summ and prv.SUMMARY_MARK in summ and is_bot_comment(summ))
+
+    class FakeAz:
+        def __init__(self):
+            self.calls = []
+
+        def add_pr_comment(self, repo, pid, content, file_path=None, line_number=None, end_line=None):
+            self.calls.append(("add", file_path, content))
+            return {"id": 99}
+
+        def reply_to_pr_thread(self, repo, pid, tid, content):
+            self.calls.append(("reply", tid, content))
+
+        def set_pr_thread_status(self, repo, pid, tid, status):
+            self.calls.append(("status", tid, status))
+
+        def update_pr_comment(self, repo, pid, tid, cid, content):
+            self.calls.append(("update", tid, content))
+
+    import agile_sdlc_crew.main as _main
+    wi_calls = []
+    _orig = _main._add_wi_comment
+    _main._add_wi_comment = lambda c, w, t: wi_calls.append(w)
+    try:
+        fz = FakeAz()
+        res = prv.sync_review(fz, "channel", 7, "77", summary=summ, issues=issues, file_bodies={},
+                              reviewed={"app/A.php", "app/B.php", "app/D.php", "app/H.php"},
+                              changed_since={"app/D.php", "app/H.php"}, state=st, head="def5678abc",
+                              others=others, assessments=asm)
+        adds = [c for c in fz.calls if c[0] == "add"]
+        check("yalnız YENİ bloklayan bulgu satıra yazılır, parmak iziyle",
+              len(adds) == 1 and adds[0][1] == "/app/H.php" and "tempo-finding:" in adds[0][2]
+              and "key:yeni-kusur" in adds[0][2], adds)
+        check("açık bulgu tekrar yazılmaz, öteki aracın doğrulanan bulgusu tekrar yazılmaz",
+              res["kept"] == 1 and res["covered"] == 1)
+        check("Tempo'nun kapattığı bulgu geri geldi → yeniden açılır; insanın kapattığına dokunulmaz",
+              ("status", 3, "active") in fz.calls and not any(c[1] == 4 for c in fz.calls if c[0] != "add"))
+        check("artık raporlanmayan + dosyası değişen bulgu 'çözüldü' diye kapanır",
+              ("status", 5, "fixed") in fz.calls and any(c[0] == "reply" and c[1] == 5 and "çözülmüş" in c[2]
+                                                         for c in fz.calls))
+        check("öteki aracın yanlış kapattığı / hatalı bulgusuna kendi thread'inde ikinci görüş, doğruya yazılmaz",
+              any(c[0] == "reply" and c[1] == 11 and "Yanlışlıkla kapatılmış" in c[2] and "tempo-assess:52c1ac8f" in c[2]
+                  for c in fz.calls)
+              and any(c[0] == "reply" and c[1] == 12 for c in fz.calls)
+              and not any(c[0] == "reply" and c[1] == 10 for c in fz.calls))
+        check("tek özet thread'i yerinde güncellenir, WI'a yeniden yazılmaz",
+              ("update", 1, summ) in fz.calls and not any(c[0] == "add" and c[1] is None for c in fz.calls)
+              and wi_calls == [])
+        fz2 = FakeAz()
+        prv.sync_review(fz2, "channel", 7, "77", summary="s", issues=issues[:1], file_bodies={},
+                        reviewed={"app/A.php"}, changed_since=None, state={"findings": {}, "summary": None},
+                        head="h", others=[], assessments=[])
+        check("ilk incelemede özet açılır ve WI'a bir kez yazılır",
+              any(c[0] == "add" and c[1] is None for c in fz2.calls) and wi_calls == ["77"])
+        fz3 = FakeAz()
+        st3 = {"findings": {fp_stale: {**st["findings"][fp_stale]}}, "summary": None}
+        prv.sync_review(fz3, "channel", 7, "77", summary="s", issues=[], file_bodies={}, reviewed={"app/D.php"},
+                        changed_since={"app/X.php"}, state=st3, head="h", others=[], assessments=[])
+        check("dosyası değişmeyen bulgu kapatılmaz; söylenecek şey yoksa özet açılmaz", fz3.calls == [])
+        twice = prv.other_reviewer_findings(threads + [{"id": 11, "status": "fixed", "comments": []}])
+        threads_assessed = [dict(t, comments=t["comments"] + [ours("x *tempo-assess:52c1ac8f*")]) if t["id"] == 11 else t
+                            for t in threads]
+        fz4 = FakeAz()
+        prv.sync_review(fz4, "channel", 7, "77", summary="s", issues=[], file_bodies={}, reviewed=set(),
+                        changed_since=None, state={"findings": {}, "summary": None}, head="h",
+                        others=prv.other_reviewer_findings(threads_assessed), assessments=asm)
+        check("ikinci görüş aynı thread'e iki kez yazılmaz", not any(c[0] == "reply" and c[1] == 11 for c in fz4.calls)
+              and len(twice) == 3)
+    finally:
+        _main._add_wi_comment = _orig
+
+    # ── push başına yeniden inceleme ──
+    now = datetime(2026, 11, 10, 12, 0)
+    pay = lambda **k: __import__("json").dumps({"post": True, **k})
+    jobs = [{"id": 5, "repo_name": "channel", "pr_id": "46052", "status": "completed", "work_item_id": "77347",
+             "job_payload": pay(head="old"), "created_at": now - timedelta(hours=30)},
+            {"id": 6, "repo_name": "channel", "pr_id": "45776", "status": "completed", "work_item_id": "PR#45776",
+             "job_payload": '{"post": false}', "created_at": now - timedelta(hours=1)},
+            {"id": 7, "repo_name": "core", "pr_id": "1", "status": "running", "work_item_id": "1",
+             "job_payload": pay(head="x"), "created_at": now},
+            ] + [{"id": 20 + i, "repo_name": "core", "pr_id": "2", "status": "completed", "work_item_id": "2",
+                  "job_payload": pay(head="y"), "created_at": now - timedelta(hours=i + 1)} for i in range(4)]
+    cands = prv.auto_rerun_candidates(jobs, now, max_per_day=4)
+    check("aday: yalnız daha önce YAZAN, şu an koşmayan, günlük sınırı dolmamış PR",
+          [(c["repo"], c["pr_id"], c["last_head"]) for c in cands] == [("channel", 46052, "old")], cands)
+
+    class PollAz:
+        def __init__(self, head, push_min_ago, status="active"):
+            self.head, self.ago, self.status = head, push_min_ago, status
+
+        def get_pull_request(self, repo, pid):
+            return {"status": self.status, "lastMergeSourceCommit": {"commitId": self.head}}
+
+        def get_pr_last_push(self, repo, pid):
+            return {"date": (now - timedelta(minutes=self.ago)).strftime("%Y-%m-%dT%H:%M:%S.1234567Z")}
+    spawned = []
+    prv.poll_once(PollAz("new", 30), jobs, spawned.append, now, debounce_min=15)
+    check("yeni push durulduysa artımlı inceleme başlar (son incelenen commit'le)",
+          len(spawned) == 1 and spawned[0]["head"] == "new" and spawned[0]["last_head"] == "old")
+    spawned.clear()
+    prv.poll_once(PollAz("new", 5), jobs, spawned.append, now, debounce_min=15)
+    prv.poll_once(PollAz("old", 60), jobs, spawned.append, now, debounce_min=15)
+    prv.poll_once(PollAz("new", 60, status="completed"), jobs, spawned.append, now, debounce_min=15)
+    check("geliştirici hâlâ itiyorsa / yeni push yoksa / PR kapandıysa başlamaz", spawned == [])
+
+    # ── CLI $ sınırı bağlama özel ──
+    from agile_sdlc_crew.tools import claude_cli_llm as cli
+    with cli.repo_tools_context(["/tmp/x"], max_usd=3.0):
+        inside = (cli._cap_cv.get(), cli._get_repo_ctx()[0])
+    check("araçlı incelemenin $ sınırı yalnız o blokta geçerli",
+          inside == (3.0, ["/tmp/x"]) and cli._cap_cv.get() is None and cli._get_repo_ctx()[0] == [])
+
+    # ── PR'ın birleşmiş hâli (gerçek git) ──
+    with tempfile.TemporaryDirectory() as td:
+        g = lambda *a, cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                           capture_output=True, text=True, check=True)
+        src = os.path.join(td, "src"); os.makedirs(src)
+        g("init", "-q", "-b", "main", cwd=src)
+        open(os.path.join(src, "a.txt"), "w").write("main\n")
+        g("add", ".", cwd=src); g("commit", "-q", "-m", "m", cwd=src)
+        open(os.path.join(src, "a.txt"), "w").write("merged\n")
+        secret = os.path.join(td, "secret.env")
+        open(secret, "w").write("DB_PASSWORD=hunter2\n")
+        os.symlink(secret, os.path.join(src, "leak.env"))       # PR yazarı repodan dışarı bağ koyuyor
+        g("add", "-A", cwd=src)
+        g("commit", "-q", "-m", "pr", cwd=src)
+        g("update-ref", "refs/pull/7/merge", "HEAD", cwd=src)
+        g("reset", "-q", "--hard", "HEAD~1", cwd=src)
+        repos = os.path.join(td, "repos"); os.makedirs(repos)
+        g("clone", "-q", src, os.path.join(repos, "channel"), cwd=td)
+        old = os.environ.get("CREW_REPOS_DIR")
+        os.environ["CREW_REPOS_DIR"] = repos
+        try:
+            with prv.pr_merge_checkout("channel", 7, "feat") as wt:
+                seen = open(os.path.join(wt, "a.txt")).read() if wt else ""
+                wt_path = str(wt)
+                leak = os.path.join(wt, "leak.env")
+                leak_is_link = os.path.islink(leak)
+                leak_text = open(leak).read() if os.path.exists(leak) and not leak_is_link else ""
+            with prv.pr_merge_checkout("../etc", 7) as bad:
+                pass
+        finally:
+            if old is None:
+                os.environ.pop("CREW_REPOS_DIR", None)
+            else:
+                os.environ["CREW_REPOS_DIR"] = old
+        clone = os.path.join(repos, "channel")
+        refs_left = subprocess.run(["git", "for-each-ref", "refs/tempo"], cwd=clone, capture_output=True, text=True).stdout
+        wts = subprocess.run(["git", "worktree", "list"], cwd=clone, capture_output=True, text=True).stdout
+        check("PR checkout: refs/pull/N/merge (birleşmiş hâl) okunur", seen == "merged\n", seen)
+        check("PR checkout: çıkışta worktree ve geçici ref silinir; klonun dalı değişmez",
+              not os.path.exists(wt_path) and refs_left == "" and wts.count("\n") == 1
+              and open(os.path.join(clone, "a.txt")).read() == "main\n")
+        check("PR checkout: geçersiz repo adı reddedilir", bad is None)
+        check("PR checkout: PR'daki sembolik bağ repodan dışarı açılmaz (gizli dosya okunamaz)",
+              not leak_is_link and "hunter2" not in leak_text, leak_text)
+
+    fz5 = FakeAz()
+    leaky = [{"id": "R1", "file": "app/Z.php", "line": 2, "severity": "major", "key": "leak", "basis": "code",
+              "problem": "config şunu içeriyor: Authorization: Basic dXNlcjpzM2NyM3RQYXNz ve DB_PASSWORD=hunter2"}]
+    _main._add_wi_comment = lambda c, w, t: None
+    try:
+        prv.sync_review(fz5, "channel", 7, "", summary="ozet DB_PASSWORD=hunter2", issues=leaky, file_bodies={},
+                        reviewed=set(), changed_since=None, state={"findings": {}, "summary": None}, head="h",
+                        others=[], assessments=[])
+    finally:
+        _main._add_wi_comment = _orig
+    sent = " ".join(c[2] for c in fz5.calls if c[0] == "add")
+    check("PR'a giden metinde gizli değer maskelenir", "hunter2" not in sent and "dXNlcjpzM2NyM3RQYXNz" not in sent
+          and "***" in sent, sent[:300])
+
+    src_txt = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
+    check("araçlı inceleme boş dönerse araçsız yeniden koşar",
+          "if not _has_decision(text):" in src_txt and "text = _kick(ctx)" in src_txt)
+    srv = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/server.py").read_text()
+    check("pr_review işi türü ve payload'u INSERT'te alır ve hemen running olur (kuyruk işçisi kapmaz)",
+          'job_kind="pr_review",\n                           job_payload=' in srv and "db.start_job(job_id)\n    return job_id" in srv)
 
 
 def test_tool_branch_conflicts():
@@ -7223,7 +7692,7 @@ def main():
               test_tool_fix_leftovers,
               test_scan_line_text_multibyte,
               test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status,
-              test_pr_review_prior_discussion, test_tool_branch_conflicts, test_hero_latest_job,
+              test_pr_review_prior_discussion, test_pr_review_coverage, test_pr_review_tracking, test_tool_branch_conflicts, test_hero_latest_job,
               test_tool_fix_result_and_logs, test_nr_app_infer, test_quality_detail):
         try:
             t()

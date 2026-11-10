@@ -22,7 +22,15 @@ _DEFAULTS = {
     "UAT": 2500,
     "PLAN_CHANGES": 10,     # adet
     "WI_COMMENTS": 4000,   # WI'daki insan yorumlari (ayri endpoint, alanlarda yok)
-    "PR_DISCUSSION": 5000,  # PR thread'leri (insan + onceki Tempo incelemesi) — pr_review
+    # PR thread'leri (insan + onceki Tempo incelemesi + baska bot) — pr_review. 5000'di: #46052'de
+    # baska bir aracin 30 thread'i vardi; once insan thread'leri secilir, sonra acik bot bulgulari.
+    "PR_DISCUSSION": 8000,
+    # Insan PR'i incelemesi (pr_review) — #45776: 34 dosyanin 22'si hic girmedi (12 dosya siniri).
+    "PR_FILES": 120000,      # tum degisen dosyalar (oncelik sirasi), ~30K token
+    "REPO_RULES": 12000,     # hedef reponun CLAUDE.md/AGENTS.md'si, ilgili bolumler
+    "BASE_CONTRACTS": 16000, # PR'in extends/implements ettigi, degistirmedigi siniflar (hedef dal)
+    "PR_BUILD": 3000,        # PR build hata ozeti
+    "OTHER_REVIEW": 16000,   # PR'daki baska inceleme aracinin bulgulari (degerlendirilmek uzere)
     # Kalite dogrudan akisinda mimara giden Task metni. 3000'di: #249'un 64 dosyalik Task'inin
     # 17 dosyasi gorundu, plan 9 dosyada kaldi. ~16K char Task ≈ 4K token (Sonnet'te kurus).
     "QUALITY_TASK_TEXT": 20000,
