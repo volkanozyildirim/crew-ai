@@ -307,6 +307,16 @@ def recent_activity_rows(limit: int = 40) -> tuple[list[dict], list[dict]]:
         return steps, list(cur.fetchall() or [])
 
 
+def pr_review_jobs(days: int = 14) -> list[dict]:
+    """Son `days` gündeki PR inceleme işleri (yeni → eski): push başına yeniden inceleme adayları."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, work_item_id, repo_name, pr_id, status, job_payload, created_at FROM jobs "
+                    "WHERE job_kind='pr_review' AND created_at >= NOW() - INTERVAL %s DAY ORDER BY id DESC",
+                    (int(days),))
+        return list(cur.fetchall() or [])
+
+
 def delete_job(job_id: int):
     """Job ve step'lerini sil."""
     with get_conn() as conn:
@@ -320,6 +330,7 @@ _ALLOWED_JOB_FIELDS = frozenset({
     "current_step", "error_message", "wi_title", "started_at", "finished_at",
     "estimate_sp",  # faz 2: nihai story point tahmini (retrospektif verisi)
     "job_kind",     # pipeline | pr_fix | pr_review — dashboard rozetleri ve retro ayrimi
+    "job_payload",  # pr_review: {"post", "auto", "head"} — push basina yeniden inceleme
 })
 
 

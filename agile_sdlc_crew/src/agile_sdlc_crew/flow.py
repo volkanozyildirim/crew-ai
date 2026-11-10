@@ -323,6 +323,15 @@ def _parse_review_issues(review_text: str) -> list[dict]:
             "suggestion": _suggestion(it),
             "status": "open",
             "note": "",
+            # ── PR incelemesi (pr_review) takip alanlari; pipeline okumaz ──
+            # key: kusurun kisa, koşudan koşuya SABIT adi (parmak izi = dosya + key).
+            # basis: code | requirement | interpretation — yalniz WI yorumuna dayanan madde bloklamaz.
+            # other_ref: ayni kusuru PR'daki BASKA bir inceleme araci zaten yazdiysa onun ref'i.
+            "key": _re_i.sub(r"[^a-z0-9]+", "-", str(it.get("key") or "").lower()).strip("-")[:60],
+            "basis": (str(it.get("basis") or "").strip().lower()
+                      if str(it.get("basis") or "").strip().lower() in ("code", "requirement", "interpretation")
+                      else ""),
+            "other_ref": str(it.get("other_ref") or "").strip().lstrip("#")[:40],
         })
     return out
 

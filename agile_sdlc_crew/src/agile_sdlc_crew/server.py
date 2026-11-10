@@ -2205,26 +2205,67 @@ async def pr_review(req: PRReviewRequest):
         return JSONResponse({"error": "work_item_id ya da repo_name + pr_id gerekli"}, status_code=400)
     if wi and not _re.match(r"^\d{1,10}$", wi):
         return JSONResponse({"error": "Gecersiz Work Item ID"}, status_code=400)
-    job_id = db.create_job(wi or f"PR#{req.pr_id}", use_hal=False)
-    db.update_job(job_id, job_kind="pr_review", pr_id=str(req.pr_id or ""), repo_name=req.repo_name or "")
-
-    def _run():
-        try:
-            db.start_job(job_id)
-            from agile_sdlc_crew.pr_review import run_pr_review
-            res = run_pr_review(work_item_id=wi, pr_id=req.pr_id, repo_name=req.repo_name,
-                                job_id=job_id, post=req.post)
-            db.complete_job(job_id)
-            pipeline_log.info(f"PR-review #{job_id}: PR #{res.get('pr_id')} {res.get('verdict')} "
-                              f"{res.get('issues')} madde, yorum {res.get('posted')}")
-        except Exception as e:
-            db.fail_job(job_id, str(e))
-            pipeline_log.error(f"PR-review #{job_id} basarisiz: {e}")
-
-    threading.Thread(target=_run, daemon=True).start()
+    job_id = _new_pr_review_job(wi, req.pr_id, req.repo_name or "", post=req.post, auto=False)
+    threading.Thread(target=_run_pr_review_job, args=(job_id, wi, req.pr_id, req.repo_name, req.post),
+                     daemon=True).start()
     return JSONResponse({"job_id": job_id, "status": "started",
                          "message": f"İnceleme başladı (iş #{job_id}) — sonuç PR ve WI yorumuna yazılacak"},
                         status_code=202)
+
+
+def _new_pr_review_job(wi: str, pr_id, repo: str, *, post: bool, auto: bool) -> int:
+    """pr_review işi: tür ve payload INSERT'te yazılır, iş hemen 'running' olur — sonradan yazılsa
+    kuyruk işçisi onu 'queued' bir pipeline işi sanıp alabilirdi."""
+    import json as _json
+    job_id = db.create_job(wi or f"PR#{pr_id}", use_hal=False, job_kind="pr_review",
+                           job_payload=_json.dumps({"post": bool(post), "auto": bool(auto)}))
+    db.update_job(job_id, pr_id=str(pr_id or ""), repo_name=repo or "")
+    db.start_job(job_id)
+    return job_id
+
+
+def _run_pr_review_job(job_id: int, wi: str, pr_id, repo: str, post: bool, last_commit: str = "",
+                       auto: bool = False):
+    """İncelemeyi koştur; incelenen commit iş kaydına yazılır (push yoklayıcısı ona bakar)."""
+    import json as _json
+    try:
+        from agile_sdlc_crew.pr_review import run_pr_review
+        res = run_pr_review(work_item_id=wi, pr_id=pr_id, repo_name=repo, job_id=job_id, post=post,
+                            last_commit=last_commit)
+        db.update_job(job_id, job_payload=_json.dumps({"post": bool(post), "auto": auto, "head": res.get("head", ""),
+                                                       "verdict": res.get("verdict")}))
+        db.complete_job(job_id)
+        pipeline_log.info(f"PR-review #{job_id}{' (push)' if auto else ''}: PR #{res.get('pr_id')} "
+                          f"{res.get('verdict')} {res.get('issues')} madde, yorum {res.get('posted')}")
+    except Exception as e:
+        db.fail_job(job_id, str(e))
+        pipeline_log.error(f"PR-review #{job_id} basarisiz: {e}")
+
+
+@app.on_event("startup")
+async def _start_pr_review_poller():
+    """Tempo'nun yorum yazdığı açık PR'a yeni push gelince artımlı yeniden inceleme
+    (CREW_PR_REVIEW_AUTO_RERUN). Yoklayıcı tek thread: incelemeler seri koşar."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew import pr_review as _prr
+
+    def _spawn(c: dict):
+        job_id = _new_pr_review_job(c.get("work_item_id") or "", c["pr_id"], c["repo"], post=True, auto=True)
+        pipeline_log.info(f"PR-review #{job_id}: PR #{c['pr_id']} ({c['repo']}) yeni push "
+                          f"{(c.get('last_head') or '?')[:7]}→{c['head'][:7]} — artımlı inceleme")
+        _run_pr_review_job(job_id, c.get("work_item_id") or "", c["pr_id"], c["repo"], True,
+                           last_commit=c.get("last_head") or "", auto=True)
+
+    try:
+        _prr.start_poller(
+            _spawn,
+            enabled=lambda: bool(_pc.get("CREW_PR_REVIEW") and _pc.get("CREW_PR_REVIEW_AUTO_RERUN")
+                                 and _pc.get("CREW_PR_REVIEW_TRACKED")),
+            interval_min=lambda: _pc.get("CREW_PR_REVIEW_POLL_MIN"),
+            debounce_min=lambda: _pc.get("CREW_PR_REVIEW_AUTO_DEBOUNCE_MIN"),
+            max_per_day=lambda: _pc.get("CREW_PR_REVIEW_AUTO_MAX_PER_DAY"))
+    except Exception as e:
+        pipeline_log.warning(f"PR oto-inceleme yoklayıcısı başlatılamadı: {e}")
 
 
 # ── Backlog refinement (Scrum faz 6; backlog_refinement.py) ──

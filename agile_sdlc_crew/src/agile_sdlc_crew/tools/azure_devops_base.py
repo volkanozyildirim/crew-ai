@@ -702,6 +702,58 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
+    def update_pr_comment(self, repo_id_or_name: str, pull_request_id: int, thread_id: int,
+                          comment_id: int, content: str) -> dict:
+        """Var olan bir yorumun metnini değiştir (Tempo'nun tek özet yorumu yerinde güncellenir)."""
+        url = (f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}"
+               f"/threads/{thread_id}/comments/{comment_id}")
+        resp = requests.patch(url, headers=self._headers, json={"content": defuse_emoticons(content)},
+                              params={"api-version": self.API_VERSION}, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def set_pr_thread_status(self, repo_id_or_name: str, pull_request_id: int, thread_id: int,
+                             status: str) -> dict:
+        """Thread durumu: active | fixed | closed | wontFix | byDesign | pending."""
+        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}/threads/{thread_id}"
+        resp = requests.patch(url, headers=self._headers, json={"status": status},
+                              params={"api-version": self.API_VERSION}, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_commit_diff_paths(self, repo_id_or_name: str, base_commit: str, target_commit: str) -> list[str]:
+        """İki commit arasında değişen dosya yolları (klasörler hariç) — artımlı inceleme için."""
+        url = f"{self._repo_api_url(repo_id_or_name)}/diffs/commits"
+        out, skip = [], 0
+        while True:
+            params = {"api-version": self.API_VERSION, "baseVersion": base_commit, "baseVersionType": "commit",
+                      "targetVersion": target_commit, "targetVersionType": "commit", "$top": 500, "$skip": skip}
+            resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            ch = data.get("changes") or []
+            for c in ch:
+                item = c.get("item") or {}
+                if item.get("isFolder") or item.get("gitObjectType") == "tree":
+                    continue
+                if item.get("path") and item["path"] not in out:
+                    out.append(item["path"])
+            if data.get("allChangesIncluded", True) or not ch:
+                return out
+            skip += len(ch)
+
+    def get_pr_last_push(self, repo_id_or_name: str, pull_request_id: int) -> dict:
+        """PR'ın son iterasyonu (= son push): {commit, date}. Yoksa boş dict."""
+        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests/{pull_request_id}/iterations"
+        resp = requests.get(url, headers=self._headers, params={"api-version": self.API_VERSION}, timeout=30)
+        resp.raise_for_status()
+        its = resp.json().get("value") or []
+        if not its:
+            return {}
+        last = its[-1]
+        return {"commit": ((last.get("sourceRefCommit") or {}).get("commitId") or ""),
+                "date": last.get("createdDate") or ""}
+
     def resolve_pr_thread(
         self,
         repo_id_or_name: str,

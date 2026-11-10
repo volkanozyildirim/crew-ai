@@ -17,12 +17,23 @@ Sınırlar — bilinçli:
 
 from __future__ import annotations
 
+import contextlib
 import difflib
+import hashlib
 import logging
+import os
 import re
 from html import unescape
 
 log = logging.getLogger("pipeline")
+
+# ── Takipli inceleme işaretleri (yorum metninde DÜZ YAZI: Azure PR thread'leri markdown'u saklar) ──
+FINDING_MARK = "tempo-finding:"       # satır yorumu: tempo-finding:<parmak izi> key:<anahtar>
+SUMMARY_MARK = "tempo-review-summary"  # tek özet thread'i (yerinde güncellenir)
+ASSESS_MARK = "tempo-assess:"          # öteki aracın thread'ine yazılan ikinci görüş
+_FP_RE = re.compile(r"tempo-finding:([0-9a-f]{10})(?:\s+key:([a-z0-9-]+))?")
+_COMMIT_RE = re.compile(r"son incelenen commit:\s*`?([0-9a-f]{7,40})")
+_OPEN = ("active", "pending")
 
 _PR_LINK_RE = re.compile(r"PullRequestId/[^%]+%2f([^%]+)%2f(\d+)", re.IGNORECASE)
 INLINE_SEVERITIES = ("blocker", "major")
@@ -78,7 +89,8 @@ _RESOLVED = {"fixed", "closed", "wontFix", "byDesign"}
 
 def _is_tempo_comment(text: str) -> bool:
     from agile_sdlc_crew.branding import is_bot_comment
-    return is_bot_comment(text) or "inceleme katkısı" in text.lower() or "İnceleme Katkısı" in text
+    return (is_bot_comment(text) or "inceleme katkısı" in text.lower() or "İnceleme Katkısı" in text
+            or FINDING_MARK in text or SUMMARY_MARK in text or ASSESS_MARK in text)
 
 
 # Başka otomatik inceleme araçları (PR #45776 / #46052'de "Claude Code Review" EcomBackend Build
@@ -92,7 +104,7 @@ def _is_other_bot(comment: dict) -> bool:
     return bool(_OTHER_BOT_RE.search(who) or _OTHER_BOT_RE.search((comment.get("content") or "")[-400:]))
 
 
-def pr_discussion_block(threads: list[dict], cap: int = 5000) -> str:
+def pr_discussion_block(threads: list[dict], cap: int = 5000, *, skip_other_bot_only: bool = False) -> str:
     """PR'da DAHA ÖNCE konuşulmuş konular (insan + önceki Tempo incelemesi), kronolojik.
 
     #45843 (job #273): üç major yorumun ikisi ("10 günlük geçmiş", "günlük sipariş limiti") bir gün
@@ -113,6 +125,8 @@ def pr_discussion_block(threads: list[dict], cap: int = 5000) -> str:
                and c.get("commentType") != "system" and (c.get("content") or "").strip()]
         if not cms:
             continue
+        if skip_other_bot_only and all(_is_other_bot(c) for c in cms):
+            continue   # öteki aracın tek başına açtığı thread'ler kendi bloğunda (other_reviewer_findings)
         ctx = t.get("threadContext") or {}
         loc = ctx.get("filePath") or "genel"
         if ctx.get("filePath") and (ctx.get("rightFileStart") or {}).get("line"):
@@ -440,7 +454,7 @@ def _safe_get(client, repo_name: str, path: str, ref: str) -> str | None:
 
 def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int | None = None, per_file: int = 6000,
                      new_file_max: int = 20_000, budget: int | None = None,
-                     bodies: dict | None = None) -> tuple[str, list[str]]:
+                     bodies: dict | None = None, only_paths: set[str] | None = None) -> tuple[str, list[str]]:
     """PR baglami + incelenen dosya listesi. `bodies` verilirse okunan dosya
     iceriklerini oraya yazar — suggestion dogrulamasi (verified_suggestion)
     icin gerekli, cunku oneri gercek satirlarla ortusmek zorunda.
@@ -463,6 +477,12 @@ def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int | None 
             budget = _cb.cap("PR_FILES")
     if max_files is None and not full:
         max_files = 12
+    unchanged: list[str] = []
+    if only_paths is not None:
+        # Artımlı inceleme: yalnız son incelemeden beri değişenler (+ açık bulgusu olanlar) girer;
+        # diğerleri adıyla anılır — önceki incelemede bakıldı, kodları değişmedi.
+        unchanged = [p for p, _ct in entries if _key(p) not in only_paths]
+        entries = [e for e in entries if _key(e[0]) in only_paths]
     paths = [p for p, _ct in entries]
     parts = []
     # Pipeline'daki inceleme adimiyla ayni referanslar: repoya uyan dil dosyasi
@@ -517,6 +537,10 @@ def build_pr_context(client, repo_name: str, pr: dict, *, max_files: int | None 
         used.append(p)
     if max_files and len(paths) > max_files:
         parts.append(f"\n(+{len(paths) - max_files} dosya daha değişti; context'e alınmadı)")
+    if unchanged:
+        parts.append(f"\n(Artımlı inceleme: şu {len(unchanged)} dosya son Tempo incelemesinden beri DEĞİŞMEDİ, "
+                     "bağlama alınmadı — önceki incelemede bakıldı: " + ", ".join(unchanged[:40])
+                     + (" …" if len(unchanged) > 40 else "") + ")")
     if skipped:
         parts.append(f"\n⚠️ BAĞLAM SINIRI: {len(skipped)} değişen dosya sığmadı ve İNCELENMEDİ: "
                      + ", ".join(skipped[:40]) + (" …" if len(skipped) > 40 else "")
@@ -814,7 +838,7 @@ def tool_diff_context(changes: dict[str, tuple[str, str]], *, tool: str = "", co
 def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name: str = "",
                   job_id: int | None = None, post: bool = True,
                   changes: dict[str, tuple[str, str]] | None = None, tool: str = "",
-                  extra_context: str = "") -> dict:
+                  extra_context: str = "", last_commit: str = "") -> dict:
     """`changes` (yol → (eski, yeni)) verilirse PR bir araç düzeltmesidir: bağlam dosya
     gövdeleri değil tüm dosyaların diff'i (tool_diff_context); gövdeler satır oturtma ve
     öneri doğrulaması için yine `file_bodies`'e yazılır."""
@@ -843,21 +867,48 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
         except Exception as e:  # noqa: BLE001
             log.info(f"  WI okunamadı: {e}")
     requirements = wi_requirements_text(wi_fields) if wi_fields else f"# Iş Kalemi\n{pr.get('title', '')}"
+    from agile_sdlc_crew import context_budget as _cb
     from agile_sdlc_crew import pipeline_config as _pc
+    human = not changes
+    head = ((pr.get("lastMergeSourceCommit") or {}).get("commitId") or "")
+    threads: list[dict] = []
+    if human:
+        try:
+            threads = client.get_pr_threads(rname, pid) or []
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  PR thread'leri okunamadı: {e}")
+    tracked = human and bool(_pc.get("CREW_PR_REVIEW_TRACKED"))
+    me = ""
+    if tracked:
+        try:
+            me = (client.get_authenticated_user() or {}).get("id", "")
+        except Exception:  # noqa: BLE001
+            me = ""
+    state = tempo_state(threads, me) if tracked else {"findings": {}, "summary": None, "commit": ""}
+    others = other_reviewer_findings(threads) if human and _pc.get("CREW_PR_REVIEW_OTHER_BOT") else []
     discussion = ""
-    if not changes and _pc.get("CREW_PR_REVIEW_DISCUSSION"):
+    if human and _pc.get("CREW_PR_REVIEW_DISCUSSION"):
         # Kapsam kararları WI yorumlarında ve PR thread'lerinde — ikisi de inceleyiciye girer
         try:
-            from agile_sdlc_crew import context_budget as _cb
             from agile_sdlc_crew.flow import wi_comments_block
             if work_item_id and _pc.get("CREW_WI_COMMENTS"):
                 requirements += wi_comments_block(client.get_work_item_comments(int(work_item_id)),
                                                   cap=_cb.cap("WI_COMMENTS"))[0]
-            discussion = pr_discussion_block(client.get_pr_threads(rname, pid), cap=_cb.cap("PR_DISCUSSION"))
+            discussion = pr_discussion_block(threads, cap=_cb.cap("PR_DISCUSSION"), skip_other_bot_only=bool(others))
             if discussion:
                 log.info(f"  💬 PR'daki önceki tartışma inceleyiciye eklendi ({len(discussion)} karakter)")
         except Exception as e:  # noqa: BLE001
             log.info(f"  PR tartışması / WI yorumları okunamadı: {e}")
+
+    # Artımlı kapsam: son Tempo incelemesinden (PR'daki özet ya da iş kaydı) beri değişen dosyalar.
+    base_commit = state.get("commit") or last_commit
+    changed_since: set[str] | None = None
+    if tracked and base_commit and head and not head.startswith(base_commit) and not base_commit.startswith(head):
+        try:
+            changed_since = {_key(p) for p in client.get_commit_diff_paths(rname, base_commit, head)}
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  Son incelemeden beri değişenler okunamadı ({e}) — tam inceleme")
+    incremental = changed_since is not None and bool(_pc.get("CREW_PR_REVIEW_INCREMENTAL"))
     file_bodies: dict[str, str] = {}
     if changes:
         file_bodies.update({"/" + p.lstrip("/"): new for p, (_old, new) in changes.items()})
@@ -865,14 +916,25 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
         who = (f"Bu PR'ı bir araç ({tool or 'araç'}) üretti. İncelemen DANIŞMA niteliğindedir: kodu sen "
                "değiştirmeyeceksin; bulgular PR yorumu olarak gidecek. Somut, dosya/satır referanslı yaz.")
     else:
-        pr_ctx, files = build_pr_context(client, rname, pr, bodies=file_bodies)
+        # Artımlı: yalnız son incelemeden beri değişen dosyalar. Değişmeyen dosyadaki açık bulgu
+        # düzelmiş olamaz; sync_review de yalnız değişen dosyalardaki bulguyu kapatır.
+        focus = set(changed_since) if incremental else None
+        pr_ctx, files = build_pr_context(client, rname, pr, bodies=file_bodies, only_paths=focus)
         who = ("Bu PR insan tarafından geliştirildi. İncelemen DANIŞMA "
                "niteliğindedir: kodu sen değiştirmeyeceksin; bulgular PR yorumu olarak geliştiriciye gidecek. "
                "Somut, dosya/satır referanslı, uygulanabilir yaz.")
-    repo_ctx, build_info = _target_repo_context(client, rname, pr, files, file_bodies) if not changes else ("", {})
+    repo_ctx, build_info = _target_repo_context(client, rname, pr, files, file_bodies) if human else ("", {})
+    contract = ""
+    if human:
+        contract = review_contract_block(
+            prior=state["findings"] if tracked else {}, others=others,
+            incremental=(base_commit[:7], sorted(changed_since or [])) if incremental else None,
+            questions=bool(_pc.get("CREW_PR_REVIEW_QUESTIONS")), cap_other=_cb.cap("OTHER_REVIEW"))
     ctx = (requirements + "\n\n# İNCELEME KAPSAMI\n" + who + (extra_context or "") + discussion
-           + repo_ctx + pr_ctx)
+           + repo_ctx + contract + pr_ctx)
     log.info(f"  İnceleme bağlamı: {len(ctx)} karakter · {len(files)} dosya"
+             + (f" · artımlı ({base_commit[:7]}→{head[:7]}, {len(changed_since or [])} değişen)" if incremental else "")
+             + (f" · öteki araç bulgusu {len(others)}" if others else "")
              + (f" · build {build_info.get('effective') or build_info.get('status')}"
                 + (" (eski commit)" if build_info.get("stale") else "") if build_info else ""))
     if job_id:
@@ -885,32 +947,68 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
                 _acct.register_call_sink(db.record_llm_call)
         except Exception:
             pass
-    try:
+
+    def _kick(context: str) -> str:
         crew = AgileSDLCCrew().create_review_crew()
         result = crew.kickoff(inputs={
             "work_item_id": work_item_id or "?", "requirements": requirements[:3000],
             "target_repo": rname, "target_branch": branch, "pr_id": str(pid), "pr_url": pr_url,
-            "previous_context": ctx, "scrum_master_feedback": "",
+            "previous_context": context, "scrum_master_feedback": "",
         })
+        return (result.raw or "") if result else ""
+
+    tools_used = False
+    try:
+        use_tools = human and bool(_pc.get("CREW_PR_REVIEW_REPO_TOOLS"))
+        with (pr_merge_checkout(rname, int(pid), branch) if use_tools else _null()) as wt:
+            if wt:
+                tools_used = True
+                cap_usd = float(_pc.get("CREW_PR_REVIEW_TOOLS_MAX_USD") or 0)
+                with _acct.repo_tools_context([str(wt)], max_usd=cap_usd):
+                    text = _kick(ctx + repo_tools_note(str(wt)))
+                if not _has_decision(text):
+                    # Bütçe cap'i / tur sınırı sonucu BOŞ bırakır (CLAUDE.md) — işi kaybetme, araçsız bir kez daha.
+                    log.warning("  Araçlı inceleme sonuç vermedi — araçsız yeniden koşuluyor")
+                    tools_used = False
+                    text = _kick(ctx)
+            else:
+                if use_tools:
+                    log.info("  Repo araçları açılamadı (yerel klon yok ya da PR ref'i alınamadı) — araçsız")
+                text = _kick(ctx)
     finally:
         try:
             _acct.clear_call_context()
         except Exception:
             pass
-    text = (result.raw or "") if result else ""
     verdict = "APPROVE" if _review_approved(text) else ("CHANGES_REQUIRED" if _review_rejected(text) else "UNKNOWN")
     issues = _parse_review_issues(text)
     anch = anchor_issue_lines(issues, file_bodies)
-    log.info(f"  Karar: {verdict} · {len(issues)} madde · {len(files)} dosya")
+    assessments = clean_assessments(parse_other_assessment(text), others) if others else []
+    if human and _pc.get("CREW_PR_REVIEW_QUESTIONS"):
+        verdict = apply_questions(issues, verdict)
+    log.info(f"  Karar: {verdict} · {len(issues)} madde · {len(files)} dosya"
+             + (" · repo araçlı" if tools_used else "")
+             + (f" · öteki araç değerlendirmesi {len(assessments)}" if others else ""))
     if anch["moved"] or anch["cleared"]:
         log.info(f"  Satır düzeltme: {anch['moved']} madde doğru satıra oturtuldu, "
                  f"{anch['cleared']} maddenin alıntısı dosyada bulunamadı (numara düşürüldü)")
 
-    summary = review_summary_markdown(verdict=verdict, issues=issues, pr_id=pid, pr_url=pr_url,
-                                      work_item_id=work_item_id or "?", files=len(files),
-                                      text_tail="" if issues else text[:2500], tool=tool if changes else "")
-    posted = post_review(client, rname, pid, work_item_id, summary, issues, file_bodies) if post else \
-        {"pr_summary": False, "inline": 0, "wi": False, "suggestions": 0}
+    if tracked:
+        summary = tracked_summary_markdown(
+            verdict=verdict, issues=issues, others=others, assessments=assessments, pr_id=pid,
+            work_item_id=work_item_id or "?", files=len(files), head=head, build=build_info,
+            incremental=(base_commit[:7], len(changed_since or [])) if incremental else None)
+        posted = sync_review(client, rname, pid, work_item_id, summary=summary, issues=issues,
+                             file_bodies=file_bodies, reviewed=set(_key(f) for f in files),
+                             changed_since=changed_since, state=state, head=head, others=others,
+                             assessments=assessments) if post else \
+            {"pr_summary": False, "inline": 0, "wi": False, "suggestions": 0}
+    else:
+        summary = review_summary_markdown(verdict=verdict, issues=issues, pr_id=pid, pr_url=pr_url,
+                                          work_item_id=work_item_id or "?", files=len(files),
+                                          text_tail="" if issues else text[:2500], tool=tool if changes else "")
+        posted = post_review(client, rname, pid, work_item_id, summary, issues, file_bodies) if post else \
+            {"pr_summary": False, "inline": 0, "wi": False, "suggestions": 0}
     if job_id:
         try:
             db.complete_step(job_id, "review_pr_task", text[:50_000])
@@ -918,7 +1016,8 @@ def run_pr_review(*, work_item_id: str = "", pr_id: int | None = None, repo_name
             pass
     return {"repo": rname, "pr_id": pid, "pr_url": pr_url, "work_item_id": work_item_id, "branch": branch,
             "verdict": verdict, "issues": len(issues), "files": len(files), "posted": posted, "summary": summary,
-            "issue_list": issues, "file_bodies": file_bodies, "build": build_info}
+            "issue_list": issues, "file_bodies": file_bodies, "build": build_info, "head": head,
+            "incremental": incremental, "tools": tools_used, "assessments": assessments, "others": len(others)}
 
 
 def _target_repo_context(client, rname: str, pr: dict, files: list[str],
@@ -1008,3 +1107,546 @@ def post_review(client, rname: str, pid, work_item_id: str, summary: str, issues
             except Exception as e:  # noqa: BLE001
                 log.info(f"  WI yorumu yazılamadı: {e}")
     return posted
+
+
+# ══ Takipli inceleme: parmak izi, push başına artımlı inceleme, öteki araç değerlendirmesi ══════════
+# Kullanıcı (2026-11-10): "farklı bir agent yorumlarda dahil ise onun hatalı yorumlarını, yanlışlarını,
+# kaçırdıklarını yaz". #46052'de öteki araç 3,5 saatte 30 thread açtı, kendi önerisini tersine çevirdi,
+# aynı konuyu 2-3 kez açtı; bizim eski akışımız ise yeniden koşunca aynı bulguları yeniden yazıyordu.
+
+OTHER_VERDICTS = {
+    "wrong": "Hatalı",
+    "outdated": "Güncelliğini yitirmiş (kod değişmiş, thread hâlâ açık)",
+    "wrongly_closed": "Yanlışlıkla kapatılmış (sorun hâlâ kodda)",
+    "conflicting": "Kendi önceki önerisiyle çelişiyor ya da yeni sorun doğuruyor",
+    "ignores_decision": "İnsanın bu PR'da verdiği kararı yok sayıp konuyu yeniden açmış",
+    "partly": "Kısmen doğru",
+    "valid": "Doğru",
+}
+
+
+def clean_assessments(assessments: list[dict], others: list[dict]) -> list[dict]:
+    """Modelin değerlendirmesini öteki aracın thread GERÇEĞİNE göre süz (#45776/#46052 kuru koşusu):
+    · 'outdated' yalnız AÇIK thread için anlamlı — kapalı thread'de sorun gittiyse araç doğru kapatmıştır
+    · insanın yanıtladığı thread karara bağlanmıştır; orada aracı değerlendirmek gürültüdür
+    · listede olmayan ref atılır."""
+    known = {f["ref"].lstrip("#"): f for f in others}
+    out = []
+    for a in assessments:
+        f = known.get(a["ref"].lstrip("#"))
+        if not f or f["humans"]:
+            continue
+        if a["verdict"] == "outdated" and f["status"] not in _OPEN:
+            continue
+        out.append(a)
+    return out
+_OTHER_REF_RE = re.compile(r"claude-review:finding:([0-9a-f]{6,16})", re.IGNORECASE)
+
+
+def apply_questions(issues: list[dict], verdict: str) -> str:
+    """Yalnız iş kaleminin YORUMUNA dayanan madde (basis=interpretation) bloklamaz: önemi 'question'
+    olur, özette yazara soru olarak durur. #45776: 'statü süreç adımlarını yansıtmalı' major açıldı,
+    yazar 'statünün paketleme adımlarıyla ilgisi yok' diye reddetti. Karar buna göre yeniden kurulur."""
+    for it in issues:
+        if it.get("basis") == "interpretation":
+            it["severity"] = "question"
+    if verdict == "CHANGES_REQUIRED" and not any(i.get("severity") in INLINE_SEVERITIES for i in issues):
+        return "QUESTIONS" if any(i.get("severity") == "question" for i in issues) else "APPROVE"
+    return verdict
+
+
+def _slug(text: str, n: int = 6) -> str:
+    return "-".join(re.findall(r"[a-z0-9çğıöşü]+", (text or "").lower())[:n])
+
+
+def fingerprint(issue: dict) -> str:
+    """Bulgunun koşudan koşuya sabit kimliği: dosya + inceleyicinin verdiği kısa anahtar."""
+    key = issue.get("key") or _slug(issue.get("problem", ""))
+    return hashlib.sha1(f"{_key(issue.get('file', ''))}|{key}".encode()).hexdigest()[:10]
+
+
+def _live_comments(t: dict) -> list[dict]:
+    return [c for c in t.get("comments") or [] if not c.get("isDeleted")
+            and c.get("commentType") != "system" and (c.get("content") or "").strip()]
+
+
+def _thread_loc(t: dict) -> tuple[str, int]:
+    ctx = t.get("threadContext") or {}
+    return ctx.get("filePath") or "", int((ctx.get("rightFileStart") or {}).get("line") or 0)
+
+
+def _human_comments(cms: list[dict]) -> list[dict]:
+    return [c for c in cms if not _is_tempo_comment(c.get("content") or "") and not _is_other_bot(c)]
+
+
+def tempo_state(threads: list[dict], me: str = "") -> dict:
+    """PR'daki Tempo izleri: bulgu thread'leri (parmak izi → durum), tek özet thread'i, son incelenen commit.
+    `me` (PAT sahibi) verilirse yalnız onun yazdığı yorumlar sayılır — bir insanın alıntısı Tempo'nun değil."""
+    findings, summary, commit = {}, None, ""
+    for t in threads or []:
+        cms = _live_comments(t)
+        if not cms:
+            continue
+        first = cms[0]
+        if me and (first.get("author") or {}).get("id") not in (None, "", me):
+            continue
+        body = first.get("content") or ""
+        if SUMMARY_MARK in body:
+            summary = {"thread_id": t.get("id"), "comment_id": first.get("id"), "status": t.get("status") or "active"}
+            m = _COMMIT_RE.search(_plain(body))
+            commit = m.group(1) if m else commit
+            continue
+        m = _FP_RE.search(_plain(body))
+        if not m:
+            continue
+        path, line = _thread_loc(t)
+        findings[m.group(1)] = {
+            "thread_id": t.get("id"), "status": t.get("status") or "active", "key": m.group(2) or "",
+            "file": path, "line": line, "text": _plain(body)[:400],
+            "human_replied": bool(_human_comments(cms[1:])),
+        }
+    return {"findings": findings, "summary": summary, "commit": commit}
+
+
+def other_reviewer_findings(threads: list[dict]) -> list[dict]:
+    """PR'daki BAŞKA otomatik inceleme aracının bulguları (özet yorumları hariç), kronolojik."""
+    out = []
+    for t in sorted(threads or [], key=lambda x: x.get("publishedDate") or ""):
+        cms = _live_comments(t)
+        if not cms or not _is_other_bot(cms[0]):
+            continue
+        body = cms[0].get("content") or ""
+        path, line = _thread_loc(t)
+        m = _OTHER_REF_RE.search(body)
+        if "claude-review:summary" in body or (not path and not m):
+            continue   # özet / genel not: bulgu değil
+        humans = _human_comments(cms[1:])
+        bot_tail = [c for c in cms[1:] if _is_other_bot(c)]
+        status = t.get("status") or "active"
+        out.append({
+            "ref": (m.group(1).lower() if m else f"#{t.get('id')}"), "thread_id": t.get("id"), "status": status,
+            "file": path, "line": line, "date": (cms[0].get("publishedDate") or "")[:16],
+            "text": re.sub(r"\s+", " ", _plain(body)).strip(),
+            "humans": [(((c.get("author") or {}).get("displayName") or "?"), re.sub(r"\s+", " ", _plain(c.get("content") or ""))[:400])
+                       for c in humans],
+            "closed_by_tool": status in _RESOLVED and not humans,
+            "tool_note": re.sub(r"\s+", " ", _plain(bot_tail[-1].get("content") or ""))[:160] if bot_tail else "",
+            "assessed": any(ASSESS_MARK in (c.get("content") or "") for c in cms[1:]),
+        })
+    return out
+
+
+def _other_rows(others: list[dict], cap: int) -> str:
+    def row(f: dict) -> str:
+        st = f["status"] + (" — o araç kendisi kapattı" if f["closed_by_tool"] else "")
+        loc = f"{f['file']}:{f['line']}" if f["file"] else "genel"
+        lines = [f"- ref={f['ref']} · [{st}] · {loc} · {f['date']}", f"    {f['text'][:900]}"]
+        if f["tool_note"]:
+            lines.append(f"    · o aracın son notu: {f['tool_note']}")
+        lines += [f"    · İNSAN yanıtı ({who}): {txt}" for who, txt in f["humans"]]
+        return "\n".join(lines)
+    order = sorted(range(len(others)), key=lambda i: (0 if others[i]["status"] in _OPEN else
+                                                       1 if others[i]["closed_by_tool"] else 2, i))
+    keep, total = set(), 0
+    for i in order:
+        r = row(others[i])
+        if total + len(r) > cap:
+            continue
+        keep.add(i)
+        total += len(r)
+    rows = [row(others[i]) for i in range(len(others)) if i in keep]
+    if len(keep) < len(others):
+        rows.append(f"- … ({len(others) - len(keep)} bulgu daha yer kalmadığı için alınmadı)")
+    return "\n".join(rows)
+
+
+def review_contract_block(*, prior: dict, others: list[dict], incremental: tuple | None,
+                          questions: bool = True, cap_other: int = 16_000) -> str:
+    """İnsan PR'ı incelemesinin ek çıktı sözleşmesi: anahtar/dayanak, önceki Tempo bulguları,
+    artımlı kapsam, öteki aracın bulgularının değerlendirilmesi."""
+    out = ["\n\n# OUTPUT CONTRACT FOR THIS REVIEW (in addition to the task's format)",
+           "Every object in REVIEW_ISSUES_JSON.issues MUST also carry:",
+           '- "key": a short, stable kebab-case name of the DEFECT itself (e.g. '
+           '"stage-returns-array-not-stageresponse"), not of the line. The same defect gets the same key on '
+           "every review of this PR.",
+           '- "basis": "code" when the code is wrong on its own terms (crash, wrong result, broken contract, '
+           'failing test, data loss); "requirement" when it contradicts an explicit statement of the work item, '
+           'its acceptance criteria or a decision recorded on the PR (fill requirement_ids); "interpretation" '
+           "when it rests only on YOUR reading of ambiguous work-item text."
+           + (' An "interpretation" item never blocks: write its "problem" as a question to the author. Never '
+              "ask what a human already answered on this PR (PRIOR PR DISCUSSION) or in the work item comments — "
+              "that answer is the requirement now."
+              if questions else "")]
+    open_prior = {fp: f for fp, f in (prior or {}).items() if f.get("status") in _OPEN or f.get("human_replied")}
+    if open_prior:
+        out.append("\n## TEMPO'S EARLIER FINDINGS ON THIS PR")
+        for fp, f in open_prior.items():
+            out.append(f"- key={f.get('key') or '?'} · {f.get('file') or 'genel'}:{f.get('line') or ''} · "
+                       f"[{f.get('status')}{', a human replied' if f.get('human_replied') else ''}] · "
+                       f"{f.get('text', '')[:300]}")
+        out.append("If one of these is still present in the code you were given, report it again with EXACTLY the "
+                   "same key. If the code now fixes it, leave it out — that is how its thread gets closed. Do not "
+                   "re-raise one a human answered or closed unless the code contradicts that answer.")
+    if incremental:
+        base, paths = incremental
+        out.append(f"\n## INCREMENTAL REVIEW\nTempo last reviewed this PR at commit {base}. Only the files changed "
+                   f"since then are in the context ({len(paths)}): raise NEW findings only in those changes. The "
+                   "other changed files were reviewed before and have not changed.")
+    if others:
+        out += ["\n## ANOTHER AUTOMATED REVIEWER ON THIS PR",
+                "Its findings (ref = its id). Judge each against the CURRENT code you were given:",
+                _other_rows(others, cap_other),
+                "\nVerdicts: valid (correct — still present if its thread is open, or genuinely fixed if the tool "
+                "closed it) · wrong (the claim is false for this code — say exactly why, with file:line) · outdated "
+                "(ONLY for an OPEN thread: true for an earlier commit, no longer in the code) · wrongly_closed (the "
+                "tool closed its thread but the defect is still in the code) · conflicting (contradicts its own "
+                "earlier advice on this PR, or following it introduces a new defect — say which) · ignores_decision "
+                "(it raises again a point a human already settled on this PR — cite where) · partly (say which part "
+                "holds). Skip findings whose thread a HUMAN answered: that point is settled.",
+                "If you confirm one of its findings and it is blocking, include it in your issues with "
+                '"other_ref": "<its ref>" — it is already on the PR and will not be posted again. Leave '
+                '"other_ref" empty for everything it did not raise: those are what it MISSED.',
+                "After REVIEW_ISSUES_JSON output:\nOTHER_REVIEWER_JSON:\n```json\n"
+                '{"assessments": [{"ref": "<ref as listed>", "verdict": "<verdict>", "reason": "<Turkish, '
+                '1-2 sentences, with file:line>"}]}\n```\nAssess every listed finding.']
+    return "\n".join(out)
+
+
+def parse_other_assessment(text: str) -> list[dict]:
+    m = re.search(r"OTHER_REVIEWER_JSON\s*:?\s*```json\s*(\{.*?\})\s*```", text or "", re.S)
+    if not m:
+        return []
+    import json as _json
+    try:
+        raw = _json.loads(m.group(1)).get("assessments") or []
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for a in raw:
+        if not isinstance(a, dict):
+            continue
+        v = str(a.get("verdict") or "").strip().lower()
+        ref = str(a.get("ref") or "").strip().lower()
+        if v in OTHER_VERDICTS and ref:
+            out.append({"ref": ref.lstrip("#"),
+                        "verdict": v, "reason": str(a.get("reason") or "").strip()[:600]})
+    return out
+
+
+def _issue_row(i: dict) -> str:
+    loc = f"`{_key(i.get('file', ''))}:{i.get('line') or '?'}`"
+    return f"{loc} — {_plain(i.get('problem', ''))[:260]}"
+
+
+def tracked_summary_markdown(*, verdict: str, issues: list[dict], others: list[dict], assessments: list[dict],
+                             pr_id, work_item_id: str, files: int, head: str, build: dict | None = None,
+                             incremental: tuple | None = None) -> str:
+    """Tek özet thread'inin metni (her koşuda yerinde güncellenir)."""
+    blocking = [i for i in issues if i.get("severity") in INLINE_SEVERITIES]
+    questions = [i for i in issues if i.get("severity") == "question"]
+    head7 = (head or "")[:7]
+    state = ("🔴 Değişiklik gerekli" if blocking else "❓ Yanıt bekleyen soru var" if questions
+             else "✅ Bloklayan bulgu yok")
+    scope = (f"artımlı — `{incremental[0]}` sonrası değişen {incremental[1]} dosya" if incremental
+             else f"{files} dosya")
+    lines = [f"## 🔍 Tempo İnceleme — PR #{pr_id}",
+             f"**Durum:** {state} · **İncelenen:** {scope} · **WI:** #{work_item_id}"]
+    if build and (build.get("effective") or build.get("result")) not in (None, "succeeded"):
+        lines.append(f"**Build:** `{build.get('definition')}` {build.get('effective') or build.get('status')}"
+                     + (" (eski commit)" if build.get("stale") else ""))
+    if blocking:
+        lines += ["", "### Açık bulgular", "| Önem | Yer | Sorun |", "|---|---|---|"]
+        for i in blocking:
+            note = f" _(öteki aracın bulgusu `{i['other_ref']}`, doğrulandı)_" if i.get("other_ref") else ""
+            lines.append(f"| {i.get('severity')} | `{_key(i.get('file', ''))}:{i.get('line') or '?'}` | "
+                         f"{_plain(i.get('problem', ''))[:220].replace('|', '/')}{note} |")
+    if questions:
+        lines += ["", "### Yazara sorular", "_İş kaleminin yorumuna dayanıyor, bloklamaz; yanıtınız yeter._"]
+        lines += [f"- {_issue_row(i)}" for i in questions]
+    if others:
+        by = {}
+        for a in assessments:
+            by.setdefault(a["verdict"], []).append(a)
+        known = {f["ref"].lstrip("#"): f for f in others}
+        lines += ["", f"### Öteki inceleme aracı hakkında ({len(others)} bulgusu değerlendirildi)"]
+        for v in ("wrong", "wrongly_closed", "conflicting", "ignores_decision", "outdated", "partly"):
+            for a in by.get(v, []):
+                f = known.get(a["ref"], {})
+                loc = f" `{_key(f.get('file', ''))}:{f.get('line')}`" if f.get("file") else ""
+                lines.append(f"- **{OTHER_VERDICTS[v]}** — `{a['ref']}`{loc}: {a['reason']}")
+        if by.get("valid"):
+            lines.append(f"- **Doğru:** {len(by['valid'])} bulgusu doğrulandı (tekrar yazılmadı).")
+        missed = [i for i in blocking if not i.get("other_ref")]
+        if missed:
+            lines.append("- **Kaçırdıkları:**")
+            lines += [f"  - [{i.get('severity')}] {_issue_row(i)}" for i in missed]
+        if not assessments:
+            lines.append("- _Bulguları bu koşuda değerlendirilemedi._")
+    lines += ["", "---", f"*Tempo — PR İnceleme (danışma) · son incelenen commit: {head7} · {SUMMARY_MARK}*"]
+    return "\n".join(lines)
+
+
+def _worth_posting(issues: list[dict], assessments: list[dict], others: list[dict]) -> bool:
+    if any(i.get("severity") in INLINE_SEVERITIES or i.get("severity") == "question" for i in issues):
+        return True
+    return bool(others) and any(a["verdict"] not in ("valid",) for a in assessments)
+
+
+def sync_review(client, rname: str, pid, work_item_id: str, *, summary: str, issues: list[dict],
+                file_bodies: dict, reviewed: set[str], changed_since: set[str] | None, state: dict, head: str,
+                others: list[dict], assessments: list[dict], wi: bool = True) -> dict:
+    """PR'ı bu incelemeyle EŞİTLE (yeniden yazma değil):
+    · yeni bloklayan bulgu → satır yorumu (parmak izli); aynı bulgu zaten açıksa dokunulmaz
+    · öteki aracın zaten yazdığı ve doğrulanan bulgu tekrar yazılmaz
+    · Tempo'nun açık bulgusu artık yoksa VE dosyası son incelemeden beri değiştiyse → "çözüldü" + kapat
+    · Tempo'nun kapattığı bulgu geri geldiyse → yeniden aç; insanın yanıtladığı thread'e dokunulmaz
+    · tek özet thread'i yerinde güncellenir (son incelenen commit onda); WI'a yalnız ilk açılışta yazılır
+    · öteki aracın hatalı/eskimiş/yanlış kapatılmış/çelişen bulgusuna kendi thread'inde bir kez ikinci görüş"""
+    from agile_sdlc_crew.main import _add_wi_comment
+    posted = {"pr_summary": False, "inline": 0, "kept": 0, "resolved": 0, "reopened": 0, "assess": 0,
+              "wi": False, "suggestions": 0, "covered": 0}
+    head7 = (head or "")[:7]
+    found = state.get("findings") or {}
+    open_other = {f["ref"].lstrip("#") for f in others if f["status"] in _OPEN}
+    current = {}
+    for i in issues:
+        if i.get("severity") != "question":
+            current[fingerprint(i)] = i
+    # 1) bloklayan bulgular
+    new_posts = 0
+    for fp, it in current.items():
+        if it.get("severity") not in INLINE_SEVERITIES:
+            continue
+        if it.get("other_ref") and it["other_ref"].lower().lstrip("#") in open_other:
+            posted["covered"] += 1
+            continue
+        ex = found.get(fp)
+        if ex:
+            if ex["status"] in _OPEN:
+                posted["kept"] += 1
+            elif not ex["human_replied"]:
+                try:
+                    client.reply_to_pr_thread(rname, pid, ex["thread_id"],
+                                              f"🔁 `{head7}` commit'inde bu sorun yeniden görünüyor: "
+                                              f"{_plain(it.get('problem', ''))[:400]}\n\n*Tempo — PR İnceleme*")
+                    client.set_pr_thread_status(rname, pid, ex["thread_id"], "active")
+                    posted["reopened"] += 1
+                except Exception as e:  # noqa: BLE001
+                    log.info(f"  Thread yeniden açılamadı ({ex['thread_id']}): {e}")
+            continue
+        if new_posts >= MAX_INLINE_COMMENTS:
+            continue
+        try:
+            sug = verified_suggestion(it, file_bodies) or {}
+            fpath = it.get("file") or ""
+            fpath = fpath if fpath.startswith("/") else "/" + fpath
+            line, end = (sug["line_start"], sug["line_end"]) if sug else (int(it.get("line") or 1), None)
+            body = inline_comment_text(it, suggestion=sug) + f"\n\n*{FINDING_MARK}{fp} key:{it.get('key') or _slug(it.get('problem', ''))}*"
+            client.add_pr_comment(rname, pid, body, file_path=fpath, line_number=line, end_line=end)
+            posted["inline"] += 1
+            new_posts += 1
+            posted["suggestions"] += int(bool(sug))
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  Satır yorumu yazılamadı ({it.get('id')}): {e}")
+    # 2) düzelen bulgular: yalnız dosyası incelendi VE son incelemeden beri değiştiyse
+    if changed_since is not None:
+        for fp, ex in found.items():
+            f = _key(ex.get("file") or "")
+            if ex["status"] not in _OPEN or fp in current or not f:
+                continue
+            if f not in reviewed or f not in changed_since:
+                continue
+            try:
+                client.reply_to_pr_thread(rname, pid, ex["thread_id"],
+                                          f"✅ `{head7}` commit'inde çözülmüş görünüyor, thread kapatıldı.\n\n"
+                                          "*Tempo — PR İnceleme*")
+                client.set_pr_thread_status(rname, pid, ex["thread_id"], "fixed")
+                posted["resolved"] += 1
+            except Exception as e:  # noqa: BLE001
+                log.info(f"  Thread kapatılamadı ({ex['thread_id']}): {e}")
+    # 3) öteki araca ikinci görüş — kendi thread'inde, bir kez
+    known = {f["ref"].lstrip("#"): f for f in others}
+    for a in assessments:
+        f = known.get(a["ref"])
+        if not f or f["assessed"] or a["verdict"] == "valid" or not f.get("thread_id"):
+            continue
+        try:
+            client.reply_to_pr_thread(rname, pid, f["thread_id"],
+                                      f"**Tempo — ikinci görüş: {OTHER_VERDICTS[a['verdict']]}.** {a['reason']}\n\n"
+                                      f"*{ASSESS_MARK}{a['ref']} · Tempo — PR İnceleme*")
+            posted["assess"] += 1
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  Öteki araç thread'ine yazılamadı ({f['thread_id']}): {e}")
+    # 4) tek özet thread'i
+    worth = _worth_posting(issues, assessments, others)
+    summ = state.get("summary")
+    try:
+        if summ:
+            client.update_pr_comment(rname, pid, summ["thread_id"], summ["comment_id"], summary)
+            want = "active" if worth else "fixed"
+            if summ.get("status") != want:
+                client.set_pr_thread_status(rname, pid, summ["thread_id"], want)
+            posted["pr_summary"] = True
+        elif worth:
+            client.add_pr_comment(rname, pid, summary)
+            posted["pr_summary"] = True
+            if work_item_id and wi and any(i.get("severity") in INLINE_SEVERITIES for i in issues):
+                try:
+                    _add_wi_comment(client, work_item_id, summary)
+                    posted["wi"] = True
+                except Exception as e:  # noqa: BLE001
+                    log.info(f"  WI yorumu yazılamadı: {e}")
+        else:
+            log.info("  Bloklayan bulgu / soru / öteki araç düzeltmesi yok — özet yazılmadı")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"  PR özet yorumu yazılamadı: {e}")
+    return posted
+
+
+# ── Repo araçları: PR'ın birleşmiş hâli (hedef dal + PR) geçici worktree'de ──
+
+@contextlib.contextmanager
+def _null():
+    yield None
+
+
+def _has_decision(text: str) -> bool:
+    return bool(re.search(r"REVIEW_DECISION\s*:|REVIEW_ISSUES_JSON", text or ""))
+
+
+def repo_tools_note(path: str) -> str:
+    return ("\n\n# REPOSITORY CHECKOUT (read-only)\n"
+            f"The PR's MERGE RESULT (target branch + this PR — the code that will run after merge) is checked out "
+            f"at {path}. You may use Read / Grep / Glob there to verify cross-file behaviour the context does not "
+            "show: callers, base classes, interfaces, configuration, tests, how a value is consumed. Use it only to "
+            "confirm or refute a suspected defect — at most ~10 lookups, do not survey the repository. In issues, "
+            "paths stay repo-relative exactly as in the diff (never the checkout path).")
+
+
+@contextlib.contextmanager
+def pr_merge_checkout(repo: str, pid: int, branch: str = ""):
+    """`refs/pull/<id>/merge`'i (yoksa PR dalını) paylaşılan klonun geçici bir worktree'sine çıkarır.
+    Hook'lar kapalı; çıkışta worktree ve ref silinir. Klon yoksa / alınamazsa None verir.
+    #46052: kanıt PR'da HİÇ değişmeyen bir dosyadaydı — birleşmiş hâli okuyabilen inceleyici onu görür."""
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    if not re.fullmatch(r"[\w.-]+", repo or "") or int(pid) <= 0:
+        yield None
+        return
+    root = Path(os.environ.get("CREW_REPOS_DIR", "~/.crew_repos")).expanduser() / repo
+    if not (root / ".git").exists():
+        yield None
+        return
+
+    def git(*a, cwd=root):
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *a], cwd=str(cwd),
+                              capture_output=True, text=True, timeout=180)
+    ref = f"refs/tempo/pr-review-{int(pid)}-{os.getpid()}"
+    tmp = Path(tempfile.mkdtemp(prefix="tempo-prreview-"))
+    wt = tmp / "wt"
+    added = False
+    try:
+        r = git("fetch", "-q", "origin", f"+refs/pull/{int(pid)}/merge:{ref}")
+        if r.returncode != 0 and branch:
+            r = git("fetch", "-q", "origin", f"+refs/heads/{branch}:{ref}")
+        if r.returncode == 0:
+            added = git("worktree", "add", "-q", "--detach", str(wt), ref).returncode == 0
+        if not added:
+            log.info(f"  PR checkout alınamadı: {(r.stderr or r.stdout or '').strip()[:200]}")
+        yield wt if added else None
+    finally:
+        if added:
+            git("worktree", "remove", "--force", str(wt))
+        git("update-ref", "-d", ref)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── Push başına yeniden inceleme (sunucu yoklayıcısı) ──
+
+def _payload(job: dict) -> dict:
+    import json as _json
+    try:
+        return _json.loads(job.get("job_payload") or "{}") or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def auto_rerun_candidates(jobs: list[dict], now, max_per_day: int) -> list[dict]:
+    """Daha önce PR'a YAZAN (post) bir incelemesi olan, şu an koşmayan, günlük sınırı dolmamış PR'lar."""
+    from datetime import timedelta
+    by: dict[tuple, list[dict]] = {}
+    for j in jobs or []:
+        pr = str(j.get("pr_id") or "")
+        if j.get("repo_name") and pr.isdigit():
+            by.setdefault((j["repo_name"], pr), []).append(j)
+    out = []
+    for (repo, pr), js in by.items():
+        js = sorted(js, key=lambda j: -int(j.get("id") or 0))
+        if any(j.get("status") in ("queued", "running") for j in js):
+            continue
+        posted = [j for j in js if j.get("status") == "completed" and _payload(j).get("post")]
+        if not posted:
+            continue
+        recent = [j for j in js if j.get("created_at") and j["created_at"] >= now - timedelta(hours=24)]
+        if len(recent) >= max_per_day:
+            continue
+        wi = str(posted[0].get("work_item_id") or "")
+        out.append({"repo": repo, "pr_id": int(pr), "work_item_id": wi if wi.isdigit() else "",
+                    "last_head": _payload(posted[0]).get("head") or ""})
+    return out
+
+
+def poll_once(client, jobs: list[dict], spawn, now, *, debounce_min: int = 15, max_per_day: int = 4) -> int:
+    """Yeni push'u olan ilk adayı incelemeye gönderir (tek seferde bir — maliyet seri kalsın)."""
+    from datetime import datetime, timedelta, timezone
+    for c in auto_rerun_candidates(jobs, now, max_per_day):
+        try:
+            pr = client.get_pull_request(c["repo"], c["pr_id"])
+        except Exception as e:  # noqa: BLE001
+            log.info(f"  Oto-inceleme: PR #{c['pr_id']} okunamadı: {e}")
+            continue
+        if pr.get("status") != "active" or pr.get("isDraft"):
+            continue
+        head = ((pr.get("lastMergeSourceCommit") or {}).get("commitId") or "")
+        if not head or head == c["last_head"]:
+            continue
+        try:   # Azure: "2026-11-09T12:28:30.4411244Z" — 7 haneli kesir, fromisoformat 6 ister
+            d = (client.get_pr_last_push(c["repo"], c["pr_id"]) or {}).get("date") or ""
+            when = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", d.replace("Z", "+00:00"))) if d else None
+        except Exception:  # noqa: BLE001
+            when = None
+        if when is not None:
+            now_utc = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+            if now_utc - when < timedelta(minutes=debounce_min):
+                continue   # geliştirici hâlâ itiyor — #46052'de 3,5 saatte 11 push
+        spawn({**c, "head": head})
+        return 1
+    return 0
+
+
+def start_poller(spawn, *, enabled, interval_min, debounce_min, max_per_day):
+    """Arka planda push yoklayıcısı. Bayraklar her turda okunur (panelden kapatılınca susar)."""
+    import threading
+    import time
+    from datetime import datetime
+
+    def loop():
+        from agile_sdlc_crew import db
+        from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+        client = None
+        while True:
+            time.sleep(max(1, int(interval_min())) * 60)
+            try:
+                if not enabled():
+                    continue
+                client = client or AzureDevOpsClient()
+                poll_once(client, db.pr_review_jobs(days=14), spawn, datetime.now(),
+                          debounce_min=int(debounce_min()), max_per_day=int(max_per_day()))
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"PR oto-inceleme yoklaması hata verdi: {e}")
+
+    t = threading.Thread(target=loop, daemon=True, name="pr-review-poller")
+    t.start()
+    return t
