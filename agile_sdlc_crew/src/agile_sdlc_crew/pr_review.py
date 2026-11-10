@@ -1392,6 +1392,16 @@ def _worth_posting(issues: list[dict], assessments: list[dict], others: list[dic
     return bool(others) and any(a["verdict"] not in ("valid",) for a in assessments)
 
 
+def _mask(text: str) -> str:
+    """PR'a/WI'a giden metinde gizli değer kalıplarını maskele (Authorization, kullanıcı:şifre@, KEY=değer,
+    uzun gizli görünümlü diziler). Araçlı inceleyici bir dosyadan gizli değer okuyup alıntılasa bile yazılmaz."""
+    try:
+        from agile_sdlc_crew.quality.render import mask_secrets
+        return mask_secrets(text)
+    except Exception:  # noqa: BLE001
+        return text
+
+
 def sync_review(client, rname: str, pid, work_item_id: str, *, summary: str, issues: list[dict],
                 file_bodies: dict, reviewed: set[str], changed_since: set[str] | None, state: dict, head: str,
                 others: list[dict], assessments: list[dict], wi: bool = True) -> dict:
@@ -1426,9 +1436,9 @@ def sync_review(client, rname: str, pid, work_item_id: str, *, summary: str, iss
                 posted["kept"] += 1
             elif not ex["human_replied"]:
                 try:
-                    client.reply_to_pr_thread(rname, pid, ex["thread_id"],
+                    client.reply_to_pr_thread(rname, pid, ex["thread_id"], _mask(
                                               f"🔁 `{head7}` commit'inde bu sorun yeniden görünüyor: "
-                                              f"{_plain(it.get('problem', ''))[:400]}\n\n*Tempo — PR İnceleme*")
+                                              f"{_plain(it.get('problem', ''))[:400]}\n\n*Tempo — PR İnceleme*"))
                     client.set_pr_thread_status(rname, pid, ex["thread_id"], "active")
                     posted["reopened"] += 1
                 except Exception as e:  # noqa: BLE001
@@ -1442,7 +1452,7 @@ def sync_review(client, rname: str, pid, work_item_id: str, *, summary: str, iss
             fpath = fpath if fpath.startswith("/") else "/" + fpath
             line, end = (sug["line_start"], sug["line_end"]) if sug else (int(it.get("line") or 1), None)
             body = inline_comment_text(it, suggestion=sug) + f"\n\n*{FINDING_MARK}{fp} key:{it.get('key') or _slug(it.get('problem', ''))}*"
-            client.add_pr_comment(rname, pid, body, file_path=fpath, line_number=line, end_line=end)
+            client.add_pr_comment(rname, pid, _mask(body), file_path=fpath, line_number=line, end_line=end)
             posted["inline"] += 1
             new_posts += 1
             posted["suggestions"] += int(bool(sug))
@@ -1471,9 +1481,9 @@ def sync_review(client, rname: str, pid, work_item_id: str, *, summary: str, iss
         if not f or f["assessed"] or a["verdict"] == "valid" or not f.get("thread_id"):
             continue
         try:
-            client.reply_to_pr_thread(rname, pid, f["thread_id"],
+            client.reply_to_pr_thread(rname, pid, f["thread_id"], _mask(
                                       f"**Tempo — ikinci görüş: {OTHER_VERDICTS[a['verdict']]}.** {a['reason']}\n\n"
-                                      f"*{ASSESS_MARK}{a['ref']} · Tempo — PR İnceleme*")
+                                      f"*{ASSESS_MARK}{a['ref']} · Tempo — PR İnceleme*"))
             posted["assess"] += 1
         except Exception as e:  # noqa: BLE001
             log.info(f"  Öteki araç thread'ine yazılamadı ({f['thread_id']}): {e}")
@@ -1482,17 +1492,17 @@ def sync_review(client, rname: str, pid, work_item_id: str, *, summary: str, iss
     summ = state.get("summary")
     try:
         if summ:
-            client.update_pr_comment(rname, pid, summ["thread_id"], summ["comment_id"], summary)
+            client.update_pr_comment(rname, pid, summ["thread_id"], summ["comment_id"], _mask(summary))
             want = "active" if worth else "fixed"
             if summ.get("status") != want:
                 client.set_pr_thread_status(rname, pid, summ["thread_id"], want)
             posted["pr_summary"] = True
         elif worth:
-            client.add_pr_comment(rname, pid, summary)
+            client.add_pr_comment(rname, pid, _mask(summary))
             posted["pr_summary"] = True
             if work_item_id and wi and any(i.get("severity") in INLINE_SEVERITIES for i in issues):
                 try:
-                    _add_wi_comment(client, work_item_id, summary)
+                    _add_wi_comment(client, work_item_id, _mask(summary))
                     posted["wi"] = True
                 except Exception as e:  # noqa: BLE001
                     log.info(f"  WI yorumu yazılamadı: {e}")
@@ -1552,7 +1562,16 @@ def pr_merge_checkout(repo: str, pid: int, branch: str = ""):
         if r.returncode != 0 and branch:
             r = git("fetch", "-q", "origin", f"+refs/heads/{branch}:{ref}")
         if r.returncode == 0:
-            added = git("worktree", "add", "-q", "--detach", str(wt), ref).returncode == 0
+            # Sembolik bağ YOK: PR yazarı `x -> ~/.ssh/id_rsa` ya da `-> .env` koyarsa araçlı inceleyici onu
+            # okuyup içeriği PR yorumuna taşıyabilirdi. symlinks=false bağı hedef yolunu içeren düz dosya yapar;
+            # yine de kalan bağ olursa silinir (savunma katmanı).
+            added = git("-c", "core.symlinks=false", "worktree", "add", "-q", "--detach", str(wt), ref).returncode == 0
+        if added:
+            for dp, dns, fns in os.walk(wt, followlinks=False):
+                for n in dns + fns:
+                    p = os.path.join(dp, n)
+                    if os.path.islink(p):
+                        os.unlink(p)
         if not added:
             log.info(f"  PR checkout alınamadı: {(r.stderr or r.stdout or '').strip()[:200]}")
         yield wt if added else None

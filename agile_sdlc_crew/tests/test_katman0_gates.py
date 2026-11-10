@@ -7298,7 +7298,11 @@ def test_pr_review_tracking():
         open(os.path.join(src, "a.txt"), "w").write("main\n")
         g("add", ".", cwd=src); g("commit", "-q", "-m", "m", cwd=src)
         open(os.path.join(src, "a.txt"), "w").write("merged\n")
-        g("commit", "-q", "-am", "pr", cwd=src)
+        secret = os.path.join(td, "secret.env")
+        open(secret, "w").write("DB_PASSWORD=hunter2\n")
+        os.symlink(secret, os.path.join(src, "leak.env"))       # PR yazarı repodan dışarı bağ koyuyor
+        g("add", "-A", cwd=src)
+        g("commit", "-q", "-m", "pr", cwd=src)
         g("update-ref", "refs/pull/7/merge", "HEAD", cwd=src)
         g("reset", "-q", "--hard", "HEAD~1", cwd=src)
         repos = os.path.join(td, "repos"); os.makedirs(repos)
@@ -7309,6 +7313,9 @@ def test_pr_review_tracking():
             with prv.pr_merge_checkout("channel", 7, "feat") as wt:
                 seen = open(os.path.join(wt, "a.txt")).read() if wt else ""
                 wt_path = str(wt)
+                leak = os.path.join(wt, "leak.env")
+                leak_is_link = os.path.islink(leak)
+                leak_text = open(leak).read() if os.path.exists(leak) and not leak_is_link else ""
             with prv.pr_merge_checkout("../etc", 7) as bad:
                 pass
         finally:
@@ -7324,6 +7331,22 @@ def test_pr_review_tracking():
               not os.path.exists(wt_path) and refs_left == "" and wts.count("\n") == 1
               and open(os.path.join(clone, "a.txt")).read() == "main\n")
         check("PR checkout: geçersiz repo adı reddedilir", bad is None)
+        check("PR checkout: PR'daki sembolik bağ repodan dışarı açılmaz (gizli dosya okunamaz)",
+              not leak_is_link and "hunter2" not in leak_text, leak_text)
+
+    fz5 = FakeAz()
+    leaky = [{"id": "R1", "file": "app/Z.php", "line": 2, "severity": "major", "key": "leak", "basis": "code",
+              "problem": "config şunu içeriyor: Authorization: Basic dXNlcjpzM2NyM3RQYXNz ve DB_PASSWORD=hunter2"}]
+    _main._add_wi_comment = lambda c, w, t: None
+    try:
+        prv.sync_review(fz5, "channel", 7, "", summary="ozet DB_PASSWORD=hunter2", issues=leaky, file_bodies={},
+                        reviewed=set(), changed_since=None, state={"findings": {}, "summary": None}, head="h",
+                        others=[], assessments=[])
+    finally:
+        _main._add_wi_comment = _orig
+    sent = " ".join(c[2] for c in fz5.calls if c[0] == "add")
+    check("PR'a giden metinde gizli değer maskelenir", "hunter2" not in sent and "dXNlcjpzM2NyM3RQYXNz" not in sent
+          and "***" in sent, sent[:300])
 
     src_txt = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/pr_review.py").read_text()
     check("araçlı inceleme boş dönerse araçsız yeniden koşar",
