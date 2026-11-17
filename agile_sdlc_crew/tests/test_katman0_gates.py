@@ -7690,6 +7690,62 @@ def test_upgrade_php_rules():
           and by["curly_offset"].since == (8, 0))
 
 
+def test_upgrade_plan_sites():
+    """Yükseltme hedefi ve sürüm yerleri: seçilebilir sürümler, imaj kanıtı, CI ve kod siteleri."""
+    print("\n[upgrade: hedef sürüm ve sürüm yerleri]")
+    import tempfile
+    from pathlib import Path
+    from agile_sdlc_crew.quality import intake, upgrade
+    index = {"core": [{"src": "anatolia/build/lojistik", "images": ["eu/prod-ar/php-8-2:1.0"]},
+                      {"src": "russia/build/lojistik", "images": ["10.1.1.1:5000/prod-ar/php-8-2:1.0"]}],
+             "web": [{"src": "anatolia/build/web", "images": ["eu/prod-ar/php-8-4:1.0"]}]}
+    check("varsayılan hedef: yayınlanmış en yüksek imaj", upgrade.default_target("php", "8.2", index) == "8.4")
+    sel = upgrade.selectable("php", "8.2", index)
+    check("seçilebilir: listedeki her üst sürüm", [s["version"] for s in sel] == ["8.3", "8.4", "8.5"])
+    # Görev 2 PHP 8.5 kırılma kurallarını kataloğa ekledi (noncanonical_casts_85) → catalog True
+    check("8.5 seçilebilir: imajı yok ama katalog kuralı var",
+          sel[-1]["published"] is False and sel[-1]["catalog"] is True and sel[1]["published"] is True)
+    check("Go: listenin sonuncusu varsayılan", upgrade.default_target("go", "1.24", {}) == "1.27")
+    check("imaj adı", upgrade.image_for("eu/prod-ar/php-8-2:1.0", "php", "8.4") == "eu/prod-ar/php-8-4:1.0")
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "core"
+        root.mkdir()
+        (root / "composer.json").write_text('{\n  "require": {\n    "php": "^8.2"\n  }\n}\n')
+        df = {"/build/lojistik/Dockerfile": "FROM scratch\nFROM eu/prod-ar/php-8-2:1.0\n"}
+        read = lambda d, p: ("FROM 10.1.1.1:5000/prod-ar/php-8-2:1.0\n" if d == "russia" else "FROM eu/prod-ar/php-8-2:1.0\n")
+        yml = {"Test Pipelines/core.yml": "variables:\n  phpVersion: '8.2'\nresources:\n  - repository: s\n    name: EcomBackend/core\n",
+               "Test Pipelines/other.yml": "variables:\n  phpVersion: '8.2'\nresources:\n    name: EcomBackend/other\n"}
+        ss = upgrade.sites(None, "core", root, "php", "8.2", "8.4", index, read=read, yml_files=yml)
+        dv = {s["repo"]: s for s in ss if s["where"] == "devops"}
+        check("anatolia sitesi açık", dv["anatolia"]["blocked"] == "" and dv["anatolia"]["path"] == "/build/lojistik/Dockerfile"
+              and dv["anatolia"]["line"] == 1 and dv["anatolia"]["new"] == "eu/prod-ar/php-8-4:1.0", str(dv))
+        check("russia imajı yayınlanmamış → engelli", "yayınlanmamış" in dv["russia"]["blocked"], str(dv["russia"]))
+        ci = [s for s in ss if s["where"] == "ci"]
+        check("CI sitesi yalnız core'u anan dosya", [s["path"] for s in ci] == ["Test Pipelines/core.yml"]
+              and ci[0]["line"] == 2 and ci[0]["old"] == "'8.2'" and ci[0]["new"] == "'8.4'", str(ci))
+        cs = [s for s in ss if s["where"] == "code"]
+        check("kod sitesi: composer require.php", len(cs) == 1 and cs[0]["path"] == "composer.json" and cs[0]["line"] == 3
+              and cs[0]["old"] == "^8.2" and cs[0]["new"] == "^8.4", str(cs))
+        deps = intake.Deps(gather=None, board=None, repo_ok=lambda r: True, queue=None, record=None, now=None,
+                           cfg=lambda: {"repos_dir": str(base)})
+        p85 = upgrade.plan(None, "core", "php", to="8.5", deps=deps, index=index, read=read, yml_files=yml)
+        check("yayınlanmamış hedef: bütün üretim siteleri engelli",
+              p85["sites"] and all("yayınlanmamış" in s["blocked"] for s in p85["sites"] if s["where"] == "devops"))
+        p84 = upgrade.plan(None, "core", "php", to="8.4", deps=deps, index=index, read=read, yml_files=yml)
+        check("plan: current/target/up_to_date", p84["current"] == "8.2" and p84["target"] == "8.4" and not p84["up_to_date"]
+              and len(p84["per_src"]) == 2, str(p84["current"]))
+        for bad in ("9.9", "8.4; rm", "8.1"):
+            try:
+                upgrade.plan(None, "core", "php", to=bad, deps=deps, index=index)
+                check(f"geçersiz hedef {bad}", False)
+            except ValueError as e:
+                check(f"geçersiz hedef {bad}", "Hedef sürüm seçilemez" in str(e))
+        idx2 = {"core": [{"src": "anatolia/build/lojistik", "images": ["eu/prod-ar/php-8-4:1.0"]}]}
+        pu = upgrade.plan(None, "core", "php", deps=deps, index=idx2)
+        check("güncel repo: up_to_date, site yok", pu["up_to_date"] is True and pu["sites"] == [], str(pu))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -7783,7 +7839,7 @@ def main():
               test_modern_multilang,
               test_modern_sp,
               test_upgrade_rules,
-              test_php_modern_82_84, test_upgrade_php_rules,
+              test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,
