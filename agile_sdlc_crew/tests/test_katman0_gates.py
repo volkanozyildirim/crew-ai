@@ -6381,9 +6381,10 @@ class _BumpFake:
     """upgrade_bump testleri için sahte Azure istemcisi: gerçek ağa çıkmaz."""
 
     def __init__(self, files, forbid=(), branches=None, prs=None, me="tempo-id", boom=(),
-                 create_result=None):
+                 create_result=None, deny_ops=()):
         import requests
         self._rq = requests
+        self.deny_ops = set(deny_ops)       # boşsa her işlemde; doluysa yalnız bu işlemlerde hata ver
         self.files = {(p, r, b, pa.lstrip("/")): v for (p, r, b, pa), v in files.items()}
         self.forbid, self.boom = set(forbid), dict(boom)
         self.oids = {}                      # (project, repo) -> {branch: oid}
@@ -6392,6 +6393,7 @@ class _BumpFake:
         self.existing_prs, self.me = prs or {}, me
         self.create_result = create_result or {}
         self.created, self.pushes, self.prs, self.writes = [], [], [], 0
+        self.created_oid = []
 
     def _bs(self, project, repo):
         return self.oids.setdefault((project, repo), {"main": "oid-main", "production": "oid-production"})
@@ -6411,7 +6413,9 @@ class _BumpFake:
     def find_pull_request(self, repo, source_branch, *, project=None):
         return self.existing_prs.get((project, repo, source_branch))
 
-    def _deny(self, repo):
+    def _deny(self, repo, op=""):
+        if self.deny_ops and op not in self.deny_ops:
+            return
         if repo in self.forbid:
             raise self._rq.HTTPError("403", response=SimpleNamespace(status_code=403))
         if repo in self.boom:
@@ -6420,34 +6424,45 @@ class _BumpFake:
                 raise self._rq.HTTPError(str(exc), response=SimpleNamespace(status_code=exc))
             raise exc
 
-    def create_branch(self, repo, branch_name, source_branch="main", project=None):
-        self._deny(repo)
+    def create_branch(self, repo, branch_name, source_branch="main", project=None, source_object_id=None):
+        self._deny(repo, "create")
         res = self.create_result.get(repo)
         if res is not None:
             return res
         bs = self._bs(project, repo)
-        bs[branch_name] = bs[source_branch]
+        bs[branch_name] = source_object_id or bs[source_branch]
+        self.created_oid.append(source_object_id)
         self.created.append((project, repo, branch_name, source_branch))
         self.writes += 1
         return {"value": [{"success": True, "updateStatus": "succeeded"}]}
 
-    def push_changes(self, repo, branch, changes, commit_message, project=None):
-        self._deny(repo)
+    def push_changes(self, repo, branch, changes, commit_message, project=None, old_object_id=None):
+        self._deny(repo, "push")
         self.pushes.append({"repo": repo, "branch": branch, "changes": changes,
-                            "project": project, "msg": commit_message})
+                            "project": project, "msg": commit_message, "old_object_id": old_object_id})
         for c in changes:
-            self.files[(project, repo, branch, c["path"].lstrip("/"))] = c["content"]
+            self.files[(project, repo, branch, c["path"].lstrip("/"))] = (
+                __import__("base64").b64decode(c["content"]) if c.get("contentType") == "base64encoded"
+                else c["content"])
         self._bs(project, repo)[branch] = "oid-pushed"
         self.writes += 1
 
     def create_pull_request(self, repo, source_branch, target_branch="main", title="",
                             description="", work_item_ids=None, draft=False, project=None):
-        self._deny(repo)
+        self._deny(repo, "pr")
         n = 100 + len(self.prs)
         self.prs.append({"repo": repo, "draft": draft, "project": project, "target": target_branch,
                          "wi": work_item_ids, "title": title, "id": n})
         self.writes += 1
         return {"pullRequestId": n, "repository": {"name": repo}}
+
+
+def _bump_dec(change):
+    """push_changes'e giden değişikliğin içeriği (base64ise çözülmüş metin)."""
+    import base64
+    if change.get("contentType") == "base64encoded":
+        return base64.b64decode(change["content"]).decode("utf-8")
+    return change["content"]
 
 
 def test_upgrade_bump_sites():
@@ -6538,15 +6553,18 @@ def test_upgrade_bump_sites():
     check("repo başına tek commit, iki dosya", len(pa) == 1 and len(pa[0]["changes"]) == 2)
     ca = {c["path"].lstrip("/"): c for c in pa[0]["changes"]}
     check("aynı dosyada iki site de uygulanır, başka satıra dokunulmaz",
-          ca["build/a/Dockerfile"]["content"] == "FROM eu/php-8-4:1.0\nRUN x\nFROM eu/php-8-4:1.0 AS b\n"
+          _bump_dec(ca["build/a/Dockerfile"]) == "FROM eu/php-8-4:1.0\nRUN x\nFROM eu/php-8-4:1.0 AS b\n"
           and ca["build/a/Dockerfile"]["changeType"] == "edit"
           and all(c["path"].startswith("/") for c in pa[0]["changes"]))
     check("başka projedeki repoya WI bağlanmaz", all(c["wi"] is None for c in fc.prs))
     check("r['prs'] biçimi", set(r["prs"][0]) >= {"repo", "id", "url"} and r["fallback"] == []
           and r["errors"] == [])
-    check("yol normalleşir: /a ve a aynı dosya (tek commit, çift değişiklik yok)",
-          len(_BumpFake(files).pushes) == 0 and len(bump.push_sites(
-              _BumpFake(files), [s_a1, dict(s_a3, path="/build/a/Dockerfile")], **kw)["prs"]) == 1)
+    fnorm = _BumpFake(files)
+    bump.push_sites(fnorm, [s_a1, dict(s_a3, path="/build/a/Dockerfile")], **kw)
+    check("yol normalleşir: /a ve a aynı dosya → push'ta TAM BİR değişiklik, iki site de uygulanmış",
+          len(fnorm.pushes) == 1 and len(fnorm.pushes[0]["changes"]) == 1
+          and _bump_dec(fnorm.pushes[0]["changes"][0]) ==
+          "FROM eu/php-8-4:1.0\nRUN x\nFROM eu/php-8-4:1.0 AS b\n", str(fnorm.pushes))
 
     # 403 → diff
     ff = _BumpFake(files, forbid={"anatolia"})
@@ -6667,7 +6685,7 @@ def test_upgrade_bump_sites():
           and fn.writes == 0)
     fj = _BumpFake({("FLODevOps", "russia", "production", "build/r/Dockerfile"): "FROM eu/php-8-2:1.0\n# é\n"})
     rj = bump.push_sites(fj, [s_r], **kw)
-    check("I5: UTF-8 içerik bayt-bayt korunur", fj.pushes[0]["changes"][0]["content"] ==
+    check("I5: UTF-8 içerik bayt-bayt korunur", _bump_dec(fj.pushes[0]["changes"][0]) ==
           "FROM eu/php-8-4:1.0\n# é\n", str(rj))
 
     # dal zaten var: C1 + S1 + I4
@@ -6683,11 +6701,12 @@ def test_upgrade_bump_sites():
     fe = _BumpFake(files, branches=branches_with("oid-foreign"))
     check("dal var, PR yok, boş değil → ValueError, dokunulmaz",
           raises(lambda: bump.push_sites(fe, [s_r], **kw), ValueError) and fe.writes == 0)
-    fe2 = _BumpFake(files, branches=branches_with("oid-foreign"), prs={("FLODevOps", "russia", bn): pr()})
+    fe2 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): "FROM eu/php-8-4:1.0\n"},
+                    branches=branches_with("oid-ours"), prs={("FLODevOps", "russia", bn): pr()})
     r = bump.push_sites(fe2, [s_r], **kw)
-    check("dal var + Tempo'nun açık PR'ı + hedef aynı → aynı PR'a push, yeni PR/dal yok",
-          len(fe2.pushes) == 1 and not fe2.created and not fe2.prs
-          and r["prs"] == [{"repo": "russia", "id": 55, "url": "https://x/55"}], str(r))
+    check("dal var + Tempo'nun açık PR'ı + içerik zaten bizim → reused, hiçbir yazma yok",
+          fe2.writes == 0 and not fe2.pushes and not fe2.prs and not fe2.created
+          and r["prs"] == [{"repo": "russia", "id": 55, "url": "https://x/55", "reused": True}], str(r))
     fe3 = _BumpFake(files, branches=branches_with("oid-foreign"),
                     prs={("FLODevOps", "russia", bn): pr(status="completed")})
     check("dal var, PR kapanmış → ValueError",
@@ -6716,17 +6735,26 @@ def test_upgrade_bump_sites():
           not fr1.created and len(fr1.pushes) == 1 and len(fr1.prs) == 1 and r["prs"][0]["repo"] == "russia", str(r))
     fr2 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): "FROM eu/php-8-4:1.0\n"},
                     branches=branches_with("oid-ours"))
-    r = bump.push_sites(fr2, [s_r], **kw)
-    check("I4: dalda bizim commit'imiz var, PR yok → yalnız PR açılır",
-          not fr2.created and not fr2.pushes and len(fr2.prs) == 1, str(r))
+    try:
+        r = bump.push_sites(fr2, [s_r], **kw)
+    except ValueError as e:
+        r = str(e)
+    check("S1: dalda bizim içerik (+ yabancı commit olabilir) var, PR yok → ValueError, yazma ve PR yok",
+          isinstance(r, str) and bn in r and "silin" in r and fr2.writes == 0 and not fr2.prs, str(r))
     fr3 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): "FROM eu/php-8-9:1.0\n"},
                     branches=branches_with("oid-ours"))
     check("I4: dalda farklı içerik, PR yok → ValueError",
           raises(lambda: bump.push_sites(fr3, [s_r], **kw), ValueError) and fr3.writes == 0)
-    fr4 = _BumpFake(files, forbid={"russia"}, branches=branches_with("oid-production"))
+    fr4 = _BumpFake(files, forbid={"russia"}, deny_ops={"push"})
     r = bump.push_sites(fr4, [s_r], **kw)
-    check("I4: boş dalda push 403 → fallback; yeniden denemede yine çalışır",
-          len(r["fallback"]) == 1 and r["prs"] == [])
+    check("I4: yeni dal oluşturuldu, push 403 → fallback, boş dal kaldı",
+          len(r["fallback"]) == 1 and r["prs"] == [] and len(fr4.created) == 1
+          and fr4._bs("FLODevOps", "russia")[bn] == "oid-production", str(r))
+    fr4.forbid.clear()
+    r2 = bump.push_sites(fr4, [s_r], **kw)
+    check("I4: ikinci koşu (artık boş dal) → create_branch yok, push + PR",
+          len(fr4.created) == 1 and len(fr4.pushes) == 1 and len(r2["prs"]) == 1
+          and r2["fallback"] == [] and r2["errors"] == [], str(r2))
 
     # kod reposu sitesi: project boş → client None geçer, WI bağlanır
     files_c = {(None, "core", "main", "composer.json"): '{"require": {"php": ">=8.2"}}\n'}
@@ -6737,7 +6765,7 @@ def test_upgrade_bump_sites():
     check("kod reposu: project=None, WI bağlanır",
           fcc.pushes[0]["project"] is None and fcc.prs[0]["project"] is None
           and fcc.prs[0]["wi"] == [7]
-          and fcc.pushes[0]["changes"][0]["content"] == '{"require": {"php": ">=8.4"}}\n', str(fcc.pushes))
+          and _bump_dec(fcc.pushes[0]["changes"][0]) == '{"require": {"php": ">=8.4"}}\n', str(fcc.pushes))
 
     # istemci: project parametresi opsiyonel ve geriye uyumlu
     import inspect
@@ -6748,6 +6776,131 @@ def test_upgrade_bump_sites():
     p = inspect.signature(C.find_pull_request).parameters["project"]
     check("find_pull_request keyword-only project", p.kind is p.KEYWORD_ONLY)
     check("get_file_bytes var", "get_file_bytes" in dir(C))
+
+
+def test_upgrade_bump_round2():
+    """Fix round 2: mevcut dala push yok (S1/S1b), hedef objectId sabitlenir (H1), baytlar aynen (H2),
+    aşama/dal bilgisi (M1), her istisna repo başına yakalanır (M2), yol kenar durumları (M3)."""
+    print("\n[Sürüm adımı: sertleştirme turu 2]")
+    import base64
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+
+    def raises(fn, exc=ValueError):
+        try:
+            fn()
+        except exc:
+            return True
+        except Exception:
+            return False
+        return False
+
+    def mk(repo, path, line, old, new, project="FLODevOps", branch="production"):
+        return {"where": "devops", "repo": repo, "project": project, "branch": branch, "path": path,
+                "line": line, "old": old, "new": new, "blocked": ""}
+
+    dock = "FROM eu/php-8-2:1.0\n"
+    rpath = ("FLODevOps", "russia", "production", "build/r/Dockerfile")
+    files = {("FLODevOps", "anatolia", "production", "build/a/Dockerfile"): dock, rpath: dock}
+    s_a = mk("anatolia", "build/a/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    s_r = mk("russia", "build/r/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    bn = "tempo/upgrade-php-core-8.4"
+    kw = dict(branch=bn, title="T", body="B", wi_id=7)
+    new_ru = "FROM eu/php-8-4:1.0\n"
+
+    def br(oid):
+        return {("FLODevOps", "russia"): {"main": "oid-main", "production": "oid-production", bn: oid}}
+
+    def pr(**o):
+        d = {"id": 55, "status": "active", "url": "https://x/55", "closed_at": "",
+             "merge_commit": "", "target": "production", "created_by": "tempo-id"}
+        d.update(o)
+        return d
+
+    # S1: yabancı commit'li önceden oluşturulmuş dal, PR yok
+    f1 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): new_ru,
+                    ("FLODevOps", "russia", bn, "other.txt"): "foreign"}, branches=br("oid-foreign"))
+    try:
+        bump.push_sites(f1, [s_r], **kw)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check("S1: bizim içerik + yabancı commit, PR yok → ValueError (dalı adıyla sil de), yazma/PR yok",
+          bn in msg and "silin" in msg and f1.writes == 0 and not f1.prs, msg)
+    # S1b: Tempo PR'ı, dalda içerik farklı / dosya yok
+    f2 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): "FROM eu/php-8-9:1.0\n"},
+                   branches=br("oid-ours"), prs={("FLODevOps", "russia", bn): pr()})
+    try:
+        bump.push_sites(f2, [s_r], **kw)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check("S1b: Tempo PR'ı ama dal içeriği farklı → ValueError (PR no + dal), yazma yok",
+          "PR dalı güncel değil" in msg and "55" in msg and bn in msg and f2.writes == 0, msg)
+    f2b = _BumpFake(files, branches=br("oid-ours"), prs={("FLODevOps", "russia", bn): pr()})
+    check("S1b: Tempo PR'ı, dalda dosya yok → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(f2b, [s_r], **kw)) and f2b.writes == 0)
+    f2c = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): new_ru},
+                    branches=br("oid-ours"), prs={("FLODevOps", "russia", bn): pr()})
+    r = bump.push_sites(f2c, [s_a, s_r], **kw)
+    check("S1b: reused yalnız o repoda; öteki repo normal akar",
+          [(p["repo"], p.get("reused", False)) for p in r["prs"]] == [("anatolia", False), ("russia", True)]
+          and len(f2c.pushes) == 1 and f2c.pushes[0]["repo"] == "anatolia", str(r))
+
+    # H1: hedef objectId sabitlenir
+    f3 = _BumpFake(files)
+    bump.push_sites(f3, [s_r], **kw)
+    check("H1: create_branch source_object_id = doğrulanan hedef oid",
+          f3.created_oid == ["oid-production"], str(f3.created_oid))
+    check("H1: push_changes old_object_id = aynı oid", f3.pushes[0]["old_object_id"] == "oid-production",
+          str(f3.pushes[0]["old_object_id"]))
+    f3b = _BumpFake(files, branches=br("oid-production"))
+    bump.push_sites(f3b, [s_r], **kw)
+    check("H1: artık boş dalda da push o oid üzerine, create yok",
+          not f3b.created and f3b.pushes[0]["old_object_id"] == "oid-production")
+
+    # H2: BOM + CRLF bayt-bayt
+    orig = b"\xef\xbb\xbfFROM eu/php-8-2:1.0\r\nRUN x\r\n"
+    f4 = _BumpFake({**files, rpath: orig})
+    bump.push_sites(f4, [s_r], **kw)
+    ch = f4.pushes[0]["changes"][0]
+    got = base64.b64decode(ch["content"])
+    check("H2: contentType base64encoded", ch.get("contentType") == "base64encoded", str(ch.get("contentType")))
+    check("H2: BOM + CRLF — yalnız düzenlenen satır farklı, bayt-bayt",
+          got == orig.replace(b"php-8-2", b"php-8-4") and got.startswith(b"\xef\xbb\xbf"), repr(got))
+
+    # M1: aşama + dal yazıldı mı
+    f5 = _BumpFake(files, forbid={"russia"}, deny_ops={"pr"})
+    r = bump.push_sites(f5, [s_r], **kw)
+    e = (r["fallback"] or [{}])[0]
+    check("M1: PR oluşturma 403 → fallback stage 'pr', branch_written True",
+          e.get("stage") == "pr" and e.get("branch_written") is True and len(f5.pushes) == 1, str(r))
+    f6 = _BumpFake(files, forbid={"russia"}, deny_ops={"create"})
+    e = (bump.push_sites(f6, [s_r], **kw)["fallback"] or [{}])[0]
+    check("M1: dal oluşturma 403 → stage 'create', branch_written False",
+          e.get("stage") == "create" and e.get("branch_written") is False, str(e))
+    f7 = _BumpFake(files, boom={"russia": 500}, deny_ops={"push"})
+    e = (bump.push_sites(f7, [s_r], **kw)["errors"] or [{}])[0]
+    check("M1: push 500 → errors stage 'push', branch_written True (dal oluşturuldu)",
+          e.get("stage") == "push" and e.get("branch_written") is True, str(e))
+    f8 = _BumpFake(files, boom={"russia": 500}, deny_ops={"pr"})
+    e = (bump.push_sites(f8, [s_r], **kw)["errors"] or [{}])[0]
+    check("M1: PR 500 → errors stage 'pr', branch_written True",
+          e.get("stage") == "pr" and e.get("branch_written") is True, str(e))
+
+    # M2: dict olmayan value[0]
+    f9 = _BumpFake(files, create_result={"russia": {"value": ["bozuk"]}})
+    r = bump.push_sites(f9, [s_a, s_r], **kw)
+    check("M2: value[0] dict değil → errors'a düşer, önceki repo'nun PR'ı kaybolmaz",
+          [p["repo"] for p in r["prs"]] == ["anatolia"] and [x["repo"] for x in r["errors"]] == ["russia"], str(r))
+    f10 = _BumpFake(files)
+    f10.create_pull_request = lambda *a, **k: None          # PR yanıtı okunamıyor (res.get patlar)
+    r = bump.push_sites(f10, [s_r], **kw)
+    check("M2: PR yanıtı bozuksa istisna sızmaz → errors", len(r["errors"]) == 1 and not r["prs"], str(r))
+
+    # M3: '.' segmenti
+    fd = _BumpFake(files)
+    check("M3: '.' yol segmenti → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(fd, [dict(s_r, path="build/./r/Dockerfile")], **kw)) and fd.writes == 0)
 
 
 def test_upgrade_client_find_pr_and_bytes():
@@ -6780,7 +6933,7 @@ def test_upgrade_client_find_pr_and_bytes():
                 import requests
                 raise requests.HTTPError(str(self.status_code), response=self)
     seen = {}
-    og = azb.requests.get
+    og, og_post = azb.requests.get, azb.requests.post
     try:
         azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
             seen.update(url=url, params=params, headers=headers) or
@@ -6796,8 +6949,27 @@ def test_upgrade_client_find_pr_and_bytes():
               and seen["params"].get("$format") == "octetStream", str(seen))
         azb.requests.get = lambda *a, **k: R(status=404)
         check("404 → None", c.get_file_bytes("r", "/a", "production") is None)
+        # H1 / H2: create_branch(source_object_id), push_changes(old_object_id, contentType)
+        posted = []
+        azb.requests.post = lambda url, headers=None, json=None, params=None, timeout=None: (
+            posted.append((url, json)) or R({"value": [{"success": True}]}))
+        c.list_branches = lambda repo, project=None: (_ for _ in ()).throw(AssertionError("list_branches çağrılmamalı"))
+        c.create_branch("r", "tempo/upgrade-php-r-8.4", "production", project="FLO", source_object_id="abc123")
+        check("create_branch source_object_id'yi newObjectId yapar (hedef adı aranmaz)",
+              posted[-1][1][0]["newObjectId"] == "abc123", str(posted[-1]))
+        c.push_changes("r", "tempo/upgrade-php-r-8.4",
+                       [{"changeType": "edit", "path": "/a", "content": "Zm9v", "contentType": "base64encoded"},
+                        {"changeType": "edit", "path": "/b", "content": "x"}],
+                       "m", project="FLO", old_object_id="abc123")
+        body = posted[-1][1]
+        check("push_changes old_object_id'yi refUpdate oldObjectId yapar (dal başı aranmaz)",
+              body["refUpdates"][0]["oldObjectId"] == "abc123", str(body))
+        ch = body["commits"][0]["changes"]
+        check("contentType geçer; verilmezse rawtext",
+              ch[0]["newContent"]["contentType"] == "base64encoded" and ch[1]["newContent"]["contentType"] == "rawtext",
+              str(ch))
     finally:
-        azb.requests.get = og
+        azb.requests.get, azb.requests.post = og, og_post
 
 
 def test_php_rector_fix():
@@ -8836,6 +9008,7 @@ def main():
               test_upgrade_scan_take,
               test_upgrade_bump_sites,
               test_upgrade_client_find_pr_and_bytes,
+              test_upgrade_bump_round2,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

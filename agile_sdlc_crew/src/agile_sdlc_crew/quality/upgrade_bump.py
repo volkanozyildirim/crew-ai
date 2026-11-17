@@ -5,11 +5,14 @@
 (dosya o arada düzenlenmişse) yazılmaz. `old` ile `new` yalnız rakam dizilerinde ayrışabilir.
 Önce HER dosya hedef daldan HAM bayt olarak okunup uygulanır, dal durumu doğrulanır, ancak ondan
 sonra yazılmaya başlanır — geç bir hata yarım push bırakmaz. Yazılan dal yalnız Tempo'nun kendi
-`tempo/upgrade-…` dalıdır; hedef dala (ör. production) asla doğrudan yazılmaz. Sunucuya ve db'ye
-bağımlı değil.
+`tempo/upgrade-…` dalıdır; hedef dala (ör. production) asla doğrudan yazılmaz. Dal ya bu çalışmada
+doğrulanan hedef commit'te YENİ açılır ya da hedefle aynı commit'te duran boş artıktır; içinde
+başka commit olan hiçbir dala push yapılmaz (mevcut Tempo PR'ı yalnız içeriği doğrulanıp aynen
+döndürülür). Dosyalar base64 ile gönderilir: baytlar (BOM/CRLF) aynen. Sunucuya ve db'ye bağımlı değil.
 """
 from __future__ import annotations
 
+import base64
 import difflib
 import re
 
@@ -99,7 +102,7 @@ def _validate(sites: list[dict], branch: str) -> None:
             raise ValueError(f"Geçersiz repo adı: {repo!r}")
         norm = _norm_path(path)
         parts = norm.split("/")[1:]
-        if (not norm.strip("/") or any(p in ("", "..") or p.startswith("-") for p in parts)
+        if (not norm.strip("/") or any(p in ("", ".", "..") or p.startswith("-") for p in parts)
                 or "\\" in path or any(ord(c) < 32 for c in path)):
             raise ValueError(f"Geçersiz dosya yolu: {path!r}")
         if not s.get("branch"):
@@ -211,57 +214,65 @@ def push_sites(client, sites: list[dict], *, branch: str, title: str, body: str,
                                      "yeniden kullanılmadı.")
                 if pr.get("created_by") != me:
                     raise ValueError(f"{repo}: '{branch}' dalındaki PR'ı Tempo açmamış; dokunulmadı.")
-                existing = pr
-                push = not _branch_has(client, repo, branch, files, proj)
+                # Mevcut dala ASLA push yok: içerik tam bizim planımızsa PR olduğu gibi döner.
+                if not _branch_has(client, repo, branch, files, proj):
+                    raise ValueError(f"{repo}: PR dalı güncel değil — PR #{pr.get('id')}'i kapatıp "
+                                     f"'{branch}' dalını silin, yeniden başlatın; dala dokunulmadı.")
+                existing, push = pr, False
             elif refs[f"refs/heads/{branch}"] == target_oid:
                 push = True                      # önceki denemeden kalan boş dal
-            elif _branch_has(client, repo, branch, files, proj):
-                push = False                     # bizim commit'imiz zaten var; yalnız PR açılacak
             else:
-                raise ValueError(f"{repo}: '{branch}' dalı var, PR'ı yok ve içeriği bizim değişikliğimiz "
-                                 "değil; başkasının dalına dokunulmadı.")
-        plans.append((project, repo, target, files, existing, create, push))
+                raise ValueError(f"{repo}: '{branch}' dalı var, PR'ı yok ve hedef dalla aynı commit'te "
+                                 f"değil (içinde başka commit olabilir); dala dokunulmadı. Kalan "
+                                 f"'{branch}' dalını silin ve yeniden deneyin.")
+        plans.append((project, repo, target, files, existing, create, push, target_oid))
 
     # 2) Yaz — her repo kendi hatasını yakalar; başarılılar kaybolmaz.
     prs: list[dict] = []
     fallback: list[dict] = []
     errors: list[dict] = []
-    for project, repo, target, files, existing, create, push in plans:
+    for project, repo, target, files, existing, create, push, base_oid in plans:
         proj = project or None
-        changes = [{"changeType": "edit", "path": path, "content": new} for path, _old, new in files]
+        changes = [{"changeType": "edit", "path": path, "contentType": "base64encoded",
+                    "content": base64.b64encode(new.encode("utf-8")).decode("ascii")}
+                   for path, _old, new in files]
+        stage, written = "create", False   # hata nerede oldu / dal bizim tarafımızdan yazıldı mı
         try:
             if create:
-                res = client.create_branch(repo, branch, target, project=proj)
-                vals = (res or {}).get("value") if isinstance(res, dict) else None
+                res = client.create_branch(repo, branch, target, project=proj, source_object_id=base_oid)
+                vals = res.get("value") if isinstance(res, dict) else None
                 first = vals[0] if vals else {}
                 if not first.get("success"):
                     status = str(first.get("updateStatus") or "")
                     if "PermissionRequired" in status:
                         raise _Denied()
                     raise ValueError(f"Dal oluşturulamadı ({status or 'yanıt okunamadı'}).")
+                written = True
+            stage = "push"
             if push:
-                client.push_changes(repo, branch, changes, title, project=proj)
+                client.push_changes(repo, branch, changes, title, project=proj, old_object_id=base_oid)
+                written = True
             if existing is not None:
-                prs.append({"repo": repo, "id": existing["id"], "url": existing.get("url", "")})
+                prs.append({"repo": repo, "id": existing["id"], "url": existing.get("url", ""),
+                            "reused": True})
                 continue
+            stage = "pr"
             res = client.create_pull_request(
                 repo, branch, target, title=title, description=body,
                 work_item_ids=[wi_id] if (wi_id and not project) else None,
                 draft=True, project=proj)
-        except _Denied:
-            fallback.append({"repo": repo, "project": project, "diff": _diff_text(files)})
-            continue
-        except (requests.RequestException, ValueError) as e:
-            if isinstance(e, requests.HTTPError) and _is_denied(e):
-                fallback.append({"repo": repo, "project": project, "diff": _diff_text(files)})
+            pid = res.get("pullRequestId")
+            name = (res.get("repository") or {}).get("name") or repo
+            url = res.get("url") or ""
+            base = getattr(client, "org_url", None)  # gerçek istemcide var; sahte istemcide yok
+            if base:
+                url = f"{base}/{project or getattr(client, 'project', '')}/_git/{name}/pullrequest/{pid}"
+            prs.append({"repo": repo, "id": pid, "url": url})
+        except Exception as e:  # noqa: BLE001 — bir repo'nun hatası öncekilerin PR'ını kaybettirmesin
+            where = {"stage": stage, "branch_written": written}
+            if isinstance(e, _Denied) or (isinstance(e, requests.HTTPError) and _is_denied(e)):
+                fallback.append({"repo": repo, "project": project, "diff": _diff_text(files), **where})
             else:
-                errors.append({"repo": repo, "project": project, "error": mask_secrets(str(e))[:800]})
-            continue
-        pid = res.get("pullRequestId")
-        name = (res.get("repository") or {}).get("name") or repo
-        url = res.get("url") or ""
-        base = getattr(client, "org_url", None)  # gerçek istemcide var; sahte istemcide yok
-        if base:
-            url = f"{base}/{project or getattr(client, 'project', '')}/_git/{name}/pullrequest/{pid}"
-        prs.append({"repo": repo, "id": pid, "url": url})
+                errors.append({"repo": repo, "project": project, "error": mask_secrets(str(e))[:800],
+                               **where})
     return {"prs": prs, "fallback": fallback, "errors": errors}

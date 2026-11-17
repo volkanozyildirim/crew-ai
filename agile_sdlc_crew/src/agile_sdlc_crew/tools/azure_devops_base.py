@@ -453,16 +453,19 @@ class AzureDevOpsClient:
         branch_name: str,
         source_branch: str = "main",
         project: str | None = None,
+        source_object_id: str | None = None,
     ) -> dict:
-        """Yeni bir branch olusturur."""
-        # Kaynak branch'in objectId'sini al
-        branches = self.list_branches(repo_id_or_name, project=project)
-        source_ref = None
-        for b in branches:
-            ref_name = b.get("name", "")
-            if ref_name == f"refs/heads/{source_branch}":
-                source_ref = b.get("objectId")
-                break
+        """Yeni bir branch olusturur. `source_object_id` verilirse dal TAM o commit'te açılır
+        (kaynak dal adı yeniden aranmaz) — çağıranın doğruladığı commit sabitlenir."""
+        source_ref = source_object_id
+        if not source_ref:
+            # Kaynak branch'in objectId'sini al
+            branches = self.list_branches(repo_id_or_name, project=project)
+            for b in branches:
+                ref_name = b.get("name", "")
+                if ref_name == f"refs/heads/{source_branch}":
+                    source_ref = b.get("objectId")
+                    break
         if not source_ref:
             raise ValueError(f"Kaynak branch '{source_branch}' bulunamadi.")
 
@@ -488,23 +491,29 @@ class AzureDevOpsClient:
         changes: list[dict],
         commit_message: str,
         project: str | None = None,
+        old_object_id: str | None = None,
     ) -> dict:
         """Branch'e dosya degisiklikleri push eder.
 
         changes formati:
         [
             {"changeType": "add"|"edit", "path": "/src/file.py", "content": "..."},
+            {"changeType": "add"|"edit", "path": "/a", "content": "<base64>",
+             "contentType": "base64encoded"},                    # opsiyonel; varsayılan rawtext
             {"changeType": "delete", "path": "/src/old.py"},   # icerik yok
             ...
         ]
+        `old_object_id` verilirse push o commit üzerine kurulur (dal başı yeniden okunmaz): dal
+        o arada ilerlediyse Azure push'u reddeder.
         """
-        # Branch'in son commit objectId'sini al
-        branches = self.list_branches(repo_id_or_name, project=project)
-        branch_ref = None
-        for b in branches:
-            if b.get("name") == f"refs/heads/{branch}":
-                branch_ref = b.get("objectId")
-                break
+        branch_ref = old_object_id
+        if not branch_ref:
+            # Branch'in son commit objectId'sini al
+            branches = self.list_branches(repo_id_or_name, project=project)
+            for b in branches:
+                if b.get("name") == f"refs/heads/{branch}":
+                    branch_ref = b.get("objectId")
+                    break
         if not branch_ref:
             raise ValueError(f"Branch '{branch}' bulunamadi.")
 
@@ -517,7 +526,7 @@ class AzureDevOpsClient:
             if change["changeType"] != "delete":
                 item["newContent"] = {
                     "content": change["content"],
-                    "contentType": "rawtext",
+                    "contentType": change.get("contentType", "rawtext"),
                 }
             formatted_changes.append(item)
 
