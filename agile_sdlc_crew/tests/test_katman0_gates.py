@@ -7655,6 +7655,41 @@ def test_php_modern_82_84():
           'items.sort(key=lambda i: (not i.get("scannable")' in md and "Hedef sürümü bilinmeyen (" in html)
 
 
+def test_upgrade_php_rules():
+    """Yükseltme kırılma kuralları (7.4 → 8.5): break.php'de her kural bulunur,
+    ok.php'deki karşı örneklerde hiçbir yükseltme bulgusu çıkmaz."""
+    print("\n[upgrade: PHP kırılma kuralları]")
+    import shutil
+    from agile_sdlc_crew.quality import php_modern as pm
+    if not shutil.which("php"):
+        skip("upgrade PHP kuralları", "php yok"); return
+    fx = Path(__file__).resolve().parent / "fixtures" / "upgrade" / "php"
+    res = pm.scan_repo(fx)
+    by = {r.key: r for r in pm.load_rules()}
+    hits = {(h["rule"], h["file"]) for h in res["hits"]}
+    keys = ("removed_functions", "curly_offset", "removed_casts", "required_after_optional", "legacy_autoload",
+            "php4_constructor", "loose_compare_numeric", "null_to_internal", "removed_81", "serializable_only",
+            "moved_to_pecl_84", "noncanonical_casts_85", "backtick_exec_85", "deprecated_85")
+    for k in keys:
+        check(f"{k} bulundu", (k, "break.php") in hits, str(sorted(h for h in hits if h[1] == "break.php")))
+    got = {(h["rule"], h["line"]) for h in res["hits"] if h["file"] == "break.php"}
+    check("removed_casts hem (real) hem (unset)", {("removed_casts", 5), ("removed_casts", 6)} <= got, str(sorted(got)))
+    check("noncanonical_casts_85 dört cast da", {("noncanonical_casts_85", n) for n in (17, 18, 19, 20)} <= got, str(sorted(got)))
+    check("(double) yalnız 8.5 kuralı; (real) 8.5 kuralı değil", ("noncanonical_casts_85", 5) not in got, str(sorted(got)))
+    check("deprecated_85: curl_close + case ;", {("deprecated_85", 22), ("deprecated_85", 24)} <= got, str(sorted(got)))
+    bad = [h for h in res["hits"] if h["file"] == "ok.php" and by[h["rule"]].breaks]
+    check("karşı örneklerde yükseltme bulgusu yok", not bad, str(bad))
+    for k in keys:
+        check(f"{k} katalogda ve kırılma kuralı", k in by and bool(by[k].breaks), k)
+    for k in ("legacy_autoload", "php4_constructor", "serializable_only"):
+        check(f"{k} line_local değil", not by[k].line_local)
+    check("breaks sınıfları", by["curly_offset"].breaks == "error" and by["php4_constructor"].breaks == "behavior"
+          and by["required_after_optional"].breaks == "deprecation" and by["moved_to_pecl_84"].breaks == "error")
+    check("moved_to_pecl_84 eklenti ister", set(sum(by["moved_to_pecl_84"].requires_if.values(), [])) >= {"imap", "pspell", "oci8"})
+    check("kural since sürümleri", by["removed_81"].since == (8, 1) and by["noncanonical_casts_85"].since == (8, 5)
+          and by["curly_offset"].since == (8, 0))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -7748,7 +7783,7 @@ def main():
               test_modern_multilang,
               test_modern_sp,
               test_upgrade_rules,
-              test_php_modern_82_84,
+              test_php_modern_82_84, test_upgrade_php_rules,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

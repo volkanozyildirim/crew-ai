@@ -89,8 +89,8 @@ rules:
     unit: file
     auto: true
     sp_unit: 1
-    title: "8.0'da kaldırılan fonksiyonlar (each, create_function, money_format)"
-    summary: "Bu çağrılar 8.0'dan beri yok: ulaşıldığında Fatal error üretir. Üretimde kalmışsa o yol ya hiç çalışmıyor ya da ölü kod."
+    title: "8.0'da kaldırılan fonksiyonlar (each, create_function, money_format, get_magic_quotes_gpc, fgetss…)"
+    summary: "Bu çağrılar (each, create_function, money_format, get_magic_quotes_gpc/runtime, ezmlm_hash, restore_include_path, hebrevc, convert_cyr_string, fgetss, gzgetss, image2wbmp, png2wbmp, jpeg2wbmp, ldap_sort, read_exif_data) 8.0'dan beri yok: ulaşıldığında Fatal error üretir. Üretimde kalmışsa o yol ya hiç çalışmıyor ya da ölü kod."
     advantages:
       - "Gizli bir Fatal error kaynağı kapanır ya da ölü kod silinir."
     risks:
@@ -197,6 +197,224 @@ rules:
     before: "error_reporting(E_ALL & ~E_STRICT);\n$r = lcg_value();"
     after: "error_reporting(E_ALL);\n$r = mt_rand() / mt_getrandmax();"
     ref: "https://wiki.php.net/rfc/deprecations_php_8_4"
+
+  # ── yükseltme kırılma kuralları (7.4 → 8.5): hedef sürümde çalışmayan / sessizce başka davranan kod ──
+  - key: curly_offset
+    since: "8.0"
+    kind: deprecation
+    breaks: error
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Süslü parantezle ofset erişimi ($s{0})"
+    summary: "Dizi / string elemanına `$s{0}` biçiminde erişim PHP 8.0'da kaldırıldı: derleme sırasında Parse error verir, dosya hiç yüklenmez."
+    advantages:
+      - "Dosya PHP 8'de yüklenebilir hale gelir; Parse error riski kapanır."
+      - "Köşeli parantez biçimi 7.x'te de aynı çalışır — yükseltmeyi beklemeden uygulanabilir."
+    risks:
+      - "Yok — `$s{0}` ile `$s[0]` aynı elemanı verir."
+    before: "$ilk = $isim{0};"
+    after: "$ilk = $isim[0];"
+    ref: "https://www.php.net/manual/en/migration80.incompatible.php"
+  - key: removed_casts
+    since: "8.0"
+    kind: deprecation
+    breaks: error
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Kaldırılan cast'ler ((real), (unset))"
+    summary: "`(real)` ve `(unset)` cast'leri 8.0'da kaldırıldı: derleme sırasında hata verir."
+    advantages:
+      - "Dosya PHP 8'de yüklenebilir hale gelir."
+      - "Karşılıkları (`(float)`, `null`) 7.x'te de aynı çalışır."
+    risks:
+      - "`(unset) $x` her zaman null veriyordu; yerine düz `null` yazılır — `$x` yan etkisi (örn. fonksiyon çağrısı) varsa ayrıca korunmalı."
+    before: "$f = (real) $deger;\n$n = (unset) $x;"
+    after: "$f = (float) $deger;\n$n = null;"
+    ref: "https://www.php.net/manual/en/migration80.incompatible.php"
+  - key: required_after_optional
+    since: "8.0"
+    kind: deprecation
+    breaks: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Varsayılanlı parametreden sonra varsayılansız parametre"
+    summary: "`function f($a = 1, $b)` biçimindeki imza 8.0'da deprecation üretir (`?Tip $a = null, $b` istisnadır). Varsayılan değer fiilen hiçbir zaman kullanılamıyordu."
+    advantages:
+      - "Deprecation gürültüsü kesilir; imza gerçek davranışı yansıtır."
+    risks:
+      - "Varsayılanı kaldırmak çağıranları etkilemez (zaten vermek zorundaydılar); parametre sırasını değiştirmek ise tüm çağrı yerlerini etkiler — sırayı değiştirme, varsayılanı kaldır."
+    before: "function listele($sayfa = 1, $filtre) { … }"
+    after: "function listele($sayfa, $filtre) { … }"
+    ref: "https://www.php.net/manual/en/migration80.deprecated.php"
+  - key: legacy_autoload
+    since: "8.0"
+    kind: structural
+    breaks: error
+    unit: file
+    auto: false
+    line_local: false  # yükleme düzeni değişir — pencere düzeltmesi güvenli değil
+    sp_unit: 2
+    title: "__autoload() fonksiyonu"
+    summary: "`function __autoload($class)` 8.0'da kaldırıldı; tanımlanması Fatal error verir. Sınıf yükleme `spl_autoload_register()` ile yapılmalı."
+    advantages:
+      - "Sınıf yüklemesi PHP 8'de çalışmaya devam eder; birden çok yükleyici (composer dahil) birlikte yaşayabilir."
+    risks:
+      - "Yükleme sırası ve hata davranışı değişebilir; composer autoload ile çakışma olup olmadığı elle doğrulanmalı."
+    before: "function __autoload($class) { require \"lib/$class.php\"; }"
+    after: "spl_autoload_register(function ($class) { require \"lib/$class.php\"; });"
+    ref: "https://www.php.net/manual/en/migration80.incompatible.php"
+  - key: php4_constructor
+    since: "8.0"
+    kind: structural
+    breaks: behavior
+    unit: file
+    auto: false
+    line_local: false
+    sp_unit: 2
+    title: "PHP 4 tarzı yapıcı (sınıf adıyla aynı adlı metot)"
+    summary: "Sınıfla aynı adı taşıyan metot 8.0'da yapıcı sayılmaz; sıradan bir metot olur ve nesne oluşturulurken çağrılmaz. Sınıfta `__construct` yoksa ilklendirme sessizce atlanır."
+    advantages:
+      - "Yapıcı mantığı PHP 8'de de çalışır; ilklendirilmeyen nesne hataları önlenir."
+    risks:
+      - "Metot şimdiye kadar yapıcı olarak çalıştıysa yeniden adlandırma çağıranları ve alt sınıfların `parent::Ad()` çağrılarını etkiler — insan bakmalı."
+    before: "class Sepet {\n    function Sepet() { $this->urunler = []; }\n}"
+    after: "class Sepet {\n    function __construct() { $this->urunler = []; }\n}"
+    ref: "https://www.php.net/manual/en/migration80.deprecated.php"
+  - key: loose_compare_numeric
+    since: "8.0"
+    kind: structural
+    breaks: behavior
+    unit: file
+    auto: false
+    line_local: false
+    sp_unit: 1
+    title: "Sayı ile sayısal olmayan string'in gevşek karşılaştırması"
+    summary: "PHP 8.0'da `0 == \"abc\"` artık false: sayı ile sayısal olmayan string, string olarak karşılaştırılır. 7.x'te true idi. Aynı satırdaki mantık sessizce ters döner."
+    advantages:
+      - "Karşılaştırma niyeti açık ve sürümden bağımsız olur."
+    risks:
+      - "Eski davranışa güvenen akış (ör. `0 == $durum` ile boş string yakalama) farklı çalışır — hangi davranışın istendiğine insan karar vermeli."
+    before: "if (0 == 'abc') { … }   // 7.x: true, 8.x: false"
+    after: "if ((string) 0 === 'abc') { … }   // niyeti açıkça yaz"
+    ref: "https://www.php.net/manual/en/migration80.incompatible.php"
+  - key: null_to_internal
+    since: "8.1"
+    kind: structural
+    breaks: behavior
+    unit: file
+    auto: false
+    line_local: false
+    sp_unit: 1
+    title: "İç fonksiyona literal null argüman (strlen(null) vb.)"
+    summary: "`strlen`, `strpos`, `str_replace`, `trim`, `explode`, `htmlspecialchars`, `strtolower`, `strtoupper`, `substr` çağrısında string parametreye null vermek 8.1'de deprecation; 9.0'da TypeError olacak."
+    advantages:
+      - "Deprecation gürültüsü kesilir; PHP 9'da TypeError'a dönecek yerler şimdiden temizlenir."
+    risks:
+      - "null'ı '' ile değiştirmek davranışı korur, ama null'ın gelmesi çoğu zaman bir veri hatasının belirtisidir — nedenine insan bakmalı."
+    before: "$uzunluk = strlen(null);"
+    after: "$uzunluk = strlen('');"
+    ref: "https://wiki.php.net/rfc/deprecate_null_to_scalar_internal_arg"
+  - key: removed_81
+    since: "8.1"
+    kind: deprecation
+    breaks: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "8.1'de kullanımdan kalkan fonksiyonlar (strftime, date_sunrise, mhash…)"
+    summary: "`strftime`, `gmstrftime`, `date_sunrise`, `date_sunset`, `mhash*`, `odbc_result_all` 8.1'de deprecated, 9.0'da kaldırılacak."
+    advantages:
+      - "Deprecation gürültüsü kesilir; PHP 9'da kırılacak çağrılar şimdiden temizlenir."
+    risks:
+      - "`strftime` biçimleri `date()` / `IntlDateFormatter` ile birebir değildir; yerel ayara bağlı çıktılar (ay/gün adları) farklılaşabilir — çıktı karşılaştırılmalı."
+    before: "echo strftime('%d.%m.%Y', $ts);"
+    after: "echo date('d.m.Y', $ts);"
+    ref: "https://www.php.net/manual/en/migration81.deprecated.php"
+  - key: serializable_only
+    since: "8.1"
+    kind: structural
+    breaks: deprecation
+    unit: file
+    auto: false
+    line_local: false  # sınıf düzeyinde: serileştirme biçimi tasarım kararı
+    sp_unit: 2
+    title: "Serializable arayüzü, __serialize/__unserialize olmadan"
+    summary: "`implements Serializable` yapıp `__serialize()` / `__unserialize()` yazmamak 8.1'de deprecation üretir."
+    advantages:
+      - "Deprecation gürültüsü kesilir; serileştirme davranışı açık ve test edilebilir olur."
+    risks:
+      - "Daha önce serileştirilip saklanmış (cache, session, kuyruk) veriler yeni biçimle okunabilmeli — iki metot birlikte yazılırsa eski veri okunmaya devam eder."
+    before: "class Sepet implements Serializable {\n    public function serialize() { … }\n    public function unserialize($d) { … }\n}"
+    after: "class Sepet implements Serializable {\n    public function __serialize(): array { … }\n    public function __unserialize(array $d): void { … }\n    // serialize()/unserialize() 7.x uyumu için kalır\n}"
+    ref: "https://wiki.php.net/rfc/phase_out_serializable"
+  - key: moved_to_pecl_84
+    requires_if: {imap_: [imap], pspell_: [pspell], oci_: [oci8]}
+    since: "8.4"
+    kind: structural
+    breaks: error
+    unit: file
+    auto: false
+    sp_unit: 2
+    title: "PECL'e taşınan eklentiler (imap, pspell, oci8)"
+    summary: "`imap_*`, `pspell_*` ve `oci_*` fonksiyonları 8.4 ile PHP çekirdeğinden çıktı; imajda PECL ile kurulmadıkça çağrı Fatal error verir."
+    advantages:
+      - "Yükseltme sonrası bu fonksiyonların kaybolması önceden bilinir ve altyapı hazırlanır."
+    risks:
+      - "Kod değişikliği değil imaj / eklenti işi: eklenti PECL ile kurulmalı (DevOps) ya da kullanım başka bir kütüphaneye taşınmalı."
+    before: "$kutu = imap_open($host, $kullanici, $parola);"
+    after: "# php-8-4 imajına imap eklentisi PECL ile eklenir ya da çağrı ayrı bir kütüphaneye taşınır"
+    ref: "https://www.php.net/manual/en/migration84.incompatible.php"
+  - key: noncanonical_casts_85
+    since: "8.5"
+    kind: deprecation
+    breaks: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Kanonik olmayan cast adları ((boolean), (integer), (double), (binary))"
+    summary: "`(boolean)`, `(integer)`, `(double)`, `(binary)` PHP 8.5'te deprecated; kanonik adlar `(bool)`, `(int)`, `(float)`, `(string)`."
+    advantages:
+      - "Deprecation gürültüsü kesilir; kanonik adlar 7.x'te de aynı çalışır."
+    risks:
+      - "Yok — davranış birebir aynı."
+    before: "$a = (integer) $x;\n$b = (double) $y;"
+    after: "$a = (int) $x;\n$b = (float) $y;"
+    ref: "https://www.php.net/manual/en/migration85.deprecated.php"
+  - key: backtick_exec_85
+    since: "8.5"
+    kind: deprecation
+    breaks: deprecation
+    unit: file
+    auto: true
+    sp_unit: 1
+    title: "Backtick operatörü (`komut`)"
+    summary: "Backtick ile kabuk komutu çalıştırma 8.5'te deprecated; `shell_exec()` ile birebir aynı."
+    advantages:
+      - "Deprecation gürültüsü kesilir; komut çalıştırma niyeti okunur ve aranabilir olur."
+    risks:
+      - "Yok — `shell_exec()` aynı değeri döndürür. Komut metni kullanıcı girdisi içeriyorsa ayrı bir güvenlik incelemesi gerekir."
+    before: "$cikti = `ls -l $dizin`;"
+    after: "$cikti = shell_exec(\"ls -l $dizin\");"
+    ref: "https://www.php.net/manual/en/migration85.deprecated.php"
+  - key: deprecated_85
+    since: "8.5"
+    kind: structural
+    breaks: deprecation
+    unit: file
+    auto: false
+    sp_unit: 1
+    title: "8.5'te kullanımdan kalkanlar (curl_close, imagedestroy, finfo_close, case ; …)"
+    summary: "PHP 8.5'te deprecated: `curl_close`, `curl_share_close`, `finfo_close`, `imagedestroy`, `mysqli_execute`, `socket_set_timeout`, `xml_parser_free`, `ldap_connect_wallet`, `MHASH_*` sabitleri ve `case 1;` (iki nokta yerine noktalı virgül). Nesneler zaten otomatik serbest kalıyor; bu çağrıların etkisi yok."
+    advantages:
+      - "Deprecation gürültüsü kesilir; PHP 9'da kırılacak yerler şimdiden temizlenir."
+    risks:
+      - "Çağrıyı silmek güvenlidir (8.0'dan beri nesne tutamaçları otomatik serbest kalır) ama `mysqli_execute` → `mysqli_stmt_execute`, `socket_set_timeout` → `stream_set_timeout` gibi yer değiştirenler elle eşlenmeli."
+    before: "curl_close($ch);\nswitch ($x) {\n    case 1;\n        break;\n}"
+    after: "// curl_close çağrısı silinir\nswitch ($x) {\n    case 1:\n        break;\n}"
+    ref: "https://www.php.net/manual/en/migration85.deprecated.php"
   # ── mechanical: davranış aynı, dönüşüm yerel ──
   - key: str_contains
     since: "8.0"
