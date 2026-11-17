@@ -2,13 +2,16 @@
 # Kural metni kullanıcıya (sekme) ve Task açıklamasına aynen gider; Türkçe.
 # since: özelliğin geldiği PHP sürümü; yalnız since ≤ hedef sürüm olan kurallar önerilir.
 # kind: deprecation (hedefte uyarı/hata) | mechanical (davranış aynı, otonom) | structural (tasarım kararı, needs-human) | report (iş açılmaz)
+# breaks: yükseltmeyi etkileyen kural — error (hedef sürümde çalışmaz) | behavior (sessizce başka davranır, otomatik düzeltilmez, insan bakar) | deprecation (uyarı verir; otomatik düzeltilebiliyorsa yükseltmeyi bekletir). Boş = yükseltme kuralı değil.
+# fix_min: kuralın düzeltmesinin çalıştığı en düşük PHP sürümü (varsayılan 7.0); örn. "8.4"
 # unit: file (dosya başına birim, paketlenir) | module (kaynak kökünden 2 dizin, paketlenmez)
-version: 3
+version: 4
 rules:
   # ── deprecation: hedef sürümde uyarı / hata üretir ──
   - key: implicit_nullable
     since: "8.4"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     sp_unit: 1
@@ -28,6 +31,7 @@ rules:
     requires: [mbstring]   # mb_convert_encoding; repoda kanıt yoksa DevOps'a gider
     since: "8.2"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     sp_unit: 1
@@ -45,6 +49,7 @@ rules:
   - key: string_interp_brace
     since: "8.2"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     sp_unit: 1
@@ -62,6 +67,7 @@ rules:
   - key: filter_sanitize_string
     since: "8.1"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     sp_unit: 1
@@ -79,6 +85,7 @@ rules:
     requires_if: {money_format: [intl]}   # NumberFormatter
     since: "8.0"
     kind: deprecation
+    breaks: error
     unit: file
     auto: true
     sp_unit: 1
@@ -95,6 +102,7 @@ rules:
   - key: dynamic_properties
     since: "8.2"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     line_local: false  # blok/sınıf düzeyinde — araç kaçırdıysa LLM penceresiyle düzeltilmez
@@ -112,6 +120,7 @@ rules:
   - key: partial_callable
     since: "8.2"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     sp_unit: 1
@@ -127,6 +136,7 @@ rules:
   - key: mb_legacy_encoding
     since: "8.2"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     sp_unit: 1
@@ -142,6 +152,7 @@ rules:
   - key: get_class_noarg
     since: "8.3"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     sp_unit: 1
@@ -157,6 +168,7 @@ rules:
   - key: deprecated_83
     since: "8.3"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     sp_unit: 1
@@ -172,6 +184,7 @@ rules:
   - key: deprecated_84
     since: "8.4"
     kind: deprecation
+    breaks: deprecation
     unit: file
     auto: true
     sp_unit: 1

@@ -35,6 +35,7 @@ TARGETS_CACHE_PATH = _CONFIG_DIR / "quality_php_targets.yaml"
 
 SOURCE = "php_modern"
 KINDS = ("deprecation", "mechanical", "structural", "report")
+BREAKS = ("error", "behavior", "deprecation")
 WEIGHT = {"deprecation": 20, "structural": 10, "mechanical": 8, "report": 0}
 
 
@@ -60,6 +61,9 @@ class Rule:
     # Bulgu satırına dar bir pencerede (±birkaç satır) çözülebilir mi — araç kaçırırsa kalan yeri
     # LLM pencereyle düzeltir. switch→match, promotion, dinamik property: sınıf/blok düzeyinde → hayır.
     line_local: bool = True
+    # Yükseltmeyi etkiler mi: ""|error (hedefte çalışmaz)|behavior (sessiz davranış değişir)|deprecation (uyarı)
+    breaks: str = ""
+    fix_min: tuple[int, int] = (7, 0)  # düzeltmenin çalıştığı en düşük PHP sürümü
     requires: list[str] = field(default_factory=list)            # PHP eklentileri
     requires_if: dict[str, list[str]] = field(default_factory=dict)  # bulunan yerde geçen ad → eklentiler
 
@@ -86,6 +90,9 @@ def load_rules(path: Path = RULES_PATH) -> list[Rule]:
         kind = str(r.get("kind") or "")
         if kind not in KINDS:
             raise ValueError(f"php_modern kuralı {r.get('key')}: kind geçersiz ({kind})")
+        breaks = str(r.get("breaks") or "")
+        if breaks and breaks not in BREAKS:
+            raise ValueError(f"php_modern kuralı {r.get('key')}: breaks geçersiz ({breaks})")
         out.append(Rule(
             key=str(r["key"]), since=_ver(r["since"]), kind=kind, title=str(r.get("title") or ""),
             summary=str(r.get("summary") or ""), advantages=[str(x) for x in r.get("advantages") or []],
@@ -95,6 +102,7 @@ def load_rules(path: Path = RULES_PATH) -> list[Rule]:
             # structural / report asla otonom değil — YAML ne derse desin
             auto=bool(r.get("auto")) and kind in ("deprecation", "mechanical"),
             sp_unit=int(r.get("sp_unit") or 0), rector=str(r.get("rector") or ""),
+            breaks=breaks, fix_min=_ver(r.get("fix_min") or "7.0"),
             fixer=str(r.get("fixer") or ""), line_local=bool(r.get("line_local", True)),
             requires=[str(x) for x in r.get("requires") or []],
             requires_if={str(k): [str(x) for x in v or []] for k, v in (r.get("requires_if") or {}).items()},

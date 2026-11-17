@@ -7585,6 +7585,43 @@ def test_quality_detail():
     check("Task açıklamasında da kritiklik satırı", "<b>Kritiklik:</b> Yüksek · E_WARNING" in render.task_description(g))
 
 
+def test_upgrade_rules():
+    print("\n[upgrade: katalog breaks/fix_min ve kural süzgeci]")
+    import tempfile
+    from pathlib import Path
+    from agile_sdlc_crew.quality import php_modern as pm, upgrade
+    rules = pm.load_rules()
+    by = {r.key: r for r in rules}
+    check("removed_functions hedefte çalışmaz", by["removed_functions"].breaks == "error")
+    check("implicit_nullable deprecation", by["implicit_nullable"].breaks == "deprecation")
+    check("mekanik kural yükseltme kuralı değil", by["str_contains"].breaks == "")
+    keys = {r.key for r in upgrade.upgrade_rules(rules, "8.2", "8.4")}
+    check("8.2→8.4: 8.3 ve 8.4 kuralları",
+          {"get_class_noarg", "deprecated_83", "implicit_nullable", "deprecated_84"} <= keys, str(keys))
+    check("8.2→8.4: 8.2 ve öncesi yok",
+          not ({"dynamic_properties", "utf8_encode", "removed_functions"} & keys))
+    check("7.4→8.4 removed_functions'ı içerir",
+          "removed_functions" in {r.key for r in upgrade.upgrade_rules(rules, "7.4", "8.4")})
+    check("error engeller", upgrade.blocking(by["removed_functions"], auto=False))
+    check("otomatik deprecation engeller, otomatik olmayan engellemez",
+          upgrade.blocking(by["implicit_nullable"], auto=True)
+          and not upgrade.blocking(by["implicit_nullable"], auto=False))
+    check("breaks boş kural engellemez", not upgrade.blocking(by["str_contains"], auto=True))
+    check("fix_min varsayılanı (7, 0)", by["str_contains"].fix_min == (7, 0))
+    base = ("rules:\n  - key: x\n    since: \"8.0\"\n    kind: deprecation\n"
+            "{extra}")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "r.yaml"
+        p.write_text(base.format(extra="    breaks: saçma\n"), encoding="utf-8")
+        try:
+            pm.load_rules(p)
+            check("geçersiz breaks ValueError", False)
+        except ValueError:
+            check("geçersiz breaks ValueError", True)
+        p.write_text(base.format(extra="    fix_min: \"8.4\"\n"), encoding="utf-8")
+        check("fix_min '8.4' → (8, 4)", pm.load_rules(p)[0].fix_min == (8, 4))
+
+
 def test_php_modern_82_84():
     """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
     denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
@@ -7710,6 +7747,7 @@ def main():
               test_devops_requests,
               test_modern_multilang,
               test_modern_sp,
+              test_upgrade_rules,
               test_php_modern_82_84,
               test_php_rector_fix,
               test_tool_review_diff_context,
