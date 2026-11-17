@@ -9483,6 +9483,43 @@ def test_upgrade_final_f5_resolved_blocks():
           ut._fp_blocking is upgrade._fp_blocking)
 
 
+def test_upgrade_final_f9_retry_guard():
+    """F9: `POST /api/jobs/{id}/retry` bir upgrade_bump işini, aynı izleme işi için kuyrukta / çalışan bir adım işi
+    varken yeniden açmaz (queue_step'in açık iş korumasını atlamasın) — 409. DB'ye dokunulmaz."""
+    print("\n[Sürüm yükseltme son düzeltme F9: yeniden deneme koruması]")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+    payload = json.dumps({"step": "prod"})
+    kind = {"v": "upgrade_bump"}
+    saved = (server.db.get_job, server.db.create_job, server._ensure_worker, bump._open_bump_jobs)
+    made, asked = [], []
+    server.db.get_job = lambda jid: {"id": jid, "status": "failed", "work_item_id": "500", "use_hal": 0,
+                                     "wi_title": "t", "job_kind": kind["v"], "job_payload": payload}
+    server.db.create_job = lambda *a, **k: (made.append((a, k)), 6)[1]
+    server._ensure_worker = lambda: None
+    try:
+        tc = TestClient(server.app)
+        bump._open_bump_jobs = lambda tid: (asked.append(tid), [{"id": 3}])[1]
+        r = tc.post("/api/jobs/5/retry")
+        check("F9 açık adım işi varken yeniden deneme → 409, iş açılmaz",
+              r.status_code == 409 and not made and asked == ["500"] and "#3" in r.json().get("error", "")
+              and "kuyrukta" in r.json().get("error", ""), str((r.status_code, r.text, made, asked)))
+        bump._open_bump_jobs = lambda tid: []
+        r = tc.post("/api/jobs/5/retry")
+        check("F9 açık adım işi yoksa yeniden deneme kendi türüyle", r.status_code == 202 and made
+              and made[-1][1] == {"job_kind": "upgrade_bump", "job_payload": payload}, str((r.status_code, made)))
+        made.clear()
+        asked.clear()
+        kind["v"] = "pipeline"
+        bump._open_bump_jobs = lambda tid: (asked.append(tid), [{"id": 3}])[1]
+        r = tc.post("/api/jobs/5/retry")
+        check("F9 pipeline işinin yeniden denemesi etkilenmez", r.status_code == 202 and made and not asked,
+              str((r.status_code, asked)))
+    finally:
+        server.db.get_job, server.db.create_job, server._ensure_worker, bump._open_bump_jobs = saved
+
+
 def test_php_rector_fix():
     """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
     başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
@@ -11552,7 +11589,7 @@ def main():
               test_upgrade_fix_round1,
               test_upgrade_fix_round2,
               test_upgrade_fix_round3,
-              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock, test_upgrade_final_f8_pinned_read, test_upgrade_final_f5_resolved_blocks,
+              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock, test_upgrade_final_f8_pinned_read, test_upgrade_final_f5_resolved_blocks, test_upgrade_final_f9_retry_guard,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

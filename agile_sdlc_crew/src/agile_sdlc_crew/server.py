@@ -485,13 +485,31 @@ async def retry_job(job_id: int):
     # araç düzeltmesi / sürüm adımı yeniden denenince yine kendi türüyle ve onaylı kapsamıyla koşsun
     # (pipeline'a düşmesin); sürüm adımı başta zaten yeniden doğrular.
     keep = job.get("job_kind") in ("modern_fix", "upgrade_bump")
-    new_job_id = db.create_job(
-        job["work_item_id"],
-        bool(job.get("use_hal", False)),
-        job.get("wi_title", ""),
-        job_kind=job["job_kind"] if keep else "pipeline",
-        job_payload=(job.get("job_payload") or "") if keep else "",
-    )
+
+    def _create():
+        return db.create_job(
+            job["work_item_id"],
+            bool(job.get("use_hal", False)),
+            job.get("wi_title", ""),
+            job_kind=job["job_kind"] if keep else "pipeline",
+            job_payload=(job.get("job_payload") or "") if keep else "",
+        )
+    if job.get("job_kind") == "upgrade_bump":
+        # queue_step'in açık iş koruması burada da: aynı izleme işi için kuyrukta / çalışan bir sürüm adımı
+        # varken ikinci adım işi açılmaz (kontrol + INSERT aynı kilit altında, kart düğmesi / oto ilerletmeyle yarışmaz).
+        from agile_sdlc_crew.quality import upgrade_bump
+        with upgrade_bump._QUEUE_LOCK:
+            busy = upgrade_bump._open_bump_jobs(job["work_item_id"])
+            if busy:
+                ids = ", ".join(f"#{(r or {}).get('id')}" for r in busy)
+                return JSONResponse(
+                    {"error": f"İzleme işi #{job['work_item_id']} için bir sürüm adımı zaten kuyrukta ya da "
+                              f"çalışıyor ({ids}) — bitmesini bekleyin."},
+                    status_code=409,
+                )
+            new_job_id = _create()
+    else:
+        new_job_id = _create()
     _ensure_worker()
     return JSONResponse({
         "job_id": new_job_id,
