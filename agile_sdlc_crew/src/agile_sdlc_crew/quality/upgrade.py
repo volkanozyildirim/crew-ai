@@ -111,8 +111,10 @@ def default_target(lang: str, current: str, index: dict) -> str | None:
         # Seçicinin gösteremeyeceği (listede olmayan) bir yayınlanmış sürüm varsayılan olmasın.
         pub = sorted(published(lang, index) & set(known_versions(lang)), key=_v)
         return pub[-1] if pub and _v(pub[-1]) > _v(current) else None
+    # Liste elle bakılır: repo listedeki son sürümü geçmişse (Next 16.3, liste 15.0) hedef yoktur —
+    # aksi halde kart "16.3 → 15.0" gibi geriye dönük bir yükseltme gösteriyordu.
     kv = known_versions(lang)
-    return kv[-1] if kv else None
+    return kv[-1] if kv and _v(kv[-1]) > _v(current) else None
 
 
 PY_UPGRADE_RULES = Path(__file__).resolve().parent.parent / "config" / "modern_python_upgrade_rules.yaml"

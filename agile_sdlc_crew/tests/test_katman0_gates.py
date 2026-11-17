@@ -11121,6 +11121,11 @@ def test_upgrade_plan_sites():
                       {"src": "russia/build/lojistik", "images": ["10.1.1.1:5000/prod-ar/php-8-2:1.0"]}],
              "web": [{"src": "anatolia/build/web", "images": ["eu/prod-ar/php-8-4:1.0"]}]}
     check("varsayılan hedef: yayınlanmış en yüksek imaj", upgrade.default_target("php", "8.2", index) == "8.4")
+    _kv = upgrade.known_versions("nextjs")
+    check("liste sonunu geçmiş repo için hedef yok (Next 16.3, liste 15.0 → geriye yükseltme önerilmez)",
+          upgrade.default_target("nextjs", "99.0", index) is None
+          and upgrade.default_target("nextjs", _kv[-1], index) is None
+          and upgrade.default_target("nextjs", "0.1", index) == _kv[-1])
     sel = upgrade.selectable("php", "8.2", index)
     check("seçilebilir: listedeki her üst sürüm", [s["version"] for s in sel] == ["8.3", "8.4", "8.5"])
     # Görev 2 PHP 8.5 kırılma kurallarını kataloğa ekledi (noncanonical_casts_85) → catalog True
