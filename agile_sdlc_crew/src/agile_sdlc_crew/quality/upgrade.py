@@ -1052,7 +1052,6 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, to: str | None =
     """Seçilen yükseltme gruplarını 'Teknik borç' story'si altında Task olarak aç (modern.take ile aynı
     kurallar ve yanıt). Rector/düzelticinin uyguladığı PHP grupları modern_fix işine, kapsamında
     `upgrade_to` ile; diğer otomatik gruplar pipeline'a; insan işleri kuyruğa alınmaz."""
-    from agile_sdlc_crew import estimation
     from agile_sdlc_crew.quality import intake, modern
     deps = deps or pm.default_deps()
     if not intake._LOCK.acquire(blocking=False):
@@ -1071,24 +1070,9 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, to: str | None =
         groups, _sk, _sum, _rbk, tools, _meta = _analyse(
             client, repo, lang, root, cur, tgt, cfg, deps, force=False, scan_fn=scan_fn, head_sha_fn=head_sha_fn,
             probe_fn=probe_fn)
-        by_gid = {pm.gid_of(g): g for g in groups}
-        picked, skipped = [], []
-        max_take = max(1, int(cfg.get("max_take", 8)))
-        for gid in dict.fromkeys(str(x) for x in (group_ids or [])):
-            g = by_gid.get(gid)
-            if g is None:
-                skipped.append({"gid": gid, "reason": "tarama değişti ya da board'da açık — yeniden tarayın"})
-            elif len(picked) >= max_take:
-                skipped.append({"gid": gid, "reason": f"istek başı tavan ({max_take})"})
-            else:
-                picked.append(g)
+        picked, skipped = pm._pick({pm.gid_of(g): g for g in groups}, group_ids, cfg.get("max_take", 8))
         if not picked:
-            if skipped and all("tarama" in s["reason"] for s in skipped):
-                raise ValueError("Seçim güncel taramada yok — tarama değişti, yeniden tarayın")
-            return {"repo": repo, "lang": lang, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
-        source = modern.LANGS[lang]["source"]
-        story = intake.resolve_story(client, source, None, team, "current_or_next", lane="techdebt", iteration=sprint)
-        cfg2 = {**cfg, "php_target": f"{cur} → {tgt} (sürüm yükseltme; düzeltme {cur} sürümünde de çalışmalı)"}
+            return pm._nothing_picked({"repo": repo, "lang": lang}, skipped, strict=True)
         if lang == "php":
             if deps.queue_tool is not None:
                 base_tool = deps.queue_tool
@@ -1097,18 +1081,11 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, to: str | None =
                     return base_tool(wid, title, json.dumps({**json.loads(payload), "upgrade_to": tgt}))
                 deps = deps._replace(queue_tool=_tool)
             deps = pm._rector_queue(deps, repo, [g for g in picked if not g.needs_human and g.findings[0].rule in tools])
-        rows, added = intake._open_tasks(client, picked, story, cfg2, deps, source=source, lane="techdebt", queue=True)
-        if added:
-            estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
-        tasks = [r for r in rows if not r["needs_human"]]
-        human = [r for r in rows if r["needs_human"]]
-        devops = pm._devops_requests(client, repo, picked, rows, cfg) if lang == "php" else []
-        log.info(f"⬆️ {label} sürüm yükseltme {cur}→{tgt} ({repo}): story #{story['id']} · {len(rows)} Task · {added} SP")
-        return {"repo": repo, "lang": lang, "version": cur, "current": cur, "target": tgt,
-                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"],
-                          "iteration": story["iteration"]},
-                "tasks": tasks, "human_tasks": human, "devops": devops, "skipped": skipped,
-                "total_sp": sum(r["sp"] for r in tasks if r.get("id")),
-                "human_sp": sum(r["sp"] for r in human if r.get("id")), "tool_fix": False}
+        return pm._open_and_report(
+            client, picked, skipped, repo=repo, source=modern.LANGS[lang]["source"], team=team, sprint=sprint,
+            task_cfg={**cfg, "php_target": f"{cur} → {tgt} (sürüm yükseltme; düzeltme {cur} sürümünde de çalışmalı)"},
+            deps=deps, head={"repo": repo, "lang": lang, "version": cur, "current": cur, "target": tgt},
+            log_line=f"⬆️ {label} sürüm yükseltme {cur}→{tgt} ({repo})", tail={"tool_fix": False},
+            devops_cfg=cfg if lang == "php" else None)
     finally:
         intake._LOCK.release()

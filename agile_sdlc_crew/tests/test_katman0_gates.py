@@ -4264,7 +4264,8 @@ def test_techdebt_sprint_choice():
     from agile_sdlc_crew.quality import modern, php_modern
     from agile_sdlc_crew import server
     check("take sprint'i story çözümüne geçirir",
-          "iteration=sprint" in inspect_source(php_modern.take) and "iteration=sprint" in inspect_source(modern.take)
+          "sprint=sprint" in inspect_source(php_modern.take) and "sprint=sprint" in inspect_source(modern.take)
+          and "iteration=sprint" in inspect_source(php_modern._open_and_report)
           and "sprint" in server.TechdebtModernTakeRequest.model_fields)
     html = (Path(__file__).resolve().parents[1] / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
     check("arayüz: sprint seçici, varsayılan aktif, take'e gider",
@@ -8079,6 +8080,24 @@ def test_upgrade_scan_take():
                 check("bilinmeyen gid → ValueError", False)
             except ValueError as e:
                 check("bilinmeyen gid → ValueError", "tarama" in str(e), str(e))
+            cfg["max_take"] = 1
+            n_created = len(client.created)
+            try:
+                capped = upgrade.take(client, "core", "php", [gid["deprecated_84"], gid["probe:error"]], to="8.4",
+                                      deps=deps, **kw)
+            finally:
+                cfg["max_take"] = 8
+            check("istek başı tavan", len(client.created) == n_created + 1 and len(capped["tasks"]) == 1
+                  and [s["reason"] for s in capped["skipped"]] == ["istek başı tavan (1)"], str(capped.get("skipped")))
+            intake._LOCK.acquire()
+            try:
+                try:
+                    upgrade.take(client, "core", "php", [gid["deprecated_84"]], to="8.4", deps=deps, **kw)
+                    check("kilitliyken Busy", False)
+                except intake.Busy:
+                    check("kilitliyken Busy", True)
+            finally:
+                intake._LOCK.release()
             n_scan = len(scanned)
             check("güncel repo taranmaz", upgrade.scan(client, "web", "php", deps=deps, **kw)["up_to_date"] is True
                   and len(scanned) == n_scan)
@@ -8104,14 +8123,26 @@ def test_upgrade_scan_take():
                   str(sorted(pb)))
             check("python: bozuk dosya ve venv atlanır", pb["imp"]["files"] == ["a.py"], str(pb["imp"]["files"]))
             check("python: utcnow + utcfromtimestamp iki yer", pb["datetime_utcnow"]["count"] == 2, str(pb["datetime_utcnow"]["count"]))
-            check("python: kaldırılan modül error, araç değil, pipeline", pb["imp"] in pr["auto"] and pb["imp"]["breaks"] == "error"
-                  and not pb["imp"]["tool"] and pb["imp"]["fingerprints"][0] == "py_modern:pyapp:imp:a.py"
-                  and pb["imp"]["title"].startswith("[pyapp] Sürüm yükseltme 3.11→3.12:"))
+            check("python: otomatik düzeltilemeyen kural insan işi (auto listesi boş), error → engeller",
+                  not pr["auto"] and pb["imp"] in pr["human"] and pb["imp"]["needs_human"] and pb["imp"]["blocking"]
+                  and pb["imp"]["breaks"] == "error" and not pb["imp"]["tool"]
+                  and pb["imp"]["fingerprints"][0] == "py_modern:pyapp:imp:a.py"
+                  and pb["imp"]["title"].startswith("[pyapp] Sürüm yükseltme 3.11→3.12:"), str(sorted(r["rule"] for r in pr["auto"])))
             check("python: asyncore insan işi ama error → engeller", pb["asyncore"] in pr["human"] and pb["asyncore"]["blocking"])
-            n_tool = len(queued_payloads)
+            n_tool, n_pipe = len(queued_payloads), len(queued)
             upgrade.take(client, "pyapp", "python", [pb["imp"]["gid"]], to="3.12", deps=deps, **pkw)
-            check("python: alım pipeline'a (araç işi değil)", len(queued_payloads) == n_tool and len(queued) == 2)
-            check("Task metni yükseltme kataloğundan", "importlib" in client.created[-1]["System.Description"])
+            check("python: insan işi Task açılır, hiçbir kuyruğa alınmaz", len(queued_payloads) == n_tool and len(queued) == n_pipe
+                  and "needs-human" in client.created[-1]["System.Tags"], str(queued))
+            check("Task metni yükseltme kataloğundan, 'otomatik' değil 'tasarım kararı'",
+                  "importlib" in client.created[-1]["System.Description"]
+                  and "tasarım kararı" in client.created[-1]["System.Description"])
+            py_rules = pm.load_rules(upgrade.PY_UPGRADE_RULES)
+            check("python kataloğu: auto:false kuralların hepsi structural + file",
+                  py_rules and all(r.kind == "structural" and r.unit == "file" for r in py_rules if not r.auto),
+                  str([r.key for r in py_rules if not r.auto and r.kind != "structural"]))
+            loose = [r.key for lg in ("nextjs", "go") for r in upgrade.catalog(lg)
+                     if r.breaks and not r.auto and r.kind not in ("structural", "report")]
+            check("Next.js / Go yükseltme kuralları: otomatik değilse structural ya da report", not loose, str(loose))
 
             # Next.js: senkron istek API'leri behavior; next lint yalnız sayı
             nx = base / "nx"
@@ -8180,12 +8211,60 @@ def test_upgrade_scan_take():
         Path("/x"), "php", "8.2", "8.4", ["a.php"], probe=lambda *a, **k: ([], {"ran": False, "tool": "", "reason": ""})) == {})
     src = inspect.getsource(modern_fix._run_scoped)
     check("Rector sürümü şimdiki üretim sürümü (upgrade_to'dan alınmaz)",
-          "apply_tool(root, lang, scope, version)" in src and "fix_leftovers(root, scope, version)" in src
+          "apply_tool(root, lang, scope, version)" in src
+          and "fix_leftovers(root, scope, version, upgrade_to=upgrade_to)" in src
           and "upgrade_to" not in inspect.getsource(modern_fix.php_apply)
           and "upgrade_to" not in inspect.getsource(modern_fix.rector_config)
           and "_upgrade_drops(root, lang, version, upgrade_to, changed)" in src)
     check("run upgrade_to'yu iş kaydından okur", "upgrade_to=upgrade_target(job.get(\"job_payload\")"
           in inspect.getsource(modern_fix.run))
+
+    # Fix round 1 — 4: ek denetim açık kalır (fail-open): probe istisnası işi düşürmez
+    def boom(*a, **k):
+        raise RuntimeError("git worktree açılamadı")
+    try:
+        got = modern_fix._upgrade_drops(Path("/x"), "php", "8.2", "8.4", ["app/A.php"], probe=boom)
+    except Exception as e:  # noqa: BLE001
+        got = e
+    check("probe istisnası: hiçbir dosya düşmez, iş sürer", got == {}, repr(got))
+
+    # Fix round 1 — 2: pencere talimatı şimdiki sürümde de çalışmayı ister
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew.quality import modern
+    nc = {r.key: r for r in pm.load_rules()}["null_coalesce"]
+    sentence = ("The code must keep working on PHP 8.2 as well as on 8.4; "
+                "do not use syntax or functions that only exist in 8.4.")
+    check("talimat: upgrade_to yokken değişmez", modern_fix._rule_instruction(nc, "8.2") ==
+          modern_fix._rule_instruction(nc, "8.2", "") and "8.4" not in modern_fix._rule_instruction(nc, "8.2"))
+    check("talimat: upgrade_to varken cümle eklenir", sentence in modern_fix._rule_instruction(nc, "8.2", "8.4"),
+          modern_fix._rule_instruction(nc, "8.2", "8.4"))
+    seen_items = []
+    _sf, _bw, _get = pm.scan_files, modern_fix.batch_window_fix, _pc.get
+    left = [[{"rule": "null_coalesce", "file": "app/A.php", "line": 2}], []]
+    pm.scan_files = lambda root, files, **k: left.pop(0) if left else []
+    modern_fix.batch_window_fix = lambda root, items, **k: (seen_items.extend(items), 1)[1]
+    _pc.get = lambda key, *a, **k: True if key == "CREW_MODERN_FIX_LLM_LEFTOVERS" else _get(key, *a, **k)
+    try:
+        modern_fix.fix_leftovers(Path("/x"), {"null_coalesce": ["app/A.php"]}, "8.2", upgrade_to="8.4")
+        with_up = [i for _f, _l, i in seen_items]
+        seen_items.clear()
+        left[:] = [[{"rule": "null_coalesce", "file": "app/A.php", "line": 2}], []]
+        modern_fix.fix_leftovers(Path("/x"), {"null_coalesce": ["app/A.php"]}, "8.2")
+        without = [i for _f, _l, i in seen_items]
+    finally:
+        pm.scan_files, modern_fix.batch_window_fix, _pc.get = _sf, _bw, _get
+    check("fix_leftovers upgrade_to'yu talimata taşır; yokken eklemez",
+          with_up and sentence in with_up[0] and without and "8.4" not in without[0], f"{with_up} {without}")
+    check("_run_scoped her iki fix_leftovers çağrısında upgrade_to geçer",
+          inspect.getsource(modern_fix._run_scoped).count("upgrade_to=upgrade_to)") >= 2)
+
+    # Fix round 1 — 3: seçim/tavan ve Task açma tek yerde
+    srcs = {f.__module__: inspect.getsource(f) for f in (pm.take, modern.take, upgrade.take)}
+    check("üç take ortak _pick + _open_and_report kullanır",
+          all("_pick(" in s and "_open_and_report(" in s for s in srcs.values()), str({k: ("_pick(" in s) for k, s in srcs.items()}))
+    qdir = Path(pm.__file__).parent
+    check("tavan metni tek yerde (php_modern)",
+          sum((qdir / f).read_text().count("istek başı tavan") for f in ("php_modern.py", "modern.py", "upgrade.py")) == 1)
 
 
 def main():

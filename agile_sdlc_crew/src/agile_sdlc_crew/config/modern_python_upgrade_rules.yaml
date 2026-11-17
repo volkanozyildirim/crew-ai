@@ -4,13 +4,13 @@
 #   attrs:   noktalı ad soneki (`datetime.utcnow` → `datetime.utcnow()` ve `datetime.datetime.utcnow()`)
 # since: modülün/API'nin kaldırıldığı ya da kullanımdan kalktığı Python sürümü.
 # breaks: error (hedefte ImportError/AttributeError) | deprecation (uyarı; bir sonraki sürümde kalkar)
-# kind: deprecation → pipeline düzeltir; structural → yerine geçecek yapı bir tasarım kararı (needs-human).
-# Hiçbir kural araçla (ruff) uygulanmaz: auto: false.
+# Hiçbir kural araçla (ruff) uygulanmaz: auto: false. Otomatik düzeltilemeyen kural kind: structural +
+# unit: file → kural başına TEK needs-human grup (yükseltme kararı, 2026-11-17).
 version: 1
 rules:
   - key: imp
     since: "3.12"
-    kind: deprecation
+    kind: structural
     breaks: error
     auto: false
     sp_unit: 1
@@ -24,7 +24,7 @@ rules:
     ref: "https://docs.python.org/3/whatsnew/3.12.html#imp"
   - key: distutils
     since: "3.12"
-    kind: deprecation
+    kind: structural
     breaks: error
     auto: false
     sp_unit: 1
@@ -108,7 +108,7 @@ rules:
     ref: "https://peps.python.org/pep-0594/#cgi"
   - key: cgitb
     since: "3.13"
-    kind: deprecation
+    kind: structural
     breaks: error
     auto: false
     sp_unit: 1
@@ -122,7 +122,7 @@ rules:
     ref: "https://peps.python.org/pep-0594/#cgitb"
   - key: pipes
     since: "3.13"
-    kind: deprecation
+    kind: structural
     breaks: error
     auto: false
     sp_unit: 1
