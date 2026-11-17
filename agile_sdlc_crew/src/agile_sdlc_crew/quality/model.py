@@ -48,6 +48,7 @@ class Group:
     human_reason: str = ""
     recurring_of: int | None = None
     infra: list[str] = field(default_factory=list)   # kod dışı ön koşul (ör. "ext:mbstring") → DevOps
+    extra_tags: list[str] = field(default_factory=list)  # Task etiketlerinin sonuna (ör. "tempo-upgrade")
 
     @property
     def last_seen(self) -> float:

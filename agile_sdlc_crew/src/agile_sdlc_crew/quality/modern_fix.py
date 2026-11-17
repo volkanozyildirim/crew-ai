@@ -62,6 +62,42 @@ def load_scope(payload: str, base_dir: Path) -> tuple[str, str, dict[str, list[s
     return lang, repo, clean, root
 
 
+_UPGRADE_TO = re.compile(r"^\d+\.\d+$")
+
+
+def upgrade_target(payload: str) -> str:
+    """Yükseltme taramasından açılan işin hedef sürümü (kayıttaki `upgrade_to`), yoksa "". Geçersiz
+    biçim yok sayılır. load_scope'tan ayrı okunur: kapsamın 4'lü dönüşü başka çağıranlarca kullanılıyor."""
+    try:
+        v = (json.loads(payload or "") or {}).get("upgrade_to")
+    except (ValueError, AttributeError):
+        return ""
+    return v if isinstance(v, str) and _UPGRADE_TO.match(v) else ""
+
+
+def _upgrade_drops(root: Path, lang: str, version: str, upgrade_to: str, changed: list[str], *,
+                   probe=None) -> dict[str, str]:
+    """Değişen dosyaları HEDEF sürümün aracıyla da denetle (upgrade.probe, files=): hedefte hata veren
+    dosya → {dosya: neden}; bu dosya PR'a girmez. Uyarı (probe:deprecation) düşürmez; araç yoksa
+    (ran=False) denetim yapılmamıştır, hiçbir dosya düşmez. Kod şimdiki sürümle yazılır (Rector
+    withPhpVersion = üretim sürümü); bu yalnız hedefte kırılmadığını doğrular."""
+    from agile_sdlc_crew.quality import upgrade
+    # Yalnız dosya bazlı probe'lar (php -l / compile()): Go probe'u HEAD'den geçici worktree açıp derler,
+    # değişen dosyaları görmez — orada main'in hatası değişen dosyayı haksız yere düşürürdü.
+    if not upgrade_to or not changed or lang not in ("php", "python"):
+        return {}
+    hits, st = (probe or upgrade.probe)(root, lang, version, upgrade_to, files=list(changed))
+    if not st.get("ran"):
+        log.info(f"  🔭 Hedef {upgrade_to} aracıyla denetlenemedi: {st.get('reason') or 'araç yok'}")
+        return {}
+    out: dict[str, str] = {}
+    for h in hits:
+        f = str(h.get("file") or "")
+        if h.get("rule") == "probe:error" and f in changed and f not in out:
+            out[f] = f"hedef {upgrade_to} aracında hata: {str(h.get('message') or '')[:160]}"
+    return out
+
+
 def _git(root: Path, *args, check: bool = False) -> subprocess.CompletedProcess:
     r = subprocess.run(["git", *args], cwd=str(root), capture_output=True, text=True, timeout=120)
     if check and r.returncode != 0:
@@ -612,7 +648,7 @@ def run(job_id: int, work_item_id: str) -> dict:
             try:
                 return _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _acct,
                                    job_id, work_item_id, title, lang, repo, scope, root, version, files_all,
-                                   lifecycle, sig)
+                                   lifecycle, sig, upgrade_to=upgrade_target(job.get("job_payload") or ""))
             finally:
                 _acct.set_toolless(False)
     except Exception as e:
@@ -628,11 +664,13 @@ def run(job_id: int, work_item_id: str) -> dict:
 
 
 def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _acct,
-                job_id, work_item_id, title, lang, repo, scope, root, version, files_all, lifecycle, sig) -> dict:
+                job_id, work_item_id, title, lang, repo, scope, root, version, files_all, lifecycle, sig,
+                upgrade_to: str = "") -> dict:
     from agile_sdlc_crew.flow import NeedsHumanReview
     from agile_sdlc_crew.pr_review import run_pr_review
     left = {"fixed": 0, "remaining": [], "skipped": []}
     with _detached(root):
+        # Sürüm yükseltme hazırlığında da araç ŞİMDİKİ üretim sürümüyle çalışır (çıktı bugün de çalışmalı)
         apply_tool(root, lang, scope, version)
         if lang == "php":
             left = fix_leftovers(root, scope, version)
@@ -641,8 +679,16 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
         # İnceleme TÜM dosyaların diff'ini görsün (pr_review.tool_diff_context) — eski hâl origin/main
         originals = {f: _git(root, "show", f"origin/main:{f}").stdout for f in changed}
         res = verify.verify(root, changed) if changed else {"ok": True, "ran": [], "issues": [], "skipped": []}
+        up_bad = _upgrade_drops(root, lang, version, upgrade_to, changed) if upgrade_to else {}
     dropped: list[str] = []
     dropped_why: dict[str, str] = {}
+    for f, why in up_bad.items():
+        changed.remove(f)
+        contents.pop(f, None)
+        dropped.append(f)
+        dropped_why[f] = why
+    if up_bad:
+        log.info(f"  🔭 {len(up_bad)} dosya hedef {upgrade_to} aracında hata verdi — PR'a alınmadı")
     for f in list(changed) if lang == "php" else []:
         lost = lost_property_defaults(originals.get(f, ""), contents[f])
         if lost:
@@ -674,6 +720,8 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             f"Kurallar: {', '.join(scope)}\n\nDeğişen dosyalar ({len(changed)}):\n"
             + "\n".join(f"- `{f}`" for f in changed)
             + f"\n\nDoğrulama: {', '.join(res['ran']) or 'doğrulayıcı yok'} geçti." + notes
+            + (f"\n\nSürüm yükseltme hazırlığı ({version} → {upgrade_to}): düzeltme {version} ile uygulandı, "
+               f"{version} sürümünde de çalışır." if upgrade_to else "")
             + (f"\n\n{branch_note}" if branch_note else "")
             + sig)
     # Kullanıcı kararı (2026-11-04): "repoda tanımlıysa unit test çalıştırıp doğrulamadan PR açma".

@@ -46,6 +46,7 @@ def task_tags(g: Group, lane: str = "quality") -> str:
     tags.append(src_tag(g.source))
     if g.needs_human:
         tags.append(HUMAN_TAG)
+    tags += [t for t in g.extra_tags if t not in tags]
     return "; ".join(tags)
 
 
@@ -256,7 +257,11 @@ LOC_PER_FILE = 5    # dosya başına en çok satır — her dosya en az bir kez 
 def _modern_rule(g: Group):
     from agile_sdlc_crew.quality import modern
     key = g.findings[0].rule if g.findings else ""
-    return next((r for r in modern.rules_for(g.source) if r.key == key), None)
+    r = next((r for r in modern.rules_for(g.source) if r.key == key), None)
+    if r is None:  # dilin yükseltme kataloğu (Python'da ayrı dosya)
+        from agile_sdlc_crew.quality import upgrade
+        r = next((r for r in upgrade.catalog(modern.SOURCE_LANG.get(g.source, "php")) if r.key == key), None)
+    return r
 
 
 def _modern_locations(g: Group) -> list[tuple[str, int, str]]:

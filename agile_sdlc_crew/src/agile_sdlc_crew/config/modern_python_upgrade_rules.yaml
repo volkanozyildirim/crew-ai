@@ -1,0 +1,360 @@
+# Python sürüm yükseltme kataloğu — hedef sürümde KALDIRILAN / kullanımdan kalkan stdlib modülleri ve API'ler.
+# Tespit `quality/upgrade.py` içinde `ast` ile yapılır (depo kodu çalıştırılmaz):
+#   modules: import edilen modül adı (`import imp`, `from distutils.util import x`, `import distutils.core`)
+#   attrs:   noktalı ad soneki (`datetime.utcnow` → `datetime.utcnow()` ve `datetime.datetime.utcnow()`)
+# since: modülün/API'nin kaldırıldığı ya da kullanımdan kalktığı Python sürümü.
+# breaks: error (hedefte ImportError/AttributeError) | deprecation (uyarı; bir sonraki sürümde kalkar)
+# kind: deprecation → pipeline düzeltir; structural → yerine geçecek yapı bir tasarım kararı (needs-human).
+# Hiçbir kural araçla (ruff) uygulanmaz: auto: false.
+version: 1
+rules:
+  - key: imp
+    since: "3.12"
+    kind: deprecation
+    breaks: error
+    auto: false
+    sp_unit: 1
+    modules: ["imp"]
+    title: "imp modülü kaldırıldı → importlib"
+    summary: "Python 3.12'de imp modülü kaldırıldı; import edilen yerde ImportError alınır. Karşılığı importlib (importlib.util, importlib.reload)."
+    advantages: ["3.12+ yorumlayıcıda modül yüklenir.", "importlib 3.4'ten beri var: düzeltme bugünkü sürümde de çalışır."]
+    risks: ["imp.load_source gibi çağrıların importlib karşılığı birkaç satır sürer; dönen modülün davranışı aynı kalmalı."]
+    before: "import imp\nmod = imp.load_source('cfg', path)"
+    after: "import importlib.util\nspec = importlib.util.spec_from_file_location('cfg', path)\nmod = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(mod)"
+    ref: "https://docs.python.org/3/whatsnew/3.12.html#imp"
+  - key: distutils
+    since: "3.12"
+    kind: deprecation
+    breaks: error
+    auto: false
+    sp_unit: 1
+    modules: ["distutils"]
+    title: "distutils kaldırıldı → setuptools / packaging / shutil"
+    summary: "Python 3.12'de distutils standart kütüphaneden çıktı. Kullanılan yardımcıların karşılığı: packaging.version, shutil, sysconfig, setuptools."
+    advantages: ["3.12+ yorumlayıcıda ImportError ortadan kalkar.", "packaging ve shutil bugünkü sürümde de çalışır."]
+    risks: ["LooseVersion karşılaştırması packaging.version'dan farklı sıralar üretebilir; strtobool için küçük bir yardımcı yazılmalı."]
+    before: "from distutils.version import LooseVersion\nif LooseVersion(v) >= LooseVersion('2.0'):"
+    after: "from packaging.version import Version\nif Version(v) >= Version('2.0'):"
+    ref: "https://docs.python.org/3/whatsnew/3.12.html#distutils"
+  - key: asyncore
+    since: "3.12"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 3
+    modules: ["asyncore"]
+    title: "asyncore kaldırıldı → asyncio"
+    summary: "Python 3.12'de asyncore kaldırıldı. Karşılığı asyncio; olay döngüsü modeli farklı olduğu için yeniden yazım gerekir."
+    advantages: ["Bakımı süren asyncio altyapısına geçilir."]
+    risks: ["Bağlantı yaşam döngüsü ve hata yönetimi değişir — kapsamı insan belirler."]
+    before: "import asyncore\nclass H(asyncore.dispatcher): ..."
+    after: "import asyncio\nclass H(asyncio.Protocol): ..."
+    ref: "https://docs.python.org/3/whatsnew/3.12.html#removed"
+  - key: asynchat
+    since: "3.12"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 3
+    modules: ["asynchat"]
+    title: "asynchat kaldırıldı → asyncio"
+    summary: "Python 3.12'de asynchat kaldırıldı. Karşılığı asyncio akışları (StreamReader/StreamWriter)."
+    advantages: ["Bakımı süren asyncio altyapısına geçilir."]
+    risks: ["Protokol yeniden yazılır — kapsamı insan belirler."]
+    before: "import asynchat\nclass C(asynchat.async_chat): ..."
+    after: "import asyncio\nreader, writer = await asyncio.open_connection(host, port)"
+    ref: "https://docs.python.org/3/whatsnew/3.12.html#removed"
+  - key: smtpd
+    since: "3.12"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 3
+    modules: ["smtpd"]
+    title: "smtpd kaldırıldı → aiosmtpd"
+    summary: "Python 3.12'de smtpd kaldırıldı. Karşılığı üçüncü taraf aiosmtpd paketi."
+    advantages: ["Bakımı süren bir SMTP sunucu kütüphanesine geçilir."]
+    risks: ["Yeni bağımlılık gerekir; işleyici API'si farklı — kapsamı insan belirler."]
+    before: "import smtpd\nclass S(smtpd.SMTPServer): ..."
+    after: "from aiosmtpd.controller import Controller"
+    ref: "https://docs.python.org/3/whatsnew/3.12.html#removed"
+  - key: datetime_utcnow
+    since: "3.12"
+    kind: structural
+    breaks: deprecation
+    auto: false
+    sp_unit: 2
+    attrs: ["datetime.utcnow", "datetime.utcfromtimestamp"]
+    title: "datetime.utcnow() / utcfromtimestamp() → saat dilimi bilinçli datetime"
+    summary: "Python 3.12'de datetime.utcnow() ve utcfromtimestamp() kullanımdan kalktı; DeprecationWarning verir."
+    advantages: ["Saat dilimi bilgisi taşıyan değerler yanlış dönüşümü önler."]
+    risks: ["datetime.now(timezone.utc) saat dilimi bilinçli (aware) değer döner: naive değerlerle karşılaştırma TypeError verir, serileştirme biçimi değişebilir — her yer elle değerlendirilmeli."]
+    before: "now = datetime.utcnow()"
+    after: "now = datetime.now(timezone.utc)"
+    ref: "https://docs.python.org/3/whatsnew/3.12.html#deprecated"
+  - key: cgi
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["cgi"]
+    title: "cgi kaldırıldı → email.message / urllib.parse / multipart"
+    summary: "Python 3.13'te cgi kaldırıldı (PEP 594). parse_header → email.message, FieldStorage → multipart paketi ya da çerçevenin ayrıştırıcısı."
+    advantages: ["3.13+ yorumlayıcıda modül yüklenir."]
+    risks: ["FieldStorage'ın yerine geçecek ayrıştırıcı seçimi bir tasarım kararıdır."]
+    before: "import cgi\nvalue, params = cgi.parse_header(h)"
+    after: "from email.message import Message\nm = Message(); m['content-type'] = h\nparams = m.get_params()"
+    ref: "https://peps.python.org/pep-0594/#cgi"
+  - key: cgitb
+    since: "3.13"
+    kind: deprecation
+    breaks: error
+    auto: false
+    sp_unit: 1
+    modules: ["cgitb"]
+    title: "cgitb kaldırıldı → çağrı silinir / logging"
+    summary: "Python 3.13'te cgitb kaldırıldı (PEP 594). Genellikle yalnız cgitb.enable() çağrısıdır; silinir ya da logging ile değiştirilir."
+    advantages: ["3.13+ yorumlayıcıda ImportError ortadan kalkar."]
+    risks: ["Hata sayfası artık HTML olarak basılmaz; hata loglanmalı."]
+    before: "import cgitb\ncgitb.enable()"
+    after: "import logging\nlogging.basicConfig()"
+    ref: "https://peps.python.org/pep-0594/#cgitb"
+  - key: pipes
+    since: "3.13"
+    kind: deprecation
+    breaks: error
+    auto: false
+    sp_unit: 1
+    modules: ["pipes"]
+    title: "pipes kaldırıldı → shlex / subprocess"
+    summary: "Python 3.13'te pipes kaldırıldı (PEP 594). pipes.quote → shlex.quote; Template → subprocess."
+    advantages: ["shlex.quote 3.3'ten beri var: düzeltme bugünkü sürümde de çalışır."]
+    risks: ["pipes.Template kullanımı varsa subprocess'e çevirmek birkaç satır sürer."]
+    before: "import pipes\ncmd = 'ls ' + pipes.quote(path)"
+    after: "import shlex\ncmd = 'ls ' + shlex.quote(path)"
+    ref: "https://peps.python.org/pep-0594/#pipes"
+  - key: telnetlib
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 3
+    modules: ["telnetlib"]
+    title: "telnetlib kaldırıldı → telnetlib3 / exscript"
+    summary: "Python 3.13'te telnetlib kaldırıldı (PEP 594). Karşılığı üçüncü taraf paketler."
+    advantages: ["Bakımı süren bir kütüphaneye geçilir."]
+    risks: ["Yeni bağımlılık ve farklı API — kapsamı insan belirler."]
+    before: "import telnetlib\ntn = telnetlib.Telnet(host)"
+    after: "import telnetlib3"
+    ref: "https://peps.python.org/pep-0594/#telnetlib"
+  - key: nntplib
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 3
+    modules: ["nntplib"]
+    title: "nntplib kaldırıldı"
+    summary: "Python 3.13'te nntplib kaldırıldı (PEP 594); standart kütüphanede karşılığı yok."
+    advantages: ["Kullanılmayan bir protokol bağımlılığı kalkar."]
+    risks: ["Özellik hâlâ gerekiyorsa üçüncü taraf paket seçilmeli — insan kararı."]
+    before: "import nntplib"
+    after: "# üçüncü taraf NNTP istemcisi ya da özelliğin kaldırılması"
+    ref: "https://peps.python.org/pep-0594/#nntplib"
+  - key: crypt
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 3
+    modules: ["crypt"]
+    title: "crypt kaldırıldı → bcrypt / passlib / hashlib"
+    summary: "Python 3.13'te crypt kaldırıldı (PEP 594). Parola özetleri için bcrypt/passlib, genel özet için hashlib."
+    advantages: ["Güncel ve güvenli parola özetleme algoritmalarına geçilir."]
+    risks: ["Saklanan özetlerin biçimi değişebilir: mevcut parolaların doğrulanması bozulmamalı — insan kararı."]
+    before: "import crypt\nh = crypt.crypt(pw, salt)"
+    after: "import bcrypt\nh = bcrypt.hashpw(pw.encode(), bcrypt.gensalt())"
+    ref: "https://peps.python.org/pep-0594/#crypt"
+  - key: audioop
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 3
+    modules: ["audioop"]
+    title: "audioop kaldırıldı"
+    summary: "Python 3.13'te audioop kaldırıldı (PEP 594). Karşılığı audioop-lts ya da numpy tabanlı işleme."
+    advantages: ["Bakımı süren bir ses işleme yoluna geçilir."]
+    risks: ["Yeni bağımlılık gerekir — insan kararı."]
+    before: "import audioop"
+    after: "import audioop  # audioop-lts paketi"
+    ref: "https://peps.python.org/pep-0594/#audioop"
+  - key: aifc
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["aifc"]
+    title: "aifc kaldırıldı"
+    summary: "Python 3.13'te aifc kaldırıldı (PEP 594). Karşılığı soundfile gibi üçüncü taraf paketler."
+    advantages: ["Bakımı süren bir ses dosyası kütüphanesine geçilir."]
+    risks: ["Yeni bağımlılık gerekir — insan kararı."]
+    before: "import aifc"
+    after: "import soundfile"
+    ref: "https://peps.python.org/pep-0594/#aifc"
+  - key: chunk
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["chunk"]
+    title: "chunk kaldırıldı"
+    summary: "Python 3.13'te chunk kaldırıldı (PEP 594); IFF parça okuması elle (struct) yazılmalı."
+    advantages: ["Kaldırılmış modül bağımlılığı biter."]
+    risks: ["Okuma mantığı yeniden yazılır — insan kararı."]
+    before: "import chunk\nc = chunk.Chunk(f)"
+    after: "import struct\nname, size = struct.unpack('>4sI', f.read(8))"
+    ref: "https://peps.python.org/pep-0594/#chunk"
+  - key: imghdr
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["imghdr"]
+    title: "imghdr kaldırıldı → filetype / Pillow"
+    summary: "Python 3.13'te imghdr kaldırıldı (PEP 594). Görsel türü tespiti için filetype ya da Pillow."
+    advantages: ["Daha çok biçimi tanıyan bir kütüphaneye geçilir."]
+    risks: ["Yeni bağımlılık gerekir; dönen tür adları farklı olabilir — insan kararı."]
+    before: "import imghdr\nkind = imghdr.what(path)"
+    after: "import filetype\nkind = filetype.guess_extension(path)"
+    ref: "https://peps.python.org/pep-0594/#imghdr"
+  - key: sndhdr
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["sndhdr"]
+    title: "sndhdr kaldırıldı"
+    summary: "Python 3.13'te sndhdr kaldırıldı (PEP 594). Ses türü tespiti için filetype gibi paketler."
+    advantages: ["Kaldırılmış modül bağımlılığı biter."]
+    risks: ["Yeni bağımlılık gerekir — insan kararı."]
+    before: "import sndhdr"
+    after: "import filetype"
+    ref: "https://peps.python.org/pep-0594/#sndhdr"
+  - key: sunau
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["sunau"]
+    title: "sunau kaldırıldı"
+    summary: "Python 3.13'te sunau kaldırıldı (PEP 594). Karşılığı soundfile gibi üçüncü taraf paketler."
+    advantages: ["Kaldırılmış modül bağımlılığı biter."]
+    risks: ["Yeni bağımlılık gerekir — insan kararı."]
+    before: "import sunau"
+    after: "import soundfile"
+    ref: "https://peps.python.org/pep-0594/#sunau"
+  - key: uu
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["uu"]
+    title: "uu kaldırıldı → base64"
+    summary: "Python 3.13'te uu kaldırıldı (PEP 594). uuencode yerine base64 kullanılır."
+    advantages: ["Standart ve yaygın bir kodlamaya geçilir."]
+    risks: ["Kodlanmış veriyi okuyan karşı taraf da değişmeli — insan kararı."]
+    before: "import uu\nuu.encode(src, dst)"
+    after: "import base64\ndst.write(base64.b64encode(src.read()))"
+    ref: "https://peps.python.org/pep-0594/#uu-and-the-uu-encoding"
+  - key: xdrlib
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["xdrlib"]
+    title: "xdrlib kaldırıldı"
+    summary: "Python 3.13'te xdrlib kaldırıldı (PEP 594); XDR kodlaması struct ile elle yazılmalı."
+    advantages: ["Kaldırılmış modül bağımlılığı biter."]
+    risks: ["Kodlama yeniden yazılır — insan kararı."]
+    before: "import xdrlib\np = xdrlib.Packer()"
+    after: "import struct\nbuf = struct.pack('>i', n)"
+    ref: "https://peps.python.org/pep-0594/#xdrlib"
+  - key: msilib
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["msilib"]
+    title: "msilib kaldırıldı"
+    summary: "Python 3.13'te msilib kaldırıldı (PEP 594); standart kütüphanede karşılığı yok."
+    advantages: ["Kaldırılmış modül bağımlılığı biter."]
+    risks: ["Windows kurulum paketi üretimi başka araca taşınmalı — insan kararı."]
+    before: "import msilib"
+    after: "# WiX gibi harici bir araç"
+    ref: "https://peps.python.org/pep-0594/#msilib"
+  - key: nis
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["nis"]
+    title: "nis kaldırıldı"
+    summary: "Python 3.13'te nis kaldırıldı (PEP 594); standart kütüphanede karşılığı yok."
+    advantages: ["Kaldırılmış modül bağımlılığı biter."]
+    risks: ["Kullanıcı/grup sorgusu başka kaynaktan yapılmalı — insan kararı."]
+    before: "import nis"
+    after: "# LDAP ya da işletim sistemi araçları"
+    ref: "https://peps.python.org/pep-0594/#nis"
+  - key: ossaudiodev
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["ossaudiodev"]
+    title: "ossaudiodev kaldırıldı"
+    summary: "Python 3.13'te ossaudiodev kaldırıldı (PEP 594); standart kütüphanede karşılığı yok."
+    advantages: ["Kaldırılmış modül bağımlılığı biter."]
+    risks: ["Ses çıkışı başka kütüphaneye taşınmalı — insan kararı."]
+    before: "import ossaudiodev"
+    after: "import sounddevice"
+    ref: "https://peps.python.org/pep-0594/#ossaudiodev"
+  - key: spwd
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["spwd"]
+    title: "spwd kaldırıldı"
+    summary: "Python 3.13'te spwd kaldırıldı (PEP 594); gölge parola dosyası okuması başka yoldan yapılmalı."
+    advantages: ["Kaldırılmış modül bağımlılığı biter."]
+    risks: ["Kimlik doğrulama akışı değişir — insan kararı."]
+    before: "import spwd"
+    after: "# python-pam ya da işletim sistemi araçları"
+    ref: "https://peps.python.org/pep-0594/#spwd"
+  - key: lib2to3
+    since: "3.13"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    modules: ["lib2to3"]
+    title: "lib2to3 kaldırıldı → ast / libcst"
+    summary: "Python 3.13'te lib2to3 kaldırıldı; kaynak kod dönüştürme için ast ya da libcst kullanılır."
+    advantages: ["Güncel sözdizimini tanıyan bir ayrıştırıcıya geçilir."]
+    risks: ["Dönüştürme kodu yeniden yazılır — insan kararı."]
+    before: "from lib2to3 import pytree"
+    after: "import libcst"
+    ref: "https://docs.python.org/3/whatsnew/3.13.html#lib2to3"

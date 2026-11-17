@@ -1,6 +1,7 @@
 """Dil sürümü yükseltme: katalogdan yükseltmeyi etkileyen kuralları süzer."""
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -9,6 +10,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import yaml
@@ -91,12 +94,30 @@ def default_target(lang: str, current: str, index: dict) -> str | None:
     return kv[-1] if kv else None
 
 
+PY_UPGRADE_RULES = Path(__file__).resolve().parent.parent / "config" / "modern_python_upgrade_rules.yaml"
+_PHP_FIX_MIN = (7, 0)
+
+
+def catalog(lang: str) -> list[pm.Rule]:
+    """Dilin kataloğu (modernleştirme + yükseltme kuralları). Python'un yükseltme kuralları ayrı dosyada:
+    ruff kodlarıyla aynı katalogda olsalar araç düzeltmesine (ruff --select) karışırlardı."""
+    from agile_sdlc_crew.quality import modern
+    if lang == "php":
+        return pm.load_rules()
+    if lang not in modern.LANGS:
+        return []
+    rules = modern.rules_for(modern.LANGS[lang]["source"])
+    if lang == "python":
+        rules = rules + pm.load_rules(PY_UPGRADE_RULES)
+    # fix_min'in varsayılanı ("7.0") PHP sürümüdür; Go 1.x / Python 3.x'te her bulguyu "önceden
+    # düzeltilemez" gösterirdi → diğer dillerde varsayılan "kısıt yok" sayılır.
+    return [replace(r, fix_min=(0, 0)) if r.fix_min == _PHP_FIX_MIN else r for r in rules]
+
+
 def _has_catalog(lang: str, version: str) -> bool:
     """O sürümde `breaks` dolu bir katalog kuralı var mı (Go/Python/Next.js'te henüz olmayabilir)."""
     try:
-        from agile_sdlc_crew.quality import modern
-        rules = pm.load_rules() if lang == "php" else modern.rules_for(modern.LANGS[lang]["source"])
-        return any(r.breaks and r.since == _v(version) for r in rules)
+        return any(r.breaks and r.since == _v(version) for r in catalog(lang))
     except Exception:  # noqa: BLE001
         return False
 
@@ -325,7 +346,7 @@ def sites(client, repo: str, root: Path, lang: str, current: str, to: str, index
 
 
 def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, index=None, root=None,
-         read=None, yml_files=None) -> dict:
+         read=None, yml_files=None, app_map_cache: dict | None = None) -> dict:
     from agile_sdlc_crew.quality import modern
     deps = deps or pm.default_deps()
     if root is None:
@@ -336,9 +357,10 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
         except Exception as e:  # noqa: BLE001
             log.warning(f"⚠️ upgrade: FLODevOps build dizini okunamadı: {e}")
             index = {}
-    if lang == "php" and client is None:  # ağsız (test) yol: app_map yüklenmez, önbellek okunmaz
-        tv = pm.target_version(None, repo, app_map_cache={}, repo_root=Path(root), write_cache=False,
-                               max_age_h=0, index=index)
+    if lang == "php" and (client is None or app_map_cache is not None):
+        # ağsız (test) yol ya da çağıranın verdiği app_map: eşleme yüklenmez, önbellek okunmaz/yazılmaz
+        tv = pm.target_version(client, repo, app_map_cache=app_map_cache or {}, repo_root=Path(root),
+                               write_cache=False, max_age_h=0, index=index)
     else:
         tv = modern.target(client, repo, Path(root), lang, index=index)
     current = tv.get("version")
@@ -744,3 +766,349 @@ def blockers(root: Path, lang: str, to: str) -> list[dict]:
             out.append({"kind": "dependency", "name": name, "constraint": str(c),
                         "detail": f"{name} {p.get('version', '')}: PHP {c} — {to} sürümünü dışlıyor".replace("  ", " ")})
     return out
+
+
+# ── Yükseltme taraması ve alımı ──────────────────────────────────────────
+# Modernleştirmenin üçüncü kardeşi: aynı gruplama (build_groups), board dedup'ı, Task açma
+# (_open_tasks) ve Rector kuyruğu. Fark yalnız kural kümesi (`breaks` dolu, current < since ≤ hedef,
+# + hedef aracın bulguları), başlık öneki, `tempo-upgrade` etiketi ve araç kapsamındaki `upgrade_to`.
+# Kaynak ve parmak izi dilin mevcut kaynağıdır: repo yükseldikten sonra aynı kural modernleştirme
+# taramasında da çıkar, board ikisini tek iş sayar.
+
+TAG = "tempo-upgrade"
+_TTL_S = 3600
+_PROBE_CACHE: dict[tuple, dict] = {}
+_PY_MAX_BYTES = 2_000_000
+_COUNT_KEYS = ("error", "behavior", "deprecation")
+
+
+def _py_matchers() -> dict[str, dict]:
+    """Python yükseltme kataloğunun eşleşme alanları (load_rules bunları taşımaz)."""
+    try:
+        data = yaml.safe_load(PY_UPGRADE_RULES.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    return {str(r["key"]): {"modules": [str(m) for m in r.get("modules") or []],
+                            "attrs": [str(a) for a in r.get("attrs") or []]} for r in data.get("rules") or []}
+
+
+def _dotted(node) -> str:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return ""
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def python_hits(root: Path, keys: set[str]) -> list[dict]:
+    """Yükseltme kataloğundaki modül / API kullanımları — `ast` ile, depo kodu ÇALIŞTIRILMADAN.
+    Ayrıştırılamayan dosya atlanır (sözdizimini hedef yorumlayıcıyla probe ayrıca denetler)."""
+    from agile_sdlc_crew.quality import modern
+    from agile_sdlc_crew.quality.render import mask_secrets
+    root = Path(root)
+    match = {k: v for k, v in _py_matchers().items() if k in keys}
+    mods = {m: k for k, v in match.items() for m in v["modules"]}
+    attrs = [(a, k) for k, v in match.items() for a in v["attrs"]]
+    hits: list[dict] = []
+    if not mods and not attrs:
+        return hits
+    for dp, dns, fns in os.walk(root, followlinks=False):
+        dns[:] = sorted(d for d in dns if d not in modern.SKIP_DIRS and not d.startswith("."))
+        for fn in sorted(fns):
+            p = Path(dp) / fn
+            if not fn.endswith(".py") or p.is_symlink():
+                continue
+            try:
+                if p.stat().st_size > _PY_MAX_BYTES:
+                    continue
+                text = p.read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(text, filename=fn)
+            except (OSError, SyntaxError, ValueError, RecursionError, MemoryError):
+                continue
+            rel = str(p.relative_to(root))
+            lines = text.splitlines()
+
+            def add(key: str, n: int) -> None:
+                src = lines[n - 1].strip() if 0 < n <= len(lines) else ""
+                hits.append({"rule": key, "file": rel, "line": n, "text": mask_secrets(src)[:200],
+                             "module": pm.module_of(rel)})
+            for node in ast.walk(tree):
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+                    names = [node.module]
+                for name in names:
+                    if name.split(".")[0] in mods:
+                        add(mods[name.split(".")[0]], node.lineno)
+                if isinstance(node, ast.Attribute) and attrs:
+                    d = _dotted(node)
+                    for a, key in attrs:
+                        if d == a or d.endswith("." + a):
+                            add(key, node.lineno)
+    return hits
+
+
+def _go_report_hits(root: Path, keys: set[str]) -> list[dict]:
+    """Go'nun yükseltme kuralları yalnız rapor: go.mod'daki `go` satırı hedefe çekilince değişen
+    varsayılanlar. Bulgu o satıra düşer (kartta sayı; iş açılmaz)."""
+    try:
+        lines = (Path(root) / "go.mod").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    n = next((i for i, ln in enumerate(lines, 1) if re.match(r"^go\s+\d", ln.strip())), 1)
+    text = lines[n - 1].strip() if lines else ""
+    return [{"rule": k, "file": "go.mod", "line": n, "text": text, "module": "."} for k in sorted(keys)]
+
+
+def _next_hits(root: Path, current: str, keys: set[str], force: bool) -> tuple[list[dict], list[str]]:
+    """Next.js katalog desenlerinin `breaks` dolu olanları (modern._hits, önbellekli) + package.json
+    kuralları (`next lint` betiği — modern.next_hits yalnız JS/TS dosyalarını gezer)."""
+    from agile_sdlc_crew.quality import modern
+    found, errors, _sha = modern._hits(root, "nextjs", current, force)
+    hits = [dict(h) for h in found if h.get("rule") in keys]
+    try:
+        pkg = (Path(root) / "package.json").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pkg = ""
+    for r in modern._raw_rules("nextjs"):
+        if r.get("key") not in keys or not r.get("pattern") or not r.get("file_pattern") \
+                or not re.search(r["file_pattern"], "package.json"):
+            continue
+        for m in re.finditer(r["pattern"], pkg, re.S):
+            n = pkg.count("\n", 0, m.start()) + 1
+            hits.append({"rule": r["key"], "file": "package.json", "line": n,
+                         "text": pkg.splitlines()[n - 1].strip()[:200], "module": "."})
+    return hits, errors
+
+
+def _probe_cached(repo: str, lang: str, root: Path, sha: str, current: str, to: str, force: bool,
+                  probe_fn=None) -> tuple[list[dict], dict]:
+    """Hedef araçla doğrulama, süreç içi önbellekli (repo × HEAD × hedef; *Yeniden tara* atlar)."""
+    if probe_fn is not None:
+        return probe_fn(root, lang, current, to)
+    key = (lang, repo, sha, to)
+    c = _PROBE_CACHE.get(key)
+    if c and sha and not force and time.time() - c["at"] < _TTL_S:
+        return c["hits"], dict(c["st"])
+    hits, st = probe(root, lang, current, to)
+    if sha:
+        _PROBE_CACHE[key] = {"hits": hits, "st": dict(st), "at": time.time()}
+    return hits, st
+
+
+def _collect(repo: str, lang: str, root: Path, current: str, to: str, cfg: dict, *, force: bool,
+             scan_fn=None, head_sha_fn=None, probe_fn=None) -> tuple[list[dict], list[pm.Rule], dict]:
+    """Bulgular (katalog + hedef araç) ve kurallar. Katalog satırında zaten bulgu varken hedef aracın
+    aynı dosya + satırdaki bulgusu aynı sorunun ikinci görünüşüdür → atılır."""
+    from agile_sdlc_crew.quality.render import mask_secrets
+    rules = upgrade_rules(catalog(lang), current, to)
+    keys = {r.key for r in rules}
+    errors: list[str] = []
+    if lang == "php":
+        with pm._scan_lock(repo):  # aynı repo için paralel php süreçleri açılmasın
+            res = pm.scan_cached(repo, root, cache_dir=Path(cfg["scan_cache"]), scan_fn=scan_fn,
+                                 head_sha_fn=head_sha_fn, exclude=cfg.get("php_exclude"),
+                                 php_bin=cfg.get("php_bin", "php"), ttl_h=int(cfg.get("scan_ttl_h", 24)), force=force)
+        hits = [h for h in res.get("hits") or [] if h.get("rule") in keys]
+        errors, sha, files = list(res.get("errors") or []), res.get("sha", ""), int(res.get("files") or 0)
+    else:
+        sha = (head_sha_fn or pm._head_sha)(root)
+        if lang == "python":
+            hits = python_hits(root, keys)
+        elif lang == "nextjs":
+            hits, errors = _next_hits(root, current, keys, force)
+        else:
+            hits = _go_report_hits(root, {r.key for r in rules if r.kind == "report"})
+        files = len({h["file"] for h in hits})
+    phits, pst = _probe_cached(repo, lang, root, sha, current, to, force, probe_fn)
+    seen = {(h.get("file"), int(h.get("line") or 0)) for h in hits}
+    extra = []
+    for h in phits:
+        if (h.get("file"), int(h.get("line") or 0)) in seen:
+            continue
+        # Task'taki "bulunan yerler" satırı hedef aracın mesajını da göstersin
+        text = f"{h.get('text') or ''} ⟵ {h.get('message') or ''}".strip(" ⟵")
+        extra.append({**h, "text": mask_secrets(text)[:200], "module": pm.module_of(str(h.get("file") or ""))})
+    # Hedef aracın bulgusu için düzeltmenin en düşük sürümü bilinmez; düzeltme şimdiki sürümde yazılır
+    prules = [replace(r, fix_min=(0, 0)) for r in probe_rules(extra, to=to)]
+    return hits + extra, rules + prules, {"sha": sha, "files": files, "errors": errors, "probe": pst}
+
+
+def _mark_groups(groups: list, rules_by_key: dict, current: str, to: str) -> None:
+    """Yükseltme grubu: başlık öneki + etiket; behavior ve `fix_min > şimdiki` bulguları insan işi."""
+    cur = _v(current)
+    for g in groups:
+        r = rules_by_key.get(g.findings[0].rule) if g.findings else None
+        reason = ""
+        if r is not None and r.breaks == "behavior":
+            reason = "Davranış değişikliği: otomatik düzeltilemez"
+        elif r is not None and r.fix_min > cur:
+            # düzeltilmiş hâl bugünkü üretimde çalışmaz → önceden düzeltilemez
+            reason = f"Düzeltme yalnız {_fmt(r.fix_min)} ve sonrasında çalışır — sürüm adımıyla birlikte ele alınmalı"
+        if reason:
+            g.needs_human = True
+            g.human_reason = f"{g.human_reason} · {reason}" if g.infra and g.human_reason else reason
+        g.title = f"Sürüm yükseltme {current}→{to}: {g.title}"
+        if TAG not in g.extra_tags:
+            g.extra_tags.append(TAG)
+
+
+def _analyse(client, repo: str, lang: str, root: Path, current: str, to: str, cfg: dict, deps, *, force: bool,
+             scan_fn=None, head_sha_fn=None, probe_fn=None):
+    from agile_sdlc_crew.quality import modern
+    hits, rules, meta = _collect(repo, lang, root, current, to, cfg, force=force, scan_fn=scan_fn,
+                                 head_sha_fn=head_sha_fn, probe_fn=probe_fn)
+    rules_by_key = {r.key: r for r in rules}
+    # Araç (Rector / kendi düzelticimiz / satır penceresi) yalnız PHP katalog kurallarına; hedef aracın
+    # genel bulgusu (probe:*) ve Go/Python/Next.js yükseltme kuralları pipeline'a ya da insana gider.
+    tools = set(pm.tool_rules([r for r in rules if not r.key.startswith("probe:")])) if lang == "php" else set()
+    # Süzme upgrade_rules'ta yapıldı; build_groups'a sürüm kapısı uygulanmasın diye "99.0"
+    groups, skipped, summary = pm.build_groups(
+        {"hits": hits}, rules, "99.0", repo=repo, board_index=deps.board(client), now=deps.now(), cfg=cfg,
+        ext_ok=pm._ext_checker(root) if lang == "php" else None, source=modern.LANGS[lang]["source"],
+        tool_rules=tools)
+    for k, s in summary.items():
+        s["breaks"] = rules_by_key[k].breaks
+    _mark_groups(groups, rules_by_key, current, to)
+    return groups, skipped, summary, rules_by_key, tools, meta
+
+
+def _rows(groups: list, rules_by_key: dict, tools: set, current: str) -> dict[str, list[dict]]:
+    cur = _v(current)
+    out: dict[str, list[dict]] = {"auto": [], "infra": [], "human": []}
+    for g in groups:
+        rule = g.findings[0].rule
+        r = rules_by_key.get(rule)
+        auto = not g.needs_human
+        row = pm._row(g, rules_by_key)
+        row.update({"breaks": r.breaks if r else "", "blocking": bool(r is not None and blocking(r, auto=auto)),
+                    "pre_fixable": bool(r is not None and r.fix_min <= cur),
+                    "tool": bool(auto and rule in tools)})
+        out["auto" if auto else ("infra" if g.infra else "human")].append(row)
+    return out
+
+
+def _prepare(repo: str, lang: str, deps, root) -> tuple[dict, Path]:
+    from agile_sdlc_crew.quality import modern
+    if lang not in modern.LANGS:
+        raise ValueError(f"Desteklenmeyen dil: {lang}")
+    cfg = deps.cfg()
+    root = Path(root) if root is not None else pm._root(cfg, repo, deps)
+    if lang not in modern.detect_langs(root):
+        raise ValueError(f"{root.name} bir {modern.LANGS[lang]['label']} reposu değil")
+    return cfg, root
+
+
+def scan(client, repo: str, lang: str, *, to: str | None = None, team: str = "", force: bool = False, deps=None,
+         index=None, root=None, read=None, yml_files=None, app_map_cache: dict | None = None, scan_fn=None,
+         head_sha_fn=None, probe_fn=None) -> dict:
+    """Yazma yok: hedef sürüme geçince kırılan / davranışı değişen / kullanımdan kalkan yerler. modern.scan
+    ile aynı anahtarlar + şimdiki/hedef sürüm, sürüm yerleri, engeller, probe durumu ve sayımlar."""
+    from agile_sdlc_crew.quality import modern
+    deps = deps or pm.default_deps()
+    cfg, root = _prepare(repo, lang, deps, root)
+    repo = root.name
+    label = modern.LANGS[lang]["label"]
+    fresh = pm.freshen_clone(root, force=force) if cfg.get("freshen", True) and scan_fn is None else {}
+    pl = plan(client, repo, lang, to, deps=deps, index=index, root=root, read=read, yml_files=yml_files,
+              app_map_cache=app_map_cache)
+    out = {"repo": repo, "lang": lang, "label": label, "version": pl["current"], "current": pl["current"],
+           "target": pl["target"], "target_source": pl["target_source"], "selectable": pl["selectable"],
+           "sites": pl["sites"], "per_src": pl["per_src"], "up_to_date": pl["up_to_date"], "freshen": fresh,
+           "sha": "", "files": 0, "auto": [], "infra": [], "human": [], "rules": {}, "skipped": [],
+           "skipped_counts": {}, "errors": [], "blockers": [], "probe": None,
+           "counts": {k: 0 for k in _COUNT_KEYS}, "blocking": 0}
+    if not pl["current"]:
+        out["message"] = f"Şimdiki {label} sürümü bulunamadı — yükseltme taranamaz."
+        return out
+    if pl["up_to_date"]:
+        out["message"] = "Repo hedef sürümde ya da seçilebilecek daha yüksek bir sürüm yok."
+        return out
+    cur, tgt = pl["current"], pl["target"]
+    groups, skipped, summary, rules_by_key, tools, meta = _analyse(
+        client, repo, lang, root, cur, tgt, cfg, deps, force=force, scan_fn=scan_fn, head_sha_fn=head_sha_fn,
+        probe_fn=probe_fn)
+    rows = _rows(groups, rules_by_key, tools, cur)
+    every = rows["auto"] + rows["infra"] + rows["human"]
+    counts = {k: sum(r["count"] for r in every if r["breaks"] == k) for k in _COUNT_KEYS}
+    out.update(rows)
+    out.update({"sha": meta["sha"], "files": meta["files"], "errors": meta["errors"], "probe": meta["probe"],
+                "rules": summary, "skipped": skipped[:50],
+                "skipped_counts": dict(Counter(s["reason"].split(" #")[0] for s in skipped)),
+                "blockers": blockers(root, lang, tgt), "counts": counts,
+                "blocking": sum(1 for r in every if r["blocking"])})
+    if not groups:
+        out["message"] = f"{cur} → {tgt} geçişinde açılacak iş yok."
+    return out
+
+
+def take(client, repo: str, lang: str, group_ids: list[str], *, to: str | None = None, team: str = "",
+         sprint: str = "", deps=None, index=None, root=None, read=None, yml_files=None,
+         app_map_cache: dict | None = None, scan_fn=None, head_sha_fn=None, probe_fn=None) -> dict:
+    """Seçilen yükseltme gruplarını 'Teknik borç' story'si altında Task olarak aç (modern.take ile aynı
+    kurallar ve yanıt). Rector/düzelticinin uyguladığı PHP grupları modern_fix işine, kapsamında
+    `upgrade_to` ile; diğer otomatik gruplar pipeline'a; insan işleri kuyruğa alınmaz."""
+    from agile_sdlc_crew import estimation
+    from agile_sdlc_crew.quality import intake, modern
+    deps = deps or pm.default_deps()
+    if not intake._LOCK.acquire(blocking=False):
+        raise intake.Busy("Başka bir alım / kuyruk isteği sürüyor")
+    try:
+        cfg, root = _prepare(repo, lang, deps, root)
+        repo = root.name
+        label = modern.LANGS[lang]["label"]
+        pl = plan(client, repo, lang, to, deps=deps, index=index, root=root, read=read, yml_files=yml_files,
+                  app_map_cache=app_map_cache)
+        if not pl["current"]:
+            raise ValueError(f"Şimdiki {label} sürümü bilinmiyor — yükseltme işi açılamaz")
+        if pl["up_to_date"]:
+            raise ValueError("Repo hedef sürümde — açılacak yükseltme işi yok")
+        cur, tgt = pl["current"], pl["target"]
+        groups, _sk, _sum, _rbk, tools, _meta = _analyse(
+            client, repo, lang, root, cur, tgt, cfg, deps, force=False, scan_fn=scan_fn, head_sha_fn=head_sha_fn,
+            probe_fn=probe_fn)
+        by_gid = {pm.gid_of(g): g for g in groups}
+        picked, skipped = [], []
+        max_take = max(1, int(cfg.get("max_take", 8)))
+        for gid in dict.fromkeys(str(x) for x in (group_ids or [])):
+            g = by_gid.get(gid)
+            if g is None:
+                skipped.append({"gid": gid, "reason": "tarama değişti ya da board'da açık — yeniden tarayın"})
+            elif len(picked) >= max_take:
+                skipped.append({"gid": gid, "reason": f"istek başı tavan ({max_take})"})
+            else:
+                picked.append(g)
+        if not picked:
+            if skipped and all("tarama" in s["reason"] for s in skipped):
+                raise ValueError("Seçim güncel taramada yok — tarama değişti, yeniden tarayın")
+            return {"repo": repo, "lang": lang, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
+        source = modern.LANGS[lang]["source"]
+        story = intake.resolve_story(client, source, None, team, "current_or_next", lane="techdebt", iteration=sprint)
+        cfg2 = {**cfg, "php_target": f"{cur} → {tgt} (sürüm yükseltme; düzeltme {cur} sürümünde de çalışmalı)"}
+        if lang == "php":
+            if deps.queue_tool is not None:
+                base_tool = deps.queue_tool
+
+                def _tool(wid, title, payload):  # onaylı kapsam + hedef sürüm INSERT'te kayda
+                    return base_tool(wid, title, json.dumps({**json.loads(payload), "upgrade_to": tgt}))
+                deps = deps._replace(queue_tool=_tool)
+            deps = pm._rector_queue(deps, repo, [g for g in picked if not g.needs_human and g.findings[0].rule in tools])
+        rows, added = intake._open_tasks(client, picked, story, cfg2, deps, source=source, lane="techdebt", queue=True)
+        if added:
+            estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
+        tasks = [r for r in rows if not r["needs_human"]]
+        human = [r for r in rows if r["needs_human"]]
+        devops = pm._devops_requests(client, repo, picked, rows, cfg) if lang == "php" else []
+        log.info(f"⬆️ {label} sürüm yükseltme {cur}→{tgt} ({repo}): story #{story['id']} · {len(rows)} Task · {added} SP")
+        return {"repo": repo, "lang": lang, "version": cur, "current": cur, "target": tgt,
+                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"],
+                          "iteration": story["iteration"]},
+                "tasks": tasks, "human_tasks": human, "devops": devops, "skipped": skipped,
+                "total_sp": sum(r["sp"] for r in tasks if r.get("id")),
+                "human_sp": sum(r["sp"] for r in human if r.get("id")), "tool_fix": False}
+    finally:
+        intake._LOCK.release()

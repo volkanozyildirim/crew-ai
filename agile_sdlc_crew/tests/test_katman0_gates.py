@@ -7927,6 +7927,267 @@ def test_upgrade_plan_sites():
               and c3[0]["new"] == c3[0]["old"], str(c3))
 
 
+def test_upgrade_scan_take():
+    """Yükseltme taraması ve alımı: mevcut modernleştirme yolunu (build_groups, board dedup,
+    _open_tasks, Rector kuyruğu) yeniden kullanır; yalnız yükseltme kuralları + hedef araç
+    bulguları, önekli başlık, tempo-upgrade etiketi, araç kapsamında upgrade_to."""
+    print("\n[upgrade: tarama, alım, Task metni]")
+    import inspect
+    from agile_sdlc_crew.quality import intake, modern_fix, php_modern as pm, render, upgrade
+    from agile_sdlc_crew.quality.model import Finding, Group
+
+    class C:
+        org_url, project = "https://dev.azure.com/o", "P"
+
+        def __init__(self):
+            self.created = []
+
+        def list_iterations(self, team=""):
+            return [{"name": "S23", "path": "P\\S23", "attributes": {"timeFrame": "current"}}]
+
+        def query_work_items(self, wiql, limit=0):  # story zaten var → created[0] Task olur
+            return [{"id": 500, "fields": {"System.AreaPath": "P\\T", "System.IterationPath": "P\\S23"}}]
+
+        def get_team_area_path(self, team=""):
+            return "P\\T"
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append(fields)
+            return {"id": 700 + len(self.created), "fields": fields}
+
+        def update_work_item(self, wid, ops):
+            return {}
+
+        def get_authenticated_user(self):
+            return {"uniqueName": "me@x"}
+
+    index = {"core": [{"src": "anatolia/build/core", "images": ["eu/prod-ar/php-8-2:1.0"]}],
+             "web": [{"src": "anatolia/build/web", "images": ["eu/prod-ar/php-8-4:1.0"]}],
+             "legacy": [{"src": "anatolia/build/legacy", "images": ["eu/prod-ar/php-8-0:1.0"]}]}
+    php_hits = {
+        "core": [{"rule": "implicit_nullable", "file": "app/A.php", "line": 3, "text": "function f(int $a = null)"},
+                 {"rule": "deprecated_84", "file": "app/B.php", "line": 5, "text": "lcg_value()"},
+                 {"rule": "str_contains", "file": "app/A.php", "line": 7, "text": "strpos($a, 'x') !== false"},
+                 {"rule": "moved_to_pecl_84", "file": "app/C.php", "line": 4, "text": "imap_open($h)"}],
+        "legacy": [{"rule": "null_to_internal", "file": "app/L.php", "line": 2, "text": "strlen(null)"},
+                   {"rule": "null_to_internal", "file": "app/L.php", "line": 8, "text": "trim(null)"},
+                   {"rule": "null_to_internal", "file": "app/M.php", "line": 3, "text": "strlen(null)"},
+                   {"rule": "serializable_only", "file": "app/S.php", "line": 1, "text": "class S implements Serializable"},
+                   {"rule": "serializable_only", "file": "app/T.php", "line": 1, "text": "class T implements Serializable"},
+                   {"rule": "loose_compare_numeric", "file": "app/L.php", "line": 4, "text": "0 == 'a'"}]}
+    probes = {
+        "core": ([{"rule": "probe:error", "file": "app/A.php", "line": 3, "text": "x", "message": "Deprecated twice"},
+                  {"rule": "probe:error", "file": "app/D.php", "line": 9, "text": "fn(", "message": "Parse error: x"},
+                  {"rule": "probe:deprecation", "file": "app/E.php", "line": 2, "text": "y", "message": "Deprecated: z"}],
+                 {"ran": True, "tool": "/x/php8.4", "reason": ""}),
+        "legacy": ([], {"ran": False, "tool": "", "reason": "hedef sürüm için araç yok — yalnız katalog"})}
+    queued, queued_payloads, scanned = [], [], []
+    _tr = pm.tool_rules
+    pm.tool_rules = lambda rules: {r.key for r in rules if r.key in ("implicit_nullable", "deprecated_84")}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            for name in ("core", "web", "legacy"):
+                (base / name).mkdir()
+                (base / name / "composer.json").write_text('{"require": {"php": "^8.0"}}', encoding="utf-8")
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+            board = {}
+
+            def mk(b):
+                return intake.Deps(gather=None, board=lambda c: b, repo_ok=lambda r: (base / r).is_dir(),
+                                   queue=lambda w, t: (queued.append((w, t)), 9)[1], record=lambda **k: None,
+                                   now=lambda: 1e9, cfg=lambda: cfg,
+                                   queue_tool=lambda w, t, p: (queued_payloads.append(p), 8)[1])
+            deps = mk(board)
+
+            def scan_fn(repo_root, **kw):
+                scanned.append(Path(repo_root).name)
+                return {"files": 4, "sha": "s1", "hits": list(php_hits[Path(repo_root).name]), "adoption": {}, "errors": []}
+            kw = dict(index=index, scan_fn=scan_fn, head_sha_fn=lambda r: "s1", app_map_cache={}, read=lambda d, p: "",
+                      yml_files={}, probe_fn=lambda root, lang, cur, to, **k: probes[Path(root).name])
+            client = C()
+            res = upgrade.scan(client, "core", "php", to="8.4", deps=deps, **kw)
+            check("şimdiki/hedef sürüm ve probe durumu", res["current"] == "8.2" and res["target"] == "8.4"
+                  and res["probe"] == {"ran": True, "tool": "/x/php8.4", "reason": ""}, str((res.get("current"), res.get("probe"))))
+            check("başlık önekli", res["auto"] and all(r["title"].startswith("[core] Sürüm yükseltme 8.2→8.4:")
+                                                        for r in res["auto"] + res["infra"] + res["human"]),
+                  str([r["title"] for r in res["auto"]]))
+            check("parmak izi modernleştirme ile aynı", res["auto"][0]["fingerprints"][0].startswith("php_modern:core:"))
+            check("mekanik kural yok", not [r for r in res["auto"] + res["human"] if r["rule"] == "str_contains"])
+            by = {r["rule"]: r for r in res["auto"] + res["infra"] + res["human"]}
+            check("otomatik deprecation engeller + araç; probe hatası pipeline'a, engeller",
+                  by["implicit_nullable"]["blocking"] and by["implicit_nullable"]["tool"] and by["implicit_nullable"]["pre_fixable"]
+                  and by["probe:error"]["blocking"] and not by["probe:error"]["tool"]
+                  and by["probe:error"] in res["auto"], str({k: (v["blocking"], v["tool"]) for k, v in by.items()}))
+            check("katalog bulgusunun satırındaki probe hatası tekrar sayılmaz",
+                  by["probe:error"]["files"] == ["app/D.php"], str(by["probe:error"]["files"]))
+            check("probe uyarısı insan işi, engellemez", by["probe:deprecation"] in res["human"]
+                  and not by["probe:deprecation"]["blocking"])
+            check("PECL'e taşınan eklenti: altyapı satırı, error → engeller",
+                  by["moved_to_pecl_84"] in res["infra"] and by["moved_to_pecl_84"]["blocking"]
+                  and by["moved_to_pecl_84"]["breaks"] == "error")
+            check("sayımlar", res["counts"]["error"] == 2 and res["counts"]["deprecation"] == 3
+                  and res["counts"]["behavior"] == 0 and res["blocking"] == 4, str((res["counts"], res["blocking"])))
+            check("kural özetinde breaks", res["rules"]["implicit_nullable"]["breaks"] == "deprecation")
+            check("blockers ve siteler yanıtta", isinstance(res["blockers"], list) and isinstance(res["sites"], list)
+                  and res["selectable"])
+
+            leg = upgrade.scan(client, "legacy", "php", to="8.4", deps=deps, **kw)
+            lb = {}
+            for r in leg["auto"] + leg["infra"] + leg["human"]:
+                lb.setdefault(r["rule"], []).append(r)
+            check("behavior insan işi ve engelleyen", lb.get("null_to_internal") and all(
+                r["needs_human"] and r["blocking"] and r["breaks"] == "behavior"
+                and r["human_reason"] == "Davranış değişikliği: otomatik düzeltilemez" for r in lb["null_to_internal"])
+                  and all(r["needs_human"] and r["blocking"] for r in leg["human"] if r["breaks"] == "behavior"), str(lb.keys()))
+            check("behavior kuralı tek grup (iki dosya)", len(lb["null_to_internal"]) == 1
+                  and sorted(lb["null_to_internal"][0]["files"]) == ["app/L.php", "app/M.php"])
+            check("yapısal + file birimli kural (Serializable) TEK needs-human grup, engellemez",
+                  len(lb.get("serializable_only", [])) == 1 and lb["serializable_only"][0] in leg["human"]
+                  and lb["serializable_only"][0]["needs_human"] and not lb["serializable_only"][0]["blocking"]
+                  and len(lb["serializable_only"][0]["files"]) == 2, str(lb.get("serializable_only")))
+            check("since == şimdiki sürüm olan kural yok (8.0 → loose_compare_numeric)", "loose_compare_numeric" not in lb)
+            check("probe doğrulanamadı: durum olduğu gibi", leg["probe"] == probes["legacy"][1] and leg["counts"]["behavior"] == 3)
+
+            # board'da aynı parmak izi açık → ikinci kez listelenmez
+            open_fp = {fp: {"wi": 900, "state": "Active"} for r in res["auto"] for fp in r["fingerprints"]}
+            res2 = upgrade.scan(client, "core", "php", to="8.4", deps=mk(open_fp), **kw)
+            check("board'da açık parmak izi atlanır", res2["skipped_counts"].get("açık WI") and not res2["auto"],
+                  str(res2["skipped_counts"]))
+
+            gid = {r["rule"]: r["gid"] for r in res["auto"]}
+            out = upgrade.take(client, "core", "php", [gid["implicit_nullable"], gid["probe:error"]], to="8.4", deps=deps, **kw)
+            check("iki Task açıldı (story zaten var)", len(client.created) == 2 and len(out["tasks"]) == 2, str(out)[:300])
+            t0 = client.created[0]
+            check("Task etiketi", "tempo-upgrade" in t0["System.Tags"] and "tempo-src-php_modern" in t0["System.Tags"]
+                  and t0["System.Tags"].endswith("tempo-upgrade"), t0["System.Tags"])
+            check("Task başlığı önekli ve 128 içinde", t0["System.Title"].startswith("[core] Sürüm yükseltme 8.2→8.4:")
+                  and len(t0["System.Title"]) <= 128, t0["System.Title"])
+            check("Task: şimdiki sürümde de çalışmalı", "8.2 sürümünde de çalışmalı" in t0["System.Description"]
+                  and "8.2 → 8.4 (sürüm yükseltme" in t0["System.Description"])
+            check("Task parmak izi satırı modernleştirme ile aynı", "tempo-fp: php_modern:core:implicit_nullable:app/A.php"
+                  in t0["System.Description"])
+            check("araç kapsamı upgrade_to taşır", len(queued_payloads) == 1
+                  and json.loads(queued_payloads[0])["upgrade_to"] == "8.4"
+                  and json.loads(queued_payloads[0])["scope"] == {"implicit_nullable": ["app/A.php"]}, str(queued_payloads))
+            check("probe hatası işi pipeline'a", len(queued) == 1 and "probe:error" in queued[0][1]
+                  and queued[0][1].startswith("[core] Sürüm yükseltme"), str(queued))
+            try:
+                upgrade.take(client, "core", "php", ["000000000000"], to="8.4", deps=deps, **kw)
+                check("bilinmeyen gid → ValueError", False)
+            except ValueError as e:
+                check("bilinmeyen gid → ValueError", "tarama" in str(e), str(e))
+            n_scan = len(scanned)
+            check("güncel repo taranmaz", upgrade.scan(client, "web", "php", deps=deps, **kw)["up_to_date"] is True
+                  and len(scanned) == n_scan)
+            try:
+                upgrade.take(client, "web", "php", ["x"], deps=deps, **kw)
+                check("güncel repoda alım → ValueError", False)
+            except ValueError:
+                check("güncel repoda alım → ValueError", True)
+
+            # Python: ast kataloğu (depo kodu çalıştırılmaz), sözdizimi bozuk dosya atlanır
+            py = base / "pyapp"
+            (py / "venv").mkdir(parents=True)
+            (py / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.11"\n')
+            (py / "a.py").write_text("import imp\nfrom distutils.util import strtobool\nimport asyncore as A\n")
+            (py / "b.py").write_text("from datetime import datetime\nx = datetime.utcnow()\ny = datetime.datetime.utcfromtimestamp(0)\n")
+            (py / "c.py").write_text("import cgi\n")
+            (py / "bad.py").write_text("import imp\ndef (:\n")
+            (py / "venv" / "v.py").write_text("import imp\n")
+            pkw = dict(index={}, read=lambda d, p: "", yml_files={}, probe_fn=lambda *a, **k: ([], {"ran": False, "tool": "", "reason": "yok"}))
+            pr = upgrade.scan(client, "pyapp", "python", to="3.12", deps=deps, **pkw)
+            pb = {r["rule"]: r for r in pr["auto"] + pr["infra"] + pr["human"]}
+            check("python: 3.12 kuralları bulunur, 3.13 (cgi) yok", set(pb) == {"imp", "distutils", "asyncore", "datetime_utcnow"},
+                  str(sorted(pb)))
+            check("python: bozuk dosya ve venv atlanır", pb["imp"]["files"] == ["a.py"], str(pb["imp"]["files"]))
+            check("python: utcnow + utcfromtimestamp iki yer", pb["datetime_utcnow"]["count"] == 2, str(pb["datetime_utcnow"]["count"]))
+            check("python: kaldırılan modül error, araç değil, pipeline", pb["imp"] in pr["auto"] and pb["imp"]["breaks"] == "error"
+                  and not pb["imp"]["tool"] and pb["imp"]["fingerprints"][0] == "py_modern:pyapp:imp:a.py"
+                  and pb["imp"]["title"].startswith("[pyapp] Sürüm yükseltme 3.11→3.12:"))
+            check("python: asyncore insan işi ama error → engeller", pb["asyncore"] in pr["human"] and pb["asyncore"]["blocking"])
+            n_tool = len(queued_payloads)
+            upgrade.take(client, "pyapp", "python", [pb["imp"]["gid"]], to="3.12", deps=deps, **pkw)
+            check("python: alım pipeline'a (araç işi değil)", len(queued_payloads) == n_tool and len(queued) == 2)
+            check("Task metni yükseltme kataloğundan", "importlib" in client.created[-1]["System.Description"])
+
+            # Next.js: senkron istek API'leri behavior; next lint yalnız sayı
+            nx = base / "nx"
+            (nx / "app" / "p").mkdir(parents=True)
+            (nx / "package.json").write_text(json.dumps({"dependencies": {"next": "14.2.0", "react": "18.3.0"},
+                                                         "scripts": {"lint": "next lint"}}))
+            (nx / "app" / "a.tsx").write_text("const h = headers()\nimport { useFormState } from 'react-dom'\n")
+            (nx / "app" / "p" / "page.tsx").write_text("export default function P({ params }) { return params.slug }\n")
+            nr = upgrade.scan(client, "nx", "nextjs", to="15.0", deps=deps, **pkw)
+            nb = {r["rule"]: r for r in nr["auto"] + nr["infra"] + nr["human"]}
+            check("nextjs: senkron API'ler behavior, insan, engeller; breaks'siz kural yok",
+                  set(nb) == {"sync_request_api", "sync_route_params"}
+                  and all(r["needs_human"] and r["blocking"] and r["breaks"] == "behavior" for r in nb.values()), str(sorted(nb)))
+            check("nextjs: next lint rapor (sayı, iş yok)", nr["rules"].get("next_lint", {}).get("count") == 1, str(nr["rules"].keys()))
+
+            # Go: katalog yalnız rapor; probe hatası iş olur
+            go = base / "goapp"
+            go.mkdir()
+            (go / "go.mod").write_text("module m\n\ngo 1.21\n")
+            gkw = dict(pkw, probe_fn=lambda *a, **k: ([{"rule": "probe:error", "file": "main.go", "line": 4, "text": "x",
+                                                         "message": "undefined: y"}], {"ran": True, "tool": "go", "reason": ""}))
+            gr = upgrade.scan(client, "goapp", "go", to="1.23", deps=deps, **gkw)
+            check("go: döngü değişkeni / GODEBUG rapor olarak sayılır, iş açmaz",
+                  gr["rules"].get("go122_loopvar", {}).get("count") == 1 and gr["rules"]["go122_loopvar"]["kind"] == "report"
+                  and not any(r["rule"].startswith("go12") for r in gr["auto"] + gr["human"]), str(gr["rules"].keys()))
+            check("go: probe hatası otomatik iş (pipeline)", [r["rule"] for r in gr["auto"]] == ["probe:error"]
+                  and gr["auto"][0]["fingerprints"][0].startswith("go_modern:goapp:"))
+    finally:
+        pm.tool_rules = _tr
+
+    # fix_min > şimdiki sürüm → insan işi
+    r = pm.Rule(key="x84", since=(8, 4), kind="deprecation", title="T", summary="", advantages=[], risks=[], before="",
+                after="", ref="", auto=True, breaks="error", fix_min=(8, 4))
+    g = Group(source="php_modern", repo="core", title="T — a.php", fingerprints=["php_modern:core:x84:a.php"],
+              findings=[Finding(source="php_modern", repo="core", file="a.php", rule="x84", lines=[1], uris=["1|x"])])
+    upgrade._mark_groups([g], {"x84": r}, "8.2", "8.4")
+    check("fix_min > şimdiki → needs_human + neden", g.needs_human and g.human_reason
+          == "Düzeltme yalnız 8.4 ve sonrasında çalışır — sürüm adımıyla birlikte ele alınmalı", g.human_reason)
+    check("Group.extra_tags render'da sona eklenir", g.extra_tags == ["tempo-upgrade"]
+          and render.task_tags(g, lane="techdebt").endswith("needs-human; tempo-upgrade")
+          and Group(source="s", repo="r", title="t", fingerprints=[], findings=[]).extra_tags == [])
+    long = Group(source="php_modern", repo="core", title="x" * 200, fingerprints=["php_modern:core:x84:a.php"], findings=g.findings)
+    upgrade._mark_groups([long], {"x84": r}, "8.2", "8.4")
+    check("uzun başlıkta önek korunur", render.task_title(long).startswith("[core] Sürüm yükseltme 8.2→8.4: x")
+          and len(render.task_title(long)) == 128)
+
+    # modern_fix: upgrade_to ayrı okunur, load_scope 4'lü kalır, hedef araç hatası dosyayı düşürür
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "gocrons").mkdir()
+        p = '{"lang": "go", "repo": "gocrons", "scope": {"any": ["a.go"]}, "upgrade_to": "1.25"}'
+        check("load_scope 4'lü kalır", len(modern_fix.load_scope(p, Path(td))) == 4)
+    check("upgrade_to doğrulanır", modern_fix.upgrade_target(p) == "1.25"
+          and modern_fix.upgrade_target('{"upgrade_to": "1.25; rm -rf /"}') == ""
+          and modern_fix.upgrade_target('{"upgrade_to": 8.4}') == "" and modern_fix.upgrade_target("") == "")
+    fake = lambda root, lang, cur, to, files=None: (
+        [{"rule": "probe:error", "file": "app/B.php", "line": 2, "text": "", "message": "Parse error: y"},
+         {"rule": "probe:deprecation", "file": "app/A.php", "line": 1, "text": "", "message": "Deprecated: z"},
+         {"rule": "probe:error", "file": "app/Z.php", "line": 1, "text": "", "message": "kapsam dışı"}],
+        {"ran": True, "tool": "php8.4", "reason": ""})
+    drops = modern_fix._upgrade_drops(Path("/nonexistent"), "php", "8.2", "8.4", ["app/A.php", "app/B.php"], probe=fake)
+    check("hedef araçta hata veren dosya düşer (uyarı ve kapsam dışı değil)", list(drops) == ["app/B.php"]
+          and "8.4" in drops["app/B.php"] and "Parse error" in drops["app/B.php"], str(drops))
+    check("Go probe'u değişen dosyaları değil HEAD'i derler → dosya düşürmez",
+          modern_fix._upgrade_drops(Path("/x"), "go", "1.22", "1.24", ["app/B.php"], probe=fake) == {})
+    check("hedef araç yoksa düşürme yok", modern_fix._upgrade_drops(
+        Path("/x"), "php", "8.2", "8.4", ["a.php"], probe=lambda *a, **k: ([], {"ran": False, "tool": "", "reason": ""})) == {})
+    src = inspect.getsource(modern_fix._run_scoped)
+    check("Rector sürümü şimdiki üretim sürümü (upgrade_to'dan alınmaz)",
+          "apply_tool(root, lang, scope, version)" in src and "fix_leftovers(root, scope, version)" in src
+          and "upgrade_to" not in inspect.getsource(modern_fix.php_apply)
+          and "upgrade_to" not in inspect.getsource(modern_fix.rector_config)
+          and "_upgrade_drops(root, lang, version, upgrade_to, changed)" in src)
+    check("run upgrade_to'yu iş kaydından okur", "upgrade_to=upgrade_target(job.get(\"job_payload\")"
+          in inspect.getsource(modern_fix.run))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -8021,6 +8282,7 @@ def main():
               test_modern_sp,
               test_upgrade_rules,
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
+              test_upgrade_scan_take,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,
