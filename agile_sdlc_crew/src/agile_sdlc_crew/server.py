@@ -165,6 +165,14 @@ class TechdebtUpgradeTakeRequest(BaseModel):
     sprint: str = ""
 
 
+class TechdebtUpgradeStepRequest(BaseModel):
+    """Yükseltmeyi başlat / durdur / sıradaki sürüm adımını kuyruğa al."""
+    repo: str
+    lang: str = "php"
+    to: str = ""  # boşsa: başlatmada varsayılan hedef, diğerlerinde izleme işinin hedefi
+    team: str = ""
+
+
 class QualityTakeRequest(BaseModel):
     source: str
     sp: int = 10
@@ -226,7 +234,7 @@ def _idle_if_stale(data: dict) -> dict:
 _ACT_DONE = {"completed": "tamamlandı", "failed": "başarısız", "needs_human": "insan incelemesine",
              "needs_info": "bilgi bekliyor", "skipped": "atlandı"}
 _ACT_KIND = {"pipeline": "pipeline", "modern_fix": "araç düzeltmesi", "pr_review": "PR inceleme",
-             "refinement": "refinement"}
+             "refinement": "refinement", "upgrade_bump": "sürüm adımı"}
 
 
 def activity_events(steps: list[dict], jobs: list[dict], limit: int = 40, now=None) -> list[dict]:
@@ -470,13 +478,15 @@ async def retry_job(job_id: int):
             {"error": f"Sadece failed/completed/needs_human/needs_info isler retry edilebilir (durum: {job['status']})"},
             status_code=409,
         )
+    # araç düzeltmesi / sürüm adımı yeniden denenince yine kendi türüyle ve onaylı kapsamıyla koşsun
+    # (pipeline'a düşmesin); sürüm adımı başta zaten yeniden doğrular.
+    keep = job.get("job_kind") in ("modern_fix", "upgrade_bump")
     new_job_id = db.create_job(
         job["work_item_id"],
         bool(job.get("use_hal", False)),
         job.get("wi_title", ""),
-        # araç düzeltmesi yeniden denenince yine araçla koşsun (pipeline'a düşmesin)
-        job_kind="modern_fix" if job.get("job_kind") == "modern_fix" else "pipeline",
-        job_payload=(job.get("job_payload") or "") if job.get("job_kind") == "modern_fix" else "",
+        job_kind=job["job_kind"] if keep else "pipeline",
+        job_payload=(job.get("job_payload") or "") if keep else "",
     )
     _ensure_worker()
     return JSONResponse({
@@ -2171,10 +2181,13 @@ def _upgrade_off():
 
 
 @app.get("/api/techdebt/upgrade/repos")
-async def techdebt_upgrade_repos():
-    """Yerel repolar × dil: şimdiki ve hedef sürüm (tarama / probe yok)."""
+async def techdebt_upgrade_repos(team: str = ""):
+    """Yerel repolar × dil: şimdiki ve hedef sürüm (tarama / probe yok). `team` verilirse takımın açık
+    izleme işleri tek sorguyla okunur: satırda `tracked` + `watch_target` (izleme işinin hedefi).
+    Gerçek aşama burada hesaplanmaz (repo başına tarama olurdu) — scan yanıtındaki `status`'ta."""
     from agile_sdlc_crew.quality import modern as _md
     from agile_sdlc_crew.quality import upgrade as _up
+    from agile_sdlc_crew.quality import upgrade_track as _ut
     bad = _upgrade_off()
     if bad:
         return bad
@@ -2186,19 +2199,29 @@ async def techdebt_upgrade_repos():
             index = _md.build_index(client)
         except Exception:  # noqa: BLE001
             index = {}
+        watch, werr = {}, ""
+        if team.strip():
+            try:
+                watch = {(t["lang"], t["repo"].lower()): t["to"] for t in _ut.tracked(client, team.strip())}
+            except Exception as e:  # noqa: BLE001 — liste izleme bilgisi olmadan da döner
+                werr = str(e)[:300]
         items = []
         for it in res.get("items", []):
             cur = it.get("version")
             lang = it.get("lang") or "php"
             tgt = _up.default_target(lang, cur, index) if cur else None
+            key = (lang, str(it["repo"]).lower())
             items.append({"repo": it["repo"], "lang": lang, "label": it.get("label") or lang,
                           "current": cur, "target": tgt, "up_to_date": bool(cur and not tgt),
-                          "stage": "hazırlık"})
-        return items
+                          "stage": "hazırlık", "tracked": key in watch, "watch_target": watch.get(key, "")})
+        return items, werr
 
     try:
-        items = await asyncio.to_thread(_build)
-        return JSONResponse({"enabled": True, "items": items})
+        items, werr = await asyncio.to_thread(_build)
+        out = {"enabled": True, "items": items}
+        if werr:
+            out["tracked_error"] = werr
+        return JSONResponse(out)
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
 
@@ -2206,17 +2229,28 @@ async def techdebt_upgrade_repos():
 @app.get("/api/techdebt/upgrade/scan")
 async def techdebt_upgrade_scan(repo: str = "", team: str = "", force: bool = False, lang: str = "php",
                                 to: str = ""):
-    """Hedef sürüme geçince kırılan / davranışı değişen / kullanımdan kalkan yerler. Yazma yok."""
+    """Hedef sürüme geçince kırılan / davranışı değişen / kullanımdan kalkan yerler. Yazma yok.
+    Yanıttaki `status`: bu taramadan türetilen aşama + sıradaki sürüm adımı (ikinci tarama yok)."""
     from agile_sdlc_crew.quality import upgrade as _up
+    from agile_sdlc_crew.quality import upgrade_track as _ut
     bad = _upgrade_off()
     if bad:
         return bad
     if not repo.strip():
         return JSONResponse({"error": "repo seçin"}, status_code=400)
+    lg, tv = (lang or "php").strip(), (to or "").strip() or None
+
+    def _do():
+        client = AzureDevOpsClient()
+        res = _up.scan(client, repo.strip(), lg, to=tv, team=team, force=bool(force))
+        try:
+            res["status"] = _ut.status(client, res.get("repo") or repo.strip(), lg, to=tv, scan=res)
+        except Exception as e:  # noqa: BLE001 — tarama sonucu durumsuz da gösterilir
+            res["status"] = {"error": str(e)[:500]}
+        return res
+
     try:
-        res = await asyncio.to_thread(_up.scan, AzureDevOpsClient(), repo.strip(), (lang or "php").strip(),
-                                      to=(to or "").strip() or None, team=team, force=bool(force))
-        return JSONResponse(res)
+        return JSONResponse(await asyncio.to_thread(_do))
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
 
@@ -2239,6 +2273,64 @@ async def techdebt_upgrade_take(req: TechdebtUpgradeTakeRequest):
         if any(t.get("job_id") for t in res.get("tasks") or []):
             _ensure_worker()
         return JSONResponse(res, status_code=201 if res.get("story") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+def _upgrade_step_check(req: "TechdebtUpgradeStepRequest"):
+    bad = _upgrade_off()
+    if bad:
+        return bad
+    if not req.repo.strip():
+        return JSONResponse({"error": "repo seçin"}, status_code=400)
+    if not req.team.strip():
+        return JSONResponse({"error": "takım seçin"}, status_code=400)
+    return None
+
+
+@app.post("/api/techdebt/upgrade/start")
+async def techdebt_upgrade_start(req: TechdebtUpgradeStepRequest):
+    """Yükseltmeyi başlat: izleme Task'ı (takım alanı, sprint'siz). Açık olan varsa aynısı döner."""
+    from agile_sdlc_crew.quality import upgrade_track as _ut
+    bad = _upgrade_step_check(req)
+    if bad:
+        return bad
+    try:
+        res = await asyncio.to_thread(_ut.start, AzureDevOpsClient(), req.repo.strip(), (req.lang or "php").strip(),
+                                      to=(req.to or "").strip() or None, team=req.team.strip())
+        return JSONResponse(res, status_code=201 if res.get("created") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.post("/api/techdebt/upgrade/stop")
+async def techdebt_upgrade_stop(req: TechdebtUpgradeStepRequest):
+    """Yükseltmeyi durdur: izleme Task'ını yorumla kapat (PR'lar ve hazırlık işleri kalır)."""
+    from agile_sdlc_crew.quality import upgrade_track as _ut
+    bad = _upgrade_step_check(req)
+    if bad:
+        return bad
+    try:
+        res = await asyncio.to_thread(_ut.stop, AzureDevOpsClient(), req.repo.strip(), (req.lang or "php").strip(),
+                                      to=(req.to or "").strip() or None, team=req.team.strip())
+        return JSONResponse(res)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.post("/api/techdebt/upgrade/bump")
+async def techdebt_upgrade_bump(req: TechdebtUpgradeStepRequest):
+    """Sıradaki sürüm adımını (test hattı → üretim → kod) kuyruğa al; ön koşulu yoksa 400 + nedeni."""
+    from agile_sdlc_crew.quality import upgrade_bump as _ub
+    bad = _upgrade_step_check(req)
+    if bad:
+        return bad
+    try:
+        res = await asyncio.to_thread(_ub.queue_step, AzureDevOpsClient(), req.repo.strip(),
+                                      (req.lang or "php").strip(), to=(req.to or "").strip() or None,
+                                      team=req.team.strip())
+        _ensure_worker()
+        return JSONResponse(res, status_code=202)
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
 
@@ -2507,7 +2599,8 @@ def _wi_mark_queued_jobs():
 
 
 def _wi_tracked(job: dict) -> bool:
-    """Yaşam döngüsünün izlediği iş mi (list_unmarked_queued_jobs ile aynı süzgeç)."""
+    """Yaşam döngüsünün izlediği iş mi (list_unmarked_queued_jobs ile aynı süzgeç). upgrade_bump
+    izlenmez: WI'ı yükseltmenin izleme Task'ıdır, board durumları arasında taşınmamalı."""
     return (not job.get("dry_run") and not job.get("kickoff_only")
             and (job.get("job_kind") or "pipeline") in ("pipeline", "modern_fix"))
 
@@ -2587,6 +2680,15 @@ def _queue_worker():
                 from agile_sdlc_crew.quality import modern_fix
                 _wi_start_job(job)
                 modern_fix.run(job_id, work_item_id)
+                db.complete_job(job_id)
+                continue
+
+            if (job.get("job_kind") or "pipeline") == "upgrade_bump":
+                # Sürüm adımı: tek adım, beklemez. WI yaşam döngüsü bu türü izlemez (_wi_tracked) —
+                # _wi_start_job yalnız işi running'e alır, izleme Task'ının durumuna dokunmaz.
+                from agile_sdlc_crew.quality import upgrade_bump
+                _wi_start_job(job)
+                upgrade_bump.run(job_id)
                 db.complete_job(job_id)
                 continue
 

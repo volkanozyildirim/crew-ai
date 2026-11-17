@@ -967,6 +967,34 @@ class AzureDevOpsClient:
             "source_version": b.get("sourceVersion") or "",
         }
 
+    def list_pr_builds(self, repo_id_or_name: str, top: int = 50) -> list[dict]:
+        """Reponun HERHANGİ bir PR'ının build'leri (reason=pullRequest), en yeni kuyruktan geriye;
+        satırlar get_pr_build ile aynı biçimde. Boş liste → repoda PR build'i hiç yok."""
+        project = self._find_repo_project(repo_id_or_name)
+        repo_id = (self.get_repository(repo_id_or_name) or {}).get("id") or repo_id_or_name
+        url = f"{self.org_url}/{project}/_apis/build/builds"
+        params = {
+            "api-version": self.API_VERSION,
+            "repositoryId": repo_id,
+            "repositoryType": "TfsGit",
+            "reasonFilter": "pullRequest",
+            "queryOrder": "queueTimeDescending",
+            "$top": int(top),
+        }
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        return [{
+            "build_id": b.get("id"),
+            "status": b.get("status"),
+            "result": b.get("result"),
+            "definition": (b.get("definition") or {}).get("name"),
+            "url": ((b.get("_links") or {}).get("web") or {}).get("href"),
+            "project": project,
+            "queue_time": b.get("queueTime") or "",
+            "source_version": b.get("sourceVersion") or "",
+            "pr_id": (b.get("triggerInfo") or {}).get("pr.number") or "",
+        } for b in resp.json().get("value", [])]
+
     def get_build_failure_summary(
         self, project: str, build_id: int, max_chars: int = 4000
     ) -> str:

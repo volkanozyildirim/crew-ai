@@ -8,13 +8,18 @@ sonra yazılmaya başlanır — geç bir hata yarım push bırakmaz. Yazılan da
 `tempo/upgrade-…` dalıdır; hedef dala (ör. production) asla doğrudan yazılmaz. Dal ya bu çalışmada
 doğrulanan hedef commit'te YENİ açılır ya da hedefle aynı commit'te duran boş artıktır; içinde
 başka commit olan hiçbir dala push yapılmaz (mevcut Tempo PR'ı yalnız içeriği doğrulanıp aynen
-döndürülür). Dosyalar base64 ile gönderilir: baytlar (BOM/CRLF) aynen. Sunucuya ve db'ye bağımlı değil.
+döndürülür). Dosyalar base64 ile gönderilir: baytlar (BOM/CRLF) aynen. push_sites sunucuya ve db'ye
+bağımlı değil; iş kaydı (queue_step / run) db'yi yalnız enjekte edilmediğinde, fonksiyon içinde açar.
 """
 from __future__ import annotations
 
 import base64
 import difflib
+import html
+import json
+import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -276,3 +281,324 @@ def push_sites(client, sites: list[dict], *, branch: str, title: str, body: str,
                 errors.append({"repo": repo, "project": project, "error": mask_secrets(str(e))[:800],
                                **where})
     return {"prs": prs, "fallback": fallback, "errors": errors}
+
+
+# ── Sürüm adımı işi (job_kind=upgrade_bump) ──────────────────────────────
+# Bir iş TEK adım atar ve biter; beklemez, yoklamaz. Hangi adımın sırada olduğu ve ön koşulu
+# `upgrade_track.status`'tan gelir: queue_step iş açmadan, run push'tan önce aynı hesabı yapar.
+
+JOB_KIND = "upgrade_bump"
+STEPS = ("ci", "prod", "code")
+_VER = re.compile(r"^\d+\.\d+$")
+log = logging.getLogger("pipeline")
+
+
+class StepFailed(ValueError):
+    """Adım atılmadı (ön koşul / yeniden doğrulama / yazma hatası); neden izleme işine yazıldı."""
+
+
+def pushable(site: dict) -> bool:
+    """Site push_sites'a verilebilir mi: engelsiz, satırı bilinen, yalnız rakam dizisi değişen."""
+    old, new = str(site.get("old") or ""), str(site.get("new") or "")
+    return (not site.get("blocked") and bool(site.get("line")) and bool(old) and old != new
+            and _digit_shape(old) == _digit_shape(new))
+
+
+def _ts(s):
+    """Azure zaman damgası (ISO, 7 haneye kadar kesir, Z/±hh:mm) → aware datetime; okunamazsa None."""
+    m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)?$", str(s or "").strip())
+    if not m:
+        return None
+    dt = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(
+        microsecond=int((m.group(2) or "0")[:6].ljust(6, "0")))
+    tz = m.group(3)
+    if not tz or tz == "Z":
+        return dt.replace(tzinfo=timezone.utc)
+    sign = 1 if tz[0] == "+" else -1
+    return dt.replace(tzinfo=timezone(sign * timedelta(hours=int(tz[1:3]), minutes=int(tz[4:6]))))
+
+
+def _partial_ok(client, b: dict) -> bool:
+    """Kısmi başarılı build yalnız test dışı bir adımda uyarı verdiyse yeşil (pipeline kapısıyla aynı)."""
+    try:
+        from agile_sdlc_crew.flow import _build_issues_block
+        return not _build_issues_block(client.get_build_issue_tasks(b.get("project"), int(b.get("build_id"))))
+    except Exception:  # noqa: BLE001 — okunamıyorsa kanıt sayılmaz
+        return False
+
+
+def ci_evidence(client, repo: str, since: str, *, wait_h: int, now=None) -> dict:
+    """Test hattı PR'ının merge'inden (`since`) SONRA kuyruğa girmiş PR build'lerinden kanıt.
+    Reponun herhangi bir PR'ının build'i sayılır; tanım başına en yeni tamamlanmış build alınır,
+    biri kırmızıysa kanıt kırmızıdır. -> {"state": green|red|none|no_pipeline, "build", "summary",
+    "overdue"} — overdue: `wait_h` saat geçtiği hâlde tamamlanmış build yok."""
+    builds = list(client.list_pr_builds(repo) or [])
+    if not builds:
+        return {"state": "no_pipeline", "build": None, "summary": "Reponun PR build'i yok.", "overdue": False}
+    t0 = _ts(since)
+    if t0 is None:
+        return {"state": "none", "build": None, "overdue": False,
+                "summary": f"Merge zamanı okunamadı ({str(since)[:40]!r}); kanıt sayılmadı."}
+    after = [(t, b) for b in builds if (t := _ts(b.get("queue_time"))) is not None and t > t0]
+    latest: dict = {}
+    for _t, b in sorted(after, key=lambda x: x[0], reverse=True):
+        if b.get("status") != "completed" or b.get("result") in (None, "", "canceled"):
+            continue
+        latest.setdefault(b.get("definition") or "", b)
+    red = [b for b in latest.values()
+           if b.get("result") == "failed" or (b.get("result") == "partiallySucceeded" and not _partial_ok(client, b))]
+    if red:
+        b = red[0]
+        try:
+            summ = client.get_build_failure_summary(b.get("project"), int(b.get("build_id")), 3000) or ""
+        except Exception as e:  # noqa: BLE001
+            summ = f"(özet okunamadı: {e})"
+        summ = mask_secrets(summ or f"Build #{b.get('build_id')} ({b.get('definition')}) {b.get('result')}")
+        return {"state": "red", "build": b, "summary": summ, "overdue": False}
+    green = [b for b in latest.values() if b.get("result") in ("succeeded", "partiallySucceeded")]
+    if green:
+        b = green[0]
+        return {"state": "green", "build": b, "overdue": False,
+                "summary": f"Build #{b.get('build_id')} ({b.get('definition')}) yeşil."}
+    now = now or datetime.now(timezone.utc)
+    overdue = (now - t0).total_seconds() > max(0, int(wait_h)) * 3600
+    return {"state": "none", "build": None, "overdue": overdue,
+            "summary": "Merge'den sonra kuyruğa girmiş tamamlanmış PR build'i yok."}
+
+
+def site_diffs(client, sites: list[dict]) -> list[dict]:
+    """Push'suz (CREW_TECHDEBT_UPGRADE_BUMP kapalı): (proje, repo) başına sitelerin uygulanmış diff'i.
+    Siteler apply_site'tan geçer; dosya değişmişse SiteChanged."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for s in sites:
+        groups.setdefault((s.get("project") or "", s["repo"]), []).append(s)
+    out = []
+    for (project, repo), grp in groups.items():
+        by_path: dict[str, list[dict]] = {}
+        for g in grp:
+            by_path.setdefault(_norm_path(g["path"]), []).append(g)
+        files = []
+        for path, ss in by_path.items():
+            old_text = _read_text(client, repo, path, ss[0]["branch"], project or None)
+            if old_text is None:
+                raise SiteChanged(f"{repo} {path}: dosya hedef dalda yok ya da boş.")
+            new_text = old_text
+            for g in sorted(ss, key=lambda x: -int(x["line"])):
+                new_text = apply_site(new_text, dict(g, path=path))
+            files.append((path, old_text, new_text))
+        out.append({"repo": repo, "project": project, "diff": _diff_text(files)})
+    return out
+
+
+def _payload(job: dict | None) -> dict:
+    from agile_sdlc_crew.quality import modern
+    if (job or {}).get("job_kind") != JOB_KIND:
+        raise StepFailed(f"İş bir sürüm adımı değil ({(job or {}).get('job_kind')!r}).")
+    try:
+        p = json.loads(job.get("job_payload") or "")
+    except ValueError:
+        raise StepFailed("İşin kapsamı okunamadı.")
+    ok = (isinstance(p, dict) and p.get("lang") in modern.LANGS and isinstance(p.get("repo"), str)
+          and bool(_REPO.match(p["repo"])) and ".." not in p["repo"]
+          and all(isinstance(p.get(k), str) and _VER.match(p[k]) for k in ("from", "to"))
+          and p.get("step") in STEPS and isinstance(p.get("sites"), list)
+          and all(isinstance(s, dict) for s in p["sites"]) and str(p.get("track_id") or "").isdigit())
+    if not ok:
+        raise StepFailed("İşin kapsamı geçersiz (dil / repo / sürüm / adım / siteler / izleme işi).")
+    return p
+
+
+def _site_key(s: dict) -> tuple:
+    try:
+        line = int(s.get("line") or 0)
+    except (TypeError, ValueError):
+        line = -1
+    return (str(s.get("where") or ""), s.get("project") or "", str(s.get("repo") or "").lower(),
+            _norm_path(s.get("path")), str(s.get("branch") or ""), line, str(s.get("old") or ""),
+            str(s.get("new") or ""))
+
+
+def _esc(s) -> str:
+    return html.escape(mask_secrets(str(s)))
+
+
+def queue_step(client, repo: str, lang: str, *, to: str | None = None, team: str, deps=None,
+               create_job=None, status_fn=None, **kw) -> dict:
+    """Sıradaki sürüm adımını kuyruğa al. Ön koşul yoksa ValueError(next.reason). Kapsam
+    (lang, repo, from, to, step, sites, track_id, team) INSERT'te işin kaydına yazılır."""
+    from agile_sdlc_crew.quality import upgrade_track as ut
+    ut._check(repo, lang)
+    tr = ut.find_open(client, lang, repo)
+    if not tr:
+        raise ValueError("Önce yükseltmeyi başlatın — açık izleme işi yok.")
+    if to and to != tr["to"]:
+        raise ValueError(f"İzleme işinin hedefi {tr['to']} (istenen {to}) — hedefi değiştirmek için durdurup "
+                         "yeniden başlatın.")
+    to = tr["to"]
+    st = (status_fn or ut.status)(client, repo, lang, to=to, deps=deps, **kw)
+    nx = st.get("next") or {}
+    if not nx.get("step") or not nx.get("ready"):
+        raise ValueError(nx.get("reason") or "Atılabilecek sürüm adımı yok.")
+    repo = st.get("repo") or repo
+    payload = {"lang": lang, "repo": repo, "from": st["current"], "to": to, "step": nx["step"],
+               "sites": nx["sites"], "track_id": int(tr["id"]), "team": team or ""}
+    title = f"[{repo}] Sürüm adımı ({ut.STEP_LABEL[nx['step']]}) {st['current']}→{to}"
+    if create_job is None:
+        from agile_sdlc_crew import db
+        create_job = db.create_job
+    job_id = create_job(str(tr["id"]), False, title, job_kind=JOB_KIND, job_payload=json.dumps(payload))
+    log.info(f"⬆️ Sürüm adımı kuyrukta: #{job_id} {nx['step']} ({lang}:{repo}:{to})")
+    return {"job_id": job_id, "step": nx["step"], "track_id": int(tr["id"]), "to": to, "sites": len(nx["sites"])}
+
+
+def _bodies(p: dict, test_note: str) -> tuple[str, str]:
+    """PR başlığı + açıklaması (Türkçe, maskeli). `test_note` varsa açıklamanın ilk satırıdır."""
+    repo, cur, to, step = p["repo"], p["from"], p["to"], p["step"]
+    title = (f"Sürüm yükseltme {cur + '→' if cur != to else '→ '}{to}: "
+             + {"ci": "test hattı", "prod": "üretim imajı", "code": "kod reposu sürüm kısıtı"}[step] + f" ({repo})")
+    if step == "ci":
+        body = f"Merge edildiğinde `{repo}` PR'ları `{to}` ile test edilir; üretim hâlâ `{cur}`."
+    elif step == "prod":
+        olds = sorted({str(s.get("old")) for s in p["sites"]})
+        body = (f"`{repo}` üretim imajı {cur} → {to}: hedefin altındaki bütün servislerin `FROM` satırı.\n\n"
+                "Merge sırası: test hattı → üretim → kod reposu. Merge ve deploy DevOps'undur.\n\n"
+                f"Geri alma: FROM satırını eski imaja çevirin ({', '.join(olds)}).")
+    else:
+        body = f"Üretim `{to}` sürümünde; kod reposundaki sürüm kısıtı `{to}` sürümüne sıkılaştırılır."
+    if test_note:
+        body = test_note + "\n\n" + body
+    body += f"\n\nTempo — sürüm yükseltme adımı. İzleme işi: #{p['track_id']}."
+    return mask_secrets(title), mask_secrets(body)
+
+
+def _devops_body(p: dict, res: dict, test_note: str, *, bump_on: bool) -> str:
+    repo, cur, to = p["repo"], p["from"], p["to"]
+    prs = "".join(f"<li>{_esc(x['repo'])}: <a href=\"{_esc(x.get('url', ''))}\">PR #{_esc(x.get('id'))}</a></li>"
+                  for x in res.get("prs") or [])
+    diffs = "".join(f"<p><b>{_esc(f.get('project') or '')} / {_esc(f['repo'])}</b></p><pre>{_esc(f['diff'])}</pre>"
+                    for f in res.get("fallback") or [])
+    olds = sorted({str(s.get("old")) for s in p["sites"] if s.get("where") == "devops"})
+    why = ("" if bump_on else
+           "<p><i>Otomatik sürüm PR'ları kapalı (CREW_TECHDEBT_UPGRADE_BUMP) — değişiklik aşağıda diff olarak.</i></p>")
+    return ((f"<p><b>{_esc(test_note)}</b></p>" if test_note else "")
+            + f"<p><b>Repo:</b> {_esc(repo)} · <b>Sürüm:</b> {_esc(cur)} → {_esc(to)} · "
+              f"<b>İzleme işi:</b> #{_esc(p['track_id'])} · <b>Adım:</b> {_esc(p['step'])}</p>" + why
+            + (f"<p><b>PR'lar (taslak)</b></p><ul>{prs}</ul>" if prs else "")
+            + (f"<p><b>Uygulanacak değişiklik</b> (PR açılmadı):</p>{diffs}" if diffs else "")
+            + "<p><b>Merge sırası:</b> test hattı (yml-files) → üretim (FLODevOps) → kod reposu. "
+              "Merge ve deploy DevOps'undur.</p>"
+            + (f"<p><b>Geri alma:</b> FROM satırını eski imaja çevirin ({_esc(', '.join(olds))}).</p>"
+               if p["step"] == "prod" else ""))
+
+
+def _comment(client, track_id: int, text_html: str) -> None:
+    from agile_sdlc_crew.quality.upgrade_track import SIGNATURE
+    try:
+        client.add_comment(int(track_id), text_html + SIGNATURE)
+    except Exception as e:  # noqa: BLE001 — yorum yazılamaması adımın sonucunu değiştirmez
+        log.warning(f"⚠️ upgrade_bump: izleme işine yorum yazılamadı (#{track_id}): {e}")
+
+
+def run(job_id: int, *, load_job=None, client=None, deps=None, status_fn=None, push_fn=None, request_fn=None,
+        **kw) -> dict:
+    """Tek adım: yeniden doğrula → push_sites (ya da diff) → izleme işine yorum; `prod`'da DevOps isteği.
+    Başarısızlıkta neden izleme işine yazılır ve StepFailed yükselir (işçi işi failed yapar)."""
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import upgrade_track as ut
+    if load_job is None:
+        from agile_sdlc_crew import db
+        load_job = db.get_job
+    p = _payload(load_job(job_id))
+    if client is None:
+        from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient
+        client = AzureDevOpsClient()
+    lang, repo, to, step, track = p["lang"], p["repo"], p["to"], p["step"], int(p["track_id"])
+    label = ut.STEP_LABEL[step]
+
+    def fail(reason: str):
+        _comment(client, track, f"<p><b>Sürüm adımı ({_esc(label)}) atılmadı</b> — iş #{_esc(job_id)}.</p>"
+                                f"<p>{_esc(reason)}</p><p>Hiçbir şey yazılmadı.</p>")
+        raise StepFailed(reason)
+
+    # 1) Yeniden doğrula: izleme işi hâlâ açık ve aynı hedefte; adım hâlâ sıradaki ve hazır
+    #    (engelleyen bulgu / engel / PR / build kanıtı taze); siteler kayıttakiyle birebir.
+    tr = ut.find_open(client, lang, repo)
+    if not tr or int(tr["id"]) != track or tr["to"] != to:
+        fail(f"İzleme işi #{track} artık açık değil ya da hedefi değişti.")
+    try:
+        st = (status_fn or ut.status)(client, repo, lang, to=to, deps=deps, **kw)
+    except Exception as e:  # noqa: BLE001
+        fail(f"Durum yeniden hesaplanamadı: {mask_secrets(str(e))[:500]}")
+    nx = st.get("next") or {}
+    if st.get("current") != p["from"]:
+        fail(f"Üretim sürümü değişti ({p['from']} → {st.get('current')}); kayıttaki kapsam geçersiz.")
+    if nx.get("step") != step or not nx.get("ready"):
+        fail(f"Adım artık atılamaz: {nx.get('reason') or 'sıradaki adım ' + str(nx.get('step'))}")
+    fresh = {_site_key(s): s for s in nx.get("sites") or []}
+    mine = {_site_key(s): s for s in p["sites"]}
+    if (not mine or set(fresh) != set(mine) or any(not pushable(s) for s in mine.values())
+            or any(not pushable(s) for s in fresh.values())):
+        gone = [f"{s.get('repo')} {s.get('path')}:{s.get('line')}" for k, s in mine.items() if k not in fresh]
+        new = [f"{s.get('repo')} {s.get('path')}:{s.get('line')}" for k, s in fresh.items() if k not in mine]
+        fail("Sürüm yerleri kayıttaki gibi değil (dosya değişmiş olabilir)."
+             + (f" Kayıtta olup artık olmayan: {', '.join(gone)}." if gone else "")
+             + (f" Yeni çıkan: {', '.join(new)}." if new else ""))
+    sites = [fresh[k] for k in sorted(fresh, key=str)]  # yazılan, taze hesaplanan (kayıtla birebir) siteler
+    test_note = nx.get("test_note") or ""
+    title, body = _bodies(p, test_note)
+
+    # 2) Yaz — ya da (BUMP kapalı) yalnız diff üret; push_sites hiç çağrılmaz.
+    bump_on = bool(pc.get("CREW_TECHDEBT_UPGRADE_BUMP"))
+    try:
+        if bump_on:
+            res = (push_fn or push_sites)(client, sites, branch=branch_name(lang, repo, to), title=title,
+                                          body=body, wi_id=track)
+        else:
+            res = {"prs": [], "fallback": site_diffs(client, sites), "errors": []}
+    except ValueError as e:
+        fail(f"Sürüm satırı yazılmadı: {mask_secrets(str(e))[:800]}")
+
+    # 3) DevOps isteği: üretim adımında her zaman; diğerlerinde yalnız diff (403 / BUMP kapalı) varsa.
+    #    Yazma hatası varken açılmaz (eksik PR listesiyle açılırsa yeniden denemede güncellenemezdi).
+    req, req_err = None, ""
+    if not res.get("errors") and (step == "prod" or res.get("fallback")):
+        if pc.get("CREW_DEVOPS_REQUESTS"):
+            from agile_sdlc_crew import devops_request as dr
+            key = f"upgrade:{lang}:{repo}:{to}" if step == "prod" else f"upgrade-{step}:{lang}:{repo}:{to}"
+            try:
+                req = (request_fn or dr.open_request)(
+                    client, team=pc.get("CREW_DEVOPS_TEAM") or "DevOps",
+                    title=mask_secrets(f"[{repo}] Sürüm yükseltme {p['from']} → {to}: {label}"),
+                    body_html=_devops_body(p, res, test_note, bump_on=bump_on), source_wi=track, key=key)
+            except Exception as e:  # noqa: BLE001
+                req_err = mask_secrets(str(e))[:500]
+        else:
+            req_err = "DevOps istekleri kapalı (CREW_DEVOPS_REQUESTS)"
+
+    # 4) İzleme işine yorum: PR bağlantıları, diff'ler, aşamasıyla hatalar.
+    lines = [f"<p><b>Sürüm adımı ({_esc(label)})</b> {_esc(p['from'])} → {_esc(to)} — iş #{_esc(job_id)}</p>"]
+    if test_note:
+        lines.append(f"<p><b>{_esc(test_note)}</b></p>")
+    for x in res.get("prs") or []:
+        lines.append(f"<p>PR: {_esc(x['repo'])} <a href=\"{_esc(x.get('url', ''))}\">#{_esc(x.get('id'))}</a>"
+                     + (" (mevcut PR)" if x.get("reused") else " (taslak)") + "</p>")
+    for f in res.get("fallback") or []:
+        lines.append(f"<p>{_esc(f['repo'])}: PR açılmadı — diff "
+                     + ("DevOps isteğinde.</p>" if req else f"aşağıda.</p><pre>{_esc(f['diff'])}</pre>"))
+    for e in res.get("errors") or []:
+        lines.append(f"<p>Hata · {_esc(e.get('repo'))} (aşama: {_esc(e.get('stage'))}"
+                     + (", dal yazıldı" if e.get("branch_written") else "") + f"): {_esc(e.get('error'))}</p>")
+    if req:
+        lines.append(f"<p>DevOps isteği: #{_esc(req.get('id'))}" + ("" if req.get("created") else " (mevcut)")
+                     + "</p>")
+    if req_err:
+        lines.append(f"<p>DevOps isteği açılamadı: {_esc(req_err)}</p>")
+    _comment(client, track, "".join(lines))
+    out = {"job_id": job_id, "step": step, "prs": res.get("prs") or [], "fallback": res.get("fallback") or [],
+           "errors": res.get("errors") or [], "devops_request": (req or {}).get("id")}
+    log.info(f"⬆️ Sürüm adımı #{job_id} ({step}, {lang}:{repo}:{to}): {len(out['prs'])} PR, "
+             f"{len(out['fallback'])} diff, {len(out['errors'])} hata")
+    if out["errors"]:
+        raise StepFailed(f"{len(out['errors'])} repoda yazma hatası: "
+                         + "; ".join(f"{e.get('repo')} ({e.get('stage')})" for e in out["errors"]))
+    return out
