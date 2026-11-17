@@ -241,9 +241,16 @@ def _devops_sites(client, repo, lang, to, index, read, per_src=None) -> list[dic
 
 
 def _ci_sites(client, repo, lang, to, yml_files) -> list[dict]:
+    return _ci_scan(client, repo, lang, to, yml_files)[0]
+
+
+def _ci_scan(client, repo, lang, to, yml_files) -> tuple[list[dict], list[dict] | None]:
+    """(siteler, sabitlemeler). Sabitleme: repoyu checkout eden test hattı dosyasında dilin sürüm satırı, sürümü ne
+    olursa olsun — `{repo, project, branch, path, line, version}`; site yalnız hedefin altındakiler. yml-files
+    okunamazsa sabitlemeler None (bilinmiyor): "test hattı sabitlemesi yok" ile karışmasın diye."""
     key = {"php": "phpVersion", "python": "pythonVersion", "go": "goVersion"}.get(lang)
     if not key:
-        return []
+        return [], []
     branch = "main"
     if yml_files is None:
         try:
@@ -257,19 +264,23 @@ def _ci_sites(client, repo, lang, to, yml_files) -> list[dict]:
                     yml_files[p] = client.get_file_content(CI_REPO, "/" + p, branch=branch, project=CI_PROJECT) or ""
         except Exception as e:  # noqa: BLE001
             log.warning(f"⚠️ upgrade: yml-files okunamadı: {e}")
-            return []
+            return [], None
     mention = re.compile(rf"(?im)^\s*(?:-\s*)?name:\s*['\"]?(?:[\w.-]+/)?{re.escape(repo)}['\"]?\s*$")
     var = re.compile(rf"^\s*{key}:\s*(['\"]?)(\d+\.\d+)\1\s*(?:#.*)?$")
-    out = []
+    out, pins = [], []
     for path in sorted(yml_files):
         if not path.startswith(CI_DIR + "/") or not mention.search(yml_files[path] or ""):
             continue
         for i, ln in enumerate((yml_files[path] or "").splitlines(), 1):
             m = var.match(ln)
-            if m and _v(m.group(2)) < _v(to):
+            if not m:
+                continue
+            pins.append({"repo": CI_REPO, "project": CI_PROJECT, "branch": branch, "path": path, "line": i,
+                         "version": m.group(2)})
+            if _v(m.group(2)) < _v(to):
                 q = m.group(1)
                 out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, f"{q}{m.group(2)}{q}", f"{q}{to}{q}"))
-    return out
+    return out, pins
 
 
 def _range_hard(constraint: str) -> bool:
@@ -365,7 +376,7 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
         tv = modern.target(client, repo, Path(root), lang, index=index)
     current = tv.get("version")
     out = {"repo": repo, "lang": lang, "current": current, "target": None, "target_source": None,
-           "selectable": [], "sites": [], "per_src": tv.get("per_src") or [], "up_to_date": False}
+           "selectable": [], "sites": [], "ci_pins": [], "per_src": tv.get("per_src") or [], "up_to_date": False}
     if not current:
         return out
     sel = selectable(lang, current, index)
@@ -379,8 +390,10 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
     if not target or _v(current) >= _v(target):
         out["up_to_date"] = True
         return out
-    out["sites"] = sites(client, repo, Path(root), lang, current, target, index, read=read, yml_files=yml_files,
-                       per_src=out["per_src"])
+    ci_sites, ci_pins = _ci_scan(client, repo, lang, target, yml_files)
+    out["sites"] = (_devops_sites(client, repo, lang, target, index, read, out["per_src"]) + ci_sites
+                    + _code_sites(repo, Path(root), lang, target))
+    out["ci_pins"] = ci_pins
     return out
 
 
@@ -1018,7 +1031,8 @@ def scan(client, repo: str, lang: str, *, to: str | None = None, team: str = "",
               app_map_cache=app_map_cache)
     out = {"repo": repo, "lang": lang, "label": label, "version": pl["current"], "current": pl["current"],
            "target": pl["target"], "target_source": pl["target_source"], "selectable": pl["selectable"],
-           "sites": pl["sites"], "per_src": pl["per_src"], "up_to_date": pl["up_to_date"], "freshen": fresh,
+           "sites": pl["sites"], "ci_pins": pl["ci_pins"], "per_src": pl["per_src"], "up_to_date": pl["up_to_date"],
+           "freshen": fresh,
            "sha": "", "files": 0, "auto": [], "infra": [], "human": [], "rules": {}, "skipped": [],
            "skipped_counts": {}, "errors": [], "blockers": [], "probe": None,
            "counts": {k: 0 for k in _COUNT_KEYS}, "blocking": 0}

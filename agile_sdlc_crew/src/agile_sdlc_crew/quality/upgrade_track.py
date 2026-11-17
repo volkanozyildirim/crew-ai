@@ -64,7 +64,8 @@ def _track_rows(client, extra: str = "") -> list[dict]:
     out = []
     for wi in client.query_work_items(q) or []:
         f = wi.get("fields") or {}
-        if not _is_open(f):
+        tags = {t.strip().lower() for t in str(f.get("System.Tags") or "").split(";")}
+        if not _is_open(f) or TRACK_TAG not in tags:     # etiket WIQL'e ek olarak burada da doğrulanır
             continue
         m = _KEY_RE.search(html.unescape(f.get("System.Description") or ""))
         if not m:
@@ -183,9 +184,15 @@ def stop(client, repo: str, lang: str, *, to: str | None = None, team: str) -> d
     """Açık izleme işini bir yorumla kapat."""
     from agile_sdlc_crew import wi_lifecycle
     _check(repo, lang)
+    area = (client.get_team_area_path(team) or "") if (team or "").strip() else ""
+    if not area:
+        raise ValueError(f"Takımın alanı çözümlenemedi: {team!r}")
     prev = find_open(client, lang, repo)
     if not prev:
         raise ValueError(f"{repo} · {lang} için açık yükseltme izleme işi yok")
+    pa, ar = prev["area"].lower(), area.lower()
+    if pa != ar and not pa.startswith(ar + "\\"):
+        raise ValueError(f"İzleme işi #{prev['id']} bu takımın alanında değil ({prev['area']}) — kapatılmadı")
     if to and prev["to"] != to:
         raise ValueError(f"Açık izleme işinin hedefi {prev['to']} (istenen {to}) — o hedefle durdurun")
     state = wi_lifecycle.pick_state(client.get_work_item_type_states("Task"), "complete")
@@ -215,15 +222,15 @@ def _fp_blocking(rest: str, rules: dict, auto: bool) -> bool:
     return upgrade.blocking(rules[k], auto=auto)
 
 
-def open_tasks(client, repo: str, lang: str, cur: str, tgt: str) -> list[dict]:
-    """Board'daki açık `tempo-upgrade` işleri (bu repo × dil × geçiş): başlıkta
-    `Sürüm yükseltme <şimdiki>→<hedef>:` ve açıklamada bu reponun parmak izi. Bir iş, parmak
-    izlerinden biri engelleyen kurala (spec §5 tablosu; needs-human etiketi = otomatik değil)
-    çıkıyorsa engelleyendir."""
+def open_tasks(client, repo: str, lang: str) -> list[dict]:
+    """Board'daki açık `tempo-upgrade` işleri (bu repo × dil): etiket + açıklamada bu reponun parmak izi.
+    Başlığa BAKILMAZ — tarama board'da işi olan bulguyu `skipped`'e atıp `blocking`'e saymaz, bu yüzden bu
+    liste o bulgular için tek kapıdır; başlığı elle değişmiş ya da başka bir hedef için alınmış iş de sayılır.
+    Bir iş, parmak izlerinden biri engelleyen kurala (spec §5 tablosu; needs-human etiketi = otomatik değil;
+    bilinmeyen kural → engeller) çıkıyorsa engelleyendir."""
     from agile_sdlc_crew.quality import modern, render
     source = modern.LANGS[lang]["source"]
     fp_pre = f"{source}:{repo}:".lower()
-    prefix = f"Sürüm yükseltme {cur}→{tgt}:"
     q = ("SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project "
          f"AND [System.Tags] CONTAINS '{upgrade.TAG}' "
          f"AND [System.Description] CONTAINS '{render.FP_PREFIX} {_q(source)}:{_q(repo)}:'")
@@ -232,13 +239,13 @@ def open_tasks(client, repo: str, lang: str, cur: str, tgt: str) -> list[dict]:
     for wi in client.query_work_items(q) or []:
         f = wi.get("fields") or {}
         title = f.get("System.Title") or ""
-        if not _is_open(f) or prefix not in title:
+        tags = {t.strip().lower() for t in (f.get("System.Tags") or "").split(";")}
+        if not _is_open(f) or upgrade.TAG not in tags:
             continue
         mine = [fp for fp in render.parse_fingerprints(f.get("System.Description") or "")
                 if fp.lower().startswith(fp_pre)]
         if not mine:
             continue
-        tags = {t.strip().lower() for t in (f.get("System.Tags") or "").split(";")}
         auto = render.HUMAN_TAG not in tags
         out.append({"id": int(wi["id"]), "title": title, "state": f.get("System.State") or "",
                     "blocking": any(_fp_blocking(fp[len(fp_pre):], rules, auto) for fp in mine)})
@@ -275,26 +282,73 @@ def _blocked_dv_reason(dv_blocked: list[dict]) -> str:
     return f"Üretim imajı güncellenemiyor ({parts}) — üretim adımı hiçbir bölge için açılmaz."
 
 
+_PR_KNOWN = ("active", "completed", "abandoned")
+
+
+def _pins_since(client, pins: list[dict]) -> str | None:
+    """Sabitleme dosyalarına dokunan en son commit'in zamanı (hepsinin en yenisi); okunamazsa None."""
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+    best = None
+    for proj, repo, branch, path in sorted({(p.get("project") or "", p["repo"], p["branch"], p["path"]) for p in pins}):
+        try:
+            d = client.get_last_commit_date(repo, "/" + str(path).lstrip("/"), branch, project=proj or None)
+        except Exception as e:  # noqa: BLE001 — zaman bilinmeden kanıt okunmaz (kapı kapalı)
+            log.warning(f"⚠️ upgrade: {repo} {path} son commit zamanı okunamadı: {e}")
+            return None
+        t = bump._ts(d)
+        if t is None:
+            return None
+        if best is None or t > best[0]:
+            best = (t, d)
+    return best[1] if best else None
+
+
+def _handoff(client, out: dict, lang: str) -> dict:
+    """Sıradaki adım DevOps'a devredilmişse (anahtarı adımı taşıyan AÇIK istek) yeniden kuyruğa alınmaz."""
+    from agile_sdlc_crew import devops_request as dr
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+    nx = out["next"]
+    nx.setdefault("handed_off", None)
+    if not nx.get("step") or not nx.get("ready"):
+        return out
+    try:
+        req = dr.find_request(client, team=pc.get("CREW_DEVOPS_TEAM") or "DevOps",
+                              key=bump.step_key(lang, out["repo"], out["target"], nx["step"]))
+    except Exception as e:  # noqa: BLE001 — devir bilinmeden adım atılmaz
+        nx.update(ready=False, reason=f"DevOps isteği sorgulanamadı: {str(e)[:300]}")
+        return out
+    if req and req.get("open"):
+        nx.update(ready=False, reason=f"DevOps isteği açık: #{req['id']}", handed_off=req["id"])
+    return out
+
+
 def status(client, repo: str, lang: str, *, to: str | None = None, deps=None, scan: dict | None = None,
            wait_h: int | None = None, **kw) -> dict:
     """Aşama + PR'lar + sıradaki adım. `scan` verilirse ikinci tarama yapılmaz.
-    -> {stage, current, target, blocking, blockers, open_tasks, prs: {ci, devops, code}, evidence,
-        next: {step, ready, reason, sites, manual, test_note}}"""
+    -> {stage, current, target, blocking, blockers, open_tasks, ci_pins, prs: {ci, devops, code},
+        evidence: {state, build{id,url,queue_time}|None, summary, overdue, since}|None,
+        next: {step, ready, reason, sites, manual, test_note, handed_off}}"""
+    _check(repo, lang)
+    out = _status(client, repo, lang, to=to, deps=deps or pm.default_deps(), scan=scan, wait_h=wait_h, kw=kw)
+    return _handoff(client, out, lang)
+
+
+def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
     from agile_sdlc_crew import pipeline_config as pc
     from agile_sdlc_crew.quality import upgrade_bump as bump
-    _check(repo, lang)
-    deps = deps or pm.default_deps()
     sc = scan if scan is not None else _fresh_scan(client, repo, lang, to, deps, kw)
     repo = sc.get("repo") or repo
     cur, tgt = sc.get("current"), sc.get("target")
     out = {"repo": repo, "lang": lang, "stage": "hazırlık", "current": cur, "target": tgt,
            "blocking": int(sc.get("blocking") or 0), "blockers": list(sc.get("blockers") or []), "open_tasks": [],
-           "prs": {"ci": None, "devops": [], "code": None}, "evidence": None,
-           "next": {"step": None, "ready": False, "reason": "", "sites": [], "manual": [], "test_note": ""}}
+           "ci_pins": sc.get("ci_pins"), "prs": {"ci": None, "devops": [], "code": None}, "evidence": None,
+           "next": {"step": None, "ready": False, "reason": "", "sites": [], "manual": [], "test_note": "",
+                    "handed_off": None}}
 
     def nxt(step, ready, reason="", sites=(), manual=(), test_note=""):
         out["next"] = {"step": step, "ready": bool(ready), "reason": reason, "sites": list(sites),
-                       "manual": list(manual), "test_note": test_note}
+                       "manual": list(manual), "test_note": test_note, "handed_off": None}
         return out
 
     if not cur:
@@ -320,9 +374,12 @@ def status(client, repo: str, lang: str, *, to: str | None = None, deps=None, sc
             return nxt("code", False, f"Kod reposu PR'ı #{cpr.get('id')} açık — merge bekleniyor.", push, manual)
         if cpr and cpr.get("status") == "completed":
             return nxt(None, False, f"Kod reposu PR'ı #{cpr.get('id')} merge edildi.", (), manual)
-        if cpr:
+        if cpr and cpr.get("status") == "abandoned":
             return nxt("code", False, f"Kod reposu PR'ı #{cpr.get('id')} terk edilmiş — '{br}' dalını silip "
                                       "yeniden deneyin.", push, manual)
+        if cpr:
+            return nxt("code", False, f"Kod reposu PR'ının durumu bilinmiyor (#{cpr.get('id')}: "
+                                      f"{cpr.get('status')!r}) — adım atılmadı.", push, manual)
         if not push:
             if manual:
                 return nxt("code", False, man_txt + ".", (), manual)
@@ -348,7 +405,7 @@ def status(client, repo: str, lang: str, *, to: str | None = None, deps=None, sc
     code = [s for s in sites if s.get("where") == "code"]
     dv_blocked = [s for s in dv if s.get("blocked")]
     ci_blocked = [s for s in ci if s.get("blocked")]
-    out["open_tasks"] = open_tasks(client, repo, lang, cur, tgt)
+    out["open_tasks"] = open_tasks(client, repo, lang)
     not_pre = [r for k in ("auto", "infra", "human") for r in sc.get(k) or [] if r.get("pre_fixable") is False]
     if out["blocking"] > 0 or any(t["blocking"] for t in out["open_tasks"]):
         base = "hazırlık"
@@ -377,11 +434,20 @@ def status(client, repo: str, lang: str, *, to: str | None = None, deps=None, sc
         if p:
             dv_prs[(proj, r)] = p
     out["prs"]["devops"] = list(dv_prs.values())
-    ev = None
-    if ci_pr and ci_pr.get("status") == "completed":
-        wh = wait_h if wait_h is not None else int(pc.get("CREW_TECHDEBT_UPGRADE_CI_WAIT_H") or 72)
-        ev = out["evidence"] = bump.ci_evidence(client, repo, ci_pr.get("closed_at") or "", wait_h=wh)
-    if ci_pr and ci_pr.get("status") in ("active", "completed") and not (ev and ev["state"] in ("green", "no_pipeline")):
+
+    # Test hattı kapısı dosyanın DURUMUNA bağlı (Tempo PR'ına değil): satır hedefin altındaysa ci adımı
+    # sırada; hepsi hedefteyse (kim yaptıysa) kanıt, dosyanın son değişikliğinden SONRA kuyruğa giren
+    # `<repo>-test` build'idir. Sabitlemeler okunamadıysa (None) hiçbir adım açılmaz.
+    pins = sc.get("ci_pins")
+    below = [p for p in pins or [] if upgrade._v(p.get("version")) < upgrade._v(tgt)]
+    ev, since = None, None
+    if pins and not below:
+        since = _pins_since(client, pins)
+        if since:
+            wh = wait_h if wait_h is not None else int(pc.get("CREW_TECHDEBT_UPGRADE_CI_WAIT_H") or 72)
+            ev = out["evidence"] = bump.ci_evidence(client, repo, since, wait_h=wh)
+    ci_status = (ci_pr or {}).get("status")
+    if (below and ci_status == "active") or (pins and not below and not (ev and ev["state"] in ("green", "no_pipeline"))):
         out["stage"] = "test hattı"
     if any(p.get("status") == "active" for p in dv_prs.values()):
         out["stage"] = "üretim"
@@ -393,27 +459,40 @@ def status(client, repo: str, lang: str, *, to: str | None = None, deps=None, sc
                        [s for s in code if not _pushable(s)])
         return code_step(code)
 
-    has_ci = bool(ci) or bool(ci_pr and ci_pr.get("status") != "abandoned")
-    if has_ci and (ci_pr is None or ci_pr.get("status") == "abandoned"):
-        if ci_pr:
+    if pins is None:
+        return nxt("ci" if ci else "prod", False, "Test hattı (yml-files) dosyaları okunamadı — test hattının "
+                                                   "durumu bilinmeden sürüm adımı atılmaz.", ci or dv)
+    if below:
+        if ci_status == "active":
+            return nxt("prod", False, f"Test hattı PR'ı #{ci_pr.get('id')} henüz merge edilmedi.", dv)
+        if ci_status == "completed":
+            return nxt("ci", False, f"Test hattı PR'ı #{ci_pr.get('id')} merge edildi ama "
+                       + ", ".join(f"{p['path']}:{p['line']} ({p['version']})" for p in below)
+                       + " hâlâ hedefin altında — dosyayı kontrol edin.", ci)
+        if ci_status == "abandoned":
             return nxt("ci", False, f"Test hattı PR'ı #{ci_pr.get('id')} terk edilmiş — '{br}' dalını silip "
                                     "yeniden deneyin.", ci)
+        if ci_pr:
+            return nxt("ci", False, f"Test hattı PR'ının durumu bilinmiyor (#{ci_pr.get('id')}: {ci_status!r}) — "
+                                    "adım atılmadı.", ci)
         if not ok:
             return nxt("ci", False, base_reason, ci)
         bad = [s for s in ci if not _pushable(s)]
-        if bad:
+        if not ci or bad:
             return nxt("ci", False, "Test hattı satırı otomatik değiştirilemez: "
-                       + "; ".join(f"{s.get('path')}:{s.get('line')}" for s in bad), ci)
+                       + ("; ".join(f"{s.get('path')}:{s.get('line')}" for s in bad) or "site bulunamadı"), ci)
         return nxt("ci", True, "", ci)
-    if has_ci and ci_pr.get("status") == "active":
-        return nxt("prod", False, f"Test hattı PR'ı #{ci_pr.get('id')} henüz merge edilmedi.", dv)
 
-    # Üretim adımı (CI PR'ı merge edilmiş ya da test hattı sitesi hiç yok)
-    test_note = "" if has_ci else NO_EVIDENCE
+    # Üretim adımı (test hattı hedefte ya da test hattı sabitlemesi hiç yok)
+    test_note = "" if pins else NO_EVIDENCE
     abandoned = [p for p in dv_prs.values() if p.get("status") == "abandoned"]
     if abandoned:
         return nxt("prod", False, "Üretim PR'ı terk edilmiş: " + ", ".join(
             f"{p['repo']} #{p.get('id')}" for p in abandoned) + f" — '{br}' dalını silip yeniden deneyin.", dv)
+    unknown = [p for p in dv_prs.values() if p.get("status") not in _PR_KNOWN]
+    if unknown:
+        return nxt("prod", False, "Üretim PR'ının durumu bilinmiyor: " + ", ".join(
+            f"{p['repo']} #{p.get('id')} ({p.get('status')!r})" for p in unknown) + " — adım atılmadı.", dv)
     if len(dv_prs) == len(dv_repos):
         if any(p.get("status") == "active" for p in dv_prs.values()):
             return nxt("code", False, "Üretim PR'ları açık — merge ve deploy DevOps'ta; kod reposu adımı üretim "
@@ -426,18 +505,49 @@ def status(client, repo: str, lang: str, *, to: str | None = None, deps=None, sc
         return nxt("prod", False, _blocked_dv_reason(dv_blocked), dv)
     if not ok:
         return nxt("prod", False, base_reason, dv)
-    if has_ci:
-        if ev["state"] == "red":
-            return nxt("prod", False, "Test hattı merge'inden sonraki build kırmızı — üretim adımı açılmaz. "
+    if pins:
+        if not since:
+            return nxt("prod", False, "Test hattı dosyasının son değişiklik zamanı okunamadı — kanıt aranamadı, "
+                                      "üretim adımı açılmaz.", dv)
+        state = (ev or {}).get("state")
+        if state == "red":
+            return nxt("prod", False, "Test hattı değişikliğinden sonraki build kırmızı — üretim adımı açılmaz. "
                        + (ev.get("summary") or "")[:1500], dv)
-        if ev["state"] == "none":
-            return nxt("prod", False, "Test hattı PR'ı merge edildi; ondan sonra kuyruğa girmiş tamamlanmış bir "
+        if state == "none":
+            return nxt("prod", False, "Test hattı hedef sürümde; ondan sonra kuyruğa girmiş tamamlanmış bir "
                                       "build henüz yok" + (" (bekleme süresi doldu — bir PR'ı yeniden tetikleyin)"
                                                            if ev.get("overdue") else "") + ".", dv)
-        if ev["state"] == "no_pipeline":
+        if state == "no_pipeline":
             test_note = NO_EVIDENCE
+        elif state != "green":
+            return nxt("prod", False, f"Test kanıtı okunamadı ({state!r}) — üretim adımı açılmaz.", dv)
     bad = [s for s in dv if not _pushable(s)]
     if bad:
         return nxt("prod", False, "Üretim imajı satırı otomatik değiştirilemez: "
                    + "; ".join(f"{s['repo']} {s.get('path')}" for s in bad), dv)
     return nxt("prod", True, "", dv, test_note=test_note)
+
+
+def watch_view(client, repo: str, lang: str, *, to: str | None = None, deps=None, **kw) -> dict | None:
+    """Tarama ucunun 'üretim izlenen hedefe ulaştı' yanıtı: repo × dil için açık izleme işi var ve üretim
+    onun hedefinde (ya da üstünde) ise — tarama o hedef için artık yapılamaz (hedef seçilemez) ama kod
+    reposu adımı sırada olabilir. Bulgu listeleri boş, `up_to_date: true`, `status` izleme hedefiyle.
+    Koşul tutmuyorsa None (uç eski davranışını korur)."""
+    from agile_sdlc_crew.quality import modern
+    _check(repo, lang)
+    tr = find_open(client, lang, repo)
+    if not tr or (to and to != tr["to"]):
+        return None
+    deps = deps or pm.default_deps()
+    pl = upgrade.plan(client, repo, lang, None, deps=deps, **_pick(kw, _PLAN_KW))
+    cur = pl.get("current")
+    if not cur or upgrade._v(cur) < upgrade._v(tr["to"]):
+        return None
+    st = status(client, repo, lang, to=tr["to"], deps=deps, **kw)
+    return {"repo": st.get("repo") or repo, "lang": lang, "label": modern.LANGS[lang]["label"], "version": cur,
+            "current": cur, "target": tr["to"], "target_source": "izleme", "selectable": pl.get("selectable") or [],
+            "sites": [], "ci_pins": [], "per_src": pl.get("per_src") or [], "up_to_date": True, "auto": [],
+            "infra": [], "human": [], "rules": {}, "skipped": [], "skipped_counts": {}, "errors": [], "blockers": [],
+            "probe": None, "counts": {"error": 0, "behavior": 0, "deprecation": 0}, "blocking": 0,
+            "watch_target": tr["to"], "track_id": tr["id"],
+            "message": f"Üretim {cur} — izlenen hedef {tr['to']} sürümüne ulaşıldı.", "status": st}

@@ -155,6 +155,29 @@ def _existing(client, area: str, key: str) -> int | None:
     return int(found[0]["id"]) if found else None
 
 
+def find_request(client, *, team: str, key: str) -> dict | None:
+    """Anahtarı birebir taşıyan DevOps isteği: {id, state, open}; açık olan önce. Alan çözülemezse ValueError."""
+    import html as _html
+    from agile_sdlc_crew.aging import DONE_STATES
+    area = client.get_team_area_path(team) or ""
+    if not area:
+        raise ValueError(f"DevOps takımının alanı çözümlenemedi: {team}")
+    k, a = key.replace("'", "''"), area.replace("'", "''")
+    q = ("SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project "
+         f"AND [System.AreaPath] UNDER '{a}' AND [System.Tags] CONTAINS '{TAG}' "
+         f"AND [System.Description] CONTAINS '{KEY_PREFIX} {k}'")
+    rows = []
+    for wi in client.query_work_items(q) or []:
+        f = wi.get("fields") or {}
+        m = re.search(re.escape(KEY_PREFIX) + r"\s*([^\s<]+)", _html.unescape(f.get("System.Description") or ""))
+        if not m or m.group(1) != key:
+            continue
+        state = f.get("System.State") or ""
+        rows.append({"id": int(wi["id"]), "state": state, "open": state.strip().lower() not in DONE_STATES})
+    rows.sort(key=lambda r: (not r["open"], r["id"]))
+    return rows[0] if rows else None
+
+
 def _link(client, source_wi, devops_id: int, _l) -> None:
     """Kaynak işe Predecessor bağı (DevOps işi önce biter). Zaten bağlıysa Azure reddeder — yutulur."""
     try:

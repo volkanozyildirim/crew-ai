@@ -2242,7 +2242,18 @@ async def techdebt_upgrade_scan(repo: str = "", team: str = "", force: bool = Fa
 
     def _do():
         client = AzureDevOpsClient()
-        res = _up.scan(client, repo.strip(), lg, to=tv, team=team, force=bool(force))
+        try:
+            res = _up.scan(client, repo.strip(), lg, to=tv, team=team, force=bool(force))
+        except ValueError:
+            # Üretim izlenen hedefe ulaştıysa hedef artık seçilemez; kod reposu adımı yine görünsün.
+            view = _ut.watch_view(client, repo.strip(), lg, to=tv)
+            if view is None:
+                raise
+            return view
+        if res.get("up_to_date"):
+            view = _ut.watch_view(client, res.get("repo") or repo.strip(), lg, to=tv)
+            if view is not None:
+                return view
         try:
             res["status"] = _ut.status(client, res.get("repo") or repo.strip(), lg, to=tv, scan=res)
         except Exception as e:  # noqa: BLE001 — tarama sonucu durumsuz da gösterilir

@@ -319,51 +319,52 @@ def _ts(s):
 
 
 def _partial_ok(client, b: dict) -> bool:
-    """Kısmi başarılı build yalnız test dışı bir adımda uyarı verdiyse yeşil (pipeline kapısıyla aynı)."""
-    try:
-        from agile_sdlc_crew.flow import _build_issues_block
-        return not _build_issues_block(client.get_build_issue_tasks(b.get("project"), int(b.get("build_id"))))
-    except Exception:  # noqa: BLE001 — okunamıyorsa kanıt sayılmaz
-        return False
+    """Kısmi başarılı build yalnız test dışı bir adımda uyarı verdiyse yeşil — pipeline kapısı ve
+    modern_fix ile aynı kural (flow._build_issues_block). Okuma hatası yükselir (kanıt sayılmaz)."""
+    from agile_sdlc_crew.flow import _build_issues_block
+    return not _build_issues_block(client.get_build_issue_tasks(b.get("project"), int(b.get("build_id"))))
 
 
 def ci_evidence(client, repo: str, since: str, *, wait_h: int, now=None) -> dict:
-    """Test hattı PR'ının merge'inden (`since`) SONRA kuyruğa girmiş PR build'lerinden kanıt.
-    Reponun herhangi bir PR'ının build'i sayılır; tanım başına en yeni tamamlanmış build alınır,
-    biri kırmızıysa kanıt kırmızıdır. -> {"state": green|red|none|no_pipeline, "build", "summary",
-    "overdue"} — overdue: `wait_h` saat geçtiği hâlde tamamlanmış build yok."""
-    builds = list(client.list_pr_builds(repo) or [])
-    if not builds:
-        return {"state": "no_pipeline", "build": None, "summary": "Reponun PR build'i yok.", "overdue": False}
+    """Test hattı dosyasının son değişikliğinden (`since`) SONRA kuyruğa girmiş `<repo>-test` build'inden kanıt.
+    Kanıt build TANIMINA bağlıdır (lint / Sonar gibi başka PR hatları sayılmaz): tanım yok → no_pipeline;
+    tanımın since'ten kesin sonra kuyruğa girmiş tamamlanmış build'i yok → none; en yenisi yeşil (ya da yalnız
+    test dışı adımda uyarılı kısmi başarı) → green; değilse red + hata özeti. API hatası yükselir.
+    -> {"state", "build": {"id","url","queue_time"}|None, "summary", "overdue", "since"}"""
     t0 = _ts(since)
     if t0 is None:
-        return {"state": "none", "build": None, "overdue": False,
-                "summary": f"Merge zamanı okunamadı ({str(since)[:40]!r}); kanıt sayılmadı."}
-    after = [(t, b) for b in builds if (t := _ts(b.get("queue_time"))) is not None and t > t0]
-    latest: dict = {}
-    for _t, b in sorted(after, key=lambda x: x[0], reverse=True):
-        if b.get("status") != "completed" or b.get("result") in (None, "", "canceled"):
-            continue
-        latest.setdefault(b.get("definition") or "", b)
-    red = [b for b in latest.values()
-           if b.get("result") == "failed" or (b.get("result") == "partiallySucceeded" and not _partial_ok(client, b))]
-    if red:
-        b = red[0]
-        try:
-            summ = client.get_build_failure_summary(b.get("project"), int(b.get("build_id")), 3000) or ""
-        except Exception as e:  # noqa: BLE001
-            summ = f"(özet okunamadı: {e})"
-        summ = mask_secrets(summ or f"Build #{b.get('build_id')} ({b.get('definition')}) {b.get('result')}")
-        return {"state": "red", "build": b, "summary": summ, "overdue": False}
-    green = [b for b in latest.values() if b.get("result") in ("succeeded", "partiallySucceeded")]
-    if green:
-        b = green[0]
-        return {"state": "green", "build": b, "overdue": False,
-                "summary": f"Build #{b.get('build_id')} ({b.get('definition')}) yeşil."}
-    now = now or datetime.now(timezone.utc)
-    overdue = (now - t0).total_seconds() > max(0, int(wait_h)) * 3600
-    return {"state": "none", "build": None, "overdue": overdue,
-            "summary": "Merge'den sonra kuyruğa girmiş tamamlanmış PR build'i yok."}
+        raise ValueError(f"Kanıt saati okunamadı ({str(since)[:40]!r}).")
+    name = f"{repo}-test"
+    d = client.find_build_definition(repo, name)
+    if not d:
+        return {"state": "no_pipeline", "build": None, "overdue": False, "since": since,
+                "summary": f"'{name}' build tanımı yok."}
+    builds = client.list_definition_builds(d["project"], d["id"], min_time=since, top=50) or []
+    done = sorted(((t, b) for b in builds
+                   if (t := _ts(b.get("queue_time"))) is not None and t > t0       # minTime'a güvenilmez: kesin "sonra"
+                   and b.get("status") == "completed" and b.get("result") not in (None, "", "canceled")),
+                  key=lambda x: x[0], reverse=True)
+    if not done:
+        now = now or datetime.now(timezone.utc)
+        overdue = (now - t0).total_seconds() > max(0, int(wait_h)) * 3600
+        return {"state": "none", "build": None, "overdue": overdue, "since": since,
+                "summary": f"Test hattı değişikliğinden sonra kuyruğa girmiş tamamlanmış '{d.get('name')}' build'i yok."}
+    b = done[0][1]
+    blk = {"id": b.get("build_id"), "url": b.get("url") or "", "queue_time": b.get("queue_time") or ""}
+    if b.get("result") == "succeeded" or (b.get("result") == "partiallySucceeded" and _partial_ok(client, b)):
+        return {"state": "green", "build": blk, "overdue": False, "since": since,
+                "summary": f"Build #{b.get('build_id')} ({d.get('name')}) yeşil."}
+    try:
+        summ = client.get_build_failure_summary(b.get("project") or d["project"], int(b.get("build_id")), 3000) or ""
+    except Exception as e:  # noqa: BLE001 — özet okunamasa da durum kırmızı kalır (kapı kapalı)
+        summ = f"(özet okunamadı: {e})"
+    summ = mask_secrets(summ or f"Build #{b.get('build_id')} ({d.get('name')}) {b.get('result')}")
+    return {"state": "red", "build": blk, "summary": summ, "overdue": False, "since": since}
+
+
+def step_key(lang: str, repo: str, to: str, step: str) -> str:
+    """Adımın DevOps isteği anahtarı (devops_request `tempo-devops-key:` satırı); status bununla devri görür."""
+    return f"upgrade:{lang}:{repo}:{to}:{step}"
 
 
 def site_diffs(client, sites: list[dict]) -> list[dict]:
@@ -564,7 +565,7 @@ def run(job_id: int, *, load_job=None, client=None, deps=None, status_fn=None, p
     if not res.get("errors") and (step == "prod" or res.get("fallback")):
         if pc.get("CREW_DEVOPS_REQUESTS"):
             from agile_sdlc_crew import devops_request as dr
-            key = f"upgrade:{lang}:{repo}:{to}" if step == "prod" else f"upgrade-{step}:{lang}:{repo}:{to}"
+            key = step_key(lang, repo, to, step)  # status açık isteği bu anahtarla görür → adım yeniden kuyruğa girmez
             try:
                 req = (request_fn or dr.open_request)(
                     client, team=pc.get("CREW_DEVOPS_TEAM") or "DevOps",

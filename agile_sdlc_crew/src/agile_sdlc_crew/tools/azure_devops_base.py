@@ -967,20 +967,32 @@ class AzureDevOpsClient:
             "source_version": b.get("sourceVersion") or "",
         }
 
-    def list_pr_builds(self, repo_id_or_name: str, top: int = 50) -> list[dict]:
-        """Reponun HERHANGİ bir PR'ının build'leri (reason=pullRequest), en yeni kuyruktan geriye;
-        satırlar get_pr_build ile aynı biçimde. Boş liste → repoda PR build'i hiç yok."""
+    def find_build_definition(self, repo_id_or_name: str, name: str) -> dict | None:
+        """Build tanımı adıyla (büyük/küçük harf duyarsız; ör. `core-test` → `Core-test`), get_pr_build'in bu
+        repo için sorguladığı projede. Yoksa None; API hatası yükselir (yok sayılmaz)."""
         project = self._find_repo_project(repo_id_or_name)
-        repo_id = (self.get_repository(repo_id_or_name) or {}).get("id") or repo_id_or_name
+        url = f"{self.org_url}/{project}/_apis/build/definitions"
+        resp = requests.get(url, headers=self._headers, params={"api-version": self.API_VERSION, "name": name},
+                            timeout=30)
+        resp.raise_for_status()
+        for d in resp.json().get("value", []) or []:
+            if str(d.get("name") or "").lower() == name.lower():
+                return {"id": d.get("id"), "name": d.get("name"), "project": project}
+        return None
+
+    def list_definition_builds(self, project: str, definition_id: int, *, min_time: str = "",
+                               top: int = 50) -> list[dict]:
+        """Tanımın PR build'leri (reason=pullRequest), en yeni kuyruktan geriye; get_pr_build ile aynı biçim."""
         url = f"{self.org_url}/{project}/_apis/build/builds"
         params = {
             "api-version": self.API_VERSION,
-            "repositoryId": repo_id,
-            "repositoryType": "TfsGit",
+            "definitions": int(definition_id),
             "reasonFilter": "pullRequest",
             "queryOrder": "queueTimeDescending",
             "$top": int(top),
         }
+        if min_time:
+            params["minTime"] = min_time
         resp = requests.get(url, headers=self._headers, params=params, timeout=30)
         resp.raise_for_status()
         return [{
@@ -992,8 +1004,26 @@ class AzureDevOpsClient:
             "project": project,
             "queue_time": b.get("queueTime") or "",
             "source_version": b.get("sourceVersion") or "",
-            "pr_id": (b.get("triggerInfo") or {}).get("pr.number") or "",
-        } for b in resp.json().get("value", [])]
+        } for b in resp.json().get("value", []) or []]
+
+    def get_last_commit_date(self, repo_id_or_name: str, path: str, branch: str, *,
+                             project: str | None = None) -> str:
+        """Dosyaya dokunan en son commit'in zamanı (committer, yoksa author) — dalda. Commit yoksa ""."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/commits"
+        params = {
+            "api-version": self.API_VERSION,
+            "searchCriteria.itemPath": path,
+            "searchCriteria.itemVersion.version": branch,
+            "searchCriteria.itemVersion.versionType": "branch",
+            "searchCriteria.$top": 1,
+        }
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        vals = resp.json().get("value", []) or []
+        if not vals:
+            return ""
+        c = vals[0]
+        return str((c.get("committer") or {}).get("date") or (c.get("author") or {}).get("date") or "")
 
     def get_build_failure_summary(
         self, project: str, build_id: int, max_chars: int = 4000
