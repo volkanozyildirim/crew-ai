@@ -1,6 +1,6 @@
 # Dil Sürümü Yükseltme — Tasarım
 
-**Tarih:** 2026-11-17 · **Durum:** tasarım onaylandı (kullanıcı, 2026-11-17) · **Dal:** `worktree-techdebt-upgrade`
+**Tarih:** 2026-11-17 · **Durum:** tasarım onaylandı (kullanıcı, 2026-11-17); planın 11 görevi dalda uygulandı (2026-11-17) — sapmalar "Uygulama sırasında değişenler"de, gerçek Azure doğrulamasında bulunan çelişkiler CLAUDE.md'deki "Language version upgrade" maddesinde · **Dal:** `worktree-techdebt-upgrade`
 **Dayandığı tasarım:** `2026-10-19-techdebt-design.md` (Teknik borç alanı, aşama 2a modernleştirme)
 
 ## Amaç ve neden
@@ -357,6 +357,48 @@ Bilinen bedeli: 7.4 → 8.x geçişinde yüzlerce yer çıkabilir ve yükseltme 
 - Bulgular yeni kaynak adıyla değil, dilin mevcut kaynağı + `tempo-upgrade` etiketiyle açılır.
 - `yml-files` klonunda `Test Pipelines/` yanında `Test%20Pipelines` kopyası var; canlı olan
   API'den (varsayılan dal) okunarak belirlenir.
+
+## Uygulama sırasında değişenler
+
+Uygulamada bu tasarımdan ayrılınan yerler (her biri gözden geçirmede verilmiş bir karar):
+
+- **Modüller:** durum / izleme Task'ı / otomatik ilerletme / yoklayıcı `upgrade.py` yerine
+  `quality/upgrade_track.py`'de (`upgrade_track.status`, `advance`, …); `upgrade.py` taramayla kaldı.
+  `plan` / `sites` / `scan` / `status` testler için anahtar-sözcüklü enjeksiyon parametreleri alır
+  (`index=`, `root=`, `read=`, `yml_files=`).
+- **Üretim kapısı CI dosyasının DURUMUNA bağlı**, Tempo'nun test hattı PR'ına değil: bütün
+  sabitlemeler hedefte **ve** sabitleme dosyalarının son first-parent commit'inden (Tempo'nun PR'ı
+  tamamlandıysa onun kapanışından) SONRA kuyruğa girmiş `<repo>-test` build'i yeşil. Satırı elle
+  değiştiren biri de kanıtsız geçemez; §6'daki "1. adımın PR'ı merge edilmiş" ifadesinden sıkı.
+- **Kanıt build TANIMINA bağlı:** "reponun herhangi bir PR build'i" değil, adı `<repo>-test` olan
+  tanımın build'i (büyük/küçük harf duyarsız, kod reposunun projesinde kesin çözümle). Tanım yok →
+  "Test kanıtı yok"; sabitleme yok ama tanım var → en yeni build yeşil olmalı ve PR açıklaması
+  "Test kanıtı zayıf" ile başlar; okunamayan her şey kapıyı kapalı tutar.
+- **Test hattı sabitlemeleri:** `phpVersion:` satırına ek olarak GoTool `version`, UsePythonVersion
+  `versionSpec`, `image: golang:` / `python:` / `php` tanınır. Okunamayan satır (`$(var)`, `3.x`) ve
+  üç parçalı sürüm (`1.24.4`, `golang:1.21.4`) otomatik yazılmaz — elle düzenlenir, kapı kapalı kalır.
+- **Site değişikliği yalnız rakam dizileri:** `old` ile `new` yalnız rakamlarda ayrışabilir, tek satır,
+  ham baytlar. Bu yüzden composer'daki alternatifli kısıt (`^7.4|^8.0` → `>=8.4`) otomatik push
+  edilmez ("kısıt elle düzenlenmeli").
+- **Commit'i olan dal yeniden kullanılmaz:** Tempo'nun dalı ya bu çalışmada doğrulanan hedef
+  commit'ten yeni açılır ya da hedefle aynı commit'teki boş artıktır; mevcut Tempo PR'ı yalnız
+  dosyaları yeni içerikle zaten aynıysa döndürülür, üstüne push yapılmaz. Bedeli: "push edildi, PR
+  açılamadı" sonrasında artık dalı bir insan siler.
+- **DevOps devri:** DevOps isteğinin anahtarı adımı da taşır (`upgrade:<dil>:<repo>:<hedef>:<adım>`);
+  sıradaki adım için açık istek varsa adım hazır sayılmaz (yeniden kuyruk döngüsü yok).
+- **Kod adımı hedef araçla `verify` çalıştırmaz:** taslak PR, CI'ı zaten hedefte koşan repoya
+  yalnız kısıt satırını değiştirir; hatalı kısıtı o CI yakalar.
+- **Kırmızı build tepkisi** (`advance`'in işi): yalnız üretimi bekleten build kırmızıyken, izleme
+  işi başına en çok **bir** açık needs-human Task; sonraki kırmızı build'ler onun altına yorum olur.
+- **Başarısız adım yeniden kuyruğa girmez:** son `upgrade_bump` işi başarısız olan adımı otomatik
+  ilerletme tekrar almaz; yeniden deneme karttaki düğmenin işidir. `/bump` `expect_step` taşır
+  (uyuşmazlık 409) ve aynı izleme işi için kuyrukta / çalışan iş varken yeni iş açmaz.
+- **İnsanın kapattığı iş yeniden açılmaz:** Done'a çekilmiş `behavior` / `fix_min` needs-human grubu
+  parmak izleri aynı kaldıkça "insan baktı" sayılır, açılmaz ve bekletmez; yeni dosya yine açılır.
+- **Katalog:** yükseltme kuralı olup `auto: false` olanlar (`legacy_autoload`, `serializable_only`,
+  `moved_to_pecl_84`, `deprecated_85`) `kind: structural` (insan işi); 8.5 kuralları
+  (`noncanonical_casts_85`, `backtick_exec_85`) testte de doğrulanır. Next.js eş bağımlılık engeli
+  `upgrade_targets.yaml`'daki `nextjs_peer_react` tablosundan.
 
 ## Yapıcıya bırakılanlar
 
