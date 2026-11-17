@@ -1896,14 +1896,16 @@ function _tdmSetMode(m){
   document.getElementById('tdmTarget').textContent='';
   document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=true;
 }
-async function loadUpgradeRepos(){
+async function loadUpgradeRepos(keep){
   try{
-    const resp=await fetch('/api/techdebt/upgrade/repos');
+    const team=_tdTeam();
+    const resp=await fetch('/api/techdebt/upgrade/repos'+(team?'?team='+encodeURIComponent(team):''));
     if(resp.status===403){_tdm.upOn=false;document.getElementById('tdmModeSw').style.display='none';_tdm.mode='mod';return}
     const r=await resp.json();
     if(!resp.ok)return;
     _tdm.upRepos=r.items||[];_tdm.upOn=true;
     document.getElementById('tdmModeSw').style.display='inline-flex';
+    if(keep)return;  // eylem sonrası yenileme: yalnız tracked / watch_target tazelenir, seçim ve sonuç korunur
     let m='mod';try{m=localStorage.getItem('tempo_modern_mode')||'mod'}catch(e){}
     _tdmSetMode(m==='up'?'up':'mod');
   }catch(e){}
@@ -1973,12 +1975,112 @@ function renderUpgrade(){
   const bl=(r.blockers||[]).map(b=>`<span class="chip dim" title="${esc(String(b.detail||''))}">${esc(String(b.name||''))} ${esc(String(b.constraint||''))}</span>`).join(' ');
   const sites=(r.sites||[]).map(s=>`<li><code>${esc(String(s.where||''))}</code> ${esc(String(s.path||''))}${s.line?':'+esc(String(s.line)):''} <span style="color:var(--text-dim)">${esc(String(s.old||''))} → ${esc(String(s.new||''))}</span>${s.blocked?` <span class="chip" style="background:var(--human-soft);color:var(--danger)">engelli: ${esc(String(s.blocked))}</span>`:''}</li>`).join('');
   box.innerHTML=`<div style="padding:6px 0"><b>${esc(String(r.repo))} · ${esc(String(r.label||''))}</b> ${esc(String(r.current||'?'))} → ${esc(String(r.target||'?'))}`
-    +(it.stage?` <span class="chip dim" title="Yükseltme aşaması">${esc(String(it.stage))}</span>`:'')
     +(r.up_to_date?' <span class="chip dim">güncel</span>':'')+'</div>'
+    +_upStatusHtml(r,it)
     +`<div style="padding:2px 0">Kırılır <b>${c.error||0}</b> · Davranış değişir <b>${c.behavior||0}</b> · Kullanımdan kalkar <b>${c.deprecation||0}</b>`
     +(r.blocking?` · <span style="color:var(--danger)">${r.blocking} engelleyen iş</span>`:'')+` · ${probeTxt}</div>`
     +(bl?`<div style="padding:2px 0"><b>Engeller:</b> ${bl}</div>`:'')
     +(sites?`<details style="padding:2px 0"><summary style="cursor:pointer"><b>Sürüm yerleri</b> (${(r.sites||[]).length})</summary><ul style="margin:2px 0 4px 18px">${sites}</ul></details>`:'');
+}
+// ── Aşama şeridi ve sürüm adımı düğmeleri: yalnız sunucunun döndürdüğü `status` gösterilir, UI hiçbir şey hesaplamaz ──
+const _UP_STAGES=['Hazırlık','Hazır','Test hattı','Üretim'];
+const _UP_STAGE_IDX={'hazırlık':0,'engelli':0,'hazır':1,'test hattı':2,'üretim':3,'tamam':4};
+const _UP_STEP_LABEL={ci:"Test hattı PR'ını aç",prod:"Üretim PR'larını aç",code:"Kod PR'ını aç"};
+const _UP_EVID={green:'yeşil',red:'kırmızı',none:'build bekleniyor',no_pipeline:'test hattı yok'};
+// Bağlantı yalnız https:// ile başlıyorsa <a> olur; aksi halde düz (kaçışlı) metin.
+function _upLink(url,text){
+  const u=String(url||'');
+  if(u.indexOf('https://')===0)return `<a href="${escHtml(u)}" target="_blank" rel="noopener">${escHtml(text)}</a>`;
+  return escHtml(text);
+}
+function _upPrLine(label,p){
+  if(!p)return '';
+  const t=`PR #${p.id}`+(p.repo?` (${p.repo})`:'');
+  return `<span style="margin-right:10px"><b>${escHtml(label)}:</b> ${_upLink(p.url,t)}${p.status?` <span class="chip dim">${escHtml(String(p.status))}</span>`:''}</span>`;
+}
+function _upStripHtml(stage){
+  const idx=_UP_STAGE_IDX[stage];
+  const blocked=stage==='engelli',done=stage==='tamam';
+  const cells=_UP_STAGES.map((lb,i)=>{
+    let st='color:var(--text-dim);border:1px solid var(--border)';
+    if(done||(idx!==undefined&&i<idx))st='color:var(--accent);border:1px solid var(--accent)';
+    if(!done&&i===idx)st=blocked?'color:var(--warning);border:1px solid var(--warning);font-weight:600':'color:var(--accent);border:1px solid var(--accent);font-weight:600;background:var(--accent-soft)';
+    return `<span style="padding:3px 10px;border-radius:12px;${st}">${escHtml(lb)}${blocked&&i===0?' · Engelli':''}</span>`;
+  });
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:4px 0" title="Yükseltme aşaması">${cells.join('<span style="color:var(--text-dim)">›</span>')}${done?'<span class="chip dim">Tamam</span>':''}</div>`;
+}
+function _upStatusHtml(r,it){
+  const tracked=!!(it&&it.tracked)||!!r.watch_target;
+  const st=r.status||null;
+  let h='';
+  if(st&&st.error){
+    h+=`<div style="padding:2px 0;color:var(--danger)">Durum hesaplanamadı: ${escHtml(String(st.error))}</div>`;
+  }else if(st){
+    h+=_upStripHtml(String(st.stage||''));
+    const nx=st.next||{};
+    if(nx.reason)h+=`<div style="padding:2px 0">${escHtml(String(nx.reason))}</div>`;
+    if(nx.test_note)h+=`<div style="padding:2px 0;color:var(--warning)">${escHtml(String(nx.test_note))}</div>`;
+    if(nx.handed_off)h+=`<div style="padding:2px 0">DevOps isteği ${typeof wiLink==='function'?wiLink(nx.handed_off):'#'+escHtml(String(nx.handed_off))}</div>`;
+    const ev=st.evidence;
+    if(ev){
+      const word=_UP_EVID[ev.state]||String(ev.state||'');
+      const b=ev.build;
+      h+=`<div style="padding:2px 0">Test hattı kanıtı: <b>${escHtml(word)}</b>`
+        +(b&&b.url?` · ${_upLink(b.url,'build'+(b.id?' #'+b.id:''))}`:'')+'</div>';
+      if(ev.state==='red'&&ev.summary)h+=`<details style="padding:2px 0"><summary style="cursor:pointer">Hata özeti</summary><pre style="white-space:pre-wrap;margin:4px 0">${escHtml(String(ev.summary))}</pre></details>`;
+    }
+    const prs=st.prs||{};
+    const pl=_upPrLine('Test hattı',prs.ci)+(prs.devops||[]).map(p=>_upPrLine('Üretim',p)).join('')+_upPrLine('Kod',prs.code);
+    if(pl)h+=`<div style="padding:2px 0">${pl}</div>`;
+  }
+  const nx=(st&&st.next)||{};
+  const canBump=tracked&&!!nx.ready&&!!_UP_STEP_LABEL[nx.step];
+  h+='<div style="display:flex;gap:8px;flex-wrap:wrap;padding:6px 0">'
+    +(tracked?'<button class="sm-btn ghost small" id="tdmUpStop" onclick="upgradeStop()">Yükseltmeyi durdur</button>'
+             :'<button class="sm-btn small" id="tdmUpStart" onclick="upgradeStart()">Yükseltmeyi başlat</button>')
+    +`<button class="sm-btn small" id="tdmUpBump" onclick="upgradeBump()"${canBump?'':' disabled'}>${escHtml(_UP_STEP_LABEL[nx.step]||'Sürüm adımını başlat')}</button>`
+    +'</div>';
+  return h;
+}
+function _upBumpConfirm(r,step){
+  const where={ci:'test hattı repolarında (yml-files)',prod:'FLODevOps repolarında',code:`${r.repo} reposunda`}[step]||'ilgili repolarda';
+  return `${_UP_STEP_LABEL[step]||'Sürüm adımı'}: ${where} taslak (draft) PR'lar açılacak. Devam edilsin mi?`;
+}
+async function _upPost(path,confirmText){
+  const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');
+  const team=_tdTeam();
+  if(!repo){msg.textContent='Repo seçin.';return}
+  if(!team){msg.textContent='Takım seçin.';return}
+  if(confirmText&&!confirm(confirmText))return;
+  const to=document.getElementById('tdmTo').value||'';
+  const btns=[...document.querySelectorAll('#tdmUpStart,#tdmUpStop,#tdmUpBump')];
+  btns.forEach(b=>b.disabled=true);msg.textContent='Gönderiliyor…';
+  try{
+    const resp=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,lang,to,team})});
+    const r=await resp.json().catch(()=>({}));
+    if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${escHtml(String(r.error||'HTTP '+resp.status))}</span>`;return}
+    let t='Tamam.';
+    if(path.endsWith('/start'))t=r.created?`İzleme işi açıldı: #${r.id}`:`Açık izleme işi var: #${r.id}`;
+    else if(path.endsWith('/stop'))t=`İzleme işi kapatıldı: #${r.id}`;
+    else if(path.endsWith('/bump'))t=`Sürüm adımı kuyruğa alındı (iş #${r.job_id}) — ${_UP_STEP_LABEL[r.step]||r.step}`;
+    msg.textContent=t;
+    await loadUpgradeRepos(true);
+    await upgradeScan(false,true);
+  }catch(e){msg.textContent=String(e)}
+  finally{btns.forEach(b=>{if(b.isConnected)b.disabled=false})}
+}
+async function upgradeStart(){
+  return _upPost('/api/techdebt/upgrade/start','');
+}
+async function upgradeStop(){
+  return _upPost('/api/techdebt/upgrade/stop','Yükseltme izlemesi durdurulsun mu? Açık PR\'lar ve hazırlık işleri olduğu gibi kalır.');
+}
+async function upgradeBump(){
+  const r=_tdm.scan||{};const nx=((r.status||{}).next)||{};
+  const {repo,lang}=_tdmSel();
+  const it=_tdm.upRepos.find(x=>x.repo===repo&&x.lang===lang)||{};
+  if(!(nx.ready&&(it.tracked||r.watch_target))){document.getElementById('tdmMsg').textContent=nx.reason||'Sürüm adımı şu an başlatılamaz.';return}
+  return _upPost('/api/techdebt/upgrade/bump',_upBumpConfirm(r,nx.step));
 }
 async function upgradeTake(){
   const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');

@@ -7767,6 +7767,48 @@ def test_upgrade_fix_round1():
         pc.get, server.AzureDevOpsClient, upgrade.scan, ut.status, ut.watch_view = saved
 
 
+def test_upgrade_card():
+    print("\n[U9] Sürüm yükseltme kartı — aşama şeridi ve düğmeler")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import upgrade, upgrade_track as ut
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("upgradeStart / upgradeStop / upgradeBump var",
+          all(f"function {n}(" in html for n in ("upgradeStart", "upgradeStop", "upgradeBump")))
+    check("dört aşama etiketi", all(f"'{lb}'" in html for lb in ("Hazırlık", "Hazır", "Test hattı", "Üretim")))
+    check("Engelli durumu metinle gösterilir", "Engelli" in html)
+
+    def _fn(name):
+        i = html.find("async function " + name)
+        if i < 0:
+            i = html.find("function " + name)
+        js = [x for x in (html.find("\nfunction ", i + 1), html.find("\nasync function ", i + 1), html.find("\nconst ", i + 1)) if x > 0]
+        return html[i:min(js)]
+    bump, status_src, link = _fn("upgradeBump"), _fn("_upStatusHtml"), _fn("_upLink")
+    check("upgradeBump next.ready ve tracked'e bakar", "nx.ready" in bump and "tracked" in bump)
+    check("düğme yalnız tracked && next.ready iken etkin", "canBump=tracked&&!!nx.ready" in status_src
+          and "disabled" in status_src)
+    check("üç POST yolu kullanılıyor",
+          all(p in html for p in ("'/api/techdebt/upgrade/start'", "'/api/techdebt/upgrade/stop'",
+                                  "'/api/techdebt/upgrade/bump'")))
+    check("bağlantı yalnız https:// ile", "indexOf('https://')===0" in link and "escHtml(u)" in link)
+    check("durdur / adım için confirm", "confirm(" in _fn("_upPost") and "Devam edilsin mi" in html)
+    check("kart sunucudan gelen next.reason'ı olduğu gibi yazar", "nx.reason" in status_src)
+    check("repos çağrısı takımı geçirir", "upgrade/repos'+(team" in html)
+
+    saved = (pc.get, server.AzureDevOpsClient, upgrade.scan, ut.status)
+    pc.get = lambda k: True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE") else saved[0](k)
+    server.AzureDevOpsClient = lambda: object()
+    upgrade.scan = lambda c, repo, lang, **k: {"repo": repo, "lang": lang, "current": "8.2", "target": "8.4"}
+    ut.status = lambda c, repo, lang, **k: {"stage": "hazır", "next": {"step": "ci", "ready": True, "reason": "x"}}
+    try:
+        js = TestClient(server.app).get("/api/techdebt/upgrade/scan?repo=core").json()
+        check("scan yanıtı status bloğu taşır", (js.get("status") or {}).get("next", {}).get("ready") is True, str(js))
+    finally:
+        pc.get, server.AzureDevOpsClient, upgrade.scan, ut.status = saved
+
+
 def test_upgrade_fix_round2():
     """Görev 8 düzeltme turu 2: prod, `<repo>-test`'in CI dosyası değiştikten SONRA yeşil koştuğu kanıtı
     olmadan açılamaz. B1 kanıt saati merge'den önceye düşmez (firstParent + Tempo CI PR'ının kapanışı);
@@ -10171,6 +10213,7 @@ def main():
               test_quality_intake,
               test_quality_endpoints,
               test_upgrade_api_surface,
+              test_upgrade_card,
               test_quality_review_fixes,
               test_quality_readiness,
               test_repo_ctx_cross_thread,
