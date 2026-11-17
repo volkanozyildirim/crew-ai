@@ -212,18 +212,7 @@ def stop(client, repo: str, lang: str, *, to: str | None = None, team: str, note
 
 # ── Durum ────────────────────────────────────────────────────────────────
 
-def _fp_blocking(rest: str, rules: dict, auto: bool) -> bool:
-    """Parmak izinin kural kısmı (`<kural>:<dosya|modül>`) yükseltmeyi bekletir mi.
-    Bilinmeyen kural muhafazakâr olarak bekletir."""
-    keys = [k for k in list(rules) + ["probe:error", "probe:deprecation"] if rest.startswith(k + ":")]
-    if not keys:
-        return True
-    k = max(keys, key=len)
-    if k == "probe:error":
-        return True
-    if k == "probe:deprecation":
-        return False
-    return upgrade.blocking(rules[k], auto=auto)
+_fp_blocking = upgrade._fp_blocking   # tek yüklem: taramanın atlananları da aynısını kullanır
 
 
 def open_tasks(client, repo: str, lang: str) -> list[dict]:

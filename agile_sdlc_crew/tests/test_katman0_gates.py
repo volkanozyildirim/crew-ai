@@ -9423,6 +9423,66 @@ def test_upgrade_final_f8_pinned_read():
           and seen[1].get("versionDescriptor.versionType") == "branch", str(seen[1]))
 
 
+def test_upgrade_final_f5_resolved_blocks():
+    """F5: engelleyen bulgu kodda dururken Task'ı 'bitmiş gibi' (Resolved / Ready for Production / grace içinde Done)
+    bir durumdaysa dedup onu `skipped`'e atar ve `open_tasks` onu kapalı sayar — hiçbir taraf saymıyordu, aşama
+    `hazır` oluyordu. Tarama `açık WI` atlamalarının engelleyen kurallarını (ayrı kural başına bir) sayar; iptal
+    edilmiş ve 'insan baktı' atlamaları sayılmaz."""
+    print("\n[Sürüm yükseltme son düzeltme F5: çözülmüş görünen engelleyen iş]")
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_track as ut
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for r in ("core", "legacy"):
+            (base / r).mkdir()
+            (base / r / "composer.json").write_text('{"require": {}}', encoding="utf-8")
+        index = {"core": [{"src": "anatolia/build/core", "images": ["eu/php-8-2:1.0"]}],
+                 "legacy": [{"src": "anatolia/build/legacy", "images": ["eu/php-7-4:1.0"]}],
+                 "web": [{"src": "anatolia/build/web", "images": ["eu/php-8-4:1.0"]}]}
+        hits = {"core": [], "legacy": [{"rule": "null_to_internal", "file": "app/L.php", "line": 3, "text": "strlen(null)"},
+                                       {"rule": "null_to_internal", "file": "app/M.php", "line": 4, "text": "trim(null)"}]}
+        probe_err = [{"rule": "probe:error", "file": "app/D.php", "line": 3, "text": "x", "message": "Parse error: y"},
+                     {"rule": "probe:error", "file": "app/E.php", "line": 5, "text": "z", "message": "Parse error: y"}]
+        closed = 1e9 - 10 * 86400
+
+        def run(repo, board):
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / ("c-" + repo)}
+            deps = intake.Deps(gather=None, board=lambda c: board, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                               record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+            sc = upgrade.scan(None, repo, "php", to="8.4", deps=deps, index=index, read=lambda d, p: "", yml_files={},
+                              app_map_cache={}, head_sha_fn=lambda r: "s",
+                              scan_fn=lambda r, **k: {"files": 2, "sha": "s", "hits": list(hits[Path(r).name]),
+                                                      "adoption": {}, "errors": []},
+                              probe_fn=lambda root, lang, cur, to, **k: (
+                                  list(probe_err) if Path(root).name == "core" else [], {"ran": True, "tool": "x",
+                                                                                        "reason": ""}))
+            st = ut.status(_UpFake(), repo, "php", to="8.4", deps=deps, scan=sc, wait_h=72, root=base / repo)
+            return sc, st
+        fps = [f"php_modern:core:probe:error:app/{f}.php" for f in ("D", "E")]
+        sc, st = run("core", {})
+        check("F5 temel: probe hatası engelliyor", sc["blocking"] == 1 and st["stage"] == "hazırlık", str(sc["blocking"]))
+        for state in ("Resolved", "Ready for Production"):
+            sc, st = run("core", {fp: {"wi": 920, "state": state} for fp in fps})
+            check(f"F5 error bulgusunun Task'ı {state} → yine engelli (aynı kural iki dosya = 1), hazırlık",
+                  sc["blocking"] == 1 and not sc["auto"] and st["stage"] == "hazırlık" and not st["next"]["ready"],
+                  str((sc["blocking"], sc["skipped"], st["stage"])))
+        sc, st = run("core", {fp: {"wi": 921, "state": "Done", "closed_at": 1e9 - 3600} for fp in fps})
+        check("F5 grace içinde Done → yine engelli", sc["blocking"] == 1 and st["stage"] == "hazırlık", str(sc["skipped"]))
+        sc, st = run("core", {fp: {"wi": 922, "state": "Canceled"} for fp in fps})
+        check("F5 iptal edilmiş → sayılmaz", sc["blocking"] == 0 and st["stage"] != "hazırlık",
+              str((sc["blocking"], sc["skipped"])))
+        lfps = [f"php_modern:legacy:null_to_internal:app/{f}.php" for f in ("L", "M")]
+        sc, st = run("legacy", {fp: {"wi": 930, "state": "Done", "closed_at": closed} for fp in lfps})
+        check("F5 insan baktı → sayılmaz", sc["blocking"] == 0
+              and any(s["reason"].startswith("insan baktı") for s in sc["skipped"]), str((sc["blocking"], sc["skipped"])))
+        sc, st = run("legacy", {fp: {"wi": 931, "state": "Resolved"} for fp in lfps})
+        check("F5 behavior bulgusunun Task'ı Resolved → engelli", sc["blocking"] == 1 and st["stage"] == "hazırlık",
+              str((sc["blocking"], sc["skipped"])))
+    check("F5 parmak izi → kural yardımcısı tek yerde (upgrade), upgrade_track onu kullanır",
+          ut._fp_blocking is upgrade._fp_blocking)
+
+
 def test_php_rector_fix():
     """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
     başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
@@ -11492,7 +11552,7 @@ def main():
               test_upgrade_fix_round1,
               test_upgrade_fix_round2,
               test_upgrade_fix_round3,
-              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock, test_upgrade_final_f8_pinned_read,
+              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock, test_upgrade_final_f8_pinned_read, test_upgrade_final_f5_resolved_blocks,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

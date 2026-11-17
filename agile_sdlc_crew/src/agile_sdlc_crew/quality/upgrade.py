@@ -46,6 +46,28 @@ def blocking(rule: pm.Rule, *, auto: bool) -> bool:
     return False
 
 
+_PROBE_KEYS = ("probe:error", "probe:deprecation")
+
+
+def _fp_rule(rest: str, rules: dict) -> str | None:
+    """Parmak izinin kural kısmından (`<kural>:<dosya|modül>`) kural anahtarı (en uzun önek); yoksa None."""
+    keys = [k for k in list(rules) + list(_PROBE_KEYS) if rest.startswith(k + ":")]
+    return max(keys, key=len) if keys else None
+
+
+def _fp_blocking(rest: str, rules: dict, auto: bool) -> bool:
+    """Parmak izinin kural kısmı (`<kural>:<dosya|modül>`) yükseltmeyi bekletir mi.
+    Bilinmeyen kural muhafazakâr olarak bekletir. (upgrade_track.open_tasks ve scan'in atlananları aynı yüklem.)"""
+    k = _fp_rule(rest, rules)
+    if k is None:
+        return True
+    if k == "probe:error":
+        return True
+    if k == "probe:deprecation":
+        return False
+    return blocking(rules[k], auto=auto)
+
+
 # ── Hedef sürüm ve sürüm yerleri ─────────────────────────────────────────
 
 def _v(s) -> tuple[int, int]:
@@ -1337,12 +1359,31 @@ def scan(client, repo: str, lang: str, *, to: str | None = None, team: str = "",
     rows = _rows(groups, rules_by_key, tools, cur)
     every = rows["auto"] + rows["infra"] + rows["human"]
     counts = {k: sum(r["count"] for r in every if r["breaks"] == k) for k in _COUNT_KEYS}
+    n_blocking = sum(1 for r in every if r["blocking"])
+    # Board'da işi olduğu için atlanan bulgu kodda duruyor: işi Resolved / Ready for Production / grace içinde Done
+    # olsa da dedup onu "açık WI" diye atlar, open_tasks ise bitmiş sayar — hiçbiri saymazsa aşama `hazır` olurdu.
+    # Engelleyen kuralları (ayrı kural başına bir; satırlarda zaten sayılan kural ikinci kez değil) eklenir.
+    # İptal edilmiş ve "insan baktı" atlamaları sayılmaz.
+    fp_pre = f"{modern.LANGS[lang]['source']}:{repo}:".lower()
+    counted = {r["rule"] for r in every if r["blocking"]}
+    held: set[str] = set()
+    for s in skipped:
+        fp = str(s.get("fingerprint") or "")
+        if not str(s.get("reason") or "").startswith("açık WI") or not fp.lower().startswith(fp_pre):
+            continue
+        rest = fp[len(fp_pre):]
+        k = _fp_rule(rest, rules_by_key)
+        r = rules_by_key.get(k) if k else None
+        auto = bool(r is not None and r.auto and r.breaks != "behavior" and r.fix_min <= _v(cur))
+        if _fp_blocking(rest, rules_by_key, auto):
+            held.add(k or rest)
+    n_blocking += len(held - counted)
     out.update(rows)
     out.update({"sha": meta["sha"], "files": meta["files"], "errors": meta["errors"], "probe": meta["probe"],
                 "rules": summary, "skipped": skipped[:50],
                 "skipped_counts": dict(Counter(s["reason"].split(" #")[0] for s in skipped)),
                 "blockers": blockers(root, lang, tgt), "counts": counts,
-                "blocking": sum(1 for r in every if r["blocking"])})
+                "blocking": n_blocking})
     if not groups:
         out["message"] = f"{cur} → {tgt} geçişinde açılacak iş yok."
     return out
