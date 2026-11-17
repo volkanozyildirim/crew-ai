@@ -2,8 +2,11 @@
 
 Üretim altyapı repolarına (FLODevOps, yml-files) yazan en riskli kod: bir site yalnız
 `line` satırındaki `old` metnini `new` ile değiştirir, başka hiçbir bayt değişmez; değişmezse
-(dosya o arada düzenlenmişse) yazılmaz. Önce HER dosya hedef daldan okunup uygulanır, ancak
-ondan sonra yazılmaya başlanır — geç bir hata yarım push bırakmaz. Sunucuya ve db'ye bağımlı değil.
+(dosya o arada düzenlenmişse) yazılmaz. `old` ile `new` yalnız rakam dizilerinde ayrışabilir.
+Önce HER dosya hedef daldan HAM bayt olarak okunup uygulanır, dal durumu doğrulanır, ancak ondan
+sonra yazılmaya başlanır — geç bir hata yarım push bırakmaz. Yazılan dal yalnız Tempo'nun kendi
+`tempo/upgrade-…` dalıdır; hedef dala (ör. production) asla doğrudan yazılmaz. Sunucuya ve db'ye
+bağımlı değil.
 """
 from __future__ import annotations
 
@@ -13,17 +16,29 @@ import re
 import requests
 
 from agile_sdlc_crew.quality.modern_fix import _REPO
+from agile_sdlc_crew.quality.render import mask_secrets
 
 # Yalnız sürüm benzeri metin: harf/rakam/_ . - : / ' " > = ^ ~ | , boşluk. Satır sonu, ; $ ` ( ) yok.
 _SAFE_NEW = re.compile(r"[\w.\-:/'\">=^~|, ]+", re.ASCII)
+# Tempo'nun kendi dalı: tempo/upgrade-<dil>-<repo>-<büyük>.<küçük>
+_BRANCH = re.compile(r"tempo/upgrade-[a-z]+-[A-Za-z0-9][\w.-]*-\d+\.\d+", re.ASCII)
+_NOT_PUSHED_MSG = "kısıt elle düzenlenmeli"
 
 
 class SiteChanged(ValueError):
     """Site artık kayıttaki gibi değil (satır değişmiş / metin belirsiz / yeni metin güvensiz)."""
 
 
+class _Denied(Exception):
+    """Yazma yetkisi yok (dal oluşturma 200 + PermissionRequired dahil)."""
+
+
 def branch_name(lang: str, repo: str, to: str) -> str:
     return f"tempo/upgrade-{lang}-{repo}-{to}"
+
+
+def _digit_shape(s: str) -> str:
+    return re.sub(r"\d+", "#", s)
 
 
 def apply_site(text: str, site: dict) -> str:
@@ -40,6 +55,8 @@ def apply_site(text: str, site: dict) -> str:
         raise SiteChanged("Eski ve yeni metin aynı; yapılacak değişiklik yok.")
     if not _SAFE_NEW.fullmatch(new):
         raise SiteChanged(f"Yeni metin yalnız sürüm benzeri karakterler içerebilir: {new[:60]!r}")
+    if _digit_shape(old) != _digit_shape(new):
+        raise SiteChanged(f"'{old}' → '{new}': eski ve yeni metin yalnız rakamlarda ayrışabilir.")
     if not 1 <= line_no <= len(lines):
         raise SiteChanged(f"{site.get('path')}: {line_no}. satır dosyada yok ({len(lines)} satır).")
     line = lines[line_no - 1]
@@ -55,9 +72,23 @@ def apply_site(text: str, site: dict) -> str:
     return "".join(out)
 
 
-def _validate(sites: list[dict]) -> None:
+def _norm_path(path: str) -> str:
+    return "/" + str(path or "").lstrip("/")
+
+
+def _validate_branch(branch: str, targets: set[str]) -> None:
+    if (not isinstance(branch, str) or not _BRANCH.fullmatch(branch)
+            or ".." in branch or "refs/" in branch):
+        raise ValueError(f"Geçersiz dal adı: {str(branch)[:80]!r} "
+                         "(tempo/upgrade-<dil>-<repo>-<sürüm> olmalı).")
+    if branch in targets:
+        raise ValueError(f"'{branch}' bir hedef dal; hedef dala doğrudan yazılmaz.")
+
+
+def _validate(sites: list[dict], branch: str) -> None:
     if not sites:
         raise ValueError("Yazılacak site yok.")
+    seen: set[tuple] = set()
     for s in sites:
         if s.get("blocked"):
             raise ValueError(f"Engelli site var ({s.get('repo')} {s.get('path')}): {s['blocked']}")
@@ -66,11 +97,21 @@ def _validate(sites: list[dict]) -> None:
         repo, path = str(s.get("repo") or ""), str(s.get("path") or "")
         if not _REPO.match(repo):
             raise ValueError(f"Geçersiz repo adı: {repo!r}")
-        parts = path.split("/")
-        if not path.strip("/") or any(p == ".." or p.startswith("-") for p in parts):
+        norm = _norm_path(path)
+        parts = norm.split("/")[1:]
+        if (not norm.strip("/") or any(p in ("", "..") or p.startswith("-") for p in parts)
+                or "\\" in path or any(ord(c) < 32 for c in path)):
             raise ValueError(f"Geçersiz dosya yolu: {path!r}")
         if not s.get("branch"):
             raise ValueError(f"Hedef dal yok ({repo}).")
+        if _digit_shape(str(s.get("old") or "")) != _digit_shape(str(s.get("new") or "")):
+            raise ValueError(f"{repo} {path}: '{s.get('old')}' → '{s.get('new')}' yalnız rakam değişimi değil — "
+                             f"{_NOT_PUSHED_MSG}, otomatik yazılmaz.")
+        key = (s.get("project") or "", repo, norm, int(s["line"]))
+        if key in seen:
+            raise ValueError(f"Aynı satır için iki site var ({repo} {path}:{s['line']}).")
+        seen.add(key)
+    _validate_branch(branch, {str(s["branch"]) for s in sites})
 
 
 def _is_denied(exc: Exception) -> bool:
@@ -78,15 +119,57 @@ def _is_denied(exc: Exception) -> bool:
     return getattr(resp, "status_code", None) in (401, 403)
 
 
+def _diff_text(files: list[tuple[str, str, str]]) -> str:
+    """Birleşik diff (a/ b/ başlıklı); satır sonu olmayan satıra standart işaretçi; sırlar maskeli."""
+    out: list[str] = []
+    for path, old, new in files:
+        p = path.lstrip("/")
+        for line in difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
+                                         fromfile=f"a/{p}", tofile=f"b/{p}"):
+            out.append(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n")
+    return mask_secrets("".join(out))
+
+
+def _read_text(client, repo: str, path: str, branch: str, proj) -> str | None:
+    raw = client.get_file_bytes(repo, path, branch, project=proj)
+    if not raw:
+        return None
+    try:
+        return raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise SiteChanged(f"{repo} {path}: dosya UTF-8 değil; yazılmadı.")
+
+
+def _branch_has(client, repo: str, branch: str, files: list, proj) -> bool:
+    """Dalda planlanan dosyaların hepsi zaten bizim yeni içeriğe eşit mi (bayt bayt)?"""
+    for path, _old, new in files:
+        raw = client.get_file_bytes(repo, _norm_path(path), branch, project=proj)
+        if raw is None or raw != new.encode("utf-8"):
+            return False
+    return True
+
+
 def push_sites(client, sites: list[dict], *, branch: str, title: str, body: str,
                wi_id: int | None) -> dict:
     """(proje, repo) başına tek commit + tek taslak PR. Yetki yoksa (401/403) PR yerine diff döner.
-    -> {"prs": [{"repo","id","url"}], "fallback": [{"repo","project","diff"}]}"""
-    _validate(sites)
+    Yazma aşamasındaki hata o repoyu `errors`'a düşürür, öncekilerin PR'ları kaybolmaz.
+    -> {"prs": [{"repo","id","url"}], "fallback": [{"repo","project","diff"}],
+        "errors": [{"repo","project","error"}]}"""
+    _validate(sites, branch)
 
     groups: dict[tuple[str, str], list[dict]] = {}
     for s in sites:
         groups.setdefault((s.get("project") or "", s["repo"]), []).append(s)
+
+    me_cache: list = []
+
+    def _me():
+        if not me_cache:
+            try:
+                me_cache.append(str((client.get_authenticated_user() or {}).get("id") or ""))
+            except Exception:
+                me_cache.append("")
+        return me_cache[0]
 
     # 1) Hepsini oku + uygula + dal durumunu doğrula — henüz yazma yok.
     plans = []
@@ -97,35 +180,67 @@ def push_sites(client, sites: list[dict], *, branch: str, title: str, body: str,
         proj = project or None
         by_path: dict[str, list[dict]] = {}
         for g in grp:
-            by_path.setdefault(g["path"], []).append(g)
+            by_path.setdefault(_norm_path(g["path"]), []).append(g)
         files = []
         for path, group_sites in by_path.items():
-            old_text = client.get_file_content(repo, path, target, project=proj)
+            old_text = _read_text(client, repo, path, target, proj)
+            if old_text is None:
+                raise SiteChanged(f"{repo} {path}: dosya hedef dalda yok ya da boş; yazılmadı.")
             new_text = old_text
             for g in sorted(group_sites, key=lambda x: -int(x["line"])):
-                new_text = apply_site(new_text, g)
+                new_text = apply_site(new_text, dict(g, path=path))
             files.append((path, old_text, new_text))
-        names = {b.get("name") for b in client.list_branches(repo, project=proj)}
-        existing = None
-        if f"refs/heads/{branch}" in names:
+        refs = {b.get("name"): b.get("objectId") for b in client.list_branches(repo, project=proj)}
+        target_oid = refs.get(f"refs/heads/{target}")
+        if not target_oid:
+            raise ValueError(f"{repo}: hedef dal '{target}' bulunamadı.")
+        create, push, existing = True, True, None
+        if f"refs/heads/{branch}" in refs:
+            create = False
             pr = client.find_pull_request(repo, branch, project=proj)
-            if not pr or pr.get("status") != "active":
-                raise ValueError(f"{repo}: '{branch}' dalı zaten var ve açık bir PR'ı yok; "
-                                 "başkasının dalına dokunulmadı.")
-            existing = pr
-        plans.append((project, repo, target, files, existing))
+            if pr:
+                if pr.get("status") != "active":
+                    raise ValueError(f"{repo}: '{branch}' dalının PR'ı kapanmış ({pr.get('status')}); "
+                                     "dokunulmadı.")
+                if pr.get("target") != target:
+                    raise ValueError(f"{repo}: '{branch}' dalındaki açık PR başka bir dala gidiyor "
+                                     f"({pr.get('target')} ≠ {target}); dokunulmadı.")
+                me = _me()
+                if not me:
+                    raise ValueError(f"{repo}: Tempo kimliği çözülemedi; mevcut '{branch}' dalı "
+                                     "yeniden kullanılmadı.")
+                if pr.get("created_by") != me:
+                    raise ValueError(f"{repo}: '{branch}' dalındaki PR'ı Tempo açmamış; dokunulmadı.")
+                existing = pr
+                push = not _branch_has(client, repo, branch, files, proj)
+            elif refs[f"refs/heads/{branch}"] == target_oid:
+                push = True                      # önceki denemeden kalan boş dal
+            elif _branch_has(client, repo, branch, files, proj):
+                push = False                     # bizim commit'imiz zaten var; yalnız PR açılacak
+            else:
+                raise ValueError(f"{repo}: '{branch}' dalı var, PR'ı yok ve içeriği bizim değişikliğimiz "
+                                 "değil; başkasının dalına dokunulmadı.")
+        plans.append((project, repo, target, files, existing, create, push))
 
-    # 2) Yaz.
+    # 2) Yaz — her repo kendi hatasını yakalar; başarılılar kaybolmaz.
     prs: list[dict] = []
     fallback: list[dict] = []
-    for project, repo, target, files, existing in plans:
+    errors: list[dict] = []
+    for project, repo, target, files, existing, create, push in plans:
         proj = project or None
-        changes = [{"changeType": "edit", "path": "/" + path.lstrip("/"), "content": new}
-                   for path, _old, new in files]
+        changes = [{"changeType": "edit", "path": path, "content": new} for path, _old, new in files]
         try:
-            if existing is None:
-                client.create_branch(repo, branch, target, project=proj)
-            client.push_changes(repo, branch, changes, title, project=proj)
+            if create:
+                res = client.create_branch(repo, branch, target, project=proj)
+                vals = (res or {}).get("value") if isinstance(res, dict) else None
+                first = vals[0] if vals else {}
+                if not first.get("success"):
+                    status = str(first.get("updateStatus") or "")
+                    if "PermissionRequired" in status:
+                        raise _Denied()
+                    raise ValueError(f"Dal oluşturulamadı ({status or 'yanıt okunamadı'}).")
+            if push:
+                client.push_changes(repo, branch, changes, title, project=proj)
             if existing is not None:
                 prs.append({"repo": repo, "id": existing["id"], "url": existing.get("url", "")})
                 continue
@@ -133,22 +248,20 @@ def push_sites(client, sites: list[dict], *, branch: str, title: str, body: str,
                 repo, branch, target, title=title, description=body,
                 work_item_ids=[wi_id] if (wi_id and not project) else None,
                 draft=True, project=proj)
-        except requests.HTTPError as e:
-            if not _is_denied(e):
-                raise
-            diff = "".join(
-                "".join(difflib.unified_diff(o.splitlines(keepends=True), n.splitlines(keepends=True),
-                                             fromfile=f"a/{p.lstrip('/')}", tofile=f"b/{p.lstrip('/')}"))
-                for p, o, n in files)
-            fallback.append({"repo": repo, "project": project, "diff": diff})
+        except _Denied:
+            fallback.append({"repo": repo, "project": project, "diff": _diff_text(files)})
+            continue
+        except (requests.RequestException, ValueError) as e:
+            if isinstance(e, requests.HTTPError) and _is_denied(e):
+                fallback.append({"repo": repo, "project": project, "diff": _diff_text(files)})
+            else:
+                errors.append({"repo": repo, "project": project, "error": mask_secrets(str(e))[:800]})
             continue
         pid = res.get("pullRequestId")
         name = (res.get("repository") or {}).get("name") or repo
         url = res.get("url") or ""
-        try:
-            base = client.org_url  # gerçek istemcide var; sahte istemcide yok
+        base = getattr(client, "org_url", None)  # gerçek istemcide var; sahte istemcide yok
+        if base:
             url = f"{base}/{project or getattr(client, 'project', '')}/_git/{name}/pullrequest/{pid}"
-        except AttributeError:
-            pass
         prs.append({"repo": repo, "id": pid, "url": url})
-    return {"prs": prs, "fallback": fallback}
+    return {"prs": prs, "fallback": fallback, "errors": errors}

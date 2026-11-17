@@ -321,6 +321,27 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json().get("value", [])
 
+    def get_file_bytes(self, repo_id_or_name: str, file_path: str, branch: str | None = None,
+                       project: str | None = None) -> bytes | None:
+        """Dosyanın HAM baytları (karakter kümesi tahmini / JSON çözümü yok); dosya yoksa None.
+        Yazma yolundaki tek-satır denetimi çözülmüş metne değil bayta dayanır."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/items"
+        params: dict = {
+            "path": file_path,
+            "$format": "octetStream",
+            "download": "true",
+            "api-version": self.API_VERSION,
+        }
+        if branch:
+            params["versionDescriptor.version"] = branch
+            params["versionDescriptor.versionType"] = "branch"
+        headers = {**self._headers, "Accept": "application/octet-stream"}
+        resp = requests.get(url, headers=headers, params=params, timeout=60)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.content
+
     def get_items_in_path(
         self,
         repo_id_or_name: str,
@@ -435,8 +456,7 @@ class AzureDevOpsClient:
     ) -> dict:
         """Yeni bir branch olusturur."""
         # Kaynak branch'in objectId'sini al
-        branches = (self.list_branches(repo_id_or_name, project) if project
-                    else self.list_branches(repo_id_or_name))
+        branches = self.list_branches(repo_id_or_name, project=project)
         source_ref = None
         for b in branches:
             ref_name = b.get("name", "")
@@ -479,8 +499,7 @@ class AzureDevOpsClient:
         ]
         """
         # Branch'in son commit objectId'sini al
-        branches = (self.list_branches(repo_id_or_name, project) if project
-                    else self.list_branches(repo_id_or_name))
+        branches = self.list_branches(repo_id_or_name, project=project)
         branch_ref = None
         for b in branches:
             if b.get("name") == f"refs/heads/{branch}":
@@ -573,7 +592,7 @@ class AzureDevOpsClient:
         vals = resp.json().get("value", [])
         if not vals:
             return None
-        pr = max(vals, key=lambda v: v.get("creationDate") or "")
+        pr = max(vals, key=lambda v: int(v.get("pullRequestId") or 0))
         repo = pr.get("repository") or {}
         proj = (repo.get("project") or {}).get("name") \
             or project or self._find_repo_project(repo_id_or_name)
@@ -585,6 +604,8 @@ class AzureDevOpsClient:
             "closed_at": pr.get("closedDate") or "",
             "merge_commit": (pr.get("lastMergeCommit") or {}).get("commitId") or "",
             "target": (pr.get("targetRefName") or "").removeprefix("refs/heads/"),
+            # PR'ı açan kimlik (PAT sahibiyle karşılaştırılır: başkasının PR'ı Tempo'nun sayılmaz)
+            "created_by": (pr.get("createdBy") or {}).get("id") or "",
         }
 
     def delete_branch(self, repo_id_or_name: str, branch_name: str) -> bool:
