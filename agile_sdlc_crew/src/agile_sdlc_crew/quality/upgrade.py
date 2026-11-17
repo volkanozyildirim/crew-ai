@@ -134,31 +134,59 @@ def _site(where, repo, project, branch, path, line, old, new, blocked="") -> dic
             "line": line, "old": old, "new": new, "blocked": blocked}
 
 
-def _devops_sites(client, repo, lang, to, index, read) -> list[dict]:
+_LANG_IMG_NAME = {"php": "php", "python": "python", "go": "golang"}
+RANGE_BLOCK = "sürüm kısıtı elle düzenlenmeli"
+NO_LINE = "Dockerfile satırı bulunamadı"
+
+
+def _devops_services(repo, lang, index, per_src) -> dict[str, list[str]]:
+    """src -> imajlar: build_index + (varsa) hedef aramasının per_src listesi (app_map'li servisler dahil)."""
+    svc: dict[str, list[str]] = {}
+    for e in (index or {}).get(repo.lower(), []):
+        src = str(e.get("src") or "").strip("/")
+        for img in e.get("images", []):
+            if img not in svc.setdefault(src, []):
+                svc[src].append(img)
+    for r in per_src or []:
+        src, img = str(r.get("src") or "").strip("/"), r.get("image")
+        if src and img and img not in svc.setdefault(src, []):
+            svc[src].append(img)
+    return svc
+
+
+def _devops_sites(client, repo, lang, to, index, read, per_src=None) -> list[dict]:
     from agile_sdlc_crew.quality import app_map as am
     by_devrepo: dict[str, set[str]] = {}
     for es in (index or {}).values():
         for e in es:
             by_devrepo.setdefault(str(e.get("src") or "").split("/")[0], set()).update(e.get("images", []))
     rd = read or (lambda d, p: am._read(client, d, p))
+    name = _LANG_IMG_NAME.get(lang, "")
     out = []
-    for e in (index or {}).get(repo.lower(), []):
-        devrepo, _, rest = str(e.get("src") or "").partition("/")
+    for src, images in sorted(_devops_services(repo, lang, index, per_src).items()):
+        devrepo, _, rest = src.partition("/")
         path = "/" + rest.strip("/") + "/Dockerfile"
         text = None
-        for img in e.get("images", []):
+        for img in images:
             v = _image_version(img, lang)
-            if not v or v >= _v(to):
+            if v is None:
+                if name and name in img:  # dil imajı ama sürüm okunamıyor: hedefin altında olabilir
+                    out.append(_site("devops", devrepo, am.DEVOPS_PROJECT, am.DEVOPS_BRANCH, path, 0, img, img,
+                                     "imaj sürümü okunamadı"))
+                continue
+            if v >= _v(to):
                 continue
             if text is None:
                 text = rd(devrepo, path) or ""
-            line = next((i for i, ln in enumerate(text.splitlines(), 1)
-                         if re.match(r"(?i)\s*FROM\s", ln) and ln.count(img) == 1), 0)
-            if not line:
-                continue
             new = image_for(img, lang, to)
+            lines = [i for i, ln in enumerate(text.splitlines(), 1)
+                     if (m := re.match(r"(?i)\s*FROM\s+(?:--\S+\s+)?(\S+)", ln)) and m.group(1) == img]
+            if not lines:
+                out.append(_site("devops", devrepo, am.DEVOPS_PROJECT, am.DEVOPS_BRANCH, path, 0, img, new, NO_LINE))
+                continue
             blocked = "" if new in by_devrepo.get(devrepo, set()) else UNPUBLISHED
-            out.append(_site("devops", devrepo, am.DEVOPS_PROJECT, am.DEVOPS_BRANCH, path, line, img, new, blocked))
+            for line in lines:
+                out.append(_site("devops", devrepo, am.DEVOPS_PROJECT, am.DEVOPS_BRANCH, path, line, img, new, blocked))
     return out
 
 
@@ -194,6 +222,11 @@ def _ci_sites(client, repo, lang, to, yml_files) -> list[dict]:
     return out
 
 
+def _range_hard(constraint: str) -> bool:
+    """Üst sınır, dışlama ya da tire aralığı içeren kısıt yeniden yazılırsa yapısı bozulur."""
+    return bool(re.search(r"[<!]|\s-\s", constraint))
+
+
 def _code_sites(repo, root: Path, lang, to) -> list[dict]:
     root = Path(root)
     out = []
@@ -204,8 +237,8 @@ def _code_sites(repo, root: Path, lang, to) -> list[dict]:
         except (OSError, UnicodeDecodeError):
             return ""
 
-    def add(path, line, old, new):
-        out.append(_site("code", repo, "", "", path, line, old, new))
+    def add(path, line, old, new, blocked=""):
+        out.append(_site("code", repo, "", "", path, line, old, new, blocked))
 
     if lang == "php":
         text = rd("composer.json")
@@ -218,10 +251,11 @@ def _code_sites(repo, root: Path, lang, to) -> list[dict]:
             nums = re.findall(r"\d+\.\d+", val)
             if not nums or min(_v(n) for n in nums) >= _v(to):
                 continue
-            new = re.sub(r"\d+\.\d+", to, val, count=1) if len(nums) == 1 else f">={to}"
+            hard = _range_hard(val)
+            new = val if hard else (re.sub(r"\d+\.\d+", to, val, count=1) if len(nums) == 1 else f">={to}")
             for i, ln in enumerate(text.splitlines(), 1):
                 if re.search(rf'"php"\s*:\s*"{re.escape(val)}"', ln) and ln.count(val) == 1:
-                    add("composer.json", i, val, new)
+                    add("composer.json", i, val, new, RANGE_BLOCK if hard else "")
     elif lang == "go":
         text = rd("go.mod")
         for pat, fn in ((r"^go\s+(\d+\.\d+(?:\.\d+)?)\s*$", lambda o: to + (".0" if o.count(".") == 2 else "")),
@@ -234,7 +268,11 @@ def _code_sites(repo, root: Path, lang, to) -> list[dict]:
         for i, ln in enumerate(rd("pyproject.toml").splitlines(), 1):
             m = re.match(r"""\s*requires-python\s*=\s*(['"])([^'"\d]*)(\d+\.\d+)([^'"]*)\1""", ln)
             if m and _v(m.group(3)) < _v(to):
-                add("pyproject.toml", i, m.group(2) + m.group(3) + m.group(4), m.group(2) + to + m.group(4))
+                old = m.group(2) + m.group(3) + m.group(4)
+                if _range_hard(old):
+                    add("pyproject.toml", i, old, old, RANGE_BLOCK)
+                else:
+                    add("pyproject.toml", i, old, m.group(2) + to + m.group(4))
         for i, ln in enumerate(rd(".python-version").splitlines(), 1):
             m = re.match(r"^\s*(\d+\.\d+(?:\.\d+)?)\s*$", ln)
             if m and _v(m.group(1)) < _v(to):
@@ -249,9 +287,10 @@ def _code_sites(repo, root: Path, lang, to) -> list[dict]:
 
 
 def sites(client, repo: str, root: Path, lang: str, current: str, to: str, index: dict, *,
-          read=None, yml_files: dict | None = None) -> list[dict]:
-    """Sürümün sabitlendiği yerler: FLODevOps Dockerfile'ları, yml-files test hattı, kod reposu."""
-    return (_devops_sites(client, repo, lang, to, index, read)
+          read=None, yml_files: dict | None = None, per_src: list | None = None) -> list[dict]:
+    """Sürümün sabitlendiği yerler: FLODevOps Dockerfile'ları, yml-files test hattı, kod reposu.
+    per_src: hedef aramasının servis listesi (app_map + build_index birleşimi)."""
+    return (_devops_sites(client, repo, lang, to, index, read, per_src)
             + _ci_sites(client, repo, lang, to, yml_files)
             + _code_sites(repo, root, lang, to))
 
@@ -289,5 +328,6 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
     if not target or _v(current) >= _v(target):
         out["up_to_date"] = True
         return out
-    out["sites"] = sites(client, repo, Path(root), lang, current, target, index, read=read, yml_files=yml_files)
+    out["sites"] = sites(client, repo, Path(root), lang, current, target, index, read=read, yml_files=yml_files,
+                       per_src=out["per_src"])
     return out

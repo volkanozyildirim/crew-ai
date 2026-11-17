@@ -7745,6 +7745,48 @@ def test_upgrade_plan_sites():
         pu = upgrade.plan(None, "core", "php", deps=deps, index=idx2)
         check("güncel repo: up_to_date, site yok", pu["up_to_date"] is True and pu["sites"] == [], str(pu))
 
+        # Düzeltme turu 1 — 1: bulunamayan Dockerfile satırı sessizce düşmez
+        idx3 = {"core": [{"src": "anatolia/build/a", "images": ["eu/prod-ar/php-8-2:1.0"]},
+                         {"src": "anatolia/build/b", "images": ["eu/prod-ar/php-8-2:1.0"]}],
+                "web": [{"src": "anatolia/build/web", "images": ["eu/prod-ar/php-8-4:1.0"]}]}
+        rd3 = lambda d, p: ("" if "/build/a/" in p else
+                            "FROM eu/prod-ar/php-8-2:1.0 AS x\nRUN true\nFROM eu/prod-ar/php-8-2:1.0\n")
+        s3 = upgrade.sites(None, "core", root, "php", "8.2", "8.4", idx3, read=rd3, yml_files={})
+        d3 = [s for s in s3 if s["where"] == "devops"]
+        miss = [s for s in d3 if s["path"] == "/build/a/Dockerfile"]
+        check("eksik FROM satırı: line 0 + engelli site",
+              len(miss) == 1 and miss[0]["line"] == 0 and "bulunamadı" in miss[0]["blocked"], str(miss))
+        two = sorted(s["line"] for s in d3 if s["path"] == "/build/b/Dockerfile")
+        check("aynı imaj iki FROM satırında: iki site", two == [1, 3], str(two))
+
+        # 3: yalnız app_map/per_src'te bilinen servis de site alır
+        ps = [{"src": "global/build/only", "version": "8.2", "image": "eu/prod-ar/php-8-2:1.0"}]
+        rd4 = lambda d, p: "FROM eu/prod-ar/php-8-2:1.0\n"
+        s4 = upgrade.sites(None, "core", root, "php", "8.2", "8.4", idx3, read=rd4, yml_files={}, per_src=ps)
+        check("per_src'te olan servis için devops sitesi var",
+              any(s["where"] == "devops" and s["repo"] == "global" and s["line"] == 1 for s in s4), str(s4))
+        p4 = upgrade.plan(None, "core", "php", to="8.4", deps=deps, index=idx3, read=rd4, yml_files={})
+        check("plan per_src'i siteye taşır", p4["per_src"] == [] or all(
+            any(s["where"] == "devops" and s["repo"] == x["src"].split("/")[0] for s in p4["sites"]) for x in p4["per_src"]))
+
+        # 2: aralık kısıtı yeniden yazılmaz
+        for cons in ("^7.4|^8.0", ">=7.4 <8.5", ">=7.4,<9"):
+            r2 = base / "cr"
+            r2.mkdir(exist_ok=True)
+            (r2 / "composer.json").write_text('{\n  "require": {\n    "php": "%s"\n  }\n}\n' % cons)
+            c2 = [s for s in upgrade.sites(None, "cr", r2, "php", "7.4", "8.4", {}, yml_files={}) if s["where"] == "code"]
+            if cons == "^7.4|^8.0":
+                check("composer ^|^ yeniden yazılır", len(c2) == 1 and c2[0]["new"] == ">=8.4" and c2[0]["blocked"] == "", str(c2))
+            else:
+                check(f"composer {cons}: elle düzenlenmeli", len(c2) == 1 and "elle" in c2[0]["blocked"]
+                      and c2[0]["new"] == c2[0]["old"], str(c2))
+        r3 = base / "py"
+        r3.mkdir()
+        (r3 / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.8,<3.12"\n')
+        c3 = [s for s in upgrade.sites(None, "py", r3, "python", "3.8", "3.12", {}, yml_files={}) if s["where"] == "code"]
+        check("requires-python üst sınırlı: elle düzenlenmeli", len(c3) == 1 and "elle" in c3[0]["blocked"]
+              and c3[0]["new"] == c3[0]["old"], str(c3))
+
 
 def main():
     print("Katman 0 kapıları — regresyon testleri")
