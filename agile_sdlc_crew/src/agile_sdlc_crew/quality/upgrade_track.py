@@ -446,7 +446,9 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
     out["stage"] = base
     ok = base == "hazır"
 
-    ci_pr = out["prs"]["ci"] = _pr(client, upgrade.CI_REPO, br, upgrade.CI_PROJECT)
+    # Test hattı PR'ı tanımın dosyasının durduğu repoda (ci_source); kaynak yoksa aranmaz.
+    src = sc.get("ci_source") or None
+    ci_pr = out["prs"]["ci"] = _pr(client, src["repo"], br, src.get("project") or None) if src else None
     dv_repos = sorted({(s.get("project") or "", s["repo"]) for s in dv})
     dv_prs = {}
     for proj, r in dv_repos:
@@ -462,15 +464,17 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
     unparsed = [p for p in pins or [] if not p.get("version")]
     below = [p for p in pins or [] if p.get("version") and upgrade._v(p["version"]) < upgrade._v(tgt)]
     ev, since = None, None
+    # Taramanın çözdüğü `<repo>-test` tanımı (canlı yol): kanıt aynı tanımla aranır, ikinci ad araması yok.
+    ev_kw = {"definition": sc["ci_test_def"]} if "ci_test_def" in sc else {}
     wh = wait_h if wait_h is not None else int(pc.get("CREW_TECHDEBT_UPGRADE_CI_WAIT_H") or 72)
     if pins and not below and not unparsed:
         since = _pins_since(client, pins, ci_pr)
         if since:
-            ev = out["evidence"] = bump.ci_evidence(client, repo, since, wait_h=wh)
+            ev = out["evidence"] = bump.ci_evidence(client, repo, since, wait_h=wh, **ev_kw)
     elif pins == [] and dv:
         # Sabitleme yok (ya da tanınmadı değil — tanınmayan satır `unparsed`tır): `<repo>-test` tanımı varsa
         # en yeni tamamlanmış build'i yeşil olmalı; tanım yoksa kanıt yok ("Test kanıtı yok").
-        ev = out["evidence"] = bump.ci_evidence(client, repo, None, wait_h=wh)
+        ev = out["evidence"] = bump.ci_evidence(client, repo, None, wait_h=wh, **ev_kw)
     ci_status = (ci_pr or {}).get("status")
     if (below and ci_status == "active") or (pins and not below and not (ev and ev["state"] in ("green", "no_pipeline"))):
         out["stage"] = "test hattı"
@@ -491,6 +495,11 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         return nxt("ci" if below else "prod", False, "Kapı kapalı — test hattı sürüm satırı okunamadı: " + "; ".join(
             f"{p['path']}:{p['line']} ({p.get('unparsed', '')!r}) — {tgt} yapılmalı" for p in unparsed)
                    + " (satır elle düzenlenmeli).", ci if below else dv)
+    if pins == [] and sc.get("ci_test_def") and not sc.get("ci_source"):
+        # Zayıf kanıt yalnız "tanım var, dosyası okundu, repoyu anıyor, sürüm satırı ve şablonu yok" durumunda;
+        # dosyası kaynak olarak okunmamış bir tanımın yeşil build'i kanıt sayılmaz.
+        return nxt("prod", False, f"'{repo}-test' tanımı var ama test hattı dosyası okunup doğrulanmadı — "
+                                  "üretim adımı açılmaz.", dv)
     if below:
         if ci_status == "active":
             return nxt("prod", False, f"Test hattı PR'ı #{ci_pr.get('id')} henüz merge edilmedi.", dv)

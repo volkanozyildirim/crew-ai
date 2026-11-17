@@ -1028,19 +1028,52 @@ class AzureDevOpsClient:
             "source_version": b.get("sourceVersion") or "",
         }
 
-    def find_build_definition(self, repo_id_or_name: str, name: str) -> dict | None:
-        """Build tanımı adıyla (büyük/küçük harf duyarsız; ör. `core-test` → `Core-test`), reponun bulunduğu
-        projede (get_pr_build'in sorguladığı proje — ama yedeksiz, kesin çözümle). Yoksa None; repo projesi
-        kesin bulunamazsa ya da API hatası olursa yükselir (yok sayılmaz → sahte no_pipeline olmaz)."""
-        project = self._repo_project_strict(repo_id_or_name)
-        url = f"{self.org_url}/{project}/_apis/build/definitions"
-        resp = requests.get(url, headers=self._headers, params={"api-version": self.API_VERSION, "name": name},
+    def _strict_json(self, url: str, params: dict | None = None) -> dict:
+        """GET → JSON sözlüğü; 200 dışı her yanıt, JSON olmayan gövde ve bağlantı hatası yükselir (kapı kanıtı
+        okunamadıysa 'yok' sayılmaz)."""
+        resp = requests.get(url, headers=self._headers, params={"api-version": self.API_VERSION, **(params or {})},
                             timeout=30)
-        resp.raise_for_status()
-        for d in resp.json().get("value", []) or []:
-            if str(d.get("name") or "").lower() == name.lower():
-                return {"id": d.get("id"), "name": d.get("name"), "project": project}
-        return None
+        if resp.status_code != 200:
+            raise ValueError(f"Azure isteği başarısız (HTTP {resp.status_code}): {url}")
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise ValueError(f"Azure yanıtı JSON değil: {url}")
+        return body
+
+    def get_test_pipeline(self, repo_id_or_name: str) -> dict | None:
+        """Reponun `<repo>-test` build tanımı ve koştuğu test hattı dosyası — sürüm yükseltmede test hattının
+        TEK kaynağı (dört ayrı `yml-files` reposu var; core'un Core-test'i EcomLojistik/yml-files'ı koşar).
+        Tanım reponun projesinde (kesin çözüm) adıyla aranır, büyük/küçük harf duyarsız; hiç yoksa None, birden
+        çok varsa ValueError. Dönüş: {id, name, project, yaml (process.type 2 değilse None; baştaki '/' atılır),
+        repo_id, repo_name, branch (refs/heads/ olmadan), repo_project (repo GUID'i organizasyon genelinde
+        çözülür)}. 200 dışı / JSON olmayan her yanıt yükselir."""
+        project = self._repo_project_strict(repo_id_or_name)
+        name = f"{repo_id_or_name}-test"
+        body = self._strict_json(f"{self.org_url}/{project}/_apis/build/definitions", {"name": name})
+        hits = [d for d in body.get("value") or [] if str(d.get("name") or "").lower() == name.lower()]
+        if not hits:
+            return None
+        if len(hits) > 1:
+            raise ValueError(f"'{name}' adlı birden çok build tanımı var ({project}: "
+                             f"{', '.join(str(d.get('name')) + ' #' + str(d.get('id')) for d in hits)}) — "
+                             "hangisinin test hattı olduğu belirsiz.")
+        det = self._strict_json(f"{self.org_url}/{project}/_apis/build/definitions/{int(hits[0]['id'])}")
+        proc = det.get("process") or {}
+        yml = proc.get("yamlFilename") if proc.get("type") == 2 else None
+        rep = det.get("repository") or {}
+        repo_id = str(rep.get("id") or "")
+        repo_project = ""
+        if repo_id:
+            rb = self._strict_json(f"{self.org_url}/_apis/git/repositories/{repo_id}")
+            repo_project = str((rb.get("project") or {}).get("name") or "")
+        return {"id": det.get("id") or hits[0].get("id"), "name": det.get("name") or hits[0].get("name"),
+                "project": project, "yaml": (str(yml).lstrip("/") or None) if yml else None,
+                "repo_id": repo_id, "repo_name": str(rep.get("name") or ""),
+                "branch": str(rep.get("defaultBranch") or "").replace("refs/heads/", "", 1),
+                "repo_project": repo_project}
 
     def list_definition_builds(self, project: str, definition_id: int, *, min_time: str = "",
                                top: int = 50) -> list[dict]:

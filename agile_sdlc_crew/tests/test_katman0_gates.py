@@ -6997,6 +6997,11 @@ def test_upgrade_client_find_pr_and_bytes():
         azb.requests.get, azb.requests.post = og, og_post
 
 
+def _ci_src(pins):
+    """Taramanın ci_source'u: sabitlemenin dosyası (F1 sonrası tanımdan gelir; burada ilk sabitlemeden)."""
+    return {k: pins[0][k] for k in ("repo", "project", "branch", "path")} if pins else None
+
+
 class _UpFake(_BumpFake):
     """Yükseltme durumu / izleme işi / sürüm adımı için sahte Azure: PR'lar (proje, repo, dal),
     PR build'leri (queue_time + sonuç), WIQL (izleme + tempo-upgrade işleri), yorum / iş kayıtları."""
@@ -7029,7 +7034,8 @@ class _UpFake(_BumpFake):
     def get_team_area_path(self, team=""):
         return self.areas.get(team, "P\\T") if team else ""
 
-    def find_build_definition(self, repo, name):
+    def get_test_pipeline(self, repo):
+        name = f"{repo}-test"
         self.def_calls.append((repo, name))
         d = self.defs.get(repo)
         if isinstance(d, Exception):
@@ -7117,7 +7123,8 @@ def test_upgrade_status_and_steps():
         pins = {"below": [pin_below], "at": [pin_at], "none": []}.get(pins, pins) if isinstance(pins, str) else pins
         return {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": up,
                 "sites": [dv_a, dv_r, ci_s, code_s] if sites is None else sites, "blocking": blocking,
-                "blockers": list(blockers), "auto": list(rows), "infra": [], "human": [], "ci_pins": pins}
+                "blockers": list(blockers), "auto": list(rows), "infra": [], "human": [], "ci_pins": pins,
+                "ci_source": _ci_src(pins)}
 
     def pr(pid, status, closed=MERGED):
         return {"id": pid, "status": status, "url": f"https://x/pr/{pid}", "closed_at": closed if status != "active" else "",
@@ -7528,7 +7535,8 @@ def test_upgrade_fix_round1():
 
     def scan(sites, pins, up=False):
         return {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": up, "sites": sites,
-                "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins}
+                "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins,
+                "ci_source": _ci_src(pins)}
 
     def track_wi(wid=500, to="8.4", area="P\\T", tags="tempo-upgrade-track"):
         return {"id": wid, "fields": {"System.Title": "izleme", "System.State": "To Do", "System.AreaPath": area,
@@ -7606,6 +7614,8 @@ def test_upgrade_fix_round1():
         seen = []
 
         class _R:
+            status_code = 200
+
             def __init__(self, js):
                 self._js = js
 
@@ -7619,6 +7629,11 @@ def test_upgrade_fix_round1():
             seen.append((url, params))
             if url.endswith("/build/definitions"):
                 return _R({"value": [{"id": 3, "name": "Core-lint"}, {"id": 5, "name": "Core-test"}]})
+            if url.endswith("/build/definitions/5"):
+                return _R({"id": 5, "name": "Core-test", "process": {"type": 2, "yamlFilename": "Test Pipelines/core.yml"},
+                           "repository": {"id": "g", "name": "yml-files", "defaultBranch": "refs/heads/main"}})
+            if url.endswith("/_apis/git/repositories/g"):
+                return _R({"id": "g", "project": {"name": "EcomBackend"}})
             if url.endswith("/commits"):
                 return _R({"value": [{"committer": {"date": "2026-11-10T10:00:00Z"}, "author": {"date": "x"}}]})
             return _R({"value": [{"id": 9, "status": "completed", "result": "failed",
@@ -7627,26 +7642,28 @@ def test_upgrade_fix_round1():
         og = azb.requests.get
         azb.requests.get = fake_get
         try:
-            d = cl.find_build_definition("core", "core-test")
+            d = cl.get_test_pipeline("core")
+            def_seen = list(seen)
+            seen.clear()
             rows = cl.list_definition_builds("EcomBackend", 5, min_time=T0, top=20)
             when = cl.get_last_commit_date("yml-files", "/Test Pipelines/core.yml", "main", project="EcomBackend")
         finally:
             azb.requests.get = og
         check("istemci: tanım adı büyük/küçük harf duyarsız, repo projesinde",
-              d == {"id": 5, "name": "Core-test", "project": "EcomBackend"}
-              and seen[0][0].endswith("/EcomBackend/_apis/build/definitions") and seen[0][1]["name"] == "core-test",
-              str((d, seen[:1])))
-        p1 = seen[1][1]
+              {k: (d or {}).get(k) for k in ("id", "name", "project")} == {"id": 5, "name": "Core-test", "project": "EcomBackend"}
+              and def_seen[0][0].endswith("/EcomBackend/_apis/build/definitions")
+              and def_seen[0][1]["name"] == "core-test", str((d, def_seen[:1])))
+        p1 = seen[0][1]
         check("istemci: tanım build'leri (definitions, pullRequest, minTime, yeni→eski, $top)",
               p1["definitions"] == 5 and p1["reasonFilter"] == "pullRequest" and p1["minTime"] == T0
               and p1["queryOrder"] == "queueTimeDescending" and p1["$top"] == 20
               and rows[0]["build_id"] == 9 and rows[0]["queue_time"] == "2026-11-10T11:00:00Z"
               and rows[0]["url"] == "https://b/9", str((p1, rows)))
-        p2 = seen[2][1]
+        p2 = seen[1][1]
         check("istemci: dosyanın son commit zamanı (itemPath + dal, tek kayıt)",
               when == "2026-11-10T10:00:00Z" and p2["searchCriteria.itemPath"] == "/Test Pipelines/core.yml"
               and p2["searchCriteria.itemVersion.version"] == "main" and p2["searchCriteria.$top"] == 1
-              and "/EcomBackend/_apis/git/repositories/yml-files/commits" in seen[2][0], str(seen[2]))
+              and "/EcomBackend/_apis/git/repositories/yml-files/commits" in seen[1][0], str(seen[1]))
 
         # ── F2: test hattı kapısı dosyanın durumuna bağlı ──
         green_after = {5: [b(2, "2026-11-10T11:00:00Z")]}
@@ -8409,7 +8426,8 @@ def test_upgrade_fix_round2():
 
     def scan(sites, pins):
         return {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False,
-                "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins}
+                "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins,
+                "ci_source": _ci_src(pins)}
 
     def pr(pid, status, closed=""):
         return {"id": pid, "status": status, "url": f"https://x/pr/{pid}", "closed_at": closed, "merge_commit": "",
@@ -8514,7 +8532,7 @@ def test_upgrade_fix_round2():
             return _R({"value": []})
         azb.requests.get = g_boom
         try:
-            d, err = safe(lambda: cl2.find_build_definition("core", "core-test"))
+            d, err = safe(lambda: cl2.get_test_pipeline("core"))
         finally:
             azb.requests.get = og
         check("B2: repo sorgusu hata verirse tanım araması hata (yanlış projede boş liste → no_pipeline değil)",
@@ -8524,7 +8542,7 @@ def test_upgrade_fix_round2():
         azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
             seen.append(url), _R(status=404) if "/git/repositories/" in url else _R({"value": []}))[1]
         try:
-            d, err = safe(lambda: cl2.find_build_definition("core", "core-test"))
+            d, err = safe(lambda: cl2.get_test_pipeline("core"))
         finally:
             azb.requests.get = og
         check("B2: repo hiçbir projede yoksa hata", d is None and err is not None
@@ -8537,11 +8555,11 @@ def test_upgrade_fix_round2():
             else _R(status=404) if "/git/repositories/" in url
             else _R({"value": [{"id": 5, "name": "Core-test"}]}))[1]
         try:
-            d, err = safe(lambda: cl2.find_build_definition("core", "core-test"))
+            d, err = safe(lambda: cl2.get_test_pipeline("core"))
         finally:
             azb.requests.get = og
         check("B2: önbellekteki yedek proje kullanılmaz; repo gerçekten bulunduğu projede aranır",
-              d == {"id": 5, "name": "Core-test", "project": "Other"}
+              {k: (d or {}).get(k) for k in ("id", "name", "project")} == {"id": 5, "name": "Core-test", "project": "Other"}
               and any(u.endswith("/Other/_apis/build/definitions") for u in seen), str((d, err, seen)))
         # status / queue_step / uç: hata yükselir, hiçbir şey hazır değil
         sc_at = scan([dv_a, dv_r], [pin])
@@ -8709,7 +8727,8 @@ def test_upgrade_fix_round3():
 
         def st(sites, pins, c):
             sc = {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False,
-                  "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins}
+                  "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins,
+                  "ci_source": _ci_src(pins)}
             return safe(lambda: ut.status(c, "core", "php", to="8.4", deps=deps, scan=sc, wait_h=72, root=root))
         bad = {"repo": "yml-files", "project": "EcomBackend", "branch": "main", "path": "Test Pipelines/core.yml",
                "line": 7, "version": "", "unparsed": "$(phpVer)"}
@@ -8965,6 +8984,253 @@ def test_upgrade_final_f6_ci_parse():
                                                     "  - script: sudo update-alternatives --set php /usr/bin/php$(phpVersion)\n")
     check("F6c: sabitlenmiş anahtarın kullanımı ikinci sabitleme değil",
           res is not None and [p["version"] for p in res[1]] == ["8.2"] and len(res[0]) == 1, str((res, err)))
+
+
+class _PipeFake:
+    """F1: `<repo>-test` tanımı + dosyası için sahte istemci (ağ yok). pipe: dict | None | Exception;
+    files: (proje, repo, dal, yol) → metin; legacy: proje → {yol: metin} (kod projesinin yml-files'ı)."""
+
+    def __init__(self, pipe=None, files=None, legacy=None, project="EcomLojistik", legacy_error=None):
+        self.pipe, self.files, self.legacy = pipe, dict(files or {}), dict(legacy or {})
+        self.project, self.legacy_error, self.calls = project, legacy_error, []
+
+    def get_test_pipeline(self, repo):
+        self.calls.append(("pipe", repo))
+        if isinstance(self.pipe, Exception):
+            raise self.pipe
+        return self.pipe
+
+    def _repo_project_strict(self, repo):
+        return self.project
+
+    def get_file_content(self, repo, path, branch=None, project=None):
+        self.calls.append(("file", project, repo, branch, path))
+        if repo == "yml-files" and branch is None:
+            return (self.legacy.get(project) or {}).get(path.lstrip("/"), "")
+        v = self.files.get((project, repo, branch, path.lstrip("/")))
+        if v is None:
+            raise RuntimeError("404 dosya yok")
+        return v
+
+    def get_items_in_path(self, repo, path="/", branch=None, recursion_level="oneLevel", project=None):
+        self.calls.append(("items", project, repo, branch, path))
+        if self.legacy_error is not None:
+            raise self.legacy_error
+        return [{"path": "/" + p, "isFolder": False} for p in (self.legacy.get(project) or {})]
+
+
+def test_upgrade_final_f1_pipeline_source():
+    """F1: test hattı dosyası `<repo>-test` TANIMINDAN okunur (repository + process.yamlFilename) — dört ayrı
+    yml-files var; core'un Core-test'i EcomLojistik/yml-files:Test Pipelines/Core.yml'ı koşar. Okunamayan /
+    tanınmayan her durum kapıyı kapalı tutar."""
+    print("\n[Sürüm yükseltme son düzeltme F1: test hattı tanımı kaynak]")
+    import requests as _rq
+    from agile_sdlc_crew.quality import upgrade, upgrade_bump as bump, upgrade_track as ut
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+
+    core_yml = ("trigger: none\nresources:\n  repositories:\n    - repository: core\n      name: EcomLojistik/core\n"
+                "variables:\n  phpVersion: '8.2'\n")
+    pipe = {"id": 55, "name": "Core-test", "project": "EcomLojistik", "yaml": "Test Pipelines/Core.yml",
+            "repo_id": "c5d0", "repo_name": "yml-files", "branch": "main", "repo_project": "EcomLojistik"}
+    fkey = ("EcomLojistik", "yml-files", "main", "Test Pipelines/Core.yml")
+    src = {"repo": "yml-files", "project": "EcomLojistik", "branch": "main", "path": "Test Pipelines/Core.yml"}
+
+    def safe(fn):
+        try:
+            return fn(), None
+        except Exception as e:  # noqa: BLE001
+            return None, e
+
+    c = _PipeFake(pipe, {fkey: core_yml})
+    res, err = safe(lambda: upgrade._ci_scan(c, "core", "php", "8.4", None))
+    sites, pins = res or ([], [])
+    check("F1 core: tanımın dosyası (başka proje) okunur → sabitleme + otomatik site",
+          res is not None and pins == [dict(src, line=7, version="8.2")] and len(sites) == 1
+          and sites[0]["project"] == "EcomLojistik" and sites[0]["repo"] == "yml-files" and bump.pushable(sites[0])
+          and ("file", "EcomLojistik", "yml-files", "main", "/Test Pipelines/Core.yml") in c.calls, str((res, err, c.calls)))
+    r = upgrade._ci_read(_PipeFake(pipe, {fkey: core_yml}), "core", "php", "8.4", None)
+    check("F1 kaynak ve tanım döner", r["source"] == src and r["definition"] == pipe and r["live"], str(r))
+    # Test Pipelines/ dışında duran dosya da okunur (önek süzgeci yok)
+    p2 = dict(pipe, yaml="pipelines/core-test.yml")
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(p2, {fkey[:3] + ("pipelines/core-test.yml",): core_yml}),
+                                             "core", "php", "8.4", None))
+    check("F1 dosya Test Pipelines/ dışında da okunur", res is not None and [p["version"] for p in res[1]] == ["8.2"],
+          str((res, err)))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(None), "core", "php", "8.4", None))
+    check("F1 tanım yok, eski dosya da yok → ([], [])", res == ([], []), str((res, err)))
+    leg = _PipeFake(None, legacy={"EcomBackend": {"Test Pipelines/myduck.yml": core_yml.replace("EcomLojistik/core",
+                                                                                                 "EcomBackend/mcduck")}},
+                    project="EcomBackend")
+    res, err = safe(lambda: upgrade._ci_scan(leg, "mcduck", "go", "1.27", None))
+    check("F1 tanım yok ama kod projesinin yml-files'ında repoyu anan dosya var → okunamayan sabitleme",
+          res is not None and res[0] == [] and len(res[1]) == 1 and res[1][0]["version"] == ""
+          and "mcduck-test" in res[1][0]["unparsed"] and res[1][0]["path"] == "Test Pipelines/myduck.yml",
+          str((res, err)))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(None, legacy_error=RuntimeError("500")), "core", "php", "8.4",
+                                             None))
+    check("F1 eski dosya araması hata verirse bilinmiyor (None)", res is not None and res[1] is None, str((res, err)))
+    for label, p, why in (("YAML değil", dict(pipe, yaml=None), "YAML"),
+                          ("kod reposunun kendi dosyası", dict(pipe, repo_name="core", repo_project="EcomLojistik"),
+                           "kod reposu")):
+        res, err = safe(lambda p=p: upgrade._ci_scan(_PipeFake(p, {fkey: core_yml}), "core", "php", "8.4", None))
+        check(f"F1 {label} → tek okunamayan sabitleme, site yok",
+              res is not None and res[0] == [] and len(res[1]) == 1 and res[1][0]["version"] == ""
+              and why in res[1][0]["unparsed"], str((res, err)))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(pipe, {fkey: core_yml.replace("EcomLojistik/core", "X/other")}),
+                                             "core", "php", "8.4", None))
+    check("F1 dosya repoyu checkout etmiyor → okunamayan sabitleme ('paylaşılan / şablon')",
+          res is not None and res[0] == [] and len(res[1]) == 1 and "paylaşılan" in res[1][0]["unparsed"],
+          str((res, err)))
+    tmpl = core_yml.replace("variables:\n  phpVersion: '8.2'\n", "extends:\n  template: base.yml\n")
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(pipe, {fkey: tmpl}), "core", "php", "8.4", None))
+    check("F1 template/extends + sabitleme yok → okunamayan sabitleme",
+          res is not None and len(res[1]) == 1 and res[1][0]["version"] == "" and "template" in res[1][0]["unparsed"],
+          str((res, err)))
+    plain = core_yml.replace("variables:\n  phpVersion: '8.2'\n", "steps:\n  - script: make test\n")
+    r = upgrade._ci_read(_PipeFake(pipe, {fkey: plain}), "core", "php", "8.4", None)
+    check("F1 okunan, repoyu anan, sürüm satırı ve şablonu olmayan dosya → sabitleme yok (zayıf kanıt yolu)",
+          r["pins"] == [] and r["source"] == src and r["definition"] == pipe, str(r))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(ValueError("iki tanım")), "core", "php", "8.4", None))
+    check("F1 tanım okunamazsa sabitlemeler None (bilinmiyor)", res is not None and res[1] is None, str((res, err)))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(pipe, {}), "core", "php", "8.4", None))
+    check("F1 tanımın dosyası okunamazsa None", res is not None and res[1] is None, str((res, err)))
+
+    # plan: ci_source + tanım, servis/kod siteleri yanında
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        (base / "core").mkdir()
+        (base / "core" / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+        index = {"core": [{"src": "anatolia/build/l", "images": ["eu/php-8-2:1.0"]}],
+                 "web": [{"src": "anatolia/build/w", "images": ["eu/php-8-4:1.0"]}]}
+        pl = upgrade.plan(_PipeFake(pipe, {fkey: core_yml}), "core", "php", to="8.4", deps=_upgrade_deps(base),
+                          index=index, read=lambda d, p: "FROM eu/php-8-2:1.0\n", app_map_cache={})
+        check("F1 plan ci_source + ci_test_def", pl["ci_source"] == src and pl.get("ci_test_def") == pipe
+              and [s["project"] for s in pl["sites"] if s["where"] == "ci"] == ["EcomLojistik"], str(pl))
+        pl2 = upgrade.plan(None, "core", "php", to="8.4", deps=_upgrade_deps(base), index=index,
+                           read=lambda d, p: "FROM eu/php-8-2:1.0\n", yml_files={}, app_map_cache={})
+        check("F1 enjekte yolda sabitleme yoksa ci_source None, tanım çözülmez", pl2["ci_source"] is None
+              and "ci_test_def" not in pl2, str(pl2))
+
+        # status: CI PR'ı ci_source'ta aranır; yoksa aranmaz; kanıt çözülmüş tanımla (ikinci arama yok)
+        dv = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+              "path": "/build/l/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+              "blocked": ""}
+        ci_s = {"where": "ci", "repo": "yml-files", "project": "EcomLojistik", "branch": "main",
+                "path": "Test Pipelines/Core.yml", "line": 7, "old": "'8.2'", "new": "'8.4'", "blocked": ""}
+        low = dict(src, line=7, version="8.2")
+        BR = "tempo/upgrade-php-core-8.4"
+        prs = {("EcomLojistik", "yml-files", BR): {"id": 11, "status": "active", "url": "u", "closed_at": "",
+                                                   "merge_commit": "", "target": "main", "created_by": "tempo-id"}}
+
+        def scan_(sites, pins, source, **k):
+            return dict({"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False,
+                         "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [],
+                         "ci_pins": pins, "ci_source": source}, **k)
+        s = ut.status(_UpFake(prs=prs), "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv, ci_s], [low], src), wait_h=72, root=base / "core")
+        check("F1 CI PR'ı tanımın reposunda (EcomLojistik) aranır", s["prs"]["ci"] and s["prs"]["ci"]["id"] == 11
+              and s["stage"] == "test hattı" and not s["next"]["ready"], str(s["prs"]))
+        s = ut.status(_UpFake(prs=prs), "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv], [], None, ci_test_def=None), wait_h=72, root=base / "core")
+        check("F1 ci_source yoksa CI PR'ı aranmaz", s["prs"]["ci"] is None, str(s["prs"]))
+        c_ev = _UpFake(defs={"core": {"id": 5, "name": "Core-test", "project": "EcomLojistik"}},
+                       builds={55: [{"build_id": 9, "status": "completed", "result": "succeeded", "definition": "Core-test",
+                                     "url": "", "project": "EcomLojistik", "queue_time": "2026-11-10T12:00:00Z",
+                                     "source_version": ""}]})
+        s = ut.status(c_ev, "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv], [], src, ci_test_def=pipe), wait_h=72, root=base / "core")
+        check("F1 kanıt çözülmüş tanımla aranır (tanım ikinci kez sorulmaz)",
+              not c_ev.def_calls and c_ev.build_calls and c_ev.build_calls[0][:2] == ("EcomLojistik", 55)
+              and s["next"]["ready"] and s["next"]["test_note"].startswith("Test kanıtı zayıf"),
+              str((c_ev.def_calls, c_ev.build_calls, s["next"])))
+        s = ut.status(c_ev, "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv], [], None, ci_test_def=None), wait_h=72, root=base / "core")
+        check("F1 çözülmüş 'tanım yok' → Test kanıtı yok, ikinci arama yok",
+              not c_ev.def_calls and s["next"]["test_note"] == "Test kanıtı yok", str(s["next"]))
+        s = ut.status(c_ev, "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv], [], None, ci_test_def=pipe), wait_h=72, root=base / "core")
+        check("F1 tanım var ama dosyası kaynak olarak okunmamış → zayıf kanıtla açılmaz",
+              not s["next"]["ready"] and s["next"]["test_note"] == "", str(s["next"]))
+
+    # İstemci: get_test_pipeline
+    class _Cl(azb.AzureDevOpsClient):
+        _headers = {"Authorization": "x"}
+
+    class _R:
+        def __init__(self, status=200, js=None):
+            self.status_code, self._js, self.ok, self.text = status, js, status < 400, "x"
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise _rq.HTTPError(str(self.status_code), response=self)
+
+        def json(self):
+            if self._js is None:
+                raise ValueError("JSON değil")
+            return self._js
+
+    def mk():
+        cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+        cl.org_url, cl.project, cl.repo_projects = "https://dev.azure.com/o", "P", ["EcomBackend", "EcomLojistik"]
+        cl._repo_project_cache = {}
+        cl.__class__ = _Cl
+        cl._repo_project_strict = lambda r: "EcomLojistik"
+        return cl
+    detail = {"id": 55, "name": "Core-test", "process": {"type": 2, "yamlFilename": "/Test Pipelines/Core.yml"},
+              "repository": {"id": "c5d0", "name": "yml-files", "type": "TfsGit", "defaultBranch": "refs/heads/main"}}
+
+    def router(defs=None, det=None, repo=None):
+        seen = []
+
+        def get(url, headers=None, params=None, timeout=None, **k):
+            seen.append((url, dict(params or {})))
+            if url.endswith("/build/definitions"):
+                return defs if isinstance(defs, _R) else _R(200, {"value": defs})
+            if "/build/definitions/" in url:
+                return det if isinstance(det, _R) else _R(200, det)
+            if "/_apis/git/repositories/" in url:
+                return repo if isinstance(repo, _R) else _R(200, repo)
+            return _R(404)
+        return get, seen
+    og = azb.requests.get
+    try:
+        get, seen = router([{"id": 3, "name": "Core-lint"}, {"id": 55, "name": "Core-test"}], detail,
+                           {"id": "c5d0", "project": {"name": "EcomLojistik"}})
+        azb.requests.get = get
+        d, err = safe(lambda: mk().get_test_pipeline("core"))
+        check("F1 istemci: tanım + YAML yolu (baştaki / atılır) + repo / dal / repo projesi",
+              d == {"id": 55, "name": "Core-test", "project": "EcomLojistik", "yaml": "Test Pipelines/Core.yml",
+                    "repo_id": "c5d0", "repo_name": "yml-files", "branch": "main", "repo_project": "EcomLojistik"}
+              and seen[0][0].endswith("/EcomLojistik/_apis/build/definitions") and seen[0][1]["name"] == "core-test"
+              and seen[1][0].endswith("/EcomLojistik/_apis/build/definitions/55")
+              and seen[2][0] == "https://dev.azure.com/o/_apis/git/repositories/c5d0", str((d, err, seen)))
+        get, seen = router([{"id": 3, "name": "Core-lint"}])
+        azb.requests.get = get
+        d, err = safe(lambda: mk().get_test_pipeline("core"))
+        check("F1 istemci: tanım yok → None", d is None and err is None and len(seen) == 1, str((d, err)))
+        get, seen = router([{"id": 55, "name": "Core-test"}, {"id": 56, "name": "core-TEST"}])
+        azb.requests.get = get
+        d, err = safe(lambda: mk().get_test_pipeline("core"))
+        check("F1 istemci: aynı adlı iki tanım → ValueError", isinstance(err, ValueError) and "Core-test" in str(err),
+              str((d, err)))
+        get, seen = router([{"id": 55, "name": "Core-test"}], dict(detail, process={"type": 1}),
+                           {"id": "c5d0", "project": {"name": "EcomLojistik"}})
+        azb.requests.get = get
+        d, err = safe(lambda: mk().get_test_pipeline("core"))
+        check("F1 istemci: tasarımcı (YAML olmayan) tanım → yaml None", d is not None and d["yaml"] is None,
+              str((d, err)))
+        for label, args in (("tanım listesi 500", (_R(500),)), ("tanım listesi JSON değil", (_R(200, None),)),
+                            ("tanım ayrıntısı 203", ([{"id": 55, "name": "Core-test"}], _R(203, None))),
+                            ("repo sorgusu 404", ([{"id": 55, "name": "Core-test"}], detail, _R(404)))):
+            get, seen = router(*args)
+            azb.requests.get = get
+            d, err = safe(lambda: mk().get_test_pipeline("core"))
+            check(f"F1 istemci: {label} → hata", d is None and err is not None, str((d, err)))
+    finally:
+        azb.requests.get = og
+    check("F1 CI_REPO / CI_PROJECT sabitleri kalktı, find_build_definition yok",
+          not hasattr(upgrade, "CI_REPO") and not hasattr(upgrade, "CI_PROJECT")
+          and not hasattr(azb.AzureDevOpsClient, "find_build_definition"))
 
 
 def test_php_rector_fix():
@@ -11036,7 +11302,7 @@ def main():
               test_upgrade_fix_round1,
               test_upgrade_fix_round2,
               test_upgrade_fix_round3,
-              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse,
+              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

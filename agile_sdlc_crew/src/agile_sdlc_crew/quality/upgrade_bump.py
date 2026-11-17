@@ -332,12 +332,17 @@ def _partial_ok(client, b: dict) -> bool:
     return not _build_issues_block(client.get_build_issue_tasks(b.get("project"), int(b.get("build_id"))))
 
 
-def ci_evidence(client, repo: str, since: str, *, wait_h: int, now=None) -> dict:
+_UNSET = object()
+
+
+def ci_evidence(client, repo: str, since: str, *, wait_h: int, now=None, definition=_UNSET) -> dict:
     """Test hattı dosyasının son değişikliğinden (`since`) SONRA kuyruğa girmiş `<repo>-test` build'inden kanıt.
     Kanıt build TANIMINA bağlıdır (lint / Sonar gibi başka PR hatları sayılmaz): tanım yok → no_pipeline;
     tanımın since'ten kesin sonra kuyruğa girmiş tamamlanmış build'i yok → none; en yenisi yeşil (ya da yalnız
     test dışı adımda uyarılı kısmi başarı) → green; değilse red + hata özeti. API hatası yükselir.
     `since=None`: saat yok (repoda test hattı sabitlemesi yok) — tanımın en yeni tamamlanmış build'i alınır.
+    `definition`: taramanın çözdüğü tanım (`get_test_pipeline` sonucu ya da None) — verilirse ikinci ad araması
+    yapılmaz; verilmezse `client.get_test_pipeline` ile çözülür.
     -> {"state", "build": {"id","url","queue_time"}|None, "summary", "overdue", "since"}"""
     t0 = None
     if since is not None:
@@ -345,7 +350,7 @@ def ci_evidence(client, repo: str, since: str, *, wait_h: int, now=None) -> dict
         if t0 is None:
             raise ValueError(f"Kanıt saati okunamadı ({str(since)[:40]!r}).")
     name = f"{repo}-test"
-    d = client.find_build_definition(repo, name)
+    d = client.get_test_pipeline(repo) if definition is _UNSET else definition
     if not d:
         return {"state": "no_pipeline", "build": None, "overdue": False, "since": since,
                 "summary": f"'{name}' build tanımı yok."}

@@ -22,8 +22,6 @@ log = logging.getLogger("pipeline")
 
 TARGETS_PATH = Path(__file__).resolve().parent.parent / "config" / "upgrade_targets.yaml"
 _VER_RE = re.compile(r"^\d+\.\d+$")
-CI_REPO = "yml-files"
-CI_PROJECT = "EcomBackend"
 CI_DIR = "Test Pipelines"
 UNPUBLISHED = "imaj yayınlanmamış"
 _IMG_RES = {
@@ -299,29 +297,21 @@ _CI_KEYS = {"php": "phpVersion", "python": "pythonVersion", "go": "goVersion"}
 
 def _ci_scan(client, repo, lang, to, yml_files) -> tuple[list[dict], list[dict] | None]:
     """(siteler, sabitlemeler). Sabitleme: repoyu checkout eden test hattı dosyasında dilin sürüm satırı, sürümü ne
-    olursa olsun — `{repo, project, branch, path, line, version}`; site yalnız hedefin altındakiler. yml-files
+    olursa olsun — `{repo, project, branch, path, line, version}`; site yalnız hedefin altındakiler. Test hattı
     okunamazsa sabitlemeler None (bilinmiyor): "test hattı sabitlemesi yok" ile karışmasın diye."""
+    r = _ci_read(client, repo, lang, to, yml_files)
+    return r["sites"], r["pins"]
+
+
+def _ci_read(client, repo, lang, to, yml_files) -> dict:
+    """{sites, pins, source, definition, live}. Canlı yol (`yml_files is None`): kaynak `<repo>-test` build
+    TANIMIDIR (`client.get_test_pipeline`) — repository + process.yamlFilename; o tek dosya tanımın reposundan /
+    dalından / projesinden okunur. Enjekte yol (testler): verilen `Test Pipelines/` dosyalarından repoyu ananlar."""
     if not _CI_KEYS.get(lang):
-        return [], []
+        return {"sites": [], "pins": [], "source": None, "definition": None, "live": yml_files is None}
     if yml_files is None:
-        branch = "main"
-        try:
-            branch = (client.get_repository(_INJECTED_SRC["repo"]).get("defaultBranch") or "refs/heads/main"
-                      ).replace("refs/heads/", "")
-            items = client.get_items_in_path(_INJECTED_SRC["repo"], "/" + CI_DIR, branch=branch,
-                                             recursion_level="oneLevel", project=_INJECTED_SRC["project"])
-            yml_files = {}
-            for it in items:
-                p = (it.get("path") or "").lstrip("/")
-                if not it.get("isFolder") and p.lower().endswith((".yml", ".yaml")):
-                    yml_files[p] = client.get_file_content(_INJECTED_SRC["repo"], "/" + p, branch=branch,
-                                                           project=_INJECTED_SRC["project"]) or ""
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"⚠️ upgrade: yml-files okunamadı: {e}")
-            return [], None
-        src = dict(_INJECTED_SRC, branch=branch)
-    else:
-        src = dict(_INJECTED_SRC)
+        return _ci_live(client, repo, lang, to)
+    src = dict(_INJECTED_SRC)
     mention = _mention_re(repo)
     out, pins = [], []
     for path in sorted(yml_files):
@@ -330,7 +320,86 @@ def _ci_scan(client, repo, lang, to, yml_files) -> tuple[list[dict], list[dict] 
         s_, p_ = _parse_ci_file(yml_files[path] or "", path, lang, to, src)
         out += s_
         pins += p_
-    return out, pins
+    source = {k: pins[0][k] for k in ("repo", "project", "branch", "path")} if pins else None
+    return {"sites": out, "pins": pins, "source": source, "definition": None, "live": False}
+
+
+_TEMPLATE_RE = re.compile(r"(?m)^\s*(?:-\s*)?(?:template|extends)\s*:")
+
+
+def _http_404(e: Exception) -> bool:
+    return getattr(getattr(e, "response", None), "status_code", None) == 404
+
+
+def _legacy_ci_file(client, repo: str) -> tuple[str, str] | None:
+    """Tanım yokken eski keşif: kod reposunun projesindeki `yml-files:Test Pipelines/` altında repoyu anan dosya
+    (proje, yol). O projede yml-files yoksa (404) None; başka her hata yükselir."""
+    proj = client._repo_project_strict(repo)
+    try:
+        items = client.get_items_in_path(_INJECTED_SRC["repo"], "/" + CI_DIR, recursion_level="oneLevel",
+                                         project=proj)
+    except Exception as e:  # noqa: BLE001
+        if _http_404(e):
+            return None
+        raise
+    mention = _mention_re(repo)
+    for it in sorted(items or [], key=lambda x: str(x.get("path") or "")):
+        p = str(it.get("path") or "").lstrip("/")
+        if it.get("isFolder") or not p.lower().endswith((".yml", ".yaml")):
+            continue
+        if mention.search(client.get_file_content(_INJECTED_SRC["repo"], "/" + p, project=proj) or ""):
+            return proj, p
+    return None
+
+
+def _ci_live(client, repo: str, lang: str, to: str) -> dict:
+    """Canlı test hattı okuması — her belirsizlik kapıyı kapalı tutar: okunamayan → pins None; tanımlanamayan /
+    elle ele alınması gereken → tek okunamayan sabitleme (`version: ""`)."""
+    res = {"sites": [], "pins": [], "source": None, "definition": None, "live": True}
+    try:
+        d = client.get_test_pipeline(repo)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"⚠️ upgrade: '{repo}-test' tanımı okunamadı: {e}")
+        return dict(res, pins=None)
+    res["definition"] = d
+    if d is None:
+        try:
+            legacy = _legacy_ci_file(client, repo)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"⚠️ upgrade: {repo} için eski test hattı dosyası aranamadı: {e}")
+            return dict(res, pins=None)
+        if legacy:
+            src = {"repo": _INJECTED_SRC["repo"], "project": legacy[0], "branch": ""}
+            res["pins"] = [_ci_pin(src, legacy[1], 0, version="",
+                                   unparsed=f"test hattı dosyası var, '{repo}-test' tanımı yok — elle ele alınmalı")]
+        return res
+    src = {"repo": str(d.get("repo_name") or ""), "project": str(d.get("repo_project") or ""),
+           "branch": str(d.get("branch") or "")}
+    path = str(d.get("yaml") or "").lstrip("/")
+
+    def unread(why: str) -> dict:
+        res["pins"] = [_ci_pin(src, path, 0, version="", unparsed=why)]
+        return res
+    if not path:
+        return unread(f"'{d.get('name')}' test hattı tanımı bir pipeline reposundaki YAML dosyası değil — "
+                      "elle ele alınmalı")
+    if src["repo"].lower() == repo.lower():
+        return unread(f"'{d.get('name')}' test hattı dosyası kod reposunun kendisinde ({path}) — elle ele alınmalı")
+    if not all(src.values()):
+        return unread(f"'{d.get('name')}' test hattı dosyasının yeri (repo / proje / dal) okunamadı")
+    res["source"] = dict(src, path=path)
+    try:
+        text = client.get_file_content(src["repo"], "/" + path, branch=src["branch"], project=src["project"]) or ""
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"⚠️ upgrade: test hattı dosyası okunamadı ({src['project']}/{src['repo']}:{path}): {e}")
+        return dict(res, pins=None)
+    if not _mention_re(repo).search(text):
+        return unread(f"paylaşılan / şablon dosya — {path} {repo} reposunu checkout etmiyor")
+    sites, pins = _parse_ci_file(text, path, lang, to, src)
+    if not pins and _TEMPLATE_RE.search(text):
+        return unread(f"{path} template / extends kullanıyor, sürüm satırı bulunamadı — elle doğrulanmalı")
+    res["sites"], res["pins"] = sites, pins
+    return res
 
 
 def _mention_re(repo: str):
@@ -579,7 +648,8 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
         tv = modern.target(client, repo, Path(root), lang, index=index)
     current = tv.get("version")
     out = {"repo": repo, "lang": lang, "current": current, "target": None, "target_source": None,
-           "selectable": [], "sites": [], "ci_pins": [], "per_src": tv.get("per_src") or [], "up_to_date": False}
+           "selectable": [], "sites": [], "ci_pins": [], "ci_source": None, "per_src": tv.get("per_src") or [],
+           "up_to_date": False}
     if not current:
         return out
     sel = selectable(lang, current, index, _devops_services(repo, lang, index, out["per_src"]))
@@ -593,10 +663,13 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
     if not target or _v(current) >= _v(target):
         out["up_to_date"] = True
         return out
-    ci_sites, ci_pins = _ci_scan(client, repo, lang, target, yml_files)
-    out["sites"] = (_devops_sites(client, repo, lang, target, index, read, out["per_src"]) + ci_sites
+    ci = _ci_read(client, repo, lang, target, yml_files)
+    out["sites"] = (_devops_sites(client, repo, lang, target, index, read, out["per_src"]) + ci["sites"]
                     + _code_sites(repo, Path(root), lang, target))
-    out["ci_pins"] = ci_pins
+    out["ci_pins"], out["ci_source"] = ci["pins"], ci["source"]
+    if ci["live"]:
+        # Çözülmüş `<repo>-test` tanımı (ya da None): kanıt aynı tanımla aranır, ikinci ad araması yapılmaz.
+        out["ci_test_def"] = ci["definition"]
     return out
 
 
@@ -1243,11 +1316,14 @@ def scan(client, repo: str, lang: str, *, to: str | None = None, team: str = "",
               app_map_cache=app_map_cache)
     out = {"repo": repo, "lang": lang, "label": label, "version": pl["current"], "current": pl["current"],
            "target": pl["target"], "target_source": pl["target_source"], "selectable": pl["selectable"],
-           "sites": pl["sites"], "ci_pins": pl["ci_pins"], "per_src": pl["per_src"], "up_to_date": pl["up_to_date"],
+           "sites": pl["sites"], "ci_pins": pl["ci_pins"], "ci_source": pl.get("ci_source"),
+           "per_src": pl["per_src"], "up_to_date": pl["up_to_date"],
            "freshen": fresh,
            "sha": "", "files": 0, "auto": [], "infra": [], "human": [], "rules": {}, "skipped": [],
            "skipped_counts": {}, "errors": [], "blockers": [], "probe": None,
            "counts": {k: 0 for k in _COUNT_KEYS}, "blocking": 0}
+    if "ci_test_def" in pl:
+        out["ci_test_def"] = pl["ci_test_def"]
     if not pl["current"]:
         out["message"] = f"Şimdiki {label} sürümü bulunamadı — yükseltme taranamaz."
         return out
