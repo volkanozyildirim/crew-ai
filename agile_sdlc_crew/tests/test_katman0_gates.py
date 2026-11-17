@@ -6918,6 +6918,7 @@ def test_upgrade_client_find_pr_and_bytes():
     c.org_url, c.project = "https://dev.azure.com/o", "P"
     class _Cl(azb.AzureDevOpsClient):
         _headers = {"Authorization": "x"}
+        _base_api_url = "https://x/P/_apis"
     c.__class__ = _Cl
     c._repo_api_url = lambda repo, project=None: f"https://x/{project or 'P'}/{repo}"
     vals = [{"pullRequestId": 7, "status": "abandoned", "creationDate": "2026-11-17T10:00:00Z",
@@ -6974,6 +6975,24 @@ def test_upgrade_client_find_pr_and_bytes():
         check("contentType geçer; verilmezse rawtext",
               ch[0]["newContent"]["contentType"] == "base64encoded" and ch[1]["newContent"]["contentType"] == "rawtext",
               str(ch))
+        # Yorumlar sayfalı: işaret araması devam belirteciyle bütün sayfaları okur, sınırda 'tamam değil' der
+        pages, asked = {None: ("t1", [1, 2]), "t1": ("t2", [3]), "t2": (None, [4])}, []
+
+        def cget(url, headers=None, params=None, timeout=None, **k):
+            asked.append(dict(params or {}))
+            tok, ids = pages[(params or {}).get("continuationToken")]
+            js = {"comments": [{"id": i, "text": f"c{i}", "createdDate": "2026-11-17T10:00:00Z",
+                                "createdBy": {"displayName": "x"}} for i in ids]}
+            if tok:
+                js["continuationToken"] = tok
+            return R(js)
+        azb.requests.get = cget
+        rows, complete = c.get_work_item_comments_all(5)
+        check("yorumlar: bütün sayfalar okunur", complete and [r["id"] for r in rows] == [1, 2, 3, 4]
+              and [r["metin"] for r in rows][-1] == "c4" and asked[1].get("continuationToken") == "t1", str(asked))
+        rows, complete = c.get_work_item_comments_all(5, max_items=2)
+        check("yorumlar: sınır aşılırsa tamam değil", not complete and len(rows) == 2, str(rows))
+        check("tek sayfalık eski okuyucu aynı", [r["id"] for r in c.get_work_item_comments(5)] == [1, 2])
     finally:
         azb.requests.get, azb.requests.post = og, og_post
 
@@ -7196,6 +7215,14 @@ def test_upgrade_status_and_steps():
         s = st(mkscan(**at), c_red)
         check("kırmızı kanıtla prod adımı hazır değil, nedeni özet",
               s["next"]["step"] == "prod" and not s["next"]["ready"] and "CoreTest" in s["next"]["reason"])
+        check("kırmızı kanıt prod'u bekletiyor → blocked_by_evidence", s["next"].get("blocked_by_evidence") is True)
+        s_prep = st(mkscan(blocking=2, **at), c_red)
+        check("hazırlıkta kırmızı kanıt bekletmiyor → blocked_by_evidence yok",
+              s_prep["evidence"]["state"] == "red" and s_prep["next"].get("blocked_by_evidence") is False
+              and s_clean["next"].get("blocked_by_evidence") is False, str(s_prep["next"]))
+        s_nopin = st(mkscan(sites=[dv_a, dv_r, code_s], pins="none"), c_red)
+        check("sabitleme yokken kırmızı kanıt da prod'u bekletir → blocked_by_evidence",
+              s_nopin["next"]["step"] == "prod" and s_nopin["next"].get("blocked_by_evidence") is True, str(s_nopin["next"]))
         ev2 = bump.ci_evidence(cf([build(4, "2026-11-10T11:00:00Z", status="inProgress", result=None), old_b]),
                                "core", MERGED, wait_h=72)
         check("koşan build kanıt değil; bekleme süresi dolmuş", ev2["state"] == "none" and ev2["overdue"] is True,
@@ -7842,8 +7869,13 @@ class _AdvFake:
     def __init__(self, tracks=(), tasks=(), future=True):
         self.tracks, self.tasks, self.future = list(tracks), list(tasks), future
         self.created, self.comments, self.states, self.wiql = [], [], [], []
-        self.store = {}
+        self.store, self.cstate, self.truncated = {}, {}, set()
         self.clock = "2026-11-17T10:00:00.000Z"
+
+    def created_wis(self):
+        """Açılan WI'ler board'da görünür (varsayılan açık-iş sayacı ve kırmızı build Task araması bunları okur)."""
+        return [{"id": 700 + i, "fields": dict(f, **{"System.State": self.cstate.get(700 + i, "To Do")})}
+                for i, f in enumerate(self.created)]
 
     def query_work_items(self, wiql, limit=0):
         import html as _h
@@ -7854,15 +7886,17 @@ class _AdvFake:
             area = m.group(1).replace("''", "'").lower() if m else None
             pool = [w for w in self.tracks if area is None or w["fields"]["System.AreaPath"].lower() == area
                     or w["fields"]["System.AreaPath"].lower().startswith(area + "\\")]
-        elif "tempo-upgrade-red:" in wiql:
-            pool = [{"id": 700 + i, "fields": dict(f, **{"System.State": "To Do"})} for i, f in enumerate(self.created)]
         elif "'User Story'" in wiql:
             return []
         elif "CONTAINS 'tempo-upgrade'" in wiql:
-            pool = self.tasks
+            pool = [w for w in self.tasks + self.created_wis()
+                    if "tempo-upgrade" in {t.strip() for t in (w["fields"].get("System.Tags") or "").split(";")}]
         else:
             pool = []
         return [w for w in pool if all(n in _h.unescape(w["fields"].get("System.Description") or "") for n in needles)]
+
+    def get_work_item_comments_all(self, wid, max_items=1000):
+        return list(self.store.get(wid, [])), wid not in self.truncated
 
     def get_team_area_path(self, team=""):
         return {"T": "P\\T", "U": "P\\U"}.get(team, "")
@@ -7957,11 +7991,12 @@ def test_upgrade_advance():
         return {"id": wid, "fields": {"System.Title": "x", "System.State": "To Do", "System.Tags": tags,
                                       "System.Description": f"<p><small>tempo-fp: {fp}</small></p>"}}
 
-    def stt(stage="hazırlık", step="ci", ready=False, reason="hazırlık bitmedi", ev=None, code_pr=None, handed=None):
+    def stt(stage="hazırlık", step="ci", ready=False, reason="hazırlık bitmedi", ev=None, code_pr=None, handed=None,
+            blocked_ev=False):
         return {"repo": "core", "current": "8.2", "target": "8.4", "stage": stage, "evidence": ev,
                 "prs": {"ci": None, "devops": [], "code": code_pr},
                 "next": {"step": step, "ready": ready, "reason": reason, "sites": [], "manual": [], "test_note": "",
-                         "handed_off": handed}}
+                         "handed_off": handed, "blocked_by_evidence": blocked_ev}}
 
     hits = [{"rule": "implicit_nullable", "file": "app/A.php", "line": 3, "text": "function f(int $a = null)"},
             {"rule": "deprecated_84", "file": "app/B.php", "line": 5, "text": "lcg_value()"}]
@@ -7993,7 +8028,8 @@ def test_upgrade_advance():
 
             def adv(c, st, **k):
                 sfn = st if callable(st) else (lambda *a, **kk: st)
-                base_kw = dict(team="T", deps=deps, create_job=cj, bump_jobs=lambda tid: [], status_fn=sfn, now=NOW)
+                base_kw = dict(team="T", deps=deps, create_job=cj, bump_jobs=lambda tid: [], status_fn=sfn, now=NOW,
+                               last_bump_job=lambda tid, step, to: None)
                 return ut.advance(c, **{**base_kw, **kw, **k})
 
             # ── Tavanlar + sprint ──
@@ -8026,6 +8062,22 @@ def test_upgrade_advance():
             r = adv(c, stt(), open_jobs=lambda repo: 0)
             check("sonraki sprint yok → alım yok, not", r[0]["took"] == [] and not c.created
                   and "sprint" in r[0]["note"], str(r))
+            # varsayılan sayaçla iki tur: ilk tur tavana kadar alır, ikinci tur kendi açtıklarını sayar
+            queued.clear()
+            c = _AdvFake(tracks=[track_wi()])
+            r1 = adv(c, stt())
+            n_tasks = len([w for w in c.created if w["_type"] == "Task"])
+            r2 = adv(c, stt())
+            check("varsayılan sayaç, iki tur: ilk tur 3 alır, ikincisi hiç (açtıklarını sayar)",
+                  len(r1[0]["took"]) == 3 and n_tasks == 3 and r2[0]["took"] == []
+                  and len([w for w in c.created if w["_type"] == "Task"]) == 3, str((r1, r2)))
+            flags["CREW_TECHDEBT_UPGRADE_MAX_OPEN"] = 0
+            c = _AdvFake(tracks=[track_wi()])
+            try:
+                r = adv(c, stt(), open_jobs=lambda repo: 0)
+            finally:
+                flags["CREW_TECHDEBT_UPGRADE_MAX_OPEN"] = MAX_OPEN
+            check("MAX_OPEN 0 → otomatik alım yok (3'e dönmez)", r[0]["took"] == [] and not c.created, str(r))
 
             # ── Sürüm adımı ──
             jobs.clear()
@@ -8038,6 +8090,26 @@ def test_upgrade_advance():
                         bump_jobs=lambda tid: [{"id": 1}])
             check("kuyrukta bump varken ikinci açılmaz", r_dup[0]["queued_step"] is None and not jobs
                   and r_dup[0]["note"], str(r_dup))
+            # son adım işi başarısızsa otomatik ilerletme o adımı bir daha açmaz (yeniden deneme insanın)
+            asked = []
+
+            def last_failed(tid, step, to):
+                asked.append((tid, step, to))
+                return {"id": 41, "status": "failed"}
+            c = _AdvFake(tracks=[track_wi()])
+            rs = [adv(c, stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3, last_bump_job=last_failed)
+                  for _ in range(2)]
+            check("son adım işi failed → iki turda da kuyruk yok, not insanı bekliyor",
+                  not jobs and all(x[0]["queued_step"] is None and "#41" in x[0]["note"] and "insan" in x[0]["note"]
+                                   for x in rs) and asked[0] == (500, "ci", "8.4"), str((rs, asked)))
+            for stt_ in ("needs_human", "needs_info"):
+                r = adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
+                        last_bump_job=lambda tid, step, to, s=stt_: {"id": 42, "status": s})
+                check(f"son adım işi {stt_} → kuyruk yok", r[0]["queued_step"] is None and not jobs, str(r))
+            r = adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
+                    last_bump_job=lambda tid, step, to: {"id": 43, "status": "completed"})
+            check("son adım işi completed → kuyruğa", r[0]["queued_step"] == "ci" and len(jobs) == 1, str(r))
+            jobs.clear()
             c = _AdvFake(tracks=[track_wi()])
             r = adv(c, stt("hazırlık", "ci", False, "Hazırlık bitmedi"), open_jobs=lambda repo: 3)
             check("hazır değil → kuyruk yok, yorum yok", r[0]["queued_step"] is None and not jobs and not c.comments
@@ -8049,9 +8121,16 @@ def test_upgrade_advance():
             check("DevOps'a devredilmiş → hiçbir şey yazılmaz / kuyruğa girmez",
                   r[0]["queued_step"] is None and not jobs and not c.comments and not c.created, str(r))
 
+            # ── Kırmızı build yalnız sıradaki adımı (prod) O bekletiyorsa ──
+            for stage_, step_ in (("hazırlık", "ci"), ("engelli", "prod"), ("hazırlık", "prod")):
+                c = _AdvFake(tracks=[track_wi()])
+                adv(c, stt(stage_, step_, False, "x", ev=red), open_jobs=lambda repo: 3)
+                check(f"kırmızı build {stage_}/{step_} aşamasında (kanıt bekletmiyor) → hiçbir şey",
+                      not c.comments and not c.created, str((c.comments, c.created)))
+
             # ── Kırmızı build: build başına bir kez yorum + needs-human Task ──
             c = _AdvFake(tracks=[track_wi()])
-            st_red = stt("test hattı", "prod", False, "build kırmızı", ev=red)
+            st_red = stt("test hattı", "prod", False, "build kırmızı", ev=red, blocked_ev=True)
             r1 = adv(c, st_red, open_jobs=lambda repo: 3)
             human = [w for w in c.created if "needs-human" in (w.get("System.Tags") or "")]
             check("kırmızı: izleme işine bir yorum (özet + build bağlantısı + işaret)",
@@ -8067,25 +8146,53 @@ def test_upgrade_advance():
             adv(c, st_red, open_jobs=lambda repo: 3)
             check("aynı build ikinci turda sessiz", len(c.comments) == n_c and len(c.created) == n_w,
                   str(c.comments[n_c:]))
+            red_task = 700 + next(i for i, w in enumerate(c.created) if "needs-human" in (w.get("System.Tags") or ""))
+            check("kırmızı Task izleme işine bağlı işaret taşır",
+                  "tempo-upgrade-red-track: 500" in c.created[red_task - 700]["System.Description"])
             red2 = dict(red, build={"id": 34, "url": "https://x/b/34", "queue_time": ""})
-            adv(c, stt("test hattı", "prod", False, "build kırmızı", ev=red2), open_jobs=lambda repo: 3)
-            check("yeni kırmızı build yeniden bildirilir", len(c.comments) == n_c + 1 and len(c.created) == n_w + 1
-                  and "tempo-upgrade-red:34" in c.comments[-1][1], str(c.comments[n_c:]))
+            st_red2 = stt("test hattı", "prod", False, "build kırmızı", ev=red2, blocked_ev=True)
+            adv(c, st_red2, open_jobs=lambda repo: 3)
+            on_task = [t for w, t in c.comments[n_c:] if w == red_task]
+            on_track = [t for w, t in c.comments[n_c:] if w == 500]
+            check("Task açıkken yeni kırmızı build: yeni Task yok, açık Task'a bir yorum, izleme işine bir yorum",
+                  len(c.created) == n_w and len(on_task) == 1 and "tempo-upgrade-red:34" in on_task[0]
+                  and "https://x/b/34" in on_task[0] and len(on_track) == 1 and "tempo-upgrade-red:34" in on_track[0],
+                  str(c.comments[n_c:]))
+            n_c2 = len(c.comments)
+            adv(c, st_red2, open_jobs=lambda repo: 3)
+            check("aynı ikinci build tekrar yazılmaz", len(c.comments) == n_c2 and len(c.created) == n_w)
+            c.cstate[red_task] = "Done"          # insan Task'ı kapattı
+            red3 = dict(red, build={"id": 35, "url": "https://x/b/35", "queue_time": ""})
+            adv(c, stt("test hattı", "prod", False, "build kırmızı", ev=red3, blocked_ev=True), open_jobs=lambda repo: 3)
+            new_human = [w for w in c.created[n_w:] if "needs-human" in (w.get("System.Tags") or "")]
+            check("insan Task'ı kapattıktan sonra yeni kırmızı build → yeni Task",
+                  len(new_human) == 1 and "tempo-upgrade-red:35" in new_human[0]["System.Description"], str(c.created[n_w:]))
 
             # ── CI bekleme notu: since başına bir kez ──
             wait = {"state": "none", "build": None, "summary": "", "overdue": True, "since": "2026-11-10T10:00:00Z"}
             c = _AdvFake(tracks=[track_wi()])
             for _ in range(2):
-                adv(c, stt("test hattı", "prod", False, "build yok", ev=wait), open_jobs=lambda repo: 3)
+                adv(c, stt("test hattı", "prod", False, "build yok", ev=wait, blocked_ev=True), open_jobs=lambda repo: 3)
             notes = sum(1 for _w, t in c.comments if "tempo-upgrade-ci-wait" in t)
             check("CI bekleme notu bir kez", notes == 1 and "yeniden tetikleyin" in c.comments[0][1]
                   and "2026-11-10T10:00:00Z" in c.comments[0][1], str(c.comments))
-            adv(c, stt("test hattı", "prod", False, "build yok", ev=dict(wait, since="2026-11-12T10:00:00Z")),
-                open_jobs=lambda repo: 3)
+            adv(c, stt("test hattı", "prod", False, "build yok", ev=dict(wait, since="2026-11-12T10:00:00Z"),
+                       blocked_ev=True), open_jobs=lambda repo: 3)
             check("yeni since → yeni not", sum(1 for _w, t in c.comments if "tempo-upgrade-ci-wait" in t) == 2)
             c = _AdvFake(tracks=[track_wi()])
-            adv(c, stt("test hattı", "prod", False, "build yok", ev=dict(wait, overdue=False)), open_jobs=lambda repo: 3)
+            adv(c, stt("test hattı", "prod", False, "build yok", ev=dict(wait, overdue=False), blocked_ev=True),
+                open_jobs=lambda repo: 3)
             check("süre dolmadan not yok", not c.comments)
+            c = _AdvFake(tracks=[track_wi()])
+            adv(c, stt("hazırlık", "ci", False, "x", ev=wait), open_jobs=lambda repo: 3)
+            check("CI bekleme notu yalnız kanıt adımı bekletirken", not c.comments)
+            # yorumların hepsi okunamadıysa (sayfa sınırı) karar verilemez → yazılmaz
+            c = _AdvFake(tracks=[track_wi()])
+            c.truncated.add(500)
+            adv(c, stt("test hattı", "prod", False, "build yok", ev=wait, blocked_ev=True), open_jobs=lambda repo: 3)
+            adv(c, st_red, open_jobs=lambda repo: 3)
+            check("yorumlar sınırda kesildi → işaretli yorum yazılmaz",
+                  not [t for w, t in c.comments if w == 500], str(c.comments))
 
             # ── Hata öğe başına; 24 saatte bir yorum ──
             def st_err(cl, repo, lang, **k):
@@ -8107,6 +8214,24 @@ def test_upgrade_advance():
             adv(c, st_err, open_jobs=lambda repo: 3, now=NOW + _td(hours=25))
             check("24 saat sonra yeniden yorumlanır",
                   len([t for w, t in c.comments if w == 500 and "tempo-upgrade-err:" in t]) == 2)
+            # AUTO tur ortasında kapatılırsa sıradaki öğeye geçilmez
+            seen_repos = []
+
+            def st_off(cl, repo, lang, **k):
+                seen_repos.append(repo)
+                flags["CREW_TECHDEBT_UPGRADE_AUTO"] = False
+                return stt("hazırlık", "ci", False, "x")
+            jobs.clear()
+            try:
+                r = adv(_AdvFake(tracks=[track_wi(), track_wi(501, repo="web")]), st_off, open_jobs=lambda repo: 3)
+            finally:
+                flags["CREW_TECHDEBT_UPGRADE_AUTO"] = True
+            check("AUTO kapanınca tur sıradaki izleme işinde durur", seen_repos == ["core"] and len(r) == 1, str(r))
+            import inspect
+            sig = inspect.signature(ut.advance).parameters
+            check("advance imzasında **kw yok; tarama enjeksiyonları adlı",
+                  not any(p.kind == p.VAR_KEYWORD for p in sig.values())
+                  and {"scan_fn", "index", "probe_fn", "last_bump_job", "track_ids"} <= set(sig), str(list(sig)))
 
             # ── tamam → izleme işi kapanır (bir kez) ──
             c = _AdvFake(tracks=[track_wi()])
@@ -8157,8 +8282,8 @@ def test_upgrade_advance():
             if len(ticks) == 1:
                 raise RuntimeError("tur hatası")
             return []
-        t1 = ut.start_poller(lambda: cpoll, interval_min=1, sleep=fsleep, tick=ftick, stop=stop)
-        t2 = ut.start_poller(lambda: cpoll, interval_min=1, sleep=fsleep, tick=ftick, stop=stop)
+        t1 = ut.start_poller(lambda: cpoll, interval_min=1, sleep=fsleep, tick=ftick, stop_event=stop)
+        t2 = ut.start_poller(lambda: cpoll, interval_min=1, sleep=fsleep, tick=ftick, stop_event=stop)
         import time as _time
         for _ in range(100):
             if events:
@@ -8181,9 +8306,10 @@ def test_upgrade_advance():
         steps.put("go")
         t1.join(2)
         check("durdurulunca thread biter", not t1.is_alive())
+        check("start_poller modülün stop()'unu gölgelemez", "stop" not in inspect.signature(ut.start_poller).parameters
+              and callable(ut.stop))
 
         # ── Sunucu: yoklayıcı üç anahtar açıkken başlar, işçiyi sunucu uyandırır ──
-        import inspect
         from agile_sdlc_crew import server
         src = inspect.getsource(server._start_upgrade_poller)
         check("sunucu: start_poller, POLL_MIN, _ensure_worker, üç anahtar",
@@ -10394,6 +10520,31 @@ def test_upgrade_scan_take():
             res2 = upgrade.scan(client, "core", "php", to="8.4", deps=mk(open_fp), **kw)
             check("board'da açık parmak izi atlanır", res2["skipped_counts"].get("açık WI") and not res2["auto"],
                   str(res2["skipped_counts"]))
+
+            # İnsanın 'baktım' diye kapattığı behavior işi aynı yerlerle yeniden açılmaz (spec §5)
+            closed = 1e9 - 10 * 86400
+            done = {f"php_modern:legacy:null_to_internal:{f}": {"wi": 910, "state": "Done", "closed_at": closed}
+                    for f in ("app/L.php", "app/M.php")}
+            leg_d = upgrade.scan(client, "legacy", "php", to="8.4", deps=mk(done), **kw)
+            rows_d = leg_d["auto"] + leg_d["infra"] + leg_d["human"]
+            check("kapalı behavior işi, aynı dosyalar → listelenmez, engellemez, skipped'te",
+                  not [r for r in rows_d if r["rule"] == "null_to_internal"]
+                  and leg_d["blocking"] == leg["blocking"] - 1
+                  and any(s["reason"] == "insan baktı: WI #910" for s in leg_d["skipped"]), str((leg_d["blocking"],
+                                                                                              leg_d["skipped"])))
+            php_hits["legacy"].append({"rule": "null_to_internal", "file": "app/N.php", "line": 6, "text": "strlen(null)"})
+            leg_n = upgrade.scan(client, "legacy", "php", to="8.4", deps=mk(done), **dict(kw, head_sha_fn=lambda r: "s2"))
+            nb = [r for r in leg_n["auto"] + leg_n["infra"] + leg_n["human"] if r["rule"] == "null_to_internal"]
+            check("aynı + yeni dosya → yalnız yeni dosyalı grup, engelleyen",
+                  len(nb) == 1 and nb[0]["files"] == ["app/N.php"] and nb[0]["blocking"]
+                  and nb[0]["fingerprints"] == ["php_modern:legacy:null_to_internal:app/N.php"], str(nb))
+            php_hits["legacy"].pop()
+            done_err = {"php_modern:core:probe:error:app/D.php": {"wi": 911, "state": "Done", "closed_at": closed}}
+            res_e = upgrade.scan(client, "core", "php", to="8.4", deps=mk(done_err), **kw)
+            pe = [r for r in res_e["auto"] if r["rule"] == "probe:error"]
+            check("kapalı error işi, bulgu duruyor → bugünkü gibi yeniden açılır",
+                  len(pe) == 1 and pe[0]["blocking"] and pe[0]["recurring_of"] == 910 + 1
+                  and not any("insan baktı" in s["reason"] for s in res_e["skipped"]), str(pe))
 
             gid = {r["rule"]: r["gid"] for r in res["auto"]}
             out = upgrade.take(client, "core", "php", [gid["implicit_nullable"], gid["probe:error"]], to="8.4", deps=deps, **kw)

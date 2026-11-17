@@ -542,7 +542,7 @@ SCHEMA: list[dict] = [
         "label": "Yükseltme · otomatik ilerletme",
         "type": "bool",
         "default": False,
-        "desc": "Aktif yükseltme izlemesi hazır olduğunda sıradaki adımı insan tıklamadan ilerletir. Kapalıyken her adım kartta elle başlatılır.",
+        "desc": "Aktif yükseltme izlemesi hazır olduğunda sıradaki adımı insan tıklamadan ilerletir. Kapalıyken her adım kartta elle başlatılır. Bu anahtar her turda okunur; ancak yoklayıcı yalnız sunucu başlarken CREW_TECHDEBT, CREW_TECHDEBT_PHP_MODERN ve CREW_TECHDEBT_UPGRADE açıksa başlar — o üç anahtardaki değişiklik sunucu yeniden başlatılınca etkin olur.",
     },
     {
         "key": "CREW_TECHDEBT_UPGRADE_BUMP",

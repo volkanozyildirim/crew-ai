@@ -446,6 +446,25 @@ def _open_bump_jobs(track_id) -> list:
         return list(cur.fetchall())
 
 
+def last_bump_job(track_id, step: str, to: str) -> dict | None:
+    """Bu izleme işi + adım + hedef için EN SON `upgrade_bump` işi ({"id","status"}) ya da None (yalnız okur).
+    Adım ve hedef işin kaydındaki kapsamdan (job_payload) okunur."""
+    from agile_sdlc_crew import db
+    with db.get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, status, job_payload FROM jobs WHERE work_item_id=%s AND job_kind=%s "
+                    "ORDER BY id DESC LIMIT 500", (str(track_id), JOB_KIND))
+        rows = list(cur.fetchall())
+    for r in rows:
+        try:
+            p = json.loads(r.get("job_payload") or "")
+        except ValueError:
+            continue
+        if isinstance(p, dict) and p.get("step") == step and p.get("to") == to:
+            return {"id": r.get("id"), "status": r.get("status")}
+    return None
+
+
 def queue_step(client, repo: str, lang: str, *, to: str | None = None, team: str, deps=None,
                create_job=None, status_fn=None, expect_step: str | None = None, open_jobs=None, **kw) -> dict:
     """Sıradaki sürüm adımını kuyruğa al. Ön koşul yoksa ValueError(next.reason). Kapsam

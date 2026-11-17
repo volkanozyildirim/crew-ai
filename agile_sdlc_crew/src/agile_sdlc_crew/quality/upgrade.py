@@ -1064,11 +1064,20 @@ def _analyse(client, repo: str, lang: str, root: Path, current: str, to: str, cf
     # Araç (Rector / kendi düzelticimiz / satır penceresi) yalnız PHP katalog kurallarına; hedef aracın
     # genel bulgusu (probe:*) ve Go/Python/Next.js yükseltme kuralları pipeline'a ya da insana gider.
     tools = set(pm.tool_rules([r for r in rules if not r.key.startswith("probe:")])) if lang == "php" else set()
+    cur_v = _v(current)
+
+    def keep_closed(rule_key: str) -> str | None:
+        # İnsan işi (behavior / fix_min > şimdiki) bir insan Done'a çekince 'baktım' demektir (spec §5): yerler
+        # aynı kaldıkça grace sonrası yeniden açılmaz, yükseltmeyi de bekletmez. Yeni dosya yine açılır.
+        r = rules_by_key.get(rule_key)
+        if r is not None and (r.breaks == "behavior" or r.fix_min > cur_v):
+            return "insan baktı: WI"
+        return None
     # Süzme upgrade_rules'ta yapıldı; build_groups'a sürüm kapısı uygulanmasın diye "99.0"
     groups, skipped, summary = pm.build_groups(
         {"hits": hits}, rules, "99.0", repo=repo, board_index=deps.board(client), now=deps.now(), cfg=cfg,
         ext_ok=pm._ext_checker(root) if lang == "php" else None, source=modern.LANGS[lang]["source"],
-        tool_rules=tools)
+        tool_rules=tools, keep_closed=keep_closed)
     for k, s in summary.items():
         s["breaks"] = rules_by_key[k].breaks
     _mark_groups(groups, rules_by_key, current, to)

@@ -357,11 +357,15 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
            "blocking": int(sc.get("blocking") or 0), "blockers": list(sc.get("blockers") or []), "open_tasks": [],
            "ci_pins": sc.get("ci_pins"), "prs": {"ci": None, "devops": [], "code": None}, "evidence": None,
            "next": {"step": None, "ready": False, "reason": "", "sites": [], "manual": [], "test_note": "",
-                    "handed_off": None}}
+                    "handed_off": None, "blocked_by_evidence": False}}
 
-    def nxt(step, ready, reason="", sites=(), manual=(), test_note=""):
+    def nxt(step, ready, reason="", sites=(), manual=(), test_note="", blocked_by_evidence=False):
+        # blocked_by_evidence: üretim adımının kanıt DIŞINDAKİ bütün ön koşulları tutuyor, onu bekleten yalnız
+        # test kanıtı (kırmızı / henüz yok). Otomatik ilerletme kırmızı build ve CI bekleme notunu yalnız bu
+        # durumda yazar — hazırlıkta başka PR'ların kırmızı build'leri bildirim üretmez.
         out["next"] = {"step": step, "ready": bool(ready), "reason": reason, "sites": list(sites),
-                       "manual": list(manual), "test_note": test_note, "handed_off": None}
+                       "manual": list(manual), "test_note": test_note, "handed_off": None,
+                       "blocked_by_evidence": bool(blocked_by_evidence)}
         return out
 
     if not cur:
@@ -535,11 +539,12 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         state = (ev or {}).get("state")
         if state == "red":
             return nxt("prod", False, "Test hattı değişikliğinden sonraki build kırmızı — üretim adımı açılmaz. "
-                       + (ev.get("summary") or "")[:1500], dv)
+                       + (ev.get("summary") or "")[:1500], dv, blocked_by_evidence=True)
         if state == "none":
             return nxt("prod", False, "Test hattı hedef sürümde; ondan sonra kuyruğa girmiş tamamlanmış bir "
                                       "build henüz yok" + (" (bekleme süresi doldu — bir PR'ı yeniden tetikleyin)"
-                                                           if ev.get("overdue") else "") + ".", dv)
+                                                           if ev.get("overdue") else "") + ".", dv,
+                       blocked_by_evidence=True)
         if state == "no_pipeline":
             test_note = NO_EVIDENCE
         elif state != "green":
@@ -553,10 +558,11 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
             test_note = WEAK_EVIDENCE
         elif state == "red":
             return nxt("prod", False, f"Test hattı sabitlemesi yok ama '{repo}-test' tanımının en yeni build'i "
-                                      "kırmızı — üretim adımı açılmaz. " + (ev.get("summary") or "")[:1500], dv)
+                                      "kırmızı — üretim adımı açılmaz. " + (ev.get("summary") or "")[:1500], dv,
+                       blocked_by_evidence=True)
         elif state == "none":
             return nxt("prod", False, f"Test hattı sabitlemesi yok; '{repo}-test' tanımı var ama tamamlanmış build'i "
-                                      "yok — üretim adımı açılmaz.", dv)
+                                      "yok — üretim adımı açılmaz.", dv, blocked_by_evidence=True)
         else:
             return nxt("prod", False, f"Test kanıtı okunamadı ({state!r}) — üretim adımı açılmaz.", dv)
     bad = [s for s in dv if not _pushable(s)]
@@ -598,6 +604,7 @@ def watch_view(client, repo: str, lang: str, *, to: str | None = None, deps=None
 # böylece 30 dakikada bir koşan tur kendini tekrarlamaz.
 
 RED_MARK = "tempo-upgrade-red:"
+RED_TRACK_MARK = "tempo-upgrade-red-track:"
 WAIT_MARK = "tempo-upgrade-ci-wait:"
 ERR_MARK = "tempo-upgrade-err:"
 ERR_REPEAT_H = 24
@@ -618,23 +625,34 @@ def _has_mark(text: str, mark: str) -> bool:
     return re.search(re.escape(mark) + r"(?![\w.:+-])", text or "") is not None
 
 
+COMMENTS_MAX = 1000
+
+
 class _Comments:
-    """İzleme işinin yorumları — öğe başına en çok bir kez okunur."""
+    """Bir WI'nin yorumları — en çok bir kez, BÜTÜN sayfalarıyla okunur (uzun yaşayan izleme işinde işaret
+    ilk sayfanın dışında kalabilir). Sınır aşılırsa okuma eksiktir: işaret 'var' sayılır, yorum yazılmaz."""
 
     def __init__(self, client, wid: int):
-        self.client, self.wid, self._rows = client, int(wid), None
+        self.client, self.wid, self._rows, self.complete = client, int(wid), None, True
 
     def rows(self) -> list[tuple[str, object]]:
         from agile_sdlc_crew.quality import upgrade_bump as bump
         if self._rows is None:
-            self._rows = [(_plain(c.get("metin")), bump._ts(c.get("tarih")))
-                          for c in self.client.get_work_item_comments(self.wid) or []]
+            reader = getattr(self.client, "get_work_item_comments_all", None)
+            if reader is not None:
+                raw, self.complete = reader(self.wid, max_items=COMMENTS_MAX)
+            else:
+                raw = self.client.get_work_item_comments(self.wid) or []
+            self._rows = [(_plain(c.get("metin")), bump._ts(c.get("tarih"))) for c in raw or []]
         return self._rows
 
     def has(self, mark: str, since=None) -> bool:
         """İşaret var mı; `since` verilirse yalnız o andan sonraki yorumlar (zamanı okunamayan yorum yeni sayılır —
-        şüphede tekrar yazılmaz)."""
-        return any(_has_mark(t, mark) and (since is None or ts is None or ts >= since) for t, ts in self.rows())
+        şüphede tekrar yazılmaz). Yorumlar eksik okunduysa karar verilemez → True."""
+        rows = self.rows()
+        if not self.complete:
+            return True
+        return any(_has_mark(t, mark) and (since is None or ts is None or ts >= since) for t, ts in rows)
 
     def add(self, text_html: str) -> None:
         self.client.add_comment(self.wid, text_html + SIGNATURE)
@@ -676,7 +694,11 @@ def _auto_take(client, tr: dict, sc: dict, res: dict, *, team: str, deps, open_j
     if not auto and not human:
         return
     max_take = max(1, int(deps.cfg().get("max_take", 8)))
-    max_open = max(0, int(pc.get("CREW_TECHDEBT_UPGRADE_MAX_OPEN") or 3))
+    mo = pc.get("CREW_TECHDEBT_UPGRADE_MAX_OPEN")
+    max_open = 3 if mo is None or mo == "" else max(0, int(mo))
+    if max_open == 0:
+        _note(res, "CREW_TECHDEBT_UPGRADE_MAX_OPEN 0 — otomatik alım yapılmadı")
+        return
     n_open = int(open_jobs(repo)) if auto else 0
     n_auto = min(max(0, max_open - n_open), max_take)
     ids = [r["gid"] for r in auto[:n_auto]] + [r["gid"] for r in human][:max_take - n_auto]
@@ -705,8 +727,10 @@ def _auto_take(client, tr: dict, sc: dict, res: dict, *, team: str, deps, open_j
 
 
 def _red_build(client, tr: dict, st: dict, ev: dict, comments: _Comments, *, team: str, deps) -> str:
-    """Kırmızı build (spec §6): build başına BİR kez needs-human Task + izleme işine özet ve bağlantı.
-    Task açıklamasındaki ve yorumdaki `tempo-upgrade-red:<build>` işareti tekrarı önler."""
+    """Kırmızı build (spec §6), yalnız üretim adımını O bekletirken çağrılır. İzleme işi başına en çok BİR açık
+    needs-human Task (`tempo-upgrade-red-track: <izleme id>` satırı): açıksa yeni build ona bir yorum olur,
+    yoksa yeni Task açılır. İzleme işine build başına bir yorum (`tempo-upgrade-red:<build>`); o yorum varsa
+    bu build için her şey yapılmıştır."""
     from agile_sdlc_crew.quality import modern, render
     b = ev.get("build") or {}
     bid = str(b.get("id") or "").strip()
@@ -714,16 +738,32 @@ def _red_build(client, tr: dict, st: dict, ev: dict, comments: _Comments, *, tea
         return "Kırmızı build'in numarası okunamadı — bildirim yazılmadı"
     repo, lang, to, tid = tr["repo"], tr["lang"], tr["to"], int(tr["id"])
     mark = RED_MARK + bid
+    if comments.has(mark):          # eksik okunduysa da True: karar verilemez, yazılmaz
+        return f"Kırmızı build #{bid} zaten bildirildi"
+    track_mark = f"{RED_TRACK_MARK} {tid}"
     url = str(b.get("url") or "")
     summary = render.mask_secrets(str(ev.get("summary") or ""))[:3000]
     label = modern.LANGS[lang]["label"]
     cur = st.get("current") or "?"
     link = f"<a href=\"{_esc(url)}\">#{_esc(bid)}</a>" if url else f"#{_esc(bid)}"
     q = ("SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project "
-         f"AND [System.Tags] CONTAINS '{upgrade.TAG}' AND [System.Description] CONTAINS '{_q(mark)}'")
-    task_id = next((int(w["id"]) for w in client.query_work_items(q) or []
-                    if _has_mark(_plain((w.get("fields") or {}).get("System.Description")), mark)), None)
+         f"AND [System.Tags] CONTAINS '{upgrade.TAG}' AND [System.Description] CONTAINS '{_q(track_mark)}'")
+    mine = [w for w in client.query_work_items(q) or []
+            if _has_mark(_plain((w.get("fields") or {}).get("System.Description")), track_mark)]
+    open_ = sorted((w for w in mine if _is_open(w.get("fields") or {})), key=lambda w: int(w["id"]))
     wrote = []
+    task_id = None
+    if open_:
+        task_id = int(open_[0]["id"])
+        tc = _Comments(client, task_id)
+        if not _has_mark(_plain(open_[0]["fields"].get("System.Description")), mark) and not tc.has(mark):
+            tc.add(f"<p><b>Yeni kırmızı build</b> {link} — üretim adımı hâlâ açılmıyor.</p>"
+                   f"<pre>{_esc(summary[:1500])}</pre><p><small>{_esc(mark)}</small></p>")
+            wrote.append(f"açık insan işi #{task_id}'e yorum")
+    elif any(_has_mark(_plain((w.get("fields") or {}).get("System.Description")), mark) for w in mine):
+        # bu build için açılmış Task bir insan tarafından kapatılmış: aynı build için yeniden açılmaz
+        task_id = next(int(w["id"]) for w in mine
+                       if _has_mark(_plain((w.get("fields") or {}).get("System.Description")), mark))
     if task_id is None:
         sprint, _mode = _auto_sprint(client, team)
         fields = {
@@ -733,8 +773,9 @@ def _red_build(client, tr: dict, st: dict, ev: dict, comments: _Comments, *, tea
                 "sürümdeyken koşan build kırmızı — üretim adımı açılmaz.</p>"
                 f"<p>Build: {link} · İzleme işi: #{tid}</p><pre>{_esc(summary)}</pre>"
                 "<p>Hata yükseltmeden kaynaklanıyorsa düzeltin; ilgisizse (kararsız test) build'i yeniden tetikleyin. "
-                "Yeşil build gelince üretim adımı açılır.</p>"
-                f"<p><small>{_esc(mark)}</small></p>" + SIGNATURE),
+                "Yeşil build gelince üretim adımı açılır. Bu Task açıkken sonraki kırmızı build'ler buraya yorum "
+                "olarak düşer.</p>"
+                f"<p><small>{_esc(track_mark)}</small></p><p><small>{_esc(mark)}</small></p>" + SIGNATURE),
             "System.Tags": "; ".join([render.TAG, render.TECHDEBT_TAG, render.TECHDEBT_PUBLIC_TAG,
                                       render.src_tag(modern.LANGS[lang]["source"]), upgrade.TAG, render.HUMAN_TAG]),
             "System.IterationPath": sprint or _root_iteration(client, team),
@@ -747,12 +788,11 @@ def _red_build(client, tr: dict, st: dict, ev: dict, comments: _Comments, *, tea
         task_id = int(client.create_work_item("Task", fields)["id"])
         wrote.append(f"insan işi #{task_id}")
         log.info(f"⬆️ upgrade oto: #{tid} ({lang}:{repo}) kırmızı build #{bid} → needs-human Task #{task_id}")
-    if not comments.has(mark):
-        comments.add(f"<p><b>Test build'i kırmızı</b> — {_esc(repo)} {_esc(cur)} → {_esc(to)}: üretim adımı açılmaz.</p>"
-                     f"<p>Build: {link} · İnsan işi: #{task_id}</p><pre>{_esc(summary[:1500])}</pre>"
-                     f"<p><small>{_esc(mark)}</small></p>")
-        wrote.append("izleme işine yorum")
-    return f"Kırmızı build #{bid}: " + (", ".join(wrote) if wrote else "zaten bildirildi")
+    comments.add(f"<p><b>Test build'i kırmızı</b> — {_esc(repo)} {_esc(cur)} → {_esc(to)}: üretim adımı açılmaz.</p>"
+                 f"<p>Build: {link} · İnsan işi: #{task_id}</p><pre>{_esc(summary[:1500])}</pre>"
+                 f"<p><small>{_esc(mark)}</small></p>")
+    wrote.append("izleme işine yorum")
+    return f"Kırmızı build #{bid}: " + ", ".join(wrote)
 
 
 def _ci_wait(client, tr: dict, ev: dict, comments: _Comments) -> str:
@@ -787,8 +827,11 @@ def _error_comment(client, tid: int, msg: str, now) -> None:
         log.warning(f"⚠️ upgrade oto: #{tid} hata yorumu yazılamadı: {str(e)[:200]}")
 
 
+_RETRY_FREE = (None, "completed")   # son adım işi yok ya da tamamlandı → otomatik kuyruğa alınabilir
+
+
 def _advance_one(client, tr: dict, res: dict, *, team: str, deps, create_job, open_jobs, bump_jobs, status_fn,
-                 take_fn, kw: dict) -> None:
+                 take_fn, last_bump_job, kw: dict) -> None:
     from agile_sdlc_crew.quality import upgrade_bump as bump
     repo, lang, to, tid = tr["repo"], tr["lang"], tr["to"], int(tr["id"])
     sc = _fresh_scan(client, repo, lang, to, deps, kw)
@@ -801,12 +844,25 @@ def _advance_one(client, tr: dict, res: dict, *, team: str, deps, create_job, op
     _auto_take(client, tr, sc, res, team=team, deps=deps,
                open_jobs=open_jobs or (lambda r: _open_work(client, r, lang)), take_fn=take_fn, kw=kw)
     ev = st.get("evidence") or {}
-    comments = _Comments(client, tid)
-    if ev.get("state") == "red":
-        _note(res, _red_build(client, tr, st, ev, comments, team=team, deps=deps))
-    elif ev.get("state") == "none" and ev.get("overdue"):
-        _note(res, _ci_wait(client, tr, ev, comments))
+    # Bildirim yalnız kanıt sıradaki adımı (prod) bekletirken: hazırlık / engelli aşamasında reponun herhangi bir
+    # PR'ının kırmızı build'i yükseltmeyle ilgisizdir (her yeni build id'si yeni bir Task olurdu).
+    if nx.get("step") == "prod" and nx.get("blocked_by_evidence"):
+        comments = _Comments(client, tid)
+        if ev.get("state") == "red":
+            _note(res, _red_build(client, tr, st, ev, comments, team=team, deps=deps))
+        elif ev.get("state") == "none" and ev.get("overdue"):
+            _note(res, _ci_wait(client, tr, ev, comments))
     if nx.get("step") and nx.get("ready"):
+        # Son çalışması başarısız olan adım otomatik olarak yeniden açılmaz (her turda bir başarısız iş + yorum
+        # olurdu); yeniden deneme karttaki düğmenin, insanın.
+        last = last_bump_job(tid, nx["step"], to)
+        if (last or {}).get("status") not in _RETRY_FREE:
+            label = STEP_LABEL.get(nx["step"], nx["step"])
+            st_ = last.get("status")
+            why = ("kuyrukta / çalışıyor" if st_ in ("queued", "running")
+                   else f"son çalışması başarısız ({st_}) — adım insanın yeniden denemesini bekliyor")
+            _note(res, f"{label} adımı otomatik kuyruğa alınmadı: iş #{last.get('id')} {why}")
+            return
         # Tek adım işi; queue_step durumu yeniden hesaplar (bu turda açılan işler dahil) ve açık adım işi
         # varken reddeder — buradan atlanamaz.
         try:
@@ -834,16 +890,24 @@ def _advance_one(client, tr: dict, res: dict, *, team: str, deps, create_job, op
         log.info(f"⬆️ upgrade oto: #{tid} ({lang}:{repo}:{to}) tamamlandı, izleme işi kapatıldı")
 
 
-def advance(client, *, team: str, deps=None, create_job=None, open_jobs=None, bump_jobs=None, status_fn=None,
-            take_fn=None, now=None, track_ids=None, **kw) -> list[dict]:
+def advance(client, *, team: str, track_ids=None, deps=None, create_job=None, open_jobs=None, bump_jobs=None,
+            last_bump_job=None, status_fn=None, take_fn=None, now=None, index=None, read=None, yml_files=None,
+            app_map_cache: dict | None = None, scan_fn=None, head_sha_fn=None, probe_fn=None) -> list[dict]:
     """Takımın açık her izleme işi için bir tur (spec §7): otomatik alım (tavanlı, sprint
-    CREW_TECHDEBT_UPGRADE_SPRINT), kırmızı build / CI bekleme bildirimi (bir kez), hazırsa tek sürüm adımı,
-    `tamam`da kapanış. Bir öğenin hatası notuna yazılır, sıradakine geçilir.
-    `open_jobs(repo) -> int`: repodaki açık otomatik iş sayısı (varsayılan board); `bump_jobs(track_id)`:
-    queue_step'in açık adım işi kontrolü (varsayılan jobs tablosu). `track_ids`: yalnız bu izleme işleri.
+    CREW_TECHDEBT_UPGRADE_SPRINT), kanıt sıradaki adımı bekletiyorsa kırmızı build / CI bekleme bildirimi (bir
+    kez), hazırsa tek sürüm adımı (son çalışması başarısızsa değil), `tamam`da kapanış. Bir öğenin hatası notuna
+    yazılır, sıradakine geçilir; CREW_TECHDEBT_UPGRADE_AUTO kapanırsa sıradaki öğeye geçilmez.
+    `track_ids`: yalnız bu izleme işleri (yoklayıcı takımları gruplarken her işi bir kez verir).
+    Enjeksiyon (testler): `open_jobs(repo) -> int` repodaki açık otomatik iş sayısı (varsayılan board);
+    `bump_jobs(track_id)` queue_step'in açık adım işi kontrolü; `last_bump_job(track_id, step, to)` son adım işi
+    (ikisinin varsayılanı jobs tablosu, yalnız okur); tarama/plan enjeksiyonları upgrade.scan'deki gibi.
     -> [{"id","repo","lang","to","took","queued_step","job_id","queued","closed","note"}]"""
     from datetime import datetime, timezone
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import upgrade_bump as bump
     from agile_sdlc_crew.quality.render import mask_secrets
+    kw = {k: v for k, v in dict(index=index, read=read, yml_files=yml_files, app_map_cache=app_map_cache,
+                                scan_fn=scan_fn, head_sha_fn=head_sha_fn, probe_fn=probe_fn).items() if v is not None}
     deps = deps or pm.default_deps()
     now = now or datetime.now(timezone.utc)
     items = tracked(client, team)
@@ -852,12 +916,16 @@ def advance(client, *, team: str, deps=None, create_job=None, open_jobs=None, bu
         items = [t for t in items if int(t["id"]) in want]
     out = []
     for tr in items:
+        if not pc.get("CREW_TECHDEBT_UPGRADE_AUTO"):
+            log.info("⬆️ upgrade oto: CREW_TECHDEBT_UPGRADE_AUTO kapatıldı — tur durdu")
+            break
         res = {"id": tr["id"], "repo": tr["repo"], "lang": tr["lang"], "to": tr["to"], "took": [],
                "queued_step": None, "job_id": None, "queued": False, "closed": False, "note": ""}
         try:
             _check(tr["repo"], tr["lang"])
             _advance_one(client, tr, res, team=team, deps=deps, create_job=create_job, open_jobs=open_jobs,
-                         bump_jobs=bump_jobs, status_fn=status_fn or status, take_fn=take_fn or upgrade.take, kw=kw)
+                         bump_jobs=bump_jobs, status_fn=status_fn or status, take_fn=take_fn or upgrade.take,
+                         last_bump_job=last_bump_job or bump.last_bump_job, kw=kw)
         except Exception as e:  # noqa: BLE001 — bir izleme işinin hatası diğerlerini durdurmaz
             msg = mask_secrets(str(e) or type(e).__name__)[:500]
             log.warning(f"⚠️ upgrade oto: #{tr['id']} ({tr['lang']}:{tr['repo']}) hata: {msg}")
@@ -913,7 +981,8 @@ def _tick(get_client, on_queued=None, *, advance_fn=None) -> list[dict]:
     return out
 
 
-def start_poller(get_client, *, interval_min, on_queued=None, sleep=None, tick=None, stop=None) -> threading.Thread:
+def start_poller(get_client, *, interval_min, on_queued=None, sleep=None, tick=None,
+                 stop_event: threading.Event | None = None) -> threading.Thread:
     """Süreç başına TEK daemon thread (ikinci çağrı aynısını döner). İlk tur bir aralık sonra — sunucu yeniden
     başlar başlamaz iş yapılmaz. `interval_min` sayı ya da her turda okunan çağrılabilir; en az 5 dakika.
     `on_queued`: kuyruğa iş girdiyse çağrılır (sunucunun `_ensure_worker`'ı — quality/ işçiyi bilmez).
@@ -925,7 +994,7 @@ def start_poller(get_client, *, interval_min, on_queued=None, sleep=None, tick=N
             return _POLLER
         sleep = sleep or time.sleep
         tick = tick or _tick
-        stop = stop or threading.Event()
+        stop_event = stop_event or threading.Event()
 
         def minutes() -> int:
             try:
@@ -935,9 +1004,9 @@ def start_poller(get_client, *, interval_min, on_queued=None, sleep=None, tick=N
                 return 30
 
         def loop():
-            while not stop.is_set():
+            while not stop_event.is_set():
                 sleep(minutes() * 60)
-                if stop.is_set():
+                if stop_event.is_set():
                     break
                 try:
                     tick(get_client, on_queued=on_queued)

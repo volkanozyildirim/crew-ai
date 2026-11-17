@@ -505,9 +505,12 @@ def pack_modern(units: list, *, source: str, tool_fix: bool = False, tool_rules:
 
 def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: str, board_index: dict, now: float,
                  cfg: dict, ext_ok=None, source: str = SOURCE, tool_fix: bool = False,
-                 tool_rules: set | frozenset = frozenset()) -> tuple[list, list[dict], dict]:
+                 tool_rules: set | frozenset = frozenset(), keep_closed=None) -> tuple[list, list[dict], dict]:
     """(gruplar, atlananlar, kural özeti). Yalnız hedef sürümün sunduğu kurallar; dedup board'dan;
-    dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez."""
+    dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez.
+    `keep_closed(rule_key) -> str | None`: kapanmış (Done) işi olan birim — dedup 'recurring' dediğinde —
+    yeniden açılmasın mı; dönen metin atlama nedenidir (`<neden> #<wi>`). Paketlemeden ÖNCE birim
+    düzeyinde: aynı kuralın yeni dosyası yine yalnız kendi parmak iziyle gruba girer."""
     from agile_sdlc_crew.quality import dedup, rank
     rules_by_key = {r.key: r for r in applicable(rules, version)}
     units, summary = _units(scan.get("hits") or [], rules_by_key, repo, source)
@@ -523,6 +526,10 @@ def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: st
             skipped.append({"fingerprint": fp, "reason": f"iptal edilmiş WI #{prev}"})
             continue
         if v == "recurring":
+            why = keep_closed(u.findings[0].rule) if keep_closed is not None else None
+            if why:
+                skipped.append({"fingerprint": fp, "reason": f"{why} #{prev}"})
+                continue
             u.recurring_of = prev
         # "Otomatik" yalnız KOD düzenlemesiyle çözülen iş: eklenti gibi kod dışı ön koşul
         # repoda kanıtlanamıyorsa iş insana + DevOps'a gider (kullanıcı kararı 2026-10-30).

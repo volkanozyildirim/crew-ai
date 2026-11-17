@@ -164,6 +164,30 @@ class AzureDevOpsClient:
             for c in comments
         ]
 
+    def get_work_item_comments_all(self, work_item_id: int, max_items: int = 1000) -> tuple[list[dict], bool]:
+        """Bütün yorum sayfaları (continuationToken ile), get_work_item_comments ile aynı satır biçimi.
+        Döner: (yorumlar, tamam). max_items aşılırsa okuma durur ve tamam=False — işaret arayan çağıran
+        'bilinmiyor' sayar (yorumu tekrar yazmaz)."""
+        url = f"{self._base_api_url}/wit/workitems/{work_item_id}/comments"
+        out: list[dict] = []
+        token = None
+        while True:
+            params = {"api-version": "7.1-preview.4", "$top": 200}
+            if token:
+                params["continuationToken"] = token
+            resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            page = data.get("comments", []) or []
+            out += [{"id": c.get("id"), "yazar": c.get("createdBy", {}).get("displayName", ""),
+                     "tarih": c.get("createdDate", ""), "metin": c.get("text", "")}
+                    for c in page]
+            token = data.get("continuationToken")
+            if not token:
+                return out, True
+            if not page or len(out) >= max_items:   # boş sayfa + belirteç: döngüye girme
+                return out[:max_items], False
+
     def add_comment(self, work_item_id: int, text: str) -> dict:
         url = f"{self._base_api_url}/wit/workitems/{work_item_id}/comments"
         params = {"api-version": "7.1-preview.4"}
