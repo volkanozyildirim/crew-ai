@@ -109,6 +109,11 @@ Ayrıca geçici bir YAML ile: `breaks: saçma` → `load_rules` `ValueError`; `f
 | `removed_81` | 8.1 | deprecation | true | `strftime`, `gmstrftime`, `date_sunrise`, `date_sunset`, `mhash`, `mhash_count`, `mhash_get_block_size`, `mhash_get_hash_name`, `mhash_keygen_s2k`, `odbc_result_all` |
 | `serializable_only` | 8.1 | deprecation | false | `implements … Serializable` ve sınıfta `__serialize` yok |
 | `moved_to_pecl_84` | 8.4 | error | false | `imap_*`, `pspell_*`, `oci_*` çağrısı; `requires_if` ile eklenti (`imap`, `pspell`, `oci8`) |
+| `noncanonical_casts_85` | 8.5 | deprecation | true | `(boolean)`, `(integer)`, `(double)`, `(binary)` cast token'ları → `(bool)`, `(int)`, `(float)`, `(string)` |
+| `backtick_exec_85` | 8.5 | deprecation | true | backtick operatörü → `shell_exec()` |
+| `deprecated_85` | 8.5 | deprecation | false | 8.5'te kullanımdan kalkan fonksiyon / sabitler — liste uygulama sırasında php.net `migration85.deprecated` sayfasından alınır, ezberden yazılmaz |
+
+8.5 kuralları kullanıcının asıl hedefi (8.2 → 8.5) için eklenir. Listeyi yazmadan önce `https://www.php.net/manual/en/migration85.php` (incompatible + deprecated) okunur; orada olup tabloda olmayan ve token'la güvenilir bulunabilen her madde aynı biçimde kural olur, bulunamayanlar `kind: report`.
 
 `line_local: false`: `legacy_autoload`, `php4_constructor`, `serializable_only`. `fix_min` hepsinde varsayılan (`7.0`), `removed_casts` dahil — karşılıkları 7.x'te çalışır.
 
