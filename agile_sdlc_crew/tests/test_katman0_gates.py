@@ -7780,6 +7780,47 @@ def test_upgrade_probe_and_blockers():
             check("python: temiz dosya hit'siz", not [h for h in hits if h["file"] == "c.py"])
             hits2, _ = upgrade.probe(pr, "python", "3.9", ver, files=["../etc/passwd", "c.py"])
             check("python: kök dışı yol reddedilir", hits2 == [])
+            # Next.js peer engelleri
+            nx = base / "nx"
+            nx.mkdir()
+            (nx / "package.json").write_text(_json.dumps({"dependencies": {"next": "^14.0.0", "react": "17.0.2",
+                                                                          "react-dom": "^17.0.2"}}))
+            bl = upgrade.blockers(nx, "nextjs", "15.0")
+            check("nextjs: react 17 → her paket için peer engeli",
+                  sorted(b["name"] for b in bl) == ["react", "react-dom"] and all(b["kind"] == "peer" for b in bl)
+                  and bl[0]["detail"] == "Next 15.0 en az react 18.2 ister", str(bl))
+            (nx / "package.json").write_text(_json.dumps({"dependencies": {"next": "^14.0.0", "react": "^18.3.0"}}))
+            check("nextjs: react ^18.3.0 engel değil", upgrade.blockers(nx, "nextjs", "15.0") == [])
+            (nx / "package.json").write_text(_json.dumps({"dependencies": {"react": "latest", "react-dom": "workspace:*"}}))
+            check("nextjs: anlaşılmayan sürüm engel değil; package.json yoksa boş",
+                  upgrade.blockers(nx, "nextjs", "15.0") == [] and upgrade.blockers(base / "yok", "nextjs", "15.0") == [])
+            # Go probe
+            import subprocess as sp
+            if shutil.which("go") and shutil.which("git") and upgrade._tool_ok("go", "1.24"):
+                def mk(name, gomod, src):
+                    r = base / name
+                    r.mkdir()
+                    (r / "go.mod").write_text(gomod)
+                    (r / "main.go").write_text(src)
+                    for a in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "i"]):
+                        sp.run(["git", *a], cwd=r, check=True, capture_output=True)
+                    return r
+                bad = mk("gobad", "module m\n\ngo 1.22\n", "package main\n\nfunc main() {\n\t_ = undefinedThing\n}\n")
+                before = (bad / "go.mod").read_bytes()
+                hits, st = upgrade.probe(bad, "go", "1.22", "1.24")
+                check("go: derleme hatası tek probe:error (vet kopyası yok)", st["ran"] is True
+                      and [(h["rule"], h["file"], h["line"]) for h in hits] == [("probe:error", "main.go", 4)], str((hits, st)))
+                wl = sp.run(["git", "worktree", "list"], cwd=bad, capture_output=True, text=True).stdout.strip().splitlines()
+                check("go: geçici worktree kalmadı, go.mod değişmedi", len(wl) == 1 and (bad / "go.mod").read_bytes() == before
+                      and not [p for p in Path(tempfile.gettempdir()).glob("tempo-gprobe-*")], str(wl))
+                ok = mk("gook", "module m\n\ngo 1.22\n", "package main\n\nfunc main() {}\n")
+                hits, st = upgrade.probe(ok, "go", "1.22", "1.24")
+                check("go: temiz modül → ran=True, hit yok", st["ran"] is True and hits == [], str((hits, st)))
+                broken = mk("gobroken", "module m\n\ngo 1.22\n\nfoo bar\n", "package main\n\nfunc main() {}\n")
+                hits, st = upgrade.probe(broken, "go", "1.22", "1.24")
+                check("go: build hiçbir yere varmadı → ran=False + neden", st["ran"] is False and hits == [] and st["reason"], str((hits, st)))
+            else:
+                skip("go probe", "yerelde go/git yok ya da hedeften eski")
         finally:
             for k, v in old.items():
                 if v is None:

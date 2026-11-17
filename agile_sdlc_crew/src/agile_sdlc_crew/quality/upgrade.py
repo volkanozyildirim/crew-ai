@@ -527,8 +527,12 @@ def _probe_go(root: Path, to: str, timeout: int) -> tuple[list[dict], dict]:
                     if _inside(wt, rel):
                         hits.append(_hit(rule, rel, int(m.group(2)), _src_line(wt, rel, int(m.group(2))), m.group(3)))
                         found += 1
-            if rc != 0 and not found and not reason:
-                reason = f"{cmd[1]} başarısız (dosya/satır yok): {out[:200]}"
+            if rc != 0 and not found:
+                # Konumsuz hata (ör. go.mod güncellenmeli): derleme bir yere varmadı → doğrulanamadı, temiz değil.
+                return [], {"ran": False, "tool": "go",
+                            "reason": f"doğrulanamadı: {cmd[1]} konumsuz hata verdi: {out[:200]}"}
+            if rc != 0 and rule == "probe:error":
+                break  # vet, derleme hatalarını `vet:` önekiyle tekrarlar; hatalı derlemede çalıştırılmaz
     finally:
         verify._run([*git, "worktree", "remove", "--force", str(wt)], root, 60)
         verify._run([*git, "worktree", "prune"], root, 60)
@@ -693,10 +697,38 @@ def php_constraint_allows(constraint: str, version: str) -> bool:
         return True
 
 
+def _nextjs_peer_blockers(root: Path, to: str) -> list[dict]:
+    """react / react-dom bildirilen sürümü, hedef Next majörünün istediği en düşük react'in altındaysa."""
+    try:
+        data = yaml.safe_load(TARGETS_PATH.read_text(encoding="utf-8")) or {}
+        minimum = str((data.get("nextjs_peer_react") or {}).get(to) or "")
+        pkg = json.loads((root / "package.json").read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, yaml.YAMLError, AttributeError):
+        return []
+    if not _VER_RE.match(minimum) or not isinstance(pkg, dict):
+        return []
+    deps = {}
+    for k in ("devDependencies", "dependencies"):
+        if isinstance(pkg.get(k), dict):
+            deps.update(pkg[k])
+    out = []
+    for name in ("react", "react-dom"):
+        declared = deps.get(name)
+        m = re.search(r"\d+\.\d+", declared) if isinstance(declared, str) else None
+        if m and _v(m.group(0)) < _v(minimum):
+            out.append({"kind": "peer", "name": name, "constraint": declared,
+                        "detail": f"Next {to} en az react {minimum} ister"})
+    return out
+
+
 def blockers(root: Path, lang: str, to: str) -> list[dict]:
     """Yükseltmeyi engelleyen bağımlılıklar (iş açmaz, hazır olmayı bekletir).
     PHP: `composer.lock` paketinin `require.php` kısıtı hedefi dışlıyorsa."""
-    if lang != "php" or not isinstance(to, str) or not _VER_RE.match(to):
+    if not isinstance(to, str) or not _VER_RE.match(to):
+        return []
+    if lang == "nextjs":
+        return _nextjs_peer_blockers(Path(root), to)
+    if lang != "php":
         return []
     try:
         doc = json.loads((Path(root) / "composer.lock").read_text(encoding="utf-8")) or {}
