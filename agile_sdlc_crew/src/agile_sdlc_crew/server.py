@@ -156,6 +156,15 @@ class TechdebtModernTakeRequest(BaseModel):
     sprint: str = ""  # sprint yolu; boşsa aktif sprint
 
 
+class TechdebtUpgradeTakeRequest(BaseModel):
+    repo: str
+    group_ids: list[str] = []
+    team: str = ""
+    lang: str = "php"
+    to: str = ""  # hedef sürüm; boşsa varsayılan
+    sprint: str = ""
+
+
 class QualityTakeRequest(BaseModel):
     source: str
     sp: int = 10
@@ -2144,6 +2153,89 @@ async def techdebt_modern_take(req: TechdebtModernTakeRequest):
     try:
         res = await asyncio.to_thread(_md.take, AzureDevOpsClient(), req.repo.strip(), (req.lang or "php").strip(),
                                       req.group_ids, team=req.team, sprint=(req.sprint or "").strip())
+        if any(t.get("job_id") for t in res.get("tasks") or []):
+            _ensure_worker()
+        return JSONResponse(res, status_code=201 if res.get("story") else 200)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+def _upgrade_off():
+    from agile_sdlc_crew import pipeline_config as _pc
+    bad = _modern_off()
+    if bad:
+        return bad
+    if not _pc.get("CREW_TECHDEBT_UPGRADE"):
+        return JSONResponse({"error": "Sürüm yükseltme kapalı (CREW_TECHDEBT_UPGRADE)"}, status_code=403)
+    return None
+
+
+@app.get("/api/techdebt/upgrade/repos")
+async def techdebt_upgrade_repos():
+    """Yerel repolar × dil: şimdiki ve hedef sürüm (tarama / probe yok)."""
+    from agile_sdlc_crew.quality import modern as _md
+    from agile_sdlc_crew.quality import upgrade as _up
+    bad = _upgrade_off()
+    if bad:
+        return bad
+
+    def _build():
+        client = AzureDevOpsClient()
+        res = _md.repos(client)
+        try:
+            index = _md.build_index(client)
+        except Exception:  # noqa: BLE001
+            index = {}
+        items = []
+        for it in res.get("items", []):
+            cur = it.get("version")
+            lang = it.get("lang") or "php"
+            tgt = _up.default_target(lang, cur, index) if cur else None
+            items.append({"repo": it["repo"], "lang": lang, "label": it.get("label") or lang,
+                          "current": cur, "target": tgt, "up_to_date": bool(cur and not tgt),
+                          "stage": "hazırlık"})
+        return items
+
+    try:
+        items = await asyncio.to_thread(_build)
+        return JSONResponse({"enabled": True, "items": items})
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.get("/api/techdebt/upgrade/scan")
+async def techdebt_upgrade_scan(repo: str = "", team: str = "", force: bool = False, lang: str = "php",
+                                to: str = ""):
+    """Hedef sürüme geçince kırılan / davranışı değişen / kullanımdan kalkan yerler. Yazma yok."""
+    from agile_sdlc_crew.quality import upgrade as _up
+    bad = _upgrade_off()
+    if bad:
+        return bad
+    if not repo.strip():
+        return JSONResponse({"error": "repo seçin"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_up.scan, AzureDevOpsClient(), repo.strip(), (lang or "php").strip(),
+                                      to=(to or "").strip() or None, team=team, force=bool(force))
+        return JSONResponse(res)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.post("/api/techdebt/upgrade/take")
+async def techdebt_upgrade_take(req: TechdebtUpgradeTakeRequest):
+    """Seçilen yükseltme gruplarını Task olarak aç; otomatikleri kuyruğa al."""
+    from agile_sdlc_crew.quality import upgrade as _up
+    bad = _upgrade_off()
+    if bad:
+        return bad
+    if not req.repo.strip():
+        return JSONResponse({"error": "repo seçin"}, status_code=400)
+    if not req.group_ids:
+        return JSONResponse({"error": "Seçili öneri yok"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_up.take, AzureDevOpsClient(), req.repo.strip(), (req.lang or "php").strip(),
+                                      req.group_ids, to=(req.to or "").strip() or None, team=req.team,
+                                      sprint=(req.sprint or "").strip())
         if any(t.get("job_id") for t in res.get("tasks") or []):
             _ensure_worker()
         return JSONResponse(res, status_code=201 if res.get("story") else 200)

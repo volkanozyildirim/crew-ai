@@ -628,13 +628,16 @@ header {
       </div>
       <div class="card" id="tdModernCard" style="display:none;flex-direction:column;overflow:hidden">
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Modernleştirme</span>
+          <span id="tdmModeSw" style="display:none;gap:4px"><button class="sm-btn small" id="tdmModeMod" onclick="_tdmSetMode('mod')">Modernleştirme</button><button class="sm-btn ghost small" id="tdmModeUp" onclick="_tdmSetMode('up')">Sürüm yükseltme</button></span>
           <span class="chip dim" id="tdmTarget" title="Hedef sürüm: repo dilinin üretimdeki sürümü"></span><span style="flex:1"></span>
           <select class="sprint-select" id="tdmRepo" title="Yerel repolar (PHP, Go, Python, Next.js)" onchange="_tdmRepoChanged()"><option>Yükleniyor…</option></select>
+          <select class="sprint-select" id="tdmTo" style="display:none" title="Yükseltme hedef sürümü" onchange="_upToChanged()"></select>
           <button class="sm-btn ghost small" id="tdmRescan" onclick="modernScan(true)" title="Önbelleği atla, yeniden tara">Yeniden tara</button>
           <select class="sprint-select" id="tdmSprint" title="İşlerin açılacağı sprint (varsayılan: aktif sprint)"><option value="">Aktif sprint</option></select>
           <button class="sm-btn small" id="tdmTake" onclick="modernTake()">Seçilenleri iş olarak aç</button>
         </div>
         <div id="tdmAdoption" style="padding:0 14px;font-size:12px;color:var(--text-dim)"></div>
+        <div id="tdmUpInfo" style="padding:0 14px;font-size:12px"></div>
         <div id="tdmMsg" style="padding:0 14px;font-size:12px"></div>
         <div id="tdmResult" style="padding:0 14px 12px"></div>
       </div>
@@ -1708,9 +1711,10 @@ async function techdebtQueue(ids){
 // taranır (LLM yok); hedefin sunduğu ama kodun kullanmadığı yapılar katalogdan
 // ayrıntı / avantaj / risk / önce-sonra ile listelenir. Seçilenler "Teknik borç —
 // <sprint>" story'si altında Task olur; mekanik → kuyruk, yapısal → needs-human.
-let _tdm={repos:[],scan:null,loaded:false,seq:0};
+let _tdm={repos:[],scan:null,loaded:false,seq:0,mode:'mod',upRepos:[],upOn:false};
 function _tdmSel(){const v=document.getElementById('tdmRepo').value;const i=v.indexOf(':');return i<0?{lang:'',repo:''}:{lang:v.slice(0,i),repo:v.slice(i+1)}}
 function _tdmRepoChanged(){
+  if(_tdm.mode==='up')return _upRepoChanged();
   const k=_tdmSel();const r=_tdm.repos.find(x=>x.repo===k.repo&&(x.lang||'php')===k.lang);
   const chip=document.getElementById('tdmTarget');
   const ps=(r&&r.per_src)||[];const mixed=new Set(ps.map(x=>x.version)).size>1;
@@ -1745,14 +1749,28 @@ async function loadModernRepos(){
       +(pas.length?`<optgroup label="Hedef sürümü bilinmeyen (${pas.length})">${pas.map(opt).join('')}</optgroup>`:'')
       :'<option value="">Yerel repo yok</option>';
     sel.value='';
+    _tdmFillRepoSel=()=>{
+      const s2=document.getElementById('tdmRepo');
+      if(_tdm.mode==='up'){
+        const up=_tdm.upRepos;
+        s2.innerHTML=up.length?'<option value="" selected>Repo seçiniz…</option>'+up.map(i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.current?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'')} ${i.current?esc(i.current)+(i.up_to_date?' (güncel)':(i.target?' → '+esc(i.target):'')):'— sürüm bilinmiyor'}</option>`).join(''):'<option value="">Yerel repo yok</option>';
+      }else{
+        s2.innerHTML=_tdmModRepoHtml;
+      }
+      s2.value='';
+    };
+    _tdmModRepoHtml=sel.innerHTML;
     _tdmRepoChanged();
+    loadUpgradeRepos();
   }catch(e){document.getElementById('tdmMsg').textContent=String(e)}
 }
+let _tdmFillRepoSel=()=>{},_tdmModRepoHtml='';
 function _tdmKindChip(k){
   const m={deprecation:['Deprecation','var(--warning)','var(--human-soft)'],mechanical:['Mekanik','var(--accent)','var(--accent-soft)'],structural:['Yapısal','var(--warning)','var(--human-soft)'],report:['Rapor','var(--text-dim)','var(--bg)']}[k]||[k,'var(--text-dim)','var(--bg)'];
   return `<span class="chip" style="background:${m[2]};color:${m[1]}">${m[0]}</span>`;
 }
 async function modernScan(force,keepMsg){
+  if(_tdm.mode==='up')return upgradeScan(force,keepMsg);
   const {repo,lang}=_tdmSel();const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
   if(!repo){msg.textContent='Repo seçin.';return}
   const team=_tdTeam();const seq=++_tdm.seq;
@@ -1775,7 +1793,8 @@ function renderModern(){
   const fr=r.freshen||{};
   const frNote=fr.updated?` · yerel klon ${fr.updated} commit güncellendi`
     :(fr.skipped&&!fr.recent?` · <span style="color:var(--warning)" title="${esc(fr.skipped)}">klon güncellenemedi — sonuçlar eski olabilir</span>`:'');
-  document.getElementById('tdmAdoption').innerHTML=((r.lang&&r.lang!=='php')
+  const isUp=_tdm.mode==='up'&&!!r.selectable;
+  document.getElementById('tdmAdoption').innerHTML=isUp?`${r.files} dosyada bulgu${r.cached?' · önbellek':''}`+frNote:((r.lang&&r.lang!=='php')
     ?`${r.files} dosyada bulgu · hedef ${esc(r.label||'')} ${esc(r.version||'?')} (${esc(r.version_source||'')})`+(r.tool_fix?` · otomatik işleri <b>araç uygular</b> (${r.lang==='go'?'Go modernize':'ruff'}), LLM yalnız inceler`:' · otomatik işleri pipeline developer\'ı uygular')
     :`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya${r.rector?' · mekanik kuralları <b>Rector uygular</b>, LLM yalnız inceler':''}`)+frNote;
   const rules=Object.entries(r.rules||{}).sort((a,b)=>b[1].count-a[1].count);
@@ -1807,7 +1826,7 @@ function renderModern(){
         <div style="font-size:12px;color:var(--text);margin-top:6px"><b>İşler (${items.length}):</b> <span style="color:var(--text-dim)">her biri ayrı Task; tek tek de seçilebilir</span><ul style="margin:2px 0 4px 0;padding:0">${items.map(x=>unitRow(x,human)).join('')}</ul></div>
       </details></td>
       <td>${files} dosya · ${items.length} iş</td><td class="num">${total}</td><td class="num">${sp}</td>
-      <td>${_tdmKindChip(t.kind)} ${statusChip(t,human)}</td></tr>`;
+      <td>${_tdmKindChip(t.kind)} ${statusChip(t,human)}${items.some(x=>x.blocking)?' <span class="chip" style="background:var(--human-soft);color:var(--danger)" title="Bu bulgu çözülmeden sürüm adımı açılmaz">engelleyen</span>':''}${t.breaks?` <span class="chip dim">${esc(({error:'Kırılır',behavior:'Davranış değişir',deprecation:'Kullanımdan kalkar'})[t.breaks]||String(t.breaks))}</span>`:''}</td></tr>`;
   };
   const tbl=(list,human)=>{
     const by=new Map();
@@ -1834,6 +1853,7 @@ function _tdmChildToggle(el){
   document.querySelectorAll(`.tdmRule[data-rule="${CSS.escape(el.dataset.rule)}"]`).forEach(p=>{p.checked=on===kids.length;p.indeterminate=on>0&&on<kids.length});
 }
 async function modernTake(){
+  if(_tdm.mode==='up')return upgradeTake();
   const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');
   const ids=[...document.querySelectorAll('.tdmSel:checked')].map(x=>x.value);
   if(!ids.length){msg.textContent='Seçili öneri yok.';return}
@@ -1852,6 +1872,129 @@ async function modernTake(){
       +((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>esc(s.reason)).join(', '):'');
     if(typeof loadTechdebt==='function')loadTechdebt();
     await modernScan(false,true);  // sonuç satırı korunur; butonlar yeniden tarama bitince açılır
+  }catch(e){msg.textContent=String(e)}
+  finally{btns.forEach(b=>b.disabled=false)}
+}
+// Sürüm yükseltme görünümü: aynı kartta, aynı repo seçici / sprint seçici / liste çizimi (renderModern).
+// Eşik hesaplamaz: sayılar, engeller, aşama ve metinler sunucudan gelir.
+function _upSaved(){try{return JSON.parse(localStorage.getItem('tempo_upgrade_to')||'{}')||{}}catch(e){return {}}}
+function _upSave(repo,lang,to){try{const m=_upSaved();m[lang+':'+repo]=to;localStorage.setItem('tempo_upgrade_to',JSON.stringify(m))}catch(e){}}
+function _tdmSetMode(m){
+  if(m==='up'&&!_tdm.upOn)m='mod';
+  _tdm.mode=m;_tdm.seq++;_tdm.scan=null;
+  try{localStorage.setItem('tempo_modern_mode',m)}catch(e){}
+  const up=m==='up';
+  document.getElementById('tdmModeMod').className='sm-btn small'+(up?' ghost':'');
+  document.getElementById('tdmModeUp').className='sm-btn small'+(up?'':' ghost');
+  document.getElementById('tdmTo').style.display=up?'':'none';
+  document.getElementById('tdmTake').textContent=up?'İşleri aç':'Seçilenleri iş olarak aç';
+  document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';
+  document.getElementById('tdmUpInfo').innerHTML='';document.getElementById('tdmMsg').textContent='';
+  _tdmFillRepoSel();
+  document.getElementById('tdmTarget').textContent='';
+  document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=true;
+}
+async function loadUpgradeRepos(){
+  try{
+    const resp=await fetch('/api/techdebt/upgrade/repos');
+    if(resp.status===403){_tdm.upOn=false;document.getElementById('tdmModeSw').style.display='none';_tdm.mode='mod';return}
+    const r=await resp.json();
+    if(!resp.ok)return;
+    _tdm.upRepos=r.items||[];_tdm.upOn=true;
+    document.getElementById('tdmModeSw').style.display='inline-flex';
+    let m='mod';try{m=localStorage.getItem('tempo_modern_mode')||'mod'}catch(e){}
+    _tdmSetMode(m==='up'?'up':'mod');
+  }catch(e){}
+}
+function _upRepoChanged(){
+  const k=_tdmSel();const r=_tdm.upRepos.find(x=>x.repo===k.repo&&x.lang===k.lang);
+  _tdm.seq++;_tdm.scan=null;
+  document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';document.getElementById('tdmUpInfo').innerHTML='';
+  document.getElementById('tdmTo').innerHTML='';
+  document.getElementById('tdmTarget').textContent=r&&r.current?`${r.label||''} ${r.current}`:'';
+  document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=!(r&&r.current);
+  document.getElementById('tdmMsg').textContent=r&&!r.current?'Şimdiki sürüm bulunamadı — yükseltme taranamaz.':'';
+  if(r&&r.current)upgradeScan(false);
+}
+function _upToChanged(){
+  const {repo,lang}=_tdmSel();const v=document.getElementById('tdmTo').value;
+  if(repo&&v)_upSave(repo,lang,v);
+  upgradeScan(false);
+}
+function _upOptText(o){
+  if(!o.published&&o.tool)return `${o.version} — imaj yok · yalnız araç doğrulaması`+(o.catalog?'':' · katalog yok');
+  const st=[];
+  if(!o.published)st.push('imaj yok');
+  if(!o.tool)st.push('araç yok');
+  if(!o.catalog)st.push('katalog yok');
+  return st.length?`${o.version} — ${st.join(' · ')}`:o.version;
+}
+function _upWatchTarget(repo,lang){const it=_tdm.upRepos.find(x=>x.repo===repo&&x.lang===lang)||{};return it.watch_target||''}
+function _upFillTo(r){
+  const sel=document.getElementById('tdmTo');
+  const watch=_upWatchTarget(r.repo,r.lang);
+  const opts=(r.selectable||[]).map(o=>`<option value="${esc(o.version)}">${esc(_upOptText(o))}</option>`).join('');
+  sel.innerHTML=opts||'<option value="">seçilebilir sürüm yok</option>';
+  const want=watch||r.target;
+  if(want)sel.value=want;
+  sel.title=watch?'Aktif izleme işi var — hedefi değiştirmek için önce durdurun':'Yükseltme hedef sürümü';
+}
+async function upgradeScan(force,keepMsg){
+  const {repo,lang}=_tdmSel();const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
+  if(!repo){msg.textContent='Repo seçin.';return}
+  const team=_tdTeam();const seq=++_tdm.seq;
+  const sel=document.getElementById('tdmTo');
+  const watch=_upWatchTarget(repo,lang);
+  const to=watch||sel.value||_upSaved()[lang+':'+repo]||'';
+  box.innerHTML=`<div class="board-empty" style="padding:12px 0">${esc(repo)} taranıyor…</div>`;if(!keepMsg)msg.textContent='';
+  const btns=[document.getElementById('tdmRescan'),document.getElementById('tdmTake'),sel];
+  btns.forEach(b=>b.disabled=true);
+  try{
+    const resp=await fetch(`/api/techdebt/upgrade/scan?repo=${encodeURIComponent(repo)}&lang=${encodeURIComponent(lang)}&team=${encodeURIComponent(team)}${to?'&to='+encodeURIComponent(to):''}${force?'&force=1':''}`);
+    const r=await resp.json();
+    if(seq!==_tdm.seq)return;
+    if(!resp.ok){box.innerHTML='';msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    _tdm.scan=r;_upFillTo(r);
+    if(r.target&&!watch)_upSave(repo,lang,r.target);
+    renderUpgrade();renderModern();
+  }catch(e){if(seq===_tdm.seq){box.innerHTML='';msg.textContent=String(e)}}
+  finally{if(seq===_tdm.seq){btns.forEach(b=>b.disabled=false);sel.disabled=!!watch}}
+}
+function renderUpgrade(){
+  const r=_tdm.scan;const box=document.getElementById('tdmUpInfo');if(!r||!box)return;
+  const it=_tdm.upRepos.find(x=>x.repo===r.repo&&x.lang===r.lang)||{};
+  const c=r.counts||{};const pr=r.probe||{};
+  const probeTxt=pr.ran?`hedef araç: ${esc(String(pr.tool||''))} ✓`:`<span style="color:var(--warning)">${esc(String(pr.reason||'hedef araç çalışmadı'))}</span>`;
+  const bl=(r.blockers||[]).map(b=>`<span class="chip dim" title="${esc(String(b.detail||''))}">${esc(String(b.name||''))} ${esc(String(b.constraint||''))}</span>`).join(' ');
+  const sites=(r.sites||[]).map(s=>`<li><code>${esc(String(s.where||''))}</code> ${esc(String(s.path||''))}${s.line?':'+esc(String(s.line)):''} <span style="color:var(--text-dim)">${esc(String(s.old||''))} → ${esc(String(s.new||''))}</span>${s.blocked?` <span class="chip" style="background:var(--human-soft);color:var(--danger)">engelli: ${esc(String(s.blocked))}</span>`:''}</li>`).join('');
+  box.innerHTML=`<div style="padding:6px 0"><b>${esc(String(r.repo))} · ${esc(String(r.label||''))}</b> ${esc(String(r.current||'?'))} → ${esc(String(r.target||'?'))}`
+    +(it.stage?` <span class="chip dim" title="Yükseltme aşaması">${esc(String(it.stage))}</span>`:'')
+    +(r.up_to_date?' <span class="chip dim">güncel</span>':'')+'</div>'
+    +`<div style="padding:2px 0">Kırılır <b>${c.error||0}</b> · Davranış değişir <b>${c.behavior||0}</b> · Kullanımdan kalkar <b>${c.deprecation||0}</b>`
+    +(r.blocking?` · <span style="color:var(--danger)">${r.blocking} engelleyen iş</span>`:'')+` · ${probeTxt}</div>`
+    +(bl?`<div style="padding:2px 0"><b>Engeller:</b> ${bl}</div>`:'')
+    +(sites?`<details style="padding:2px 0"><summary style="cursor:pointer"><b>Sürüm yerleri</b> (${(r.sites||[]).length})</summary><ul style="margin:2px 0 4px 18px">${sites}</ul></details>`:'');
+}
+async function upgradeTake(){
+  const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');
+  const ids=[...document.querySelectorAll('.tdmSel:checked')].map(x=>x.value);
+  if(!ids.length){msg.textContent='Seçili öneri yok.';return}
+  const team=_tdTeam(),sprint=(document.getElementById('tdmSprint')||{}).value||'';
+  const to=document.getElementById('tdmTo').value||'';
+  const btns=[document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
+  btns.forEach(b=>b.disabled=true);msg.textContent='İşler açılıyor…';
+  try{
+    const resp=await fetch('/api/techdebt/upgrade/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,lang,to,group_ids:ids,team,sprint})});
+    const r=await resp.json();
+    if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    const t=(r.tasks||[]),h=(r.human_tasks||[]);
+    msg.innerHTML=(r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'')
+      +`${t.length} iş ${r.tool_fix?'araç düzeltmesine':'kuyruğa'} alındı (${r.total_sp||0} SP) · ${h.length} Task insan bekliyor (${r.human_sp||0} SP)`
+      +((r.devops||[]).filter(d=>d.devops).length?' · DevOps isteği: '+[...new Set((r.devops||[]).filter(d=>d.devops).map(d=>d.devops))].map(id=>wiLink(id)).join(', '):'')
+      +(t.concat(h).filter(x=>x.id).length?' — '+t.concat(h).filter(x=>x.id).map(x=>wiLink(x.id)).join(', '):'')
+      +((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>esc(s.reason)).join(', '):'');
+    if(typeof loadTechdebt==='function')loadTechdebt();
+    await upgradeScan(false,true);
   }catch(e){msg.textContent=String(e)}
   finally{btns.forEach(b=>b.disabled=false)}
 }

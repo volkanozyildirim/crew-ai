@@ -3779,6 +3779,39 @@ def test_quality_endpoints():
           and "function loadQuality" in html and "loadQuality();" in html)
 
 
+def test_upgrade_api_surface():
+    print("\n[U6] Sürüm yükseltme — ayarlar, uçlar, kart")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    schema = {e["key"]: e for e in pc.SCHEMA}
+    want = {"CREW_TECHDEBT_UPGRADE": False, "CREW_TECHDEBT_UPGRADE_AUTO": False, "CREW_TECHDEBT_UPGRADE_BUMP": True,
+            "CREW_TECHDEBT_UPGRADE_POLL_MIN": 30, "CREW_TECHDEBT_UPGRADE_MAX_OPEN": 3,
+            "CREW_TECHDEBT_UPGRADE_SPRINT": "next", "CREW_TECHDEBT_UPGRADE_CI_WAIT_H": 72}
+    check("yedi yükseltme ayarı varsayılanlarıyla şemada",
+          all(k in schema and schema[k]["default"] == v for k, v in want.items()),
+          str({k: schema.get(k, {}).get("default") for k in want}))
+    check("araç yolu ayarları şemada yok",
+          "CREW_UPGRADE_PHP_BINS" not in schema and "CREW_UPGRADE_PYTHON_BINS" not in schema)
+    paths = {getattr(r, "path", "") for r in server.app.routes}
+    check("repos / scan / take yolları kayıtlı",
+          {"/api/techdebt/upgrade/repos", "/api/techdebt/upgrade/scan", "/api/techdebt/upgrade/take"} <= paths)
+    orig = pc.get
+    pc.get = lambda k: False if k == "CREW_TECHDEBT_UPGRADE" else (True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN") else orig(k))
+    try:
+        tc = TestClient(server.app)
+        check("bayrak kapalıyken repos → 403", tc.get("/api/techdebt/upgrade/repos").status_code == 403)
+        check("bayrak kapalıyken scan → 403", tc.get("/api/techdebt/upgrade/scan?repo=x").status_code == 403)
+        check("bayrak kapalıyken take → 403",
+              tc.post("/api/techdebt/upgrade/take", json={"repo": "x", "group_ids": ["a"]}).status_code == 403)
+    finally:
+        pc.get = orig
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("kart yükseltme işlevleri ve mod anahtarı",
+          all(n in html for n in ("function loadUpgradeRepos", "function upgradeScan", "function renderUpgrade",
+                                  "function upgradeTake", "tempo_modern_mode", "tempo_upgrade_to")))
+
+
 def test_quality_review_fixes():
     print("\n[Q10] Kalite alımı — son inceleme düzeltmeleri")
     import requests as _rq
@@ -8314,6 +8347,7 @@ def main():
               test_quality_sources,
               test_quality_intake,
               test_quality_endpoints,
+              test_upgrade_api_surface,
               test_quality_review_fixes,
               test_quality_readiness,
               test_repo_ctx_cross_thread,
