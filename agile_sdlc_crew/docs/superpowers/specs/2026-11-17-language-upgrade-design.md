@@ -34,7 +34,8 @@ Kullanıcı kararları (2026-11-17):
 - Tempo hiçbir PR'ı **merge etmez**, hiçbir deploy'u tetiklemez.
 - Bağımlılık (composer / npm / pip paketi) güncellemesi yapılmaz; hedef sürümü desteklemeyen
   bağımlılık **engel olarak listelenir** (aşağıda), insan işi olur.
-- Yeni imaj yayınlamak (ör. `php-8-5`) DevOps'undur; yayınlanmamış imaja geçiş önerilmez.
+- Yeni imaj yayınlamak (ör. `php-8-5`) DevOps'undur; yayınlanmamış sürüm hedef seçilebilir ama
+  imaj gelene kadar yalnız hazırlık yürür.
 - Ara sürümlerde durmak yok: 7.4 → 8.4 tek hamle (katalog aradaki bütün sürümleri kapsar).
 - Next.js için sürüm PR'ı bu tasarımda **yok** (aşağıda "Dil kapsamı").
 
@@ -75,13 +76,22 @@ Kullanıcı kararları (2026-11-17):
 `upgrade.plan(client, repo, lang, to=None)` → `{current, target, target_source, selectable, sites, blockers}`.
 
 - **current**: bugünkü `modern.target` (değişmez).
-- **target** varsayılanı:
-  - PHP: build dizininde görülen **en yüksek** `php-X-Y` imaj sürümü (bugün 8.4). Yayınlanmamış
-    sürüm hedef olamaz.
-  - Python: aynı kural, `python-X-Y` imajları.
-  - Go, Next.js: `config/upgrade_targets.yaml` (`go: "1.27"`, `nextjs: "15.0"` gibi; elle bakılır).
-- **selectable**: `current < v ≤ tavan` olan ve katalogda adı geçen sürümler. Kartta seçilen `to`
-  bu listede değilse 400. Sürüm metni `^\d+\.\d+$`.
+- **Hedefi kullanıcı kartta seçer** (kullanıcı, 2026-11-17). Seçilebilir sürümler dilin bilinen
+  sürüm listesinden gelir: `config/upgrade_targets.yaml` → `php: ["8.0", …, "8.5"]`,
+  `python: [...]`, `go: [...]`, `nextjs: [...]` (elle bakılır; yeni sürüm çıkınca bir satır eklenir).
+- **selectable**: listede `current < v` olan her sürüm; her biri
+  `{version, published: bool, catalog: bool, tool: bool}` taşır — imajı yayınlanmış mı, o sürüm için
+  katalog kuralı var mı, yerelde o sürümün aracı var mı. Kart bunları seçicide gösterir
+  ("8.5 — imaj yok · yalnız araç doğrulaması"). Seçilen `to` listede değilse 400. Sürüm metni
+  `^\d+\.\d+$`.
+- **Varsayılan** (kullanıcı seçmemişse): PHP ve Python'da build dizininde görülen **en yüksek
+  yayınlanmış** imaj sürümü (PHP için bugün 8.4); Go ve Next.js'te listenin sonuncusu.
+- **Yayınlanmamış sürüm de seçilebilir** (ör. PHP 8.5): hazırlık taraması ve işleri aynen yürür,
+  üretim siteleri `blocked: "imaj yayınlanmamış"` olur ve DevOps'a imaj isteği açılır; imaj
+  yayınlanana kadar repo `engelli` kalır, sürüm adımı açılmaz. Böylece hazırlık imajı beklemez.
+- Seçim nerede durur: kart son seçimi tarayıcıda hatırlar (`localStorage`); yükseltme
+  başlatıldığında hedef izleme Task'ının `tempo-upgrade-key` satırına yazılır ve otomatik ilerletme
+  onu kullanır. Aktif bir yükseltmenin hedefini değiştirmek = durdur + yeni hedefle başlat.
 - `current ≥ target` → repo "güncel", tarama yapılmaz.
 
 ### 2. Sürüm sabitleme yerleri (`sites`)

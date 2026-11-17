@@ -130,13 +130,15 @@ check("karşı örneklerde yükseltme bulgusu yok",
 
 ### Task 3: Hedef sürüm ve sürüm yerleri
 
-**Files:** Modify `quality/upgrade.py`; Create `config/upgrade_targets.yaml` (`go: "1.27"`, `nextjs: "15.0"`); Test
+**Files:** Modify `quality/upgrade.py`; Create `config/upgrade_targets.yaml` (`php: ["8.0","8.1","8.2","8.3","8.4","8.5"]`, `python: ["3.10","3.11","3.12","3.13","3.14"]`, `go: ["1.22","1.23","1.24","1.25","1.26","1.27"]`, `nextjs: ["13.0","14.0","15.0"]`); Test
 
 **Interfaces — Consumes:** `modern.target(client, repo, root, lang, index=) -> {"version","source","images","per_src"?}`, `modern.build_index(client)`, `app_map._read(client, devrepo, path)`, `app_map.DEVOPS_PROJECT/DEVOPS_BRANCH`.
 
 **Interfaces — Produces:**
-- `upgrade.ceiling(lang: str, index: dict) -> str | None` — PHP/Python: dizindeki en yüksek `php-X-Y` / `python-X-Y`; Go/Next.js: `upgrade_targets.yaml`.
-- `upgrade.selectable(lang: str, current: str, ceil: str) -> list[str]` — `current < v ≤ ceil`, artan.
+- `upgrade.known_versions(lang: str) -> list[str]` — `upgrade_targets.yaml`'daki liste, artan; biçimi bozuk girdi atılır.
+- `upgrade.published(lang: str, index: dict) -> set[str]` — build dizinindeki `php-X-Y` / `python-X-Y` imaj sürümleri (Go / Next.js: boş küme, "yayın" kavramı yok → hepsi `published=True`).
+- `upgrade.default_target(lang: str, current: str, index: dict) -> str | None` — PHP/Python: yayınlanmış en yüksek sürüm (`> current` ise); Go/Next.js: `known_versions` sonuncusu.
+- `upgrade.selectable(lang: str, current: str, index: dict) -> list[dict]` — `known_versions` içinde `current < v` olanlar, artan; her biri `{"version","published": bool,"catalog": bool,"tool": bool}` (`catalog`: o sürümde `breaks` kuralı var; `tool`: `tool_bins` / yerel Go o sürümü karşılıyor).
 - `upgrade.image_for(image: str, lang: str, to: str) -> str` — `…/php-8-2:1.0` → `…/php-8-4:1.0` (önek ve etiket korunur).
 - `upgrade.sites(client, repo: str, root: Path, lang: str, current: str, to: str, index: dict, *, read=None, yml_files: dict | None = None) -> list[dict]` — her biri `{"where": "devops"|"ci"|"code", "repo", "project", "branch", "path", "line", "old", "new", "blocked": ""|neden}`. `read(devrepo, path) -> str` ve `yml_files: {path: text}` test enjeksiyonu; varsayılanları Azure API.
 - `upgrade.plan(client, repo: str, lang: str, to: str | None = None, *, deps=None) -> dict` — `{"repo","lang","current","target","target_source","selectable","sites","per_src","up_to_date": bool}`; `to` seçilebilir değilse `ValueError("Hedef sürüm seçilemez: …")`.
@@ -149,8 +151,14 @@ Kurallar (spec §1–2): devops sitesi yalnız sürümü hedefin altındaki serv
 index = {"core": [{"src": "anatolia/build/lojistik", "images": ["eu/prod-ar/php-8-2:1.0"]},
                   {"src": "russia/build/lojistik", "images": ["10.1.1.1:5000/prod-ar/php-8-2:1.0"]}],
          "web":  [{"src": "anatolia/build/web", "images": ["eu/prod-ar/php-8-4:1.0"]}]}
-check("PHP tavanı dizindeki en yüksek imaj", upgrade.ceiling("php", index) == "8.4")
-check("seçilebilir", upgrade.selectable("php", "8.2", "8.4") == ["8.3", "8.4"])
+check("varsayılan hedef: yayınlanmış en yüksek imaj", upgrade.default_target("php", "8.2", index) == "8.4")
+sel = upgrade.selectable("php", "8.2", index)
+check("seçilebilir: listedeki her üst sürüm", [s["version"] for s in sel] == ["8.3", "8.4", "8.5"])
+check("8.5 seçilebilir ama imajı yok, katalog kuralı yok",
+      sel[-1]["published"] is False and sel[-1]["catalog"] is False and sel[1]["published"] is True)
+p85 = upgrade.plan(None, "core", "php", to="8.5", deps=deps)
+check("yayınlanmamış hedef: bütün üretim siteleri engelli",
+      all("yayınlanmamış" in s["blocked"] for s in p85["sites"] if s["where"] == "devops"))
 check("imaj adı", upgrade.image_for("eu/prod-ar/php-8-2:1.0", "php", "8.4") == "eu/prod-ar/php-8-4:1.0")
 ss = upgrade.sites(None, "core", root, "php", "8.2", "8.4", index, read=fake_read, yml_files=fake_yml)
 dv = {s["path"]: s for s in ss if s["where"] == "devops"}
@@ -247,7 +255,7 @@ check("güncel repo taranmaz", upgrade.scan(client, "web", "php", deps=deps)["up
 - `GET /api/techdebt/upgrade/scan?repo&lang&to&team&force` → `upgrade.scan`.
 - `POST /api/techdebt/upgrade/take` gövde `{repo, lang, to, group_ids, team, sprint}` → `upgrade.take`; iş kuyruğa girdiyse `_ensure_worker()`.
 - `_upgrade_off()` — `_modern_off()` + `CREW_TECHDEBT_UPGRADE` (403 "Sürüm yükseltme kapalı (CREW_TECHDEBT_UPGRADE)").
-- Kart: `#tdModernCard` içinde `Modernleştirme | Sürüm yükseltme` anahtarı (`localStorage.tempo_modern_mode`); yükseltme görünümü spec §8 taslağındaki satırlar: sürüm seçici (`selectable`), sayım satırı, engeller, sürüm yerleri, üç liste, **İşleri aç**. JS fonksiyonları: `loadUpgradeRepos()`, `upgradeScan(force)`, `renderUpgrade()`, `upgradeTake()`. Arayüz eşik hesaplamaz.
+- Kart: `#tdModernCard` içinde `Modernleştirme | Sürüm yükseltme` anahtarı (`localStorage.tempo_modern_mode`); yükseltme görünümü spec §8 taslağındaki satırlar: **hedef sürüm seçici** (`selectable`'dan; seçenek metni sürüm + durum: "8.4", "8.5 — imaj yok · yalnız araç doğrulaması"; seçim değişince `upgradeScan()` yeni `to` ile yeniden çağrılır; son seçim repo × dil başına `localStorage.tempo_upgrade_to`'da; aktif izleme işi varken seçici kilitli ve izleme işinin hedefini gösterir), sayım satırı, engeller, sürüm yerleri, üç liste, **İşleri aç**. JS fonksiyonları: `loadUpgradeRepos()`, `upgradeScan(force)`, `renderUpgrade()`, `upgradeTake()`. Arayüz eşik hesaplamaz.
 
 - [ ] **Step 1: Test** — `test_upgrade_api_surface()`: `pipeline_config` şemasında yedi ayar varsayılanlarıyla; `CREW_UPGRADE_PHP_BINS` şemada **yok**; `server.app.routes` içinde beş yol (bu task üçünü, Task 8 ikisini ekler — test Task 8'de tamamlanır); `index.html` `loadUpgradeRepos` / `upgradeScan` / `renderUpgrade` / `upgradeTake` ve `tempo_modern_mode` içerir; `TestClient` ile bayrak kapalıyken `/api/techdebt/upgrade/repos` → 403.
 - [ ] **Step 2–4.** Step 4'te `.venv/bin/python -c "from agile_sdlc_crew.server import app"` hatasız.
