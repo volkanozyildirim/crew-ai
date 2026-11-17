@@ -6984,7 +6984,7 @@ class _UpFake(_BumpFake):
     org_url, project = "https://dev.azure.com/o", "P"
 
     def __init__(self, files=None, *, prs=None, builds=None, tracks=(), tasks=(), defs=None, commit_dates=None,
-                 requests_=(), areas=None, issue_tasks=None, **k):
+                 requests_=(), areas=None, issue_tasks=None, summary_error=None, **k):
         super().__init__(files or {}, prs=prs, **k)
         # builds: tanım id → build listesi (sahte minTime'ı YOK SAYAR — sıkı "sonra" süzgeci kodda olmalı)
         self.builds, self.tracks, self.tasks = dict(builds or {}), list(tracks), list(tasks)
@@ -6993,6 +6993,7 @@ class _UpFake(_BumpFake):
         self.requests_ = list(requests_)              # DevOps istekleri (tempo-devops)
         self.areas = dict(areas or {})
         self.issue_tasks = dict(issue_tasks or {})    # build id → [{name, result}]
+        self.summary_error = summary_error            # verilirse get_build_failure_summary bunu yükseltir
         self.def_calls, self.build_calls = [], []
         self.wis, self.comments, self.states, self.wiql, self.descs, self.summaries = [], [], [], [], [], []
 
@@ -7052,6 +7053,8 @@ class _UpFake(_BumpFake):
 
     def get_build_failure_summary(self, project, build_id, max_chars=4000):
         self.summaries.append(build_id)
+        if self.summary_error is not None:
+            raise self.summary_error
         return f"FAILED [Task] Run tests: CoreTest::testFoo (#{build_id})"
 
     def get_repository(self, repo):
@@ -7236,9 +7239,10 @@ def test_upgrade_status_and_steps():
         check("kod PR'ı açık → code hazır değil", s["next"]["step"] == "code" and not s["next"]["ready"])
         # CI sitesi yok → ci atlanır
         s = st(mkscan(sites=[dv_a, dv_r, code_s], pins="none"))
-        check("test hattı sabitlemesi yok → sıradaki prod, kanıt aranmaz, 'Test kanıtı yok'",
+        # turu 2 (B3b): sabitleme yokken de <repo>-test tanımı aranır; burada tanım yok → no_pipeline
+        check("test hattı sabitlemesi yok, tanım yok → sıradaki prod, 'Test kanıtı yok'",
               s["next"]["step"] == "prod" and s["next"]["ready"] and s["next"]["test_note"] == "Test kanıtı yok"
-              and s["evidence"] is None, str(s["next"]))
+              and (s["evidence"] or {}).get("state") == "no_pipeline", str(s["next"]))
         # devops sitesi yok → tek adım code, hazır'da açılır
         s = st(mkscan(sites=[ci_s, code_s]))
         check("devops sitesi yok → code tek adım, hazır'da açık",
@@ -7565,6 +7569,7 @@ def test_upgrade_fix_round1():
         cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
         cl.org_url, cl.project = "https://dev.azure.com/o", "P"
         cl._find_repo_project = lambda r: "EcomBackend"
+        cl._repo_project_strict = lambda r: "EcomBackend"   # kesin çözüm turu 2'de ayrıca sınanır
         cl._repo_api_url = lambda repo, project=None: f"https://x/{project or 'P'}/_apis/git/repositories/{repo}"
 
         class _Cl(azb.AzureDevOpsClient):
@@ -7760,6 +7765,257 @@ def test_upgrade_fix_round1():
               r.status_code == 200 and r.json().get("status") == {"stage": "tamam", "w": 1}, str(r.json()))
     finally:
         pc.get, server.AzureDevOpsClient, upgrade.scan, ut.status, ut.watch_view = saved
+
+
+def test_upgrade_fix_round2():
+    """Görev 8 düzeltme turu 2: prod, `<repo>-test`'in CI dosyası değiştikten SONRA yeşil koştuğu kanıtı
+    olmadan açılamaz. B1 kanıt saati merge'den önceye düşmez (firstParent + Tempo CI PR'ının kapanışı);
+    B2 repo projesi kesin bulunamazsa hata (önbellekli yedek proje → sahte no_pipeline yok); B3 okunamayan
+    sürüm satırı ve sabitlemesiz repo da kapıyı kapalı tutar. Her denetim ayrı çalışır (biri çökse de
+    ötekiler raporlanır)."""
+    print("\n[Sürüm yükseltme: düzeltme turu 2]")
+    import requests as _rq
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_bump as bump, upgrade_track as ut
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+
+    BR = "tempo/upgrade-php-core-8.4"
+    T1, T2, T3, T4 = ("2026-11-10T09:00:00Z", "2026-11-10T10:00:00Z", "2026-11-10T11:00:00Z",
+                      "2026-11-10T12:00:00Z")
+    dv_a = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+            "path": "/build/core/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+            "blocked": ""}
+    dv_r = dict(dv_a, repo="russia")
+    ci_s = {"where": "ci", "repo": "yml-files", "project": "EcomBackend", "branch": "main",
+            "path": "Test Pipelines/core.yml", "line": 2, "old": "'8.2'", "new": "'8.4'", "blocked": ""}
+    pin = {"repo": "yml-files", "project": "EcomBackend", "branch": "main", "path": "Test Pipelines/core.yml",
+           "line": 2, "version": "8.4"}
+    PIN_FILE = ("EcomBackend", "yml-files", "main", "Test Pipelines/core.yml")
+    CORE_DEF = {"core": {"id": 5, "name": "Core-test", "project": "EcomBackend"}}
+    ci_key = ("EcomBackend", "yml-files", BR)
+
+    def b(bid, q, result="succeeded", status="completed"):
+        return {"build_id": bid, "status": status, "result": result, "definition": "Core-test",
+                "url": f"https://x/b/{bid}", "project": "EcomBackend", "queue_time": q, "source_version": ""}
+
+    def scan(sites, pins):
+        return {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False,
+                "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins}
+
+    def pr(pid, status, closed=""):
+        return {"id": pid, "status": status, "url": f"https://x/pr/{pid}", "closed_at": closed, "merge_commit": "",
+                "target": "main", "created_by": "tempo-id"}
+
+    def safe(fn):
+        """(sonuç, hata) — bir denetimin çökmesi ötekileri gizlemesin."""
+        try:
+            return fn(), None
+        except Exception as e:  # noqa: BLE001
+            return None, e
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "core"
+        root.mkdir()
+        (root / "composer.json").write_text('{\n  "require": {\n    "php": "^8.2"\n  }\n}\n', encoding="utf-8")
+        cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+               "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+               "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+        deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                           record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+
+        def st(sc, c):
+            return safe(lambda: ut.status(c, "core", "php", to="8.4", deps=deps, scan=sc, wait_h=72, root=root))
+
+        # ── B1: kanıt saati merge'den önceye düşmez ──
+        cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+        cl.org_url, cl.project = "https://dev.azure.com/o", "P"
+        cl._repo_api_url = lambda repo, project=None: f"https://x/{project or 'P'}/_apis/git/repositories/{repo}"
+
+        class _Cl(azb.AzureDevOpsClient):
+            _headers = {"Authorization": "x"}
+        cl.__class__ = _Cl
+
+        class _R:
+            def __init__(self, js=None, status=200):
+                self._js, self.status_code, self.ok = js, status, status < 400
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise _rq.HTTPError(str(self.status_code), response=self)
+
+            def json(self):
+                return self._js
+        og = azb.requests.get
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: _R({"value": [{"committer": {
+            "date": T3 if (params or {}).get("searchCriteria.historyMode") == "firstParent" else T1}}]})
+        try:
+            when, err = safe(lambda: cl.get_last_commit_date("yml-files", "/Test Pipelines/core.yml", "main",
+                                                             project="EcomBackend"))
+        finally:
+            azb.requests.get = og
+        check("B1a: dosyanın son commit'i firstParent ile (merge commit'i, özellik dalının commit'i değil)",
+              when == T3, str((when, err)))
+        prs_done = {ci_key: pr(11, "completed", closed=T3)}
+        s, err = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds={5: [b(2, T2)]},
+                                                       commit_dates={PIN_FILE: T1}, prs=prs_done))
+        check("B1b: commit T1 ama Tempo CI PR'ı T3'te kapandı → since T3, T2'deki yeşil kanıt değil",
+              s is not None and s["evidence"] and s["evidence"]["since"] == T3 and s["evidence"]["state"] == "none"
+              and not s["next"]["ready"], str((s and s["evidence"], err)))
+        s, err = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4), b(2, T2)]},
+                                                       commit_dates={PIN_FILE: T1}, prs=prs_done))
+        check("B1b: T3'ten sonra yeşil → prod hazır", s is not None and s["next"]["step"] == "prod"
+              and s["next"]["ready"], str((s and s["next"], err)))
+        s, err = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4)]},
+                                                       commit_dates={PIN_FILE: T1},
+                                                       prs={ci_key: pr(11, "completed", closed="")}))
+        check("B1b: tamamlanmış Tempo CI PR'ının kapanış zamanı okunamazsa prod yok",
+              s is not None and not s["next"]["ready"] and "okunamadı" in s["next"]["reason"],
+              str((s and s["next"], err)))
+        pin2 = dict(pin, path="Test Pipelines/core-api.yml")
+        s, err = st(scan([dv_a, dv_r], [pin, pin2]),
+                    _UpFake(defs=CORE_DEF, builds={5: [b(2, T2)]},
+                            commit_dates={PIN_FILE: T1, ("EcomBackend", "yml-files", "main", pin2["path"]): T3}))
+        check("ek: birden çok sabitleme dosyasında en geç değişiklik zamanı",
+              s is not None and s["evidence"] and s["evidence"]["since"] == T3 and s["evidence"]["state"] == "none",
+              str((s and s["evidence"], err)))
+
+        # ── ek: iptal edilen en yeni build + since'ten önceki tamamlanmış build → none; okunamayan özet → red ──
+        ev, err = safe(lambda: bump.ci_evidence(
+            _UpFake(defs=CORE_DEF, builds={5: [b(3, T4, result="canceled"), b(1, T1)]}), "core", T2, wait_h=72))
+        check("ek: iptal edilen en yeni build, önceki build since'ten önce → none",
+              ev is not None and ev["state"] == "none", str((ev, err)))
+        ev, err = safe(lambda: bump.ci_evidence(
+            _UpFake(defs=CORE_DEF, builds={5: [b(3, T4, result="failed")]}, summary_error=RuntimeError("500")),
+            "core", T2, wait_h=72))
+        check("ek: özeti okunamayan kırmızı build kırmızı kalır",
+              ev is not None and ev["state"] == "red" and "okunamadı" in ev["summary"], str((ev, err)))
+
+        # ── B2: repo projesi kesin bulunamazsa hata ──
+        cl2 = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+        cl2.org_url, cl2.project, cl2.repo_projects = "https://dev.azure.com/o", "P", ["EcomBackend", "Other"]
+        cl2._repo_project_cache = {}
+        cl2.__class__ = _Cl
+        seen = []
+
+        def g_boom(url, headers=None, params=None, timeout=None, **k):
+            seen.append(url)
+            if "/git/repositories/" in url:
+                raise _rq.ConnectionError("geçici hata")
+            return _R({"value": []})
+        azb.requests.get = g_boom
+        try:
+            d, err = safe(lambda: cl2.find_build_definition("core", "core-test"))
+        finally:
+            azb.requests.get = og
+        check("B2: repo sorgusu hata verirse tanım araması hata (yanlış projede boş liste → no_pipeline değil)",
+              d is None and err is not None and not any("/build/definitions" in u for u in seen)
+              and "core" not in cl2._repo_project_cache, str((d, err, seen)))
+        seen.clear()
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            seen.append(url), _R(status=404) if "/git/repositories/" in url else _R({"value": []}))[1]
+        try:
+            d, err = safe(lambda: cl2.find_build_definition("core", "core-test"))
+        finally:
+            azb.requests.get = og
+        check("B2: repo hiçbir projede yoksa hata", d is None and err is not None
+              and not any("/build/definitions" in u for u in seen), str((d, err, seen)))
+        seen.clear()
+        cl2._repo_project_cache = {"core": "EcomBackend"}  # _find_repo_project'in önbelleğe yazdığı yedek
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            seen.append(url),
+            _R(status=200, js={"id": "g"}) if url.endswith("/Other/_apis/git/repositories/core")
+            else _R(status=404) if "/git/repositories/" in url
+            else _R({"value": [{"id": 5, "name": "Core-test"}]}))[1]
+        try:
+            d, err = safe(lambda: cl2.find_build_definition("core", "core-test"))
+        finally:
+            azb.requests.get = og
+        check("B2: önbellekteki yedek proje kullanılmaz; repo gerçekten bulunduğu projede aranır",
+              d == {"id": 5, "name": "Core-test", "project": "Other"}
+              and any(u.endswith("/Other/_apis/build/definitions") for u in seen), str((d, err, seen)))
+        # status / queue_step / uç: hata yükselir, hiçbir şey hazır değil
+        sc_at = scan([dv_a, dv_r], [pin])
+        c_err = _UpFake(defs={"core": RuntimeError("repo projesi bulunamadı")}, commit_dates={PIN_FILE: T1})
+        s, err = st(sc_at, c_err)
+        check("B2: tanım okunamazsa status hata verir (hazır değil)", s is None and err is not None, str(s))
+        track = {"id": 500, "fields": {"System.Title": "izleme", "System.State": "To Do", "System.AreaPath": "P\\T",
+                                       "System.Tags": "tempo-upgrade-track",
+                                       "System.Description": "<p><small>tempo-upgrade-key: php:core:8.4</small></p>"}}
+        c_q = _UpFake(defs={"core": RuntimeError("repo projesi bulunamadı")}, commit_dates={PIN_FILE: T1},
+                      tracks=[track])
+        made = []
+        q, err = safe(lambda: bump.queue_step(
+            c_q, "core", "php", team="T", deps=deps,
+            create_job=lambda *a, **k: (made.append(1), 1)[1],
+            status_fn=lambda cl_, r, l, **k: ut.status(cl_, r, l, to=k.get("to"), deps=deps, scan=sc_at, wait_h=72,
+                                                       root=root)))
+        check("B2: queue_step hata verir, iş açılmaz", q is None and err is not None and not made, str(q))
+        saved = (pc.get, server.AzureDevOpsClient, upgrade.scan, ut.watch_view)
+        pc.get = lambda k: True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE") else saved[0](k)
+        server.AzureDevOpsClient = lambda: _UpFake(defs={"core": RuntimeError("repo projesi bulunamadı")},
+                                                   commit_dates={PIN_FILE: T1})
+        upgrade.scan = lambda c, repo, lang, **k: dict(sc_at)
+        ut.watch_view = lambda *a, **k: None
+        try:
+            js = TestClient(server.app).get("/api/techdebt/upgrade/scan?repo=core&to=8.4").json()
+        finally:
+            pc.get, server.AzureDevOpsClient, upgrade.scan, ut.watch_view = saved
+        check("B2: tarama ucu durum hatasını raporlar", "error" in (js.get("status") or {}), str(js.get("status")))
+
+        # ── B3a: okunamayan sürüm satırı ──
+        def ci_of(lang, line, to):
+            yml = f"variables:\n  {line}\nresources:\n  - repository: s\n    name: EcomBackend/core\n"
+            return safe(lambda: upgrade._ci_scan(None, "core", lang, to, {"Test Pipelines/core.yml": yml}))
+        for lang, line, to, raw in (("python", "pythonVersion: '3.x'", "3.12", "3.x"),
+                                    ("php", "phpVersion: $(phpVer)", "8.4", "$(phpVer)"),
+                                    ("php", "phpVersion: 8", "8.4", "8")):
+            res, err = ci_of(lang, line, to)
+            pins_ = (res or ([], []))[1] or []
+            check(f"B3a: '{line}' → boş sürümlü sabitleme + ham metin, site yok",
+                  res is not None and len(pins_) == 1 and pins_[0]["version"] == "" and pins_[0]["unparsed"] == raw
+                  and res[0] == [], str((res, err)))
+        res, err = ci_of("go", "goVersion: '1.22.5'", "1.25")
+        sites_, pins_ = res or ([], [])
+        check("B3a: üç parçalı sürüm major.minor ile karşılaştırılır, site elle (otomatik değil)",
+              res is not None and pins_ and pins_[0]["version"] == "1.22" and len(sites_) == 1
+              and sites_[0]["blocked"] == "sürüm satırı elle düzenlenmeli" and not bump.pushable(sites_[0]),
+              str((res, err)))
+        res, err = ci_of("go", "goVersion: '1.25.1'", "1.25")
+        check("B3a: üç parçalı sürüm hedefte → sabitleme 1.25, site yok",
+              res is not None and res[1] and res[1][0]["version"] == "1.25" and res[0] == [], str((res, err)))
+        bad_pin = dict(pin, version="", unparsed="$(phpVer)")
+        s, err = st(scan([dv_a, dv_r], [bad_pin]), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4)]},
+                                                           commit_dates={PIN_FILE: T1}))
+        check("B3a: okunamayan satır → prod hazır değil, neden dosyayı adlandırır",
+              s is not None and not s["next"]["ready"]
+              and "test hattı sürüm satırı okunamadı: Test Pipelines/core.yml" in s["next"]["reason"],
+              str((s and s["next"], err)))
+        low = dict(pin, version="8.2")
+        s, err = st(scan([dv_a, dv_r, ci_s], [low, dict(bad_pin, path="Test Pipelines/other.yml")]), _UpFake())
+        check("B3a: okunamayan satır → ci de hazır değil",
+              s is not None and not s["next"]["ready"]
+              and "test hattı sürüm satırı okunamadı: Test Pipelines/other.yml" in s["next"]["reason"],
+              str((s and s["next"], err)))
+
+        # ── B3b: sabitleme yok ama <repo>-test tanımı var → en yeni build yeşil olmalı ──
+        s, err = st(scan([dv_a, dv_r], []), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4, result="failed")]}))
+        check("B3b: sabitleme yok, tanımın en yeni build'i kırmızı → prod yok",
+              s is not None and s["next"]["step"] == "prod" and not s["next"]["ready"]
+              and s["evidence"] and s["evidence"]["state"] == "red", str((s and s["next"], err)))
+        s, err = st(scan([dv_a, dv_r], []), _UpFake(defs=CORE_DEF, builds={5: []}))
+        check("B3b: sabitleme yok, tanımın tamamlanmış build'i yok → prod yok",
+              s is not None and not s["next"]["ready"] and s["next"]["reason"], str((s and s["next"], err)))
+        s, err = st(scan([dv_a, dv_r], []), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4)]}))
+        check("B3b: sabitleme yok, tanımın en yeni build'i yeşil → prod hazır",
+              s is not None and s["next"]["ready"] and (s["evidence"] or {}).get("state") == "green",
+              str((s and s["next"], err)))
+        s, err = st(scan([dv_a, dv_r], []), _UpFake())
+        check("B3b: sabitleme yok, tanım yok → prod hazır, 'Test kanıtı yok'",
+              s is not None and s["next"]["ready"] and s["next"]["test_note"] == "Test kanıtı yok",
+              str((s and s["next"], err)))
 
 
 def test_php_rector_fix():
@@ -9801,6 +10057,7 @@ def main():
               test_upgrade_bump_round2,
               test_upgrade_status_and_steps,
               test_upgrade_fix_round1,
+              test_upgrade_fix_round2,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

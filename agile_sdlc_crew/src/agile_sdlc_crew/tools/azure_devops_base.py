@@ -301,6 +301,27 @@ class AzureDevOpsClient:
         self._repo_project_cache[repo_id_or_name] = fallback
         return fallback
 
+    def _repo_project_strict(self, repo_id_or_name: str) -> str:
+        """Reponun projesi — yalnız KESİN bulunursa. _find_repo_project'in aksine hata yutmaz, yedek projeye
+        düşmez ve onun önbelleğini ne okur ne yazar (o önbellekte yedek değer olabilir): bir kapının kanıtı
+        yanlış projede aranıp "yok" okunmasın. 404 → sonraki proje; başka hata → yükselir; hiçbirinde yok →
+        ValueError. Olumlu sonuç ayrı bir önbellekte tutulur."""
+        found = getattr(self, "_repo_project_found", None)
+        if found is None:
+            found = self._repo_project_found = {}
+        if repo_id_or_name in found:
+            return found[repo_id_or_name]
+        for proj in self.repo_projects:
+            url = f"{self._project_api_url(proj)}/git/repositories/{repo_id_or_name}"
+            resp = requests.get(url, headers=self._headers, params={"api-version": self.API_VERSION}, timeout=10)
+            if resp.status_code == 404:
+                continue
+            resp.raise_for_status()
+            found[repo_id_or_name] = proj
+            return proj
+        raise ValueError(f"'{repo_id_or_name}' reposu Azure projelerinde bulunamadı "
+                         f"({', '.join(self.repo_projects)})")
+
     def _repo_api_url(self, repo_id_or_name: str, project: str | None = None) -> str:
         proj = project or self._find_repo_project(repo_id_or_name)
         return f"{self._project_api_url(proj)}/git/repositories/{repo_id_or_name}"
@@ -968,9 +989,10 @@ class AzureDevOpsClient:
         }
 
     def find_build_definition(self, repo_id_or_name: str, name: str) -> dict | None:
-        """Build tanımı adıyla (büyük/küçük harf duyarsız; ör. `core-test` → `Core-test`), get_pr_build'in bu
-        repo için sorguladığı projede. Yoksa None; API hatası yükselir (yok sayılmaz)."""
-        project = self._find_repo_project(repo_id_or_name)
+        """Build tanımı adıyla (büyük/küçük harf duyarsız; ör. `core-test` → `Core-test`), reponun bulunduğu
+        projede (get_pr_build'in sorguladığı proje — ama yedeksiz, kesin çözümle). Yoksa None; repo projesi
+        kesin bulunamazsa ya da API hatası olursa yükselir (yok sayılmaz → sahte no_pipeline olmaz)."""
+        project = self._repo_project_strict(repo_id_or_name)
         url = f"{self.org_url}/{project}/_apis/build/definitions"
         resp = requests.get(url, headers=self._headers, params={"api-version": self.API_VERSION, "name": name},
                             timeout=30)
@@ -1008,13 +1030,16 @@ class AzureDevOpsClient:
 
     def get_last_commit_date(self, repo_id_or_name: str, path: str, branch: str, *,
                              project: str | None = None) -> str:
-        """Dosyaya dokunan en son commit'in zamanı (committer, yoksa author) — dalda. Commit yoksa ""."""
+        """Dosyaya dokunan en son commit'in zamanı (committer, yoksa author) — dalın first-parent çizgisinde.
+        Commit yoksa "". firstParent şart: varsayılan (sadeleştirilmiş) geçmiş, "Merge (no fast-forward)" ile
+        tamamlanan PR'da özellik dalındaki commit'i (push zamanı) döndürür, merge commit'ini değil."""
         url = f"{self._repo_api_url(repo_id_or_name, project)}/commits"
         params = {
             "api-version": self.API_VERSION,
             "searchCriteria.itemPath": path,
             "searchCriteria.itemVersion.version": branch,
             "searchCriteria.itemVersion.versionType": "branch",
+            "searchCriteria.historyMode": "firstParent",
             "searchCriteria.$top": 1,
         }
         resp = requests.get(url, headers=self._headers, params=params, timeout=30)

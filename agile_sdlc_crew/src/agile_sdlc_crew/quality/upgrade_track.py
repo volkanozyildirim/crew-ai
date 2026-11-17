@@ -285,10 +285,18 @@ def _blocked_dv_reason(dv_blocked: list[dict]) -> str:
 _PR_KNOWN = ("active", "completed", "abandoned")
 
 
-def _pins_since(client, pins: list[dict]) -> str | None:
-    """Sabitleme dosyalarına dokunan en son commit'in zamanı (hepsinin en yenisi); okunamazsa None."""
+def _pins_since(client, pins: list[dict], ci_pr: dict | None = None) -> str | None:
+    """Kanıt saati: sabitleme dosyalarına dokunan en son commit (first-parent; hepsinin en yenisi) ile
+    Tempo'nun test hattı PR'ı tamamlanmışsa onun kapanış zamanının en geçi. Biri okunamazsa None (kapı kapalı):
+    commit araması merge'den önceki bir zamanı verse bile merge'den önce koşan build kanıt sayılmaz."""
     from agile_sdlc_crew.quality import upgrade_bump as bump
     best = None
+    if ci_pr and ci_pr.get("status") == "completed":
+        t = bump._ts(ci_pr.get("closed_at"))
+        if t is None:
+            log.warning(f"⚠️ upgrade: test hattı PR'ı #{ci_pr.get('id')} kapanış zamanı okunamadı")
+            return None
+        best = (t, ci_pr.get("closed_at"))
     for proj, repo, branch, path in sorted({(p.get("project") or "", p["repo"], p["branch"], p["path"]) for p in pins}):
         try:
             d = client.get_last_commit_date(repo, "/" + str(path).lstrip("/"), branch, project=proj or None)
@@ -439,13 +447,18 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
     # sırada; hepsi hedefteyse (kim yaptıysa) kanıt, dosyanın son değişikliğinden SONRA kuyruğa giren
     # `<repo>-test` build'idir. Sabitlemeler okunamadıysa (None) hiçbir adım açılmaz.
     pins = sc.get("ci_pins")
-    below = [p for p in pins or [] if upgrade._v(p.get("version")) < upgrade._v(tgt)]
+    unparsed = [p for p in pins or [] if not p.get("version")]
+    below = [p for p in pins or [] if p.get("version") and upgrade._v(p["version"]) < upgrade._v(tgt)]
     ev, since = None, None
-    if pins and not below:
-        since = _pins_since(client, pins)
+    wh = wait_h if wait_h is not None else int(pc.get("CREW_TECHDEBT_UPGRADE_CI_WAIT_H") or 72)
+    if pins and not below and not unparsed:
+        since = _pins_since(client, pins, ci_pr)
         if since:
-            wh = wait_h if wait_h is not None else int(pc.get("CREW_TECHDEBT_UPGRADE_CI_WAIT_H") or 72)
             ev = out["evidence"] = bump.ci_evidence(client, repo, since, wait_h=wh)
+    elif pins == [] and dv:
+        # Sabitleme yok (ya da tanınmadı değil — tanınmayan satır `unparsed`tır): `<repo>-test` tanımı varsa
+        # en yeni tamamlanmış build'i yeşil olmalı; tanım yoksa kanıt yok ("Test kanıtı yok").
+        ev = out["evidence"] = bump.ci_evidence(client, repo, None, wait_h=wh)
     ci_status = (ci_pr or {}).get("status")
     if (below and ci_status == "active") or (pins and not below and not (ev and ev["state"] in ("green", "no_pipeline"))):
         out["stage"] = "test hattı"
@@ -462,6 +475,10 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
     if pins is None:
         return nxt("ci" if ci else "prod", False, "Test hattı (yml-files) dosyaları okunamadı — test hattının "
                                                    "durumu bilinmeden sürüm adımı atılmaz.", ci or dv)
+    if unparsed:
+        return nxt("ci" if below else "prod", False, "Kapı kapalı — test hattı sürüm satırı okunamadı: " + ", ".join(
+            f"{p['path']}:{p['line']} ({p.get('unparsed', '')!r})" for p in unparsed)
+                   + " — satır elle düzenlenmeli.", ci if below else dv)
     if below:
         if ci_status == "active":
             return nxt("prod", False, f"Test hattı PR'ı #{ci_pr.get('id')} henüz merge edilmedi.", dv)
@@ -507,8 +524,8 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         return nxt("prod", False, base_reason, dv)
     if pins:
         if not since:
-            return nxt("prod", False, "Test hattı dosyasının son değişiklik zamanı okunamadı — kanıt aranamadı, "
-                                      "üretim adımı açılmaz.", dv)
+            return nxt("prod", False, "Test hattı dosyasının son değişiklik zamanı okunamadı (son commit ya da "
+                                      "test hattı PR'ının kapanışı) — kanıt aranamadı, üretim adımı açılmaz.", dv)
         state = (ev or {}).get("state")
         if state == "red":
             return nxt("prod", False, "Test hattı değişikliğinden sonraki build kırmızı — üretim adımı açılmaz. "
@@ -520,6 +537,20 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         if state == "no_pipeline":
             test_note = NO_EVIDENCE
         elif state != "green":
+            return nxt("prod", False, f"Test kanıtı okunamadı ({state!r}) — üretim adımı açılmaz.", dv)
+    else:
+        state = (ev or {}).get("state")
+        if state == "no_pipeline":
+            test_note = NO_EVIDENCE
+        elif state == "green":
+            test_note = ""
+        elif state == "red":
+            return nxt("prod", False, f"Test hattı sabitlemesi yok ama '{repo}-test' tanımının en yeni build'i "
+                                      "kırmızı — üretim adımı açılmaz. " + (ev.get("summary") or "")[:1500], dv)
+        elif state == "none":
+            return nxt("prod", False, f"Test hattı sabitlemesi yok; '{repo}-test' tanımı var ama tamamlanmış build'i "
+                                      "yok — üretim adımı açılmaz.", dv)
+        else:
             return nxt("prod", False, f"Test kanıtı okunamadı ({state!r}) — üretim adımı açılmaz.", dv)
     bad = [s for s in dv if not _pushable(s)]
     if bad:

@@ -330,25 +330,31 @@ def ci_evidence(client, repo: str, since: str, *, wait_h: int, now=None) -> dict
     Kanıt build TANIMINA bağlıdır (lint / Sonar gibi başka PR hatları sayılmaz): tanım yok → no_pipeline;
     tanımın since'ten kesin sonra kuyruğa girmiş tamamlanmış build'i yok → none; en yenisi yeşil (ya da yalnız
     test dışı adımda uyarılı kısmi başarı) → green; değilse red + hata özeti. API hatası yükselir.
+    `since=None`: saat yok (repoda test hattı sabitlemesi yok) — tanımın en yeni tamamlanmış build'i alınır.
     -> {"state", "build": {"id","url","queue_time"}|None, "summary", "overdue", "since"}"""
-    t0 = _ts(since)
-    if t0 is None:
-        raise ValueError(f"Kanıt saati okunamadı ({str(since)[:40]!r}).")
+    t0 = None
+    if since is not None:
+        t0 = _ts(since)
+        if t0 is None:
+            raise ValueError(f"Kanıt saati okunamadı ({str(since)[:40]!r}).")
     name = f"{repo}-test"
     d = client.find_build_definition(repo, name)
     if not d:
         return {"state": "no_pipeline", "build": None, "overdue": False, "since": since,
                 "summary": f"'{name}' build tanımı yok."}
-    builds = client.list_definition_builds(d["project"], d["id"], min_time=since, top=50) or []
+    builds = client.list_definition_builds(d["project"], d["id"], min_time=since or "", top=50) or []
     done = sorted(((t, b) for b in builds
-                   if (t := _ts(b.get("queue_time"))) is not None and t > t0       # minTime'a güvenilmez: kesin "sonra"
+                   if (t := _ts(b.get("queue_time"))) is not None and (t0 is None or t > t0)  # minTime'a güvenilmez
                    and b.get("status") == "completed" and b.get("result") not in (None, "", "canceled")),
                   key=lambda x: x[0], reverse=True)
     if not done:
-        now = now or datetime.now(timezone.utc)
-        overdue = (now - t0).total_seconds() > max(0, int(wait_h)) * 3600
+        overdue = False
+        if t0 is not None:
+            now = now or datetime.now(timezone.utc)
+            overdue = (now - t0).total_seconds() > max(0, int(wait_h)) * 3600
         return {"state": "none", "build": None, "overdue": overdue, "since": since,
-                "summary": f"Test hattı değişikliğinden sonra kuyruğa girmiş tamamlanmış '{d.get('name')}' build'i yok."}
+                "summary": (f"Test hattı değişikliğinden sonra kuyruğa girmiş tamamlanmış '{d.get('name')}' build'i yok."
+                            if t0 is not None else f"'{d.get('name')}' tanımının tamamlanmış build'i yok.")}
     b = done[0][1]
     blk = {"id": b.get("build_id"), "url": b.get("url") or "", "queue_time": b.get("queue_time") or ""}
     if b.get("result") == "succeeded" or (b.get("result") == "partiallySucceeded" and _partial_ok(client, b)):

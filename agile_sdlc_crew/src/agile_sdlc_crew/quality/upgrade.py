@@ -186,6 +186,7 @@ def _site(where, repo, project, branch, path, line, old, new, blocked="") -> dic
 
 _LANG_IMG_NAME = {"php": "php", "python": "python", "go": "golang"}
 RANGE_BLOCK = "sürüm kısıtı elle düzenlenmeli"
+CI_HAND = "sürüm satırı elle düzenlenmeli"
 NO_LINE = "Dockerfile satırı bulunamadı"
 
 
@@ -266,20 +267,32 @@ def _ci_scan(client, repo, lang, to, yml_files) -> tuple[list[dict], list[dict] 
             log.warning(f"⚠️ upgrade: yml-files okunamadı: {e}")
             return [], None
     mention = re.compile(rf"(?im)^\s*(?:-\s*)?name:\s*['\"]?(?:[\w.-]+/)?{re.escape(repo)}['\"]?\s*$")
-    var = re.compile(rf"^\s*{key}:\s*(['\"]?)(\d+\.\d+)\1\s*(?:#.*)?$")
+    keyline = re.compile(rf"^\s*{key}\s*:(.*)$")
     out, pins = [], []
     for path in sorted(yml_files):
         if not path.startswith(CI_DIR + "/") or not mention.search(yml_files[path] or ""):
             continue
         for i, ln in enumerate((yml_files[path] or "").splitlines(), 1):
-            m = var.match(ln)
+            m = keyline.match(ln)
             if not m:
                 continue
-            pins.append({"repo": CI_REPO, "project": CI_PROJECT, "branch": branch, "path": path, "line": i,
-                         "version": m.group(2)})
-            if _v(m.group(2)) < _v(to):
-                q = m.group(1)
-                out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, f"{q}{m.group(2)}{q}", f"{q}{to}{q}"))
+            raw = re.sub(r"\s+#.*$", "", m.group(1)).strip()
+            q, inner = "", raw
+            if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in "'\"":
+                q, inner = inner[0], inner[1:-1]
+            pin = {"repo": CI_REPO, "project": CI_PROJECT, "branch": branch, "path": path, "line": i}
+            mm = re.fullmatch(r"(\d+)\.(\d+)(\.\d+)?", inner)
+            if not mm:
+                # `3.x`, `$(var)`, `8` …: sürüm okunamıyor — kapı kapalı kalır, satırı insan düzenler
+                pins.append({**pin, "version": "", "unparsed": inner[:40]})
+                continue
+            ver = f"{mm.group(1)}.{mm.group(2)}"
+            pins.append({**pin, "version": ver})
+            if _v(ver) < _v(to):
+                if mm.group(3):   # 1.22.5: rakam-dizisi kuralı 1.25.5'e izin verirdi — yanlış; otomatik yazılmaz
+                    out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, raw, raw, CI_HAND))
+                else:
+                    out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, f"{q}{ver}{q}", f"{q}{to}{q}"))
     return out, pins
 
 
