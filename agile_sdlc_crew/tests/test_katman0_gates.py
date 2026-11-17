@@ -3811,6 +3811,21 @@ def test_upgrade_api_surface():
           all(n in html for n in ("function loadUpgradeRepos", "function upgradeScan", "function renderUpgrade",
                                   "function upgradeTake", "tempo_modern_mode", "tempo_upgrade_to")))
 
+    def _fn(name):
+        i = html.find("function " + name) if "async function " + name not in html else html.find("async function " + name)
+        j = html.find("\nfunction ", i + 1)
+        j2 = html.find("\nasync function ", i + 1)
+        j = min(x for x in (j, j2, len(html)) if x > 0)
+        return html[i:j]
+    scan_src, changed_src = _fn("upgradeScan"), _fn("_upToChanged")
+    check("_upShouldRetry var ve upgradeScan onu çağırıyor",
+          "function _upShouldRetry" in html and "_upShouldRetry(" in scan_src)
+    check("tempo_upgrade_to yalnız _upToChanged içinde yazılıyor",
+          html.count("setItem('tempo_upgrade_to'") == 1 and "setItem('tempo_upgrade_to'" in changed_src
+          and "setItem" not in scan_src)
+    check("kayıtlı hedef 400 verince tek otomatik yeniden deneme",
+          "retried" in scan_src and "_upDropSaved()" in scan_src)
+
 
 def test_quality_review_fixes():
     print("\n[Q10] Kalite alımı — son inceleme düzeltmeleri")
