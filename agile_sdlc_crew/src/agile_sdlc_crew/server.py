@@ -173,6 +173,10 @@ class TechdebtUpgradeStepRequest(BaseModel):
     team: str = ""
 
 
+class TechdebtUpgradeBumpRequest(TechdebtUpgradeStepRequest):
+    step: str = ""  # kullanıcının onayladığı adım (ci|prod|code); farklıysa 409
+
+
 class QualityTakeRequest(BaseModel):
     source: str
     sp: int = 10
@@ -2330,18 +2334,23 @@ async def techdebt_upgrade_stop(req: TechdebtUpgradeStepRequest):
 
 
 @app.post("/api/techdebt/upgrade/bump")
-async def techdebt_upgrade_bump(req: TechdebtUpgradeStepRequest):
+async def techdebt_upgrade_bump(req: TechdebtUpgradeBumpRequest):
     """Sıradaki sürüm adımını (test hattı → üretim → kod) kuyruğa al; ön koşulu yoksa 400 + nedeni."""
     from agile_sdlc_crew.quality import upgrade_bump as _ub
     bad = _upgrade_step_check(req)
     if bad:
         return bad
+    step = (req.step or "").strip()
+    if step not in ("", "ci", "prod", "code"):
+        return JSONResponse({"error": "Geçersiz adım (ci | prod | code)"}, status_code=400)
     try:
         res = await asyncio.to_thread(_ub.queue_step, AzureDevOpsClient(), req.repo.strip(),
                                       (req.lang or "php").strip(), to=(req.to or "").strip() or None,
-                                      team=req.team.strip())
+                                      team=req.team.strip(), expect_step=step or None)
         _ensure_worker()
         return JSONResponse(res, status_code=202)
+    except _ub.StepChanged as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
 

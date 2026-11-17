@@ -1900,15 +1900,16 @@ async function loadUpgradeRepos(keep){
   try{
     const team=_tdTeam();
     const resp=await fetch('/api/techdebt/upgrade/repos'+(team?'?team='+encodeURIComponent(team):''));
-    if(resp.status===403){_tdm.upOn=false;document.getElementById('tdmModeSw').style.display='none';_tdm.mode='mod';return}
+    if(resp.status===403){_tdm.upOn=false;document.getElementById('tdmModeSw').style.display='none';_tdm.mode='mod';return false}
     const r=await resp.json();
-    if(!resp.ok)return;
+    if(!resp.ok)return false;
     _tdm.upRepos=r.items||[];_tdm.upOn=true;
     document.getElementById('tdmModeSw').style.display='inline-flex';
-    if(keep)return;  // eylem sonrası yenileme: yalnız tracked / watch_target tazelenir, seçim ve sonuç korunur
+    if(keep)return true;  // eylem sonrası yenileme: yalnız tracked / watch_target tazelenir, seçim ve sonuç korunur
     let m='mod';try{m=localStorage.getItem('tempo_modern_mode')||'mod'}catch(e){}
     _tdmSetMode(m==='up'?'up':'mod');
-  }catch(e){}
+    return true;
+  }catch(e){return false}
 }
 function _upRepoChanged(){
   const k=_tdmSel();const r=_tdm.upRepos.find(x=>x.repo===k.repo&&x.lang===k.lang);
@@ -1946,7 +1947,7 @@ function _upFillTo(r){
 }
 async function upgradeScan(force,keepMsg,retried){
   const {repo,lang}=_tdmSel();const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
-  if(!repo){msg.textContent='Repo seçin.';return}
+  if(!repo){msg.textContent='Repo seçin.';return false}
   const team=_tdTeam();const seq=++_tdm.seq;
   const sel=document.getElementById('tdmTo');
   const watch=_upWatchTarget(repo,lang);
@@ -1958,13 +1959,14 @@ async function upgradeScan(force,keepMsg,retried){
   try{
     const resp=await fetch(`/api/techdebt/upgrade/scan?repo=${encodeURIComponent(repo)}&lang=${encodeURIComponent(lang)}&team=${encodeURIComponent(team)}${to?'&to='+encodeURIComponent(to):''}${force?'&force=1':''}`);
     const r=await resp.json();
-    if(seq!==_tdm.seq)return;
+    if(seq!==_tdm.seq)return null;
     if(!resp.ok){
       if(!retried&&!watch&&_upShouldRetry(resp.status,to,saved,_tdm.userTo)){_upDropSaved();return upgradeScan(force,keepMsg,true)}
-      box.innerHTML='';msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+      box.innerHTML='';msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return false}
     _tdm.scan=r;_upFillTo(r);
     renderUpgrade();renderModern();
-  }catch(e){if(seq===_tdm.seq){box.innerHTML='';msg.textContent=String(e)}}
+    return true;
+  }catch(e){if(seq===_tdm.seq){box.innerHTML='';msg.textContent=String(e);return false}return null}
   finally{if(seq===_tdm.seq){btns.forEach(b=>b.disabled=false);sel.disabled=!!watch}}
 }
 function renderUpgrade(){
@@ -2034,7 +2036,7 @@ function _upStatusHtml(r,it){
     if(pl)h+=`<div style="padding:2px 0">${pl}</div>`;
   }
   const nx=(st&&st.next)||{};
-  const canBump=tracked&&!!nx.ready&&!!_UP_STEP_LABEL[nx.step];
+  const canBump=tracked&&nx.ready===true&&!!_UP_STEP_LABEL[nx.step];
   h+='<div style="display:flex;gap:8px;flex-wrap:wrap;padding:6px 0">'
     +(tracked?'<button class="sm-btn ghost small" id="tdmUpStop" onclick="upgradeStop()">Yükseltmeyi durdur</button>'
              :'<button class="sm-btn small" id="tdmUpStart" onclick="upgradeStart()">Yükseltmeyi başlat</button>')
@@ -2046,28 +2048,52 @@ function _upBumpConfirm(r,step){
   const where={ci:'test hattı repolarında (yml-files)',prod:'FLODevOps repolarında',code:`${r.repo} reposunda`}[step]||'ilgili repolarda';
   return `${_UP_STEP_LABEL[step]||'Sürüm adımı'}: ${where} taslak (draft) PR'lar açılacak. Devam edilsin mi?`;
 }
-async function _upPost(path,confirmText){
+// Eylem sonrası panel her zaman sunucudan taze durumla yeniden çizilir; taze durum alınamazsa düğmesiz "bayat" satırı kalır.
+async function _upRefresh(){
+  const info=document.getElementById('tdmUpInfo'),msg=document.getElementById('tdmMsg');
+  const prev=msg.innerHTML;
+  _tdm.scan=null;
+  info.innerHTML='<div style="padding:6px 0;color:var(--text-dim)">Durum yenileniyor…</div>';
+  const repoOk=await loadUpgradeRepos(true);
+  const ok=repoOk?await upgradeScan(false,true):false;
+  if(ok===null)return;  // bu arada başka repo seçildi: o taramanın sonucu geçerli
+  if(ok===false){
+    _tdm.scan=null;
+    info.innerHTML='<div style="padding:6px 0;color:var(--warning)">Durum yenilenemedi — yeniden tarayın.</div>';
+    msg.innerHTML=prev+(repoOk?'':' <span style="color:var(--danger)">İzleme durumu okunamadı; hedef seçici eski durumda kalmış olabilir.</span>');
+  }
+}
+async function _upPost(path,confirmText,extra){
   const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');
   const team=_tdTeam();
   if(!repo){msg.textContent='Repo seçin.';return}
   if(!team){msg.textContent='Takım seçin.';return}
   if(confirmText&&!confirm(confirmText))return;
   const to=document.getElementById('tdmTo').value||'';
+  const isBump=path.endsWith('/bump');
   const btns=[...document.querySelectorAll('#tdmUpStart,#tdmUpStop,#tdmUpBump')];
+  const pre=btns.map(b=>b.disabled);
   btns.forEach(b=>b.disabled=true);msg.textContent='Gönderiliyor…';
+  let refresh=false;
   try{
-    const resp=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,lang,to,team})});
+    const resp=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({repo,lang,to,team},extra||{}))});
     const r=await resp.json().catch(()=>({}));
-    if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${escHtml(String(r.error||'HTTP '+resp.status))}</span>`;return}
+    if(!resp.ok){
+      msg.innerHTML=`<span style="color:var(--danger)">${escHtml(String(r.error||'HTTP '+resp.status))}</span>`;
+      refresh=isBump||resp.status===409;  // adım işinde durum bilinmiyor: taze tara; 409: panel yeni adımı göstersin
+      return;
+    }
     let t='Tamam.';
     if(path.endsWith('/start'))t=r.created?`İzleme işi açıldı: #${r.id}`:`Açık izleme işi var: #${r.id}`;
     else if(path.endsWith('/stop'))t=`İzleme işi kapatıldı: #${r.id}`;
-    else if(path.endsWith('/bump'))t=`Sürüm adımı kuyruğa alındı (iş #${r.job_id}) — ${_UP_STEP_LABEL[r.step]||r.step}`;
+    else if(isBump)t=`Sürüm adımı kuyruğa alındı (iş #${r.job_id}) — ${_UP_STEP_LABEL[r.step]||r.step}`;
     msg.textContent=t;
-    await loadUpgradeRepos(true);
-    await upgradeScan(false,true);
-  }catch(e){msg.textContent=String(e)}
-  finally{btns.forEach(b=>{if(b.isConnected)b.disabled=false})}
+    refresh=true;
+  }catch(e){msg.textContent=String(e);refresh=isBump}
+  finally{
+    if(refresh)await _upRefresh();
+    else btns.forEach((b,i)=>{if(b.isConnected&&b.id!=='tdmUpBump')b.disabled=pre[i]});  // Başlat/Durdur: eylem öncesi hâline; bump kendiliğinden açılmaz
+  }
 }
 async function upgradeStart(){
   return _upPost('/api/techdebt/upgrade/start','');
@@ -2079,8 +2105,8 @@ async function upgradeBump(){
   const r=_tdm.scan||{};const nx=((r.status||{}).next)||{};
   const {repo,lang}=_tdmSel();
   const it=_tdm.upRepos.find(x=>x.repo===repo&&x.lang===lang)||{};
-  if(!(nx.ready&&(it.tracked||r.watch_target))){document.getElementById('tdmMsg').textContent=nx.reason||'Sürüm adımı şu an başlatılamaz.';return}
-  return _upPost('/api/techdebt/upgrade/bump',_upBumpConfirm(r,nx.step));
+  if(!(nx.ready===true&&(it.tracked||r.watch_target))){document.getElementById('tdmMsg').textContent=nx.reason||'Sürüm adımı şu an başlatılamaz.';return}
+  return _upPost('/api/techdebt/upgrade/bump',_upBumpConfirm(r,nx.step),{step:nx.step});
 }
 async function upgradeTake(){
   const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');

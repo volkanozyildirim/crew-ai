@@ -7767,6 +7767,72 @@ def test_upgrade_fix_round1():
         pc.get, server.AzureDevOpsClient, upgrade.scan, ut.status, ut.watch_view = saved
 
 
+def test_upgrade_bump_expect_step():
+    print("\n[U9b] Sürüm adımı — onaylanan adım ve açık iş koruması")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import upgrade_bump as bump, upgrade_track as ut
+    track = {"id": 500, "to": "8.4", "lang": "php", "repo": "core", "area": "A"}
+    st = {"repo": "core", "current": "8.2", "stage": "hazır",
+          "next": {"step": "ci", "ready": True, "reason": "", "sites": []}}
+    created = []
+
+    def cj(wid, use_hal, title, *, job_kind, job_payload):
+        created.append(wid)
+        return 9
+    saved_fo = ut.find_open
+    ut.find_open = lambda c, lang, repo: track
+    try:
+        kw = dict(team="T", create_job=cj, status_fn=lambda *a, **k: st, open_jobs=lambda tid: [])
+        q = bump.queue_step(object(), "core", "php", expect_step="ci", **kw)
+        check("expect_step eşleşirse kuyruğa alır", q["job_id"] == 9 and q["step"] == "ci", str(q))
+        created.clear()
+        try:
+            bump.queue_step(object(), "core", "php", expect_step="prod", **kw)
+            check("expect_step farklıysa StepChanged", False)
+        except bump.StepChanged as e:
+            check("expect_step farklıysa StepChanged, iş yok",
+                  not created and "üretim" in str(e) and "test hattı" in str(e), str(e))
+        try:
+            bump.queue_step(object(), "core", "php", expect_step="x", **kw)
+            check("geçersiz expect_step → ValueError", False)
+        except bump.StepChanged:
+            check("geçersiz expect_step → ValueError", False)
+        except ValueError:
+            check("geçersiz expect_step → ValueError", not created)
+        try:
+            bump.queue_step(object(), "core", "php", **dict(kw, open_jobs=lambda tid: [{"id": 3}]))
+            check("açık adım işi varsa reddeder", False)
+        except bump.StepChanged as e:
+            check("açık adım işi varsa reddeder, iş yok", not created and "500" in str(e), str(e))
+    finally:
+        ut.find_open = saved_fo
+
+    orig_pc, orig_qs, orig_cl, orig_w = pc.get, bump.queue_step, server.AzureDevOpsClient, server._ensure_worker
+    pc.get = lambda k: True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE") else orig_pc(k)
+    server.AzureDevOpsClient = lambda: object()
+    server._ensure_worker = lambda: None
+    seen = []
+
+    def qs(c, repo, lang, **k):
+        seen.append(k.get("expect_step"))
+        raise k["boom"] if "boom" in k else bump.StepChanged("Durum değişti")
+    bump.queue_step = qs
+    try:
+        tc = TestClient(server.app)
+        body = {"repo": "core", "team": "T", "step": "ci"}
+        r = tc.post("/api/techdebt/upgrade/bump", json=body)
+        check("uç: StepChanged → 409 + Türkçe mesaj, expect_step iletilir",
+              r.status_code == 409 and r.json().get("error") == "Durum değişti" and seen == ["ci"], str(r.text))
+        bump.queue_step = lambda c, repo, lang, **k: (_ for _ in ()).throw(ValueError("Hazır değil"))
+        check("uç: hazır değil → 400", tc.post("/api/techdebt/upgrade/bump", json=body).status_code == 400)
+        check("uç: geçersiz step → 400",
+              tc.post("/api/techdebt/upgrade/bump", json=dict(body, step="x")).status_code == 400)
+    finally:
+        pc.get, bump.queue_step, server.AzureDevOpsClient, server._ensure_worker = orig_pc, orig_qs, orig_cl, orig_w
+
+
 def test_upgrade_card():
     print("\n[U9] Sürüm yükseltme kartı — aşama şeridi ve düğmeler")
     from fastapi.testclient import TestClient
@@ -7787,8 +7853,18 @@ def test_upgrade_card():
         return html[i:min(js)]
     bump, status_src, link = _fn("upgradeBump"), _fn("_upStatusHtml"), _fn("_upLink")
     check("upgradeBump next.ready ve tracked'e bakar", "nx.ready" in bump and "tracked" in bump)
-    check("düğme yalnız tracked && next.ready iken etkin", "canBump=tracked&&!!nx.ready" in status_src
+    check("düğme yalnız tracked && next.ready===true iken etkin", "canBump=tracked&&nx.ready===true" in status_src
           and "disabled" in status_src)
+    check("upgradeBump step gönderir, ready===true ister",
+          "step:nx.step" in bump and "nx.ready===true" in bump)
+    post_src = _fn("_upPost")
+    check("_upPost 409'da yeniden tarar, kör yeniden-etkinleştirme yok",
+          "409" in post_src and "_upRefresh()" in post_src and "b.disabled=false" not in post_src
+          and "isConnected&&b.id!=='tdmUpBump'" in post_src)
+    ref_src = _fn("_upRefresh")
+    check("_upRefresh: tarama düşerse scan=null + Türkçe bayat satırı",
+          "_tdm.scan=null" in ref_src and "Durum yenilenemedi — yeniden tarayın" in ref_src
+          and "İzleme durumu okunamadı" in ref_src)
     check("üç POST yolu kullanılıyor",
           all(p in html for p in ("'/api/techdebt/upgrade/start'", "'/api/techdebt/upgrade/stop'",
                                   "'/api/techdebt/upgrade/bump'")))
@@ -10214,6 +10290,7 @@ def main():
               test_quality_endpoints,
               test_upgrade_api_surface,
               test_upgrade_card,
+              test_upgrade_bump_expect_step,
               test_quality_review_fixes,
               test_quality_readiness,
               test_repo_ctx_cross_thread,

@@ -293,6 +293,11 @@ _VER = re.compile(r"^\d+\.\d+$")
 log = logging.getLogger("pipeline")
 
 
+class StepChanged(ValueError):
+    """Kullanıcının onayladığı adım ile sunucunun şimdi hesapladığı sıradaki adım farklı (ya da aynı
+    izleme işi için açık bir adım işi var); uç bunu 409'a çevirir."""
+
+
 class StepFailed(ValueError):
     """Adım atılmadı (ön koşul / yeniden doğrulama / yazma hatası); neden izleme işine yazıldı."""
 
@@ -429,12 +434,24 @@ def _esc(s) -> str:
     return html.escape(mask_secrets(str(s)))
 
 
+def _open_bump_jobs(track_id) -> list:
+    """Aynı izleme işi için kuyrukta / koşan `upgrade_bump` işleri (yalnız okur)."""
+    from agile_sdlc_crew import db
+    with db.get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM jobs WHERE work_item_id=%s AND job_kind=%s AND status IN ('queued','running')",
+                    (str(track_id), JOB_KIND))
+        return list(cur.fetchall())
+
+
 def queue_step(client, repo: str, lang: str, *, to: str | None = None, team: str, deps=None,
-               create_job=None, status_fn=None, **kw) -> dict:
+               create_job=None, status_fn=None, expect_step: str | None = None, open_jobs=None, **kw) -> dict:
     """Sıradaki sürüm adımını kuyruğa al. Ön koşul yoksa ValueError(next.reason). Kapsam
     (lang, repo, from, to, step, sites, track_id, team) INSERT'te işin kaydına yazılır."""
     from agile_sdlc_crew.quality import upgrade_track as ut
     ut._check(repo, lang)
+    if expect_step and expect_step not in ("ci", "prod", "code"):
+        raise ValueError(f"Geçersiz adım: {expect_step!r} (ci | prod | code)")
     tr = ut.find_open(client, lang, repo)
     if not tr:
         raise ValueError("Önce yükseltmeyi başlatın — açık izleme işi yok.")
@@ -446,6 +463,13 @@ def queue_step(client, repo: str, lang: str, *, to: str | None = None, team: str
     nx = st.get("next") or {}
     if not nx.get("step") or not nx.get("ready"):
         raise ValueError(nx.get("reason") or "Atılabilecek sürüm adımı yok.")
+    if expect_step and expect_step != nx["step"]:
+        raise StepChanged(f"Durum değişti: onaylanan adım {ut.STEP_LABEL.get(expect_step, expect_step)}, şimdi sıradaki "
+                          f"adım {ut.STEP_LABEL.get(nx['step'], nx['step'])} — kart yenilendi, yeniden onaylayın.")
+    if open_jobs is None and create_job is None:   # test kendi create_job'unu verdiyse DB'ye dokunma
+        open_jobs = _open_bump_jobs
+    if open_jobs is not None and open_jobs(tr["id"]):
+        raise StepChanged(f"İzleme işi #{tr['id']} için bir sürüm adımı zaten kuyrukta ya da çalışıyor — bitmesini bekleyin.")
     repo = st.get("repo") or repo
     payload = {"lang": lang, "repo": repo, "from": st["current"], "to": to, "step": nx["step"],
                "sites": nx["sites"], "track_id": int(tr["id"]), "team": team or ""}
