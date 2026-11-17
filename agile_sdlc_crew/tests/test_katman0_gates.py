@@ -7690,6 +7690,104 @@ def test_upgrade_php_rules():
           and by["curly_offset"].since == (8, 0))
 
 
+def test_upgrade_probe_and_blockers():
+    """Hedef araçla doğrulama (php -l / compile()) ve composer.lock bağımlılık engelleri."""
+    print("\n[upgrade: probe ve bağımlılık engelleri]")
+    import json as _json
+    import os
+    import shutil
+    import sys as _sys
+    import tempfile
+    from pathlib import Path
+    from agile_sdlc_crew.quality import upgrade
+    A = upgrade.php_constraint_allows
+    check("^7.3|^8.0 8.4'e izin verir", A("^7.3|^8.0", "8.4"))
+    check("~8.1.0 8.4'e izin vermez", not A("~8.1.0", "8.4"))
+    check(">=7.4 <8.3 izin vermez", not A(">=7.4 <8.3", "8.4"))
+    check("anlaşılmayan kısıt engel değil", A("dev-main as 1.0", "8.4"))
+    check("kısıt biçimleri", A(">=7.2.5", "8.4") and A("^8.0 || ^7.4", "8.4") and not A("^7.4", "8.4")
+          and A("8.*", "8.4") and not A("<8.4", "8.4") and A("<=8.4", "8.4") and not A("~8.3.0", "8.4") and A("~8.3", "8.4")
+          and not A("^8.0 <8.3", "8.4") and A(">= 7.4, < 9", "8.4") and not A("7.4 - 8.2", "8.4"))
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "repo"
+        root.mkdir()
+        (root / "composer.lock").write_text(_json.dumps({"packages": [
+            {"name": "a/ok", "version": "1.0", "require": {"php": "^8.0"}},
+            {"name": "b/old", "version": "2.0", "require": {"php": "~8.1.0"}},
+            {"name": "c/none", "version": "1.0"}]}))
+        check("yalnız b/old engel", [b["name"] for b in upgrade.blockers(root, "php", "8.4")] == ["b/old"])
+        check("PHP dışı dilde engel yok", upgrade.blockers(root, "go", "1.25") == [])
+        fake = base / "bin"
+        fake.mkdir()
+        good, bad = fake / "php8.4", fake / "notphp"
+        good.write_text("#!/bin/sh\n"); bad.write_text("#!/bin/sh\n")
+        old = {k: os.environ.get(k) for k in ("CREW_UPGRADE_PHP_BINS", "CREW_UPGRADE_PYTHON_BINS")}
+        try:
+            os.environ["CREW_UPGRADE_PHP_BINS"] = f"8.4={good},8.5={bad},8.6=/yok/php,x.y={good},rel/php=1"
+            check("tool_bins: yalnız php… adlı, var olan, N.N sürümlü", upgrade.tool_bins("CREW_UPGRADE_PHP_BINS", "php") == {"8.4": str(good)},
+                  str(upgrade.tool_bins("CREW_UPGRADE_PHP_BINS", "php")))
+            check("_tool_ok env'e bakar", upgrade._tool_ok("php", "8.4") and not upgrade._tool_ok("php", "8.5"))
+            os.environ.pop("CREW_UPGRADE_PHP_BINS")
+            hits, st = upgrade.probe(root, "php", "8.2", "8.4")
+            check("araç yokken probe atlanır, hata yok", hits == [] and st["ran"] is False and "araç" in st["reason"], str(st))
+            check("Next.js: araç yok", upgrade.probe(root, "nextjs", "14.0", "15.0")[1] == {"ran": False, "tool": "", "reason": "araç yok"})
+            check("pyproject.toml pipeline_config'te değil", "CREW_UPGRADE_PHP_BINS" not in
+                  (Path(upgrade.__file__).parent.parent / "pipeline_config.py").read_text())
+            rules = upgrade.probe_rules([{"rule": "probe:error", "message": "Parse error: x"},
+                                         {"rule": "probe:deprecation", "message": "Deprecated: y"}], to="8.4")
+            by = {r.key: r for r in rules}
+            check("probe_rules alanları", by["probe:error"].breaks == "error" and by["probe:error"].auto and by["probe:error"].line_local
+                  and by["probe:deprecation"].breaks == "deprecation" and not by["probe:deprecation"].auto
+                  and by["probe:error"].since == (8, 4) and "Parse error" in by["probe:error"].title)
+            # PHP
+            php = shutil.which("php")
+            if php:
+                (root / "src").mkdir(); (root / "vendor").mkdir()
+                (root / "src" / "bad.php").write_text("<?php\nfunction ( {\n")
+                (root / "src" / "dep.php").write_text("<?php\nfunction f(int $a = null) { return $a; }\n")
+                (root / "src" / "ok.php").write_text("<?php\nfunction g(?int $a = null) { return $a; }\n")
+                (root / "vendor" / "v.php").write_text("<?php\nfunction ( {\n")
+                link = fake / "php"
+                os.symlink(php, link)
+                os.environ["CREW_UPGRADE_PHP_BINS"] = f"8.4={link}"
+                hits, st = upgrade.probe(root, "php", "8.2", "8.4")
+                errs = [h for h in hits if h["rule"] == "probe:error"]
+                check("php: parse error → probe:error, vendor dışlanır", st["ran"] is True
+                      and [h["file"] for h in errs] == ["src/bad.php"] and errs[0]["line"] >= 1, str((hits, st)))
+                check("php: ok.php temiz", not [h for h in hits if h["file"] == "src/ok.php"])
+                check("php: hit şekli", all(set(h) == {"rule", "file", "line", "text", "message"} for h in hits) and len(hits) >= 1)
+            else:
+                skip("php probe", "yerelde php yok")
+            # Python tuzakları
+            pr = base / "pyrepo"
+            pr.mkdir()
+            marker = base / "MARKER"
+            for n in ("py_compile.py", "ruff.py", "warnings.py", "json.py"):
+                (pr / n).write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+            (pr / "a.py").write_text("def (:\n")
+            (pr / "b.py").write_text("x = 1\nif x is 1:\n    pass\n")
+            (pr / "c.py").write_text("x = 1\n")
+            exe = Path(_sys.executable)
+            link = fake / "python3.x"
+            os.symlink(exe, link)
+            ver = f"{_sys.version_info[0]}.{_sys.version_info[1]}"
+            os.environ["CREW_UPGRADE_PYTHON_BINS"] = f"{ver}={link}"
+            hits, st = upgrade.probe(pr, "python", "3.9", ver)
+            check("python: işaret dosyası oluşmadı (depo kodu çalışmadı)", not marker.exists())
+            check("python: SyntaxError → probe:error", any(h["rule"] == "probe:error" and h["file"] == "a.py" for h in hits), str((hits, st)))
+            check("python: SyntaxWarning → probe:deprecation", any(h["rule"] == "probe:deprecation" and h["file"] == "b.py" and h["line"] == 2 for h in hits), str(hits))
+            check("python: temiz dosya hit'siz", not [h for h in hits if h["file"] == "c.py"])
+            hits2, _ = upgrade.probe(pr, "python", "3.9", ver, files=["../etc/passwd", "c.py"])
+            check("python: kök dışı yol reddedilir", hits2 == [])
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
 def test_upgrade_plan_sites():
     """Yükseltme hedefi ve sürüm yerleri: seçilebilir sürümler, imaj kanıtı, CI ve kod siteleri."""
     print("\n[upgrade: hedef sürüm ve sürüm yerleri]")
@@ -7881,7 +7979,7 @@ def main():
               test_modern_multilang,
               test_modern_sp,
               test_upgrade_rules,
-              test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites,
+              test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

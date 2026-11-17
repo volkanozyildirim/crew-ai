@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -97,10 +101,35 @@ def _has_catalog(lang: str, version: str) -> bool:
         return False
 
 
+_BIN_RE = re.compile(r"^[\w./@+~-]+$")
+_PROBE_ENV = {"php": ("CREW_UPGRADE_PHP_BINS", "php"), "python": ("CREW_UPGRADE_PYTHON_BINS", "python3")}
+
+
+def tool_bins(env_name: str, prefix: str) -> dict[str, str]:
+    """`8.4=/yol/php,8.5=/yol/php8.5` → {sürüm: yol}. Yalnız env'den okunur (panelden yazılamaz; sunucuda
+    kimlik doğrulama yok — php_modern._safe_bin ile aynı karar). Sürüm `N.N`, yol mutlak ve var olan bir
+    dosya, dosya adı `prefix` ile başlamalı; aksi atılır."""
+    out: dict[str, str] = {}
+    for part in (os.environ.get(env_name) or "").split(","):
+        ver, sep, path = part.strip().partition("=")
+        ver, path = ver.strip(), path.strip()
+        if not sep or not _VER_RE.match(ver) or not path or not _BIN_RE.match(path):
+            continue
+        p = Path(path)
+        if p.is_absolute() and p.is_file() and p.name.startswith(prefix):
+            out[ver] = path
+    return out
+
+
+def _target_bin(lang: str, version: str) -> str | None:
+    spec = _PROBE_ENV.get(lang)
+    return tool_bins(*spec).get(version) if spec else None
+
+
 def _tool_ok(lang: str, version: str) -> bool:
-    """Yerelde o sürümü karşılayan araç var mı. Go: yerel `go version`; PHP/Python: Görev 4 genişletir."""
+    """Yerelde o sürümü karşılayan araç var mı. Go: yerel `go version`; PHP/Python: env'de o sürümün binary'si."""
     if lang != "go":
-        return False
+        return _target_bin(lang, version) is not None
     try:
         out = subprocess.run(["go", "version"], capture_output=True, text=True, timeout=15, cwd="/").stdout
         m = re.search(r"go(\d+)\.(\d+)", out)
@@ -330,4 +359,356 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
         return out
     out["sites"] = sites(client, repo, Path(root), lang, current, target, index, read=read, yml_files=yml_files,
                        per_src=out["per_src"])
+    return out
+
+
+# ── Hedef sürümün aracıyla doğrulama ─────────────────────────────────────
+
+PROBE_PY = Path(__file__).resolve().parent / "upgrade_probe.py"
+_PY_SKIP_DIRS = {".git", "node_modules", "venv", ".venv", "env", "site-packages", "__pycache__", "build", "dist",
+                 ".tox", ".mypy_cache"}
+_PHP_MSG = re.compile(r"^(?:PHP )?(Parse error|Fatal error|Deprecated):\s*(.*?)(?: in (.+?))? on line (\d+)\s*$")
+_GO_MSG = re.compile(r"^(?:vet: )?((?:[\w.@-]+/)*[\w.@-]+\.go):(\d+)(?::\d+)?:\s*(.*)$")
+
+
+def _hit(rule: str, rel: str, line: int, text: str, message: str) -> dict:
+    return {"rule": rule, "file": rel, "line": int(line or 0), "text": (text or "").strip()[:200],
+            "message": (message or "").strip()[:300]}
+
+
+def _src_line(root: Path, rel: str, n: int) -> str:
+    try:
+        lines = (root / rel).read_text(encoding="utf-8", errors="replace").splitlines()
+        return lines[n - 1] if 0 < n <= len(lines) else ""
+    except OSError:
+        return ""
+
+
+def _inside(root: Path, rel: str) -> bool:
+    if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+        return False
+    try:
+        (root / rel).resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _walk_files(root: Path, suffix: str, lang: str) -> list[str]:
+    """Probe dosya listesi. PHP: `php_modern` taramasının dışlamaları (ad ya da yol öneki); Python: sanal ortam /
+    üretilmiş dizinler. Sembolik bağlar izlenmez."""
+    if lang == "php":
+        ex = [e.strip("/") for e in pm.load_cfg().get("php_exclude", []) if e.strip("/")]
+    else:
+        ex = []
+    out: list[str] = []
+    for dp, dns, fns in os.walk(root, followlinks=False):
+        rel_dir = os.path.relpath(dp, root)
+        rel_dir = "" if rel_dir == "." else rel_dir
+
+        def skip(d: str) -> bool:
+            rel = (rel_dir + "/" + d).lstrip("/")
+            if d == ".git" or (lang == "python" and d in _PY_SKIP_DIRS):
+                return True
+            return any(rel == e or rel.startswith(e + "/") or ("/" not in e and d == e) for e in ex)
+        dns[:] = sorted(d for d in dns if not skip(d))
+        for fn in sorted(fns):
+            p = Path(dp) / fn
+            if fn.endswith(suffix) and not p.is_symlink():
+                out.append((rel_dir + "/" + fn).lstrip("/"))
+    return out
+
+
+def _probe_php(root: Path, binp: str, files, timeout: int) -> tuple[list[dict], dict]:
+    from agile_sdlc_crew import verify
+    rels = [f for f in (files if files is not None else _walk_files(root, ".php", "php")) if _inside(root, f)]
+    hits: list[dict] = []
+    seen: set = set()
+    deadline = time.monotonic() + timeout
+    done = 0
+    with tempfile.TemporaryDirectory(prefix="tempo-probe-") as cwd:
+        for rel in rels:
+            left = deadline - time.monotonic()
+            if left <= 1:
+                break
+            try:
+                _, out = verify._run([binp, "-d", "error_reporting=-1", "-d", "display_errors=1", "-l",
+                                      str((root / rel).resolve())], Path(cwd), int(min(30, left)))
+            except (OSError, subprocess.SubprocessError):
+                done += 1
+                continue
+            done += 1
+            for ln in out.splitlines():
+                m = _PHP_MSG.match(ln.strip())
+                if not m:
+                    continue
+                kind, msg, _p, num = m.group(1), m.group(2), m.group(3), int(m.group(4))
+                rule = "probe:deprecation" if kind == "Deprecated" else "probe:error"
+                key = (rule, rel, num, msg)
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(_hit(rule, rel, num, _src_line(root, rel, num), f"{kind}: {msg}"))
+    st = {"ran": True, "tool": binp, "reason": ""}
+    if done < len(rels):
+        st["reason"] = f"süre doldu: {done}/{len(rels)} dosya denetlendi"
+    return hits, st
+
+
+def _probe_python(root: Path, binp: str, files, timeout: int) -> tuple[list[dict], dict]:
+    from agile_sdlc_crew import verify
+    rels = [f for f in (files if files is not None else _walk_files(root, ".py", "python")) if _inside(root, f)]
+    hits: list[dict] = []
+    deadline = time.monotonic() + timeout
+    done = 0
+    with tempfile.TemporaryDirectory(prefix="tempo-probe-") as cwd:
+        for i in range(0, len(rels), 100):
+            left = deadline - time.monotonic()
+            if left <= 1:
+                break
+            chunk = rels[i:i + 100]
+            try:
+                _, out = verify._run([binp, "-I", str(PROBE_PY), str(root.resolve()), *chunk], Path(cwd), int(left))
+            except (OSError, subprocess.SubprocessError):
+                break
+            done += len(chunk)
+            for ln in out.splitlines():
+                try:
+                    d = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(d, dict) and d.get("rule") in ("probe:error", "probe:deprecation"):
+                    hits.append(_hit(d["rule"], str(d.get("file") or ""), d.get("line") or 0, str(d.get("text") or ""),
+                                     str(d.get("message") or "")))
+    st = {"ran": True, "tool": binp, "reason": ""}
+    if done < len(rels):
+        st["reason"] = f"süre doldu: {done}/{len(rels)} dosya denetlendi"
+    return hits, st
+
+
+def _probe_go(root: Path, to: str, timeout: int) -> tuple[list[dict], dict]:
+    from agile_sdlc_crew import verify
+    if not (root / "go.mod").is_file():
+        return [], {"ran": False, "tool": "go", "reason": "go.mod yok"}
+    if not _tool_ok("go", to):
+        return [], {"ran": False, "tool": "go", "reason": f"yerel Go {to} sürümünden eski — hedef sürüm aracı yok"}
+    git = ["git", "-c", "core.hooksPath=/dev/null"]
+    tmp = Path(tempfile.mkdtemp(prefix="tempo-gprobe-"))
+    wt = tmp / "wt"
+    hits: list[dict] = []
+    reason = ""
+    try:
+        code, out = verify._run([*git, "worktree", "add", "-q", "--detach", str(wt), "HEAD"], root, 120)
+        if code != 0:
+            return [], {"ran": False, "tool": "go", "reason": f"geçici worktree açılamadı: {out[:200]}"}
+        gm = wt / "go.mod"
+        text = gm.read_text(encoding="utf-8", errors="replace")
+        text = re.sub(r"(?m)^toolchain\s+.*\n?", "", text)
+        text = re.sub(r"(?m)^go\s+\S+\s*$", f"go {to}", text) if re.search(r"(?m)^go\s+\S+\s*$", text) \
+            else text.rstrip("\n") + f"\n\ngo {to}\n"
+        gm.write_text(text, encoding="utf-8")
+        mod = "-mod=vendor" if (wt / "vendor" / "modules.txt").is_file() else "-mod=readonly"
+        deadline = time.monotonic() + timeout
+        for cmd, rule in ((["go", "build", mod, "./..."], "probe:error"), (["go", "vet", mod, "./..."], "probe:deprecation")):
+            left = deadline - time.monotonic()
+            if left <= 1:
+                reason = "süre doldu"
+                break
+            try:
+                rc, out = verify._run(cmd, wt, int(left))
+            except subprocess.TimeoutExpired:
+                reason = "süre doldu"
+                break
+            found = 0
+            for ln in out.splitlines():
+                m = _GO_MSG.match(ln.strip())
+                if m:
+                    rel = m.group(1).removeprefix("./")
+                    if _inside(wt, rel):
+                        hits.append(_hit(rule, rel, int(m.group(2)), _src_line(wt, rel, int(m.group(2))), m.group(3)))
+                        found += 1
+            if rc != 0 and not found and not reason:
+                reason = f"{cmd[1]} başarısız (dosya/satır yok): {out[:200]}"
+    finally:
+        verify._run([*git, "worktree", "remove", "--force", str(wt)], root, 60)
+        verify._run([*git, "worktree", "prune"], root, 60)
+        shutil.rmtree(tmp, ignore_errors=True)
+    return hits, {"ran": True, "tool": "go", "reason": reason}
+
+
+def probe(root: Path, lang: str, current: str, to: str, *, files: list[str] | None = None,
+          timeout: int = 300) -> tuple[list[dict], dict]:
+    """Hedef sürümün KENDİ aracıyla depoyu doğrula (depo kodu çalıştırılmaz).
+    Dönüş: (hit'ler, {"ran", "tool", "reason"}). Araç yoksa ([], ran=False)."""
+    root = Path(root)
+    none = {"ran": False, "tool": "", "reason": "hedef sürüm için araç yok — yalnız katalog"}
+    if not isinstance(to, str) or not _VER_RE.match(to) or not root.is_dir():
+        return [], {**none, "reason": "geçersiz hedef sürüm ya da repo dizini"}
+    if lang in ("php", "python"):
+        binp = _target_bin(lang, to)
+        if not binp:
+            return [], none
+        fn = _probe_php if lang == "php" else _probe_python
+        return fn(root, binp, files, timeout)
+    if lang == "go":
+        return _probe_go(root, to, timeout)
+    return [], {"ran": False, "tool": "", "reason": "araç yok"}
+
+
+def probe_rules(hits: list[dict], *, to: str | None = None) -> list[pm.Rule]:
+    """probe hit'lerinden genel kurallar (kural anahtarı başına bir tane; başlık/özet ilk mesajdan)."""
+    since = _v(to) if to else (0, 0)
+    out: list[pm.Rule] = []
+    seen: set[str] = set()
+    for h in hits:
+        key = h.get("rule")
+        if key not in ("probe:error", "probe:deprecation") or key in seen:
+            continue
+        seen.add(key)
+        err = key == "probe:error"
+        msg = str(h.get("message") or "")
+        out.append(pm.Rule(
+            key=key, since=since, kind="deprecation" if err else "structural",
+            title=f"{key}: {msg[:80]}", summary=msg,
+            advantages=["Hedef sürümde çalışmayı doğrular."],
+            risks=(["Düzeltme hedef sürümün aracının mesajına göre yapılır."] if err else
+                   ["Aracın otomatik düzeltmesi yok — her yer elle değerlendirilmeli."]),
+            before="", after="", ref="", auto=err, sp_unit=1, line_local=True,
+            breaks="error" if err else "deprecation"))
+    return out
+
+
+# ── Bağımlılık engelleri ─────────────────────────────────────────────────
+
+_INF = (10 ** 6, 0, 0)
+
+
+def _nums(s: str) -> tuple[list[int], bool]:
+    """'8.1.0' → ([8,1,0], wildcard?). Anlaşılmazsa ValueError."""
+    s = s.strip().lstrip("vV")
+    s = re.sub(r"[-+@].*$", "", s) if re.match(r"^\d", s) else s
+    parts = s.split(".")
+    wild = False
+    nums: list[int] = []
+    for p in parts:
+        if p in ("*", "x", "X"):
+            wild = True
+            break
+        if not p.isdigit():
+            raise ValueError(s)
+        nums.append(int(p))
+    if not nums and not wild:
+        raise ValueError(s)
+    return nums, wild
+
+
+def _t(nums: list[int]) -> tuple[int, int, int]:
+    n = (list(nums) + [0, 0, 0])[:3]
+    return n[0], n[1], n[2]
+
+
+def _bump(nums: list[int], idx: int) -> tuple[int, int, int]:
+    n = (list(nums) + [0, 0, 0])[:3]
+    n[idx] += 1
+    for j in range(idx + 1, 3):
+        n[j] = 0
+    return n[0], n[1], n[2]
+
+
+def _atom(tok: str) -> list[tuple]:
+    """Tek kısıt parçası → [lo, hi) aralıkları (üçlü sürüm demetleri)."""
+    tok = tok.strip()
+    if tok in ("", "*", "x", "X"):
+        return [((0, 0, 0), _INF)]
+    m = re.match(r"^(\^|~|>=|<=|==|!=|=|>|<)?\s*(.+)$", tok)
+    if not m:
+        raise ValueError(tok)
+    op, rest = m.group(1) or "", m.group(2)
+    nums, wild = _nums(rest)
+    n = len(nums)
+    if op == "^":
+        lo = _t(nums)
+        if n == 0:
+            raise ValueError(tok)
+        idx = next((i for i, x in enumerate(nums) if x), n - 1)
+        return [(lo, _bump(nums, min(idx, 2)))]
+    if op == "~":
+        if n == 0:
+            raise ValueError(tok)
+        return [(_t(nums), _bump(nums, 0 if n <= 2 else 1))]
+    if op in ("", "=", "==") or wild:
+        if wild or (op == "" and n < 3 and wild):
+            if n == 0:
+                return [((0, 0, 0), _INF)]
+            return [(_t(nums), _bump(nums, n - 1))]
+        return [(_t(nums), _bump(nums, 2))]
+    if op == ">=":
+        return [(_t(nums), _INF)]
+    if op == ">":
+        return [(_bump(nums, n - 1) if n < 3 else _bump(nums, 2), _INF)]
+    if op == "<":
+        return [((0, 0, 0), _t(nums))]
+    if op == "<=":
+        return [((0, 0, 0), _bump(nums, n - 1) if n < 3 else _bump(nums, 2))]
+    if op == "!=":
+        lo, hi = _t(nums), (_bump(nums, n - 1) if n < 3 else _bump(nums, 2))
+        return [((0, 0, 0), lo), (hi, _INF)]
+    raise ValueError(tok)
+
+
+def _intersect(a: list[tuple], b: list[tuple]) -> list[tuple]:
+    out = []
+    for lo1, hi1 in a:
+        for lo2, hi2 in b:
+            lo, hi = max(lo1, lo2), min(hi1, hi2)
+            if lo < hi:
+                out.append((lo, hi))
+    return out
+
+
+def php_constraint_allows(constraint: str, version: str) -> bool:
+    """Composer `require.php` kısıtı `version` (N.N serisi, herhangi bir yama) sürümüne izin veriyor mu.
+    Anlaşılmayan kısıt `True` döner (engel sayılmaz)."""
+    try:
+        a, b = _nums(version)[0][:2]
+        series = [((a, b, 0), (a, b + 1, 0))]
+        c = (constraint or "").strip()
+        if not c:
+            return True
+        for branch in re.split(r"\s*\|\|?\s*", c):
+            branch = re.sub(r"(\^|~|>=|<=|==|!=|=|>|<)\s+", r"\1", branch.strip())
+            m = re.match(r"^(\S+)\s+-\s+(\S+)$", branch)
+            if m:
+                lo_n, _w = _nums(m.group(1))
+                hi = _atom("<=" + m.group(2))
+                cur = _intersect([(_t(lo_n), _INF)], hi)
+            else:
+                cur = [((0, 0, 0), _INF)]
+                for tok in [t for t in re.split(r"[\s,]+", branch) if t]:
+                    cur = _intersect(cur, _atom(tok))
+            if _intersect(cur, series):
+                return True
+        return False
+    except (ValueError, IndexError):
+        return True
+
+
+def blockers(root: Path, lang: str, to: str) -> list[dict]:
+    """Yükseltmeyi engelleyen bağımlılıklar (iş açmaz, hazır olmayı bekletir).
+    PHP: `composer.lock` paketinin `require.php` kısıtı hedefi dışlıyorsa."""
+    if lang != "php" or not isinstance(to, str) or not _VER_RE.match(to):
+        return []
+    try:
+        doc = json.loads((Path(root) / "composer.lock").read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return []
+    out = []
+    for p in doc.get("packages") or []:
+        if not isinstance(p, dict):
+            continue
+        c = (p.get("require") or {}).get("php") if isinstance(p.get("require"), dict) else None
+        name = str(p.get("name") or "")
+        if c and name and not php_constraint_allows(str(c), to):
+            out.append({"kind": "dependency", "name": name, "constraint": str(c),
+                        "detail": f"{name} {p.get('version', '')}: PHP {c} — {to} sürümünü dışlıyor".replace("  ", " ")})
     return out
