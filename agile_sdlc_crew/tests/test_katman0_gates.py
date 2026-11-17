@@ -6377,6 +6377,210 @@ def test_modern_multilang():
           '<span class="h">Modernleştirme</span>' in html and "function _tdmSel()" in html and "Araç uygular" in html)
 
 
+def test_upgrade_bump_sites():
+    """Sürüm satırı değişikliği: yalnız kayıttaki siteye ait tek satır, taslak PR, çapraz proje,
+    403'te diff; hiçbir site yazılmadan önce hepsi doğrulanır."""
+    print("\n[Sürüm adımı: tek satırlık değişiklik]")
+    import requests
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+
+    src = "FROM eu/prod-ar/php-8-2:1.0\nRUN x\n"
+    site = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+            "path": "build/a/Dockerfile", "line": 1, "old": "php-8-2:1.0", "new": "php-8-4:1.0",
+            "blocked": ""}
+    check("yalnız o satır değişir", bump.apply_site(src, site) ==
+          "FROM eu/prod-ar/php-8-4:1.0\nRUN x\n")
+    check("CRLF korunur", bump.apply_site(src.replace("\n", "\r\n"), site) ==
+          "FROM eu/prod-ar/php-8-4:1.0\r\nRUN x\r\n")
+    check("sonda satır sonu yoksa korunur", bump.apply_site("FROM eu/prod-ar/php-8-2:1.0", site) ==
+          "FROM eu/prod-ar/php-8-4:1.0")
+
+    def raises(fn, exc):
+        try:
+            fn()
+        except exc:
+            return True
+        except Exception:
+            return False
+        return False
+
+    check("satır değişmişse SiteChanged",
+          raises(lambda: bump.apply_site("FROM eu/prod-ar/php-8-3:1.0\nRUN x\n", site), bump.SiteChanged))
+    check("old satırda iki kez → SiteChanged", raises(lambda: bump.apply_site(
+        "FROM php-8-2:1.0 php-8-2:1.0\n", site), bump.SiteChanged))
+    check("satır aralık dışı → SiteChanged",
+          raises(lambda: bump.apply_site(src, dict(site, line=3)), bump.SiteChanged)
+          and raises(lambda: bump.apply_site(src, dict(site, line=0)), bump.SiteChanged))
+    check("izinsiz karakter (yeni satır / kabuk) → SiteChanged",
+          raises(lambda: bump.apply_site(src, dict(site, new="php-8-4:1.0\nRUN evil")), bump.SiteChanged)
+          and raises(lambda: bump.apply_site(src, dict(site, new="php-8-4;rm -rf")), bump.SiteChanged))
+    check("old == new → SiteChanged",
+          raises(lambda: bump.apply_site(src, dict(site, new=site["old"])), bump.SiteChanged))
+    check("dal adı", bump.branch_name("php", "core", "8.4") == "tempo/upgrade-php-core-8.4")
+
+    class Fake:
+        def __init__(self, files, forbid=(), branches=None, prs=None):
+            self.files, self.forbid = files, set(forbid)
+            self.branches = {k: set(v) for k, v in (branches or {}).items()}
+            self.existing_prs = prs or {}
+            self.created, self.pushes, self.prs = [], [], []
+
+        def _bs(self, project, repo):
+            return self.branches.setdefault((project, repo), {"main", "production"})
+
+        def get_file_content(self, repo, path, branch=None, project=None):
+            return self.files[(project, repo, branch, path)]
+
+        def list_branches(self, repo, project=None):
+            return [{"name": f"refs/heads/{b}", "objectId": "x"} for b in self._bs(project, repo)]
+
+        def find_pull_request(self, repo, source_branch, *, project=None):
+            return self.existing_prs.get((project, repo, source_branch))
+
+        def _deny(self, repo):
+            if repo in self.forbid:
+                r = SimpleNamespace(status_code=403)
+                raise requests.HTTPError("403", response=r)
+
+        def create_branch(self, repo, branch_name, source_branch="main", project=None):
+            self._deny(repo)
+            self._bs(project, repo).add(branch_name)
+            self.created.append((project, repo, branch_name, source_branch))
+
+        def push_changes(self, repo, branch, changes, commit_message, project=None):
+            self._deny(repo)
+            self.pushes.append({"repo": repo, "branch": branch, "changes": changes,
+                                "project": project, "msg": commit_message})
+
+        def create_pull_request(self, repo, source_branch, target_branch="main", title="",
+                                description="", work_item_ids=None, draft=False, project=None):
+            self._deny(repo)
+            n = 100 + len(self.prs)
+            self.prs.append({"repo": repo, "draft": draft, "project": project, "target": target_branch,
+                             "wi": work_item_ids, "title": title, "id": n})
+            return {"pullRequestId": n, "repository": {"name": repo}}
+
+    def mk(repo, path, line, old, new, project="FLODevOps", branch="production"):
+        return {"where": "devops", "repo": repo, "project": project, "branch": branch, "path": path,
+                "line": line, "old": old, "new": new, "blocked": ""}
+
+    dock_a = "FROM eu/php-8-2:1.0\nRUN x\nFROM eu/php-8-2:1.0 AS b\n"
+    dock_b = "FROM eu/php-8-2:1.0\n"
+    files = {("FLODevOps", "anatolia", "production", "build/a/Dockerfile"): dock_a,
+             ("FLODevOps", "anatolia", "production", "build/b/Dockerfile"): dock_b,
+             ("FLODevOps", "russia", "production", "build/r/Dockerfile"): dock_b}
+    s_a1 = mk("anatolia", "build/a/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    s_a3 = mk("anatolia", "build/a/Dockerfile", 3, "php-8-2:1.0", "php-8-4:1.0")
+    s_b = mk("anatolia", "build/b/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    s_r = mk("russia", "build/r/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    kw = dict(branch="tempo/upgrade-php-core-8.4", title="T", body="B", wi_id=7)
+
+    fc = Fake(files)
+    r = bump.push_sites(fc, [s_a1, s_a3, s_b, s_r], **kw)
+    check("bölge reposu başına tek PR, taslak",
+          [p["repo"] for p in r["prs"]] == ["anatolia", "russia"] and len(fc.prs) == 2
+          and all(c["draft"] for c in fc.prs), str(fc.prs))
+    check("project parametresi geçer", fc.pushes and all(c["project"] == "FLODevOps" for c in fc.pushes)
+          and all(c["project"] == "FLODevOps" for c in fc.prs)
+          and all(c[0] == "FLODevOps" for c in fc.created))
+    check("hedef dal sitenin dalı", all(c["target"] == "production" for c in fc.prs)
+          and all(c[3] == "production" for c in fc.created))
+    pa = [p for p in fc.pushes if p["repo"] == "anatolia"]
+    check("repo başına tek commit, iki dosya", len(pa) == 1 and len(pa[0]["changes"]) == 2)
+    ca = {c["path"].lstrip("/"): c for c in pa[0]["changes"]}
+    check("aynı dosyada iki site de uygulanır, başka satıra dokunulmaz",
+          ca["build/a/Dockerfile"]["content"] == "FROM eu/php-8-4:1.0\nRUN x\nFROM eu/php-8-4:1.0 AS b\n"
+          and ca["build/a/Dockerfile"]["changeType"] == "edit"
+          and all(c["path"].startswith("/") for c in pa[0]["changes"]))
+    check("başka projedeki repoya WI bağlanmaz", all(c["wi"] is None for c in fc.prs))
+    check("r['prs'] biçimi", set(r["prs"][0]) >= {"repo", "id", "url"} and r["fallback"] == [])
+
+    # 403 → diff
+    ff = Fake(files, forbid={"anatolia"})
+    r = bump.push_sites(ff, [s_a1, s_r], **kw)
+    fb = r["fallback"]
+    check("403 → diff fallback'e, öteki repo devam eder",
+          len(fb) == 1 and fb[0]["repo"] == "anatolia" and fb[0]["project"] == "FLODevOps"
+          and fb[0]["diff"].count("\n+") == 2 and "a/build/a/Dockerfile" in fb[0]["diff"]
+          and "b/build/a/Dockerfile" in fb[0]["diff"]
+          and [p["repo"] for p in r["prs"]] == ["russia"], str(fb))
+    check("diff yalnız tek satırı değiştirir",
+          [l for l in fb[0]["diff"].splitlines() if l.startswith("-") and not l.startswith("---")]
+          == ["-FROM eu/php-8-2:1.0"])
+
+    class Boom(Fake):
+        def push_changes(self, *a, **k):
+            r = SimpleNamespace(status_code=500)
+            raise requests.HTTPError("500", response=r)
+    check("403 dışı HTTP hatası yayılır",
+          raises(lambda: bump.push_sites(Boom(files), [s_a1], **kw), requests.HTTPError))
+
+    # engelli / satırsız site → hiçbir şey yazılmaz
+    f0 = Fake(files)
+    check("engelli site → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(f0, [s_r, dict(s_a1, blocked="imaj yok")], **kw), ValueError)
+          and not f0.pushes and not f0.created and not f0.prs)
+    check("line=0 → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(f0, [dict(s_r, line=0)], **kw), ValueError)
+          and not f0.pushes and not f0.created)
+    check("geçersiz repo adı / yol → ValueError",
+          raises(lambda: bump.push_sites(f0, [dict(s_r, repo="a/../b")], **kw), ValueError)
+          and raises(lambda: bump.push_sites(f0, [dict(s_r, path="../x/Dockerfile")], **kw), ValueError)
+          and raises(lambda: bump.push_sites(f0, [dict(s_r, path="build/-x/Dockerfile")], **kw), ValueError)
+          and not f0.pushes)
+    check("aynı repoda farklı hedef dal → ValueError",
+          raises(lambda: bump.push_sites(f0, [s_a1, dict(s_b, branch="main")], **kw), ValueError)
+          and not f0.pushes)
+
+    # geç SiteChanged → ilk repoya da yazılmaz
+    files_bad = dict(files)
+    files_bad[("FLODevOps", "russia", "production", "build/r/Dockerfile")] = "FROM eu/php-8-3:1.0\n"
+    fl = Fake(files_bad)
+    check("ikinci repoda SiteChanged → ilkine de push yok",
+          raises(lambda: bump.push_sites(fl, [s_a1, s_r], **kw), bump.SiteChanged)
+          and not fl.pushes and not fl.created and not fl.prs)
+
+    # dal zaten var
+    bn = kw["branch"]
+    fe = Fake(files, branches={("FLODevOps", "russia"): {"main", "production", bn}})
+    check("dal var, açık PR yok → ValueError, dokunulmaz",
+          raises(lambda: bump.push_sites(fe, [s_r], **kw), ValueError)
+          and not fe.pushes and not fe.created)
+    pr_open = {"id": 55, "status": "active", "url": "https://x/55", "closed_at": "",
+               "merge_commit": "", "target": "production"}
+    fe2 = Fake(files, branches={("FLODevOps", "russia"): {"main", "production", bn}},
+               prs={("FLODevOps", "russia", bn): pr_open})
+    r = bump.push_sites(fe2, [s_r], **kw)
+    check("dal var + açık PR → aynı PR'a push, yeni PR/dal yok",
+          len(fe2.pushes) == 1 and not fe2.created and not fe2.prs
+          and r["prs"] == [{"repo": "russia", "id": 55, "url": "https://x/55"}], str(r))
+    pr_done = dict(pr_open, status="completed")
+    fe3 = Fake(files, branches={("FLODevOps", "russia"): {"main", "production", bn}},
+               prs={("FLODevOps", "russia", bn): pr_done})
+    check("dal var, PR kapanmış → ValueError",
+          raises(lambda: bump.push_sites(fe3, [s_r], **kw), ValueError) and not fe3.pushes)
+
+    # kod reposu sitesi: project boş → client None geçer, WI bağlanır
+    files_c = {(None, "core", "main", "composer.json"): '{"require": {"php": ">=8.2"}}\n'}
+    s_c = {"where": "code", "repo": "core", "project": "", "branch": "main", "path": "composer.json",
+           "line": 1, "old": ">=8.2", "new": ">=8.4", "blocked": ""}
+    fcc = Fake(files_c)
+    r = bump.push_sites(fcc, [s_c], **kw)
+    check("kod reposu: project=None, WI bağlanır",
+          fcc.pushes[0]["project"] is None and fcc.prs[0]["project"] is None
+          and fcc.prs[0]["wi"] == [7]
+          and fcc.pushes[0]["changes"][0]["content"] == '{"require": {"php": ">=8.4"}}\n', str(fcc.pushes))
+
+    # istemci: project parametresi opsiyonel ve geriye uyumlu
+    import inspect
+    from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient as C
+    for n in ("create_branch", "push_changes", "create_pull_request", "list_branches"):
+        p = inspect.signature(getattr(C, n)).parameters.get("project")
+        check(f"{n}(project=None)", p is not None and p.default is None)
+    p = inspect.signature(C.find_pull_request).parameters["project"]
+    check("find_pull_request keyword-only project", p.kind is p.KEYWORD_ONLY)
+
+
 def test_php_rector_fix():
     """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
     başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
@@ -8411,6 +8615,7 @@ def main():
               test_upgrade_rules,
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
               test_upgrade_scan_take,
+              test_upgrade_bump_sites,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

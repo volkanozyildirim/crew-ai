@@ -313,9 +313,9 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
-    def list_branches(self, repo_id_or_name: str) -> list[dict]:
+    def list_branches(self, repo_id_or_name: str, project: str | None = None) -> list[dict]:
         """Bir repodaki branch'leri listeler."""
-        url = f"{self._repo_api_url(repo_id_or_name)}/refs"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/refs"
         params = {"filter": "heads/", "api-version": self.API_VERSION}
         resp = requests.get(url, headers=self._headers, params=params, timeout=30)
         resp.raise_for_status()
@@ -431,10 +431,12 @@ class AzureDevOpsClient:
         repo_id_or_name: str,
         branch_name: str,
         source_branch: str = "main",
+        project: str | None = None,
     ) -> dict:
         """Yeni bir branch olusturur."""
         # Kaynak branch'in objectId'sini al
-        branches = self.list_branches(repo_id_or_name)
+        branches = (self.list_branches(repo_id_or_name, project) if project
+                    else self.list_branches(repo_id_or_name))
         source_ref = None
         for b in branches:
             ref_name = b.get("name", "")
@@ -444,7 +446,7 @@ class AzureDevOpsClient:
         if not source_ref:
             raise ValueError(f"Kaynak branch '{source_branch}' bulunamadi.")
 
-        url = f"{self._repo_api_url(repo_id_or_name)}/refs"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/refs"
         params = {"api-version": self.API_VERSION}
         body = [
             {
@@ -465,6 +467,7 @@ class AzureDevOpsClient:
         branch: str,
         changes: list[dict],
         commit_message: str,
+        project: str | None = None,
     ) -> dict:
         """Branch'e dosya degisiklikleri push eder.
 
@@ -476,7 +479,8 @@ class AzureDevOpsClient:
         ]
         """
         # Branch'in son commit objectId'sini al
-        branches = self.list_branches(repo_id_or_name)
+        branches = (self.list_branches(repo_id_or_name, project) if project
+                    else self.list_branches(repo_id_or_name))
         branch_ref = None
         for b in branches:
             if b.get("name") == f"refs/heads/{branch}":
@@ -498,7 +502,7 @@ class AzureDevOpsClient:
                 }
             formatted_changes.append(item)
 
-        url = f"{self._repo_api_url(repo_id_or_name)}/pushes"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pushes"
         params = {"api-version": self.API_VERSION}
         body = {
             "refUpdates": [
@@ -523,6 +527,7 @@ class AzureDevOpsClient:
         description: str = "",
         work_item_ids: list[int] | None = None,
         draft: bool = False,
+        project: str | None = None,
     ) -> dict:
         """Pull request olusturur (`draft` → taslak: incelemeciye düşmez, build politikası koşar).
 
@@ -532,7 +537,7 @@ class AzureDevOpsClient:
         if len(description or "") > PR_DESCRIPTION_MAX:
             note = "\n\n… (açıklama Azure'un 4000 karakter sınırına sığdırıldı — liste kısaltıldı)"
             description = description[:PR_DESCRIPTION_MAX - len(note)] + note
-        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pullrequests"
         params = {"api-version": self.API_VERSION}
         body: dict = {
             "sourceRefName": f"refs/heads/{source_branch}",
@@ -551,6 +556,36 @@ class AzureDevOpsClient:
             raise requests.HTTPError(f"{resp.status_code} PR oluşturulamadı: {(resp.text or '')[:400]}",
                                      response=resp)
         return resp.json()
+
+    def find_pull_request(self, repo_id_or_name: str, source_branch: str, *,
+                          project: str | None = None) -> dict | None:
+        """O daldan açılmış en yeni PR (her durumda); yoksa None.
+        {"id","status","url","closed_at","merge_commit","target"} — status Azure'un verdiği:
+        active | completed | abandoned."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pullrequests"
+        params = {
+            "searchCriteria.sourceRefName": f"refs/heads/{source_branch}",
+            "searchCriteria.status": "all",
+            "api-version": self.API_VERSION,
+        }
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        vals = resp.json().get("value", [])
+        if not vals:
+            return None
+        pr = max(vals, key=lambda v: v.get("creationDate") or "")
+        repo = pr.get("repository") or {}
+        proj = (repo.get("project") or {}).get("name") \
+            or project or self._find_repo_project(repo_id_or_name)
+        repo_name = repo.get("name") or repo_id_or_name
+        return {
+            "id": pr.get("pullRequestId"),
+            "status": pr.get("status") or "",
+            "url": f"{self.org_url}/{proj}/_git/{repo_name}/pullrequest/{pr.get('pullRequestId')}",
+            "closed_at": pr.get("closedDate") or "",
+            "merge_commit": (pr.get("lastMergeCommit") or {}).get("commitId") or "",
+            "target": (pr.get("targetRefName") or "").removeprefix("refs/heads/"),
+        }
 
     def delete_branch(self, repo_id_or_name: str, branch_name: str) -> bool:
         """Remote branch'i siler. Branch yoksa False doner (hata firlatmaz).
