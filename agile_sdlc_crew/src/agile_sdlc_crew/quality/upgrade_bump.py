@@ -19,6 +19,7 @@ import html
 import json
 import logging
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -289,6 +290,7 @@ def push_sites(client, sites: list[dict], *, branch: str, title: str, body: str,
 
 JOB_KIND = "upgrade_bump"
 STEPS = ("ci", "prod", "code")
+_QUEUE_LOCK = threading.Lock()
 _VER = re.compile(r"^\d+\.\d+$")
 log = logging.getLogger("pipeline")
 
@@ -466,10 +468,9 @@ def queue_step(client, repo: str, lang: str, *, to: str | None = None, team: str
     if expect_step and expect_step != nx["step"]:
         raise StepChanged(f"Durum değişti: onaylanan adım {ut.STEP_LABEL.get(expect_step, expect_step)}, şimdi sıradaki "
                           f"adım {ut.STEP_LABEL.get(nx['step'], nx['step'])} — kart yenilendi, yeniden onaylayın.")
-    if open_jobs is None and create_job is None:   # test kendi create_job'unu verdiyse DB'ye dokunma
-        open_jobs = _open_bump_jobs
-    if open_jobs is not None and open_jobs(tr["id"]):
-        raise StepChanged(f"İzleme işi #{tr['id']} için bir sürüm adımı zaten kuyrukta ya da çalışıyor — bitmesini bekleyin.")
+    # Açık iş koruması yalnız open_jobs'a bağlı: create_job enjekte eden çağıran (otomatik ilerletme,
+    # testler) korumayı kaybetmez; DB'ye dokunmayacak test kendi open_jobs'unu verir.
+    open_jobs = open_jobs or _open_bump_jobs
     repo = st.get("repo") or repo
     payload = {"lang": lang, "repo": repo, "from": st["current"], "to": to, "step": nx["step"],
                "sites": nx["sites"], "track_id": int(tr["id"]), "team": team or ""}
@@ -477,7 +478,13 @@ def queue_step(client, repo: str, lang: str, *, to: str | None = None, team: str
     if create_job is None:
         from agile_sdlc_crew import db
         create_job = db.create_job
-    job_id = create_job(str(tr["id"]), False, title, job_kind=JOB_KIND, job_payload=json.dumps(payload))
+    # "açık adım işi var mı → iş aç" tek kilit altında: kart düğmesi ile otomatik ilerletme aynı anda aynı
+    # izleme işi için iki adım işi açmasın (kontrol ile INSERT arası yarış).
+    with _QUEUE_LOCK:
+        if open_jobs(tr["id"]):
+            raise StepChanged(f"İzleme işi #{tr['id']} için bir sürüm adımı zaten kuyrukta ya da çalışıyor — "
+                              "bitmesini bekleyin.")
+        job_id = create_job(str(tr["id"]), False, title, job_kind=JOB_KIND, job_payload=json.dumps(payload))
     log.info(f"⬆️ Sürüm adımı kuyrukta: #{job_id} {nx['step']} ({lang}:{repo}:{to})")
     return {"job_id": job_id, "step": nx["step"], "track_id": int(tr["id"]), "to": to, "sites": len(nx["sites"])}
 

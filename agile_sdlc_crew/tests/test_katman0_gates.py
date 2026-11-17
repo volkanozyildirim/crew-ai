@@ -7304,20 +7304,21 @@ def test_upgrade_status_and_steps():
             created.append({"wid": wid, "title": title, "kind": job_kind, "payload": json.loads(job_payload)})
             return 77
         try:
-            bump.queue_step(_UpFake(), "core", "php", team="T", deps=deps, create_job=cj, status_fn=lambda *a, **k: s_clean)
+            bump.queue_step(_UpFake(), "core", "php", team="T", deps=deps, create_job=cj, open_jobs=lambda t: [],
+                            status_fn=lambda *a, **k: s_clean)
             check("izleme işi yokken bump → ValueError", False)
         except ValueError as e:
             check("izleme işi yokken bump → ValueError", "başlatın" in str(e))
         blocked_st = st(mkscan(sites=[dv_a, dv_rb, ci_s, code_s]))
         try:
             bump.queue_step(_UpFake(tracks=[track_wi()]), "core", "php", team="T", deps=deps, create_job=cj,
-                            status_fn=lambda *a, **k: blocked_st)
+                            open_jobs=lambda t: [], status_fn=lambda *a, **k: blocked_st)
             check("ön koşul yoksa queue_step → ValueError(next.reason)", False)
         except ValueError as e:
             check("ön koşul yoksa queue_step → ValueError(next.reason)",
                   str(e) == blocked_st["next"]["reason"] and not created, str(e))
         q = bump.queue_step(_UpFake(tracks=[track_wi()]), "core", "php", team="T", deps=deps, create_job=cj,
-                            status_fn=lambda *a, **k: s_clean)
+                            open_jobs=lambda t: [], status_fn=lambda *a, **k: s_clean)
         pl = created[0]["payload"] if created else {}
         check("queue_step: upgrade_bump işi, WI = izleme işi, kapsam INSERT'te",
               q["job_id"] == 77 and created[0]["kind"] == "upgrade_bump" and created[0]["wid"] == "500"
@@ -7337,7 +7338,7 @@ def test_upgrade_status_and_steps():
         try:
             created.clear()
             ce = _UpFake(yml_files, tracks=[track_wi()])
-            bump.queue_step(ce, "core", "php", team="T", deps=deps, create_job=cj, **skw)
+            bump.queue_step(ce, "core", "php", team="T", deps=deps, create_job=cj, open_jobs=lambda t: [], **skw)
             job = {"job_kind": "upgrade_bump", "job_payload": json.dumps(created[0]["payload"])}
             out = bump.run(77, load_job=lambda j: job, client=ce, deps=deps, request_fn=rq, **skw)
             check("run ci: tek taslak PR yml-files'a, yalnız sürüm satırı",
@@ -7833,6 +7834,368 @@ def test_upgrade_bump_expect_step():
         pc.get, bump.queue_step, server.AzureDevOpsClient, server._ensure_worker = orig_pc, orig_qs, orig_cl, orig_w
 
 
+class _AdvFake:
+    """Otomatik ilerletme için sahte Azure: izleme işleri, tempo-upgrade işleri, sprintler, yorumlar
+    (zaman damgalı; Azure gibi HTML döner), oluşturulan WI'ler ve durum geçişleri."""
+    org_url, project = "https://dev.azure.com/o", "P"
+
+    def __init__(self, tracks=(), tasks=(), future=True):
+        self.tracks, self.tasks, self.future = list(tracks), list(tasks), future
+        self.created, self.comments, self.states, self.wiql = [], [], [], []
+        self.store = {}
+        self.clock = "2026-11-17T10:00:00.000Z"
+
+    def query_work_items(self, wiql, limit=0):
+        import html as _h
+        self.wiql.append(wiql)
+        needles = [n.replace("''", "'") for n in re.findall(r"\[System\.Description\] CONTAINS '((?:[^']|'')*)'", wiql)]
+        if "tempo-upgrade-track" in wiql:
+            m = re.search(r"\[System\.AreaPath\] UNDER '((?:[^']|'')*)'", wiql)
+            area = m.group(1).replace("''", "'").lower() if m else None
+            pool = [w for w in self.tracks if area is None or w["fields"]["System.AreaPath"].lower() == area
+                    or w["fields"]["System.AreaPath"].lower().startswith(area + "\\")]
+        elif "tempo-upgrade-red:" in wiql:
+            pool = [{"id": 700 + i, "fields": dict(f, **{"System.State": "To Do"})} for i, f in enumerate(self.created)]
+        elif "'User Story'" in wiql:
+            return []
+        elif "CONTAINS 'tempo-upgrade'" in wiql:
+            pool = self.tasks
+        else:
+            pool = []
+        return [w for w in pool if all(n in _h.unescape(w["fields"].get("System.Description") or "") for n in needles)]
+
+    def get_team_area_path(self, team=""):
+        return {"T": "P\\T", "U": "P\\U"}.get(team, "")
+
+    def list_teams(self):
+        return [{"name": "T"}, {"name": "U"}]
+
+    def list_iterations(self, team=""):
+        its = [{"name": "S23", "path": "P\\S23", "attributes": {"timeFrame": "current"}}]
+        if self.future:
+            its.append({"name": "S24", "path": "P\\S24", "attributes": {"timeFrame": "future", "startDate": "2026-11-24"}})
+        return its
+
+    def create_work_item(self, type_name, fields, parent_id=None):
+        self.created.append(dict(fields, _type=type_name, _parent=parent_id))
+        return {"id": 700 + len(self.created) - 1, "fields": fields}
+
+    def update_work_item(self, wid, ops):
+        return {}
+
+    def get_authenticated_user(self):
+        return {"uniqueName": "me@x"}
+
+    def add_comment(self, wid, text):
+        self.comments.append((wid, text))
+        # Azure markdown'ı HTML olarak geri verir; işaretler etiket soyularak aranmalı
+        self.store.setdefault(wid, []).append({"id": len(self.comments), "yazar": "Tempo", "tarih": self.clock,
+                                               "metin": "<div>" + text.replace("<p>", "<p dir=\"auto\">") + "</div>"})
+        return {}
+
+    def get_work_item_comments(self, wid):
+        return list(self.store.get(wid, []))
+
+    def get_work_item_type_states(self, t):
+        return [{"name": "To Do", "category": "Proposed"}, {"name": "Done", "category": "Completed"}]
+
+    def set_work_item_state(self, wid, st):
+        self.states.append((wid, st))
+        for w in self.tracks:
+            if w["id"] == wid:
+                w["fields"]["System.State"] = st
+
+
+def test_upgrade_advance():
+    """Otomatik ilerletme (spec §7): butonların fonksiyonlarından geçer, tavanlar, sprint, kırmızı build /
+    CI bekleme notu bir kez, devir ve hazır-değil'de sessiz, hata öğe başına, tamam'da kapanış, yoklayıcı."""
+    print("\n[U10] Sürüm yükseltme — otomatik ilerletme ve yoklayıcı")
+    import queue as _queue
+    import threading as _th
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake, upgrade_bump as bump, upgrade_track as ut
+
+    # ── queue_step: create_job verilse de açık iş koruması (Görev 9'dan devir) + kilit ──
+    track = {"id": 500, "to": "8.4", "lang": "php", "repo": "core", "area": "P\\T"}
+    st_ci = {"repo": "core", "current": "8.2", "stage": "hazır",
+             "next": {"step": "ci", "ready": True, "reason": "", "sites": [], "handed_off": None}}
+    made = []
+    saved_fo, saved_ob = ut.find_open, bump._open_bump_jobs
+    ut.find_open = lambda c, lang, repo: track
+    bump._open_bump_jobs = lambda tid: [{"id": 3}]
+    try:
+        try:
+            bump.queue_step(object(), "core", "php", team="T", status_fn=lambda *a, **k: st_ci,
+                            create_job=lambda *a, **k: (made.append(1), 9)[1])
+            check("queue_step: create_job enjekte olsa da açık adım işi reddedilir", False, str(made))
+        except bump.StepChanged:
+            check("queue_step: create_job enjekte olsa da açık adım işi reddedilir", not made)
+        held = []
+        q = bump.queue_step(object(), "core", "php", team="T", status_fn=lambda *a, **k: st_ci,
+                            open_jobs=lambda tid: (held.append(bump._QUEUE_LOCK.locked()), [])[1],
+                            create_job=lambda *a, **k: (held.append(bump._QUEUE_LOCK.locked()), 9)[1])
+        check("queue_step: kontrol → INSERT tek kilit altında", q["job_id"] == 9 and held == [True, True]
+              and not bump._QUEUE_LOCK.locked(), str(held))
+    finally:
+        ut.find_open, bump._open_bump_jobs = saved_fo, saved_ob
+
+    MAX_OPEN = 3
+    flags = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE": True,
+             "CREW_TECHDEBT_UPGRADE_AUTO": True, "CREW_TECHDEBT_UPGRADE_MAX_OPEN": MAX_OPEN,
+             "CREW_TECHDEBT_UPGRADE_SPRINT": "next", "CREW_TECHDEBT_UPGRADE_POLL_MIN": 30,
+             "CREW_TECHDEBT_UPGRADE_CI_WAIT_H": 72}
+    orig_get = pc.get
+    pc.get = lambda k: flags[k] if k in flags else orig_get(k)
+
+    def track_wi(wid=500, repo="core", area="P\\T", to="8.4", state="To Do"):
+        return {"id": wid, "fields": {"System.Title": "izleme", "System.State": state, "System.AreaPath": area,
+                                      "System.Tags": "tempo-upgrade-track",
+                                      "System.Description": f"<p><small>tempo-upgrade-key: php:{repo}:{to}</small></p>"}}
+
+    def task_wi(wid, fp, tags="tempo-quality; tempo-techdebt; tempo-upgrade"):
+        return {"id": wid, "fields": {"System.Title": "x", "System.State": "To Do", "System.Tags": tags,
+                                      "System.Description": f"<p><small>tempo-fp: {fp}</small></p>"}}
+
+    def stt(stage="hazırlık", step="ci", ready=False, reason="hazırlık bitmedi", ev=None, code_pr=None, handed=None):
+        return {"repo": "core", "current": "8.2", "target": "8.4", "stage": stage, "evidence": ev,
+                "prs": {"ci": None, "devops": [], "code": code_pr},
+                "next": {"step": step, "ready": ready, "reason": reason, "sites": [], "manual": [], "test_note": "",
+                         "handed_off": handed}}
+
+    hits = [{"rule": "implicit_nullable", "file": "app/A.php", "line": 3, "text": "function f(int $a = null)"},
+            {"rule": "deprecated_84", "file": "app/B.php", "line": 5, "text": "lcg_value()"}]
+    probe = ([{"rule": "probe:error", "file": "app/D.php", "line": 9, "text": "fn(", "message": "Parse error: x"}],
+             {"ran": True, "tool": "/x/php8.4", "reason": ""})
+    jobs, queued = [], []
+
+    def cj(wid, use_hal, title, *, job_kind, job_payload):
+        jobs.append({"wid": wid, "kind": job_kind, "payload": json.loads(job_payload)})
+        return 77
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            for name in ("core", "web"):
+                (base / name).mkdir()
+                (base / name / "composer.json").write_text('{"require": {"php": "^8.0"}}', encoding="utf-8")
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+            deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(),
+                               queue=lambda w, t: (queued.append((w, t)), 9)[1], record=lambda **k: None,
+                               now=lambda: 1e9, cfg=lambda: cfg)
+            index = {r: [{"src": f"anatolia/build/{r}", "images": ["eu/prod-ar/php-8-2:1.0"]}] for r in ("core", "web")}
+            kw = dict(index=index, scan_fn=lambda root, **k: {"files": 3, "sha": "s1", "hits": list(hits), "adoption": {},
+                                                              "errors": []},
+                      head_sha_fn=lambda r: "s1", app_map_cache={}, read=lambda d, p: "", yml_files={},
+                      probe_fn=lambda root, lang, cur, to, **k: probe)
+            NOW = _dt(2026, 11, 17, 10, 0, tzinfo=_tz.utc)
+
+            def adv(c, st, **k):
+                sfn = st if callable(st) else (lambda *a, **kk: st)
+                base_kw = dict(team="T", deps=deps, create_job=cj, bump_jobs=lambda tid: [], status_fn=sfn, now=NOW)
+                return ut.advance(c, **{**base_kw, **kw, **k})
+
+            # ── Tavanlar + sprint ──
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt(), open_jobs=lambda repo: 2)
+            check("tavan: 2 açıkken 1 iş alınır", len(r) == 1 and len(r[0]["took"]) == 1, str(r))
+            check("otomatik alım bir sonraki sprint'e",
+                  c.created and c.created[-1]["System.IterationPath"] == "P\\S24"
+                  and "tempo-upgrade" in c.created[-1]["System.Tags"], str(c.created[-1:]))
+            check("alınan iş kuyruğa (queued)", r[0]["queued"] and queued, str(r))
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt(), open_jobs=lambda repo: 3)
+            check("tavan doluyken alım yok", r[0]["took"] == [] and not c.created, str(r))
+            cfg["max_take"] = 1
+            c = _AdvFake(tracks=[track_wi()])
+            try:
+                r = adv(c, stt(), open_jobs=lambda repo: 0)
+            finally:
+                cfg["max_take"] = 8
+            check("max_take MAX_OPEN'dan küçükse o kazanır", len(r[0]["took"]) == 1, str(r))
+            # varsayılan sayaç: açık tempo-upgrade işleri (needs-human hariç)
+            c = _AdvFake(tracks=[track_wi()], tasks=[
+                task_wi(61, "php_modern:core:x:app/Q.php"), task_wi(62, "php_modern:core:y:app/R.php"),
+                task_wi(63, "php_modern:core:z:app/S.php", tags="tempo-quality; tempo-upgrade; needs-human"),
+                task_wi(64, "php_modern:web:x:app/Q.php")])
+            r = adv(c, stt())
+            check("varsayılan sayaç: needs-human ve başka repo sayılmaz (2 açık → 1 alım)", len(r[0]["took"]) == 1,
+                  str(r))
+            c = _AdvFake(tracks=[track_wi()], future=False)
+            r = adv(c, stt(), open_jobs=lambda repo: 0)
+            check("sonraki sprint yok → alım yok, not", r[0]["took"] == [] and not c.created
+                  and "sprint" in r[0]["note"], str(r))
+
+            # ── Sürüm adımı ──
+            jobs.clear()
+            c = _AdvFake(tracks=[track_wi()])
+            r_ready = adv(c, stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3)
+            check("hazır → ci adımı kuyruğa", r_ready[0]["queued_step"] == "ci" and len(jobs) == 1
+                  and jobs[0]["kind"] == "upgrade_bump" and jobs[0]["wid"] == "500" and r_ready[0]["queued"], str(r_ready))
+            jobs.clear()
+            r_dup = adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
+                        bump_jobs=lambda tid: [{"id": 1}])
+            check("kuyrukta bump varken ikinci açılmaz", r_dup[0]["queued_step"] is None and not jobs
+                  and r_dup[0]["note"], str(r_dup))
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt("hazırlık", "ci", False, "Hazırlık bitmedi"), open_jobs=lambda repo: 3)
+            check("hazır değil → kuyruk yok, yorum yok", r[0]["queued_step"] is None and not jobs and not c.comments
+                  and not c.created, str(r))
+            red = {"state": "red", "build": {"id": 33, "url": "https://x/b/33", "queue_time": ""},
+                   "summary": "FAILED CoreTest::testFoo password=hunter2", "overdue": False, "since": "2026-11-10T10:00:00Z"}
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt("test hattı", "prod", False, "devir", ev=red, handed=4242), open_jobs=lambda repo: 3)
+            check("DevOps'a devredilmiş → hiçbir şey yazılmaz / kuyruğa girmez",
+                  r[0]["queued_step"] is None and not jobs and not c.comments and not c.created, str(r))
+
+            # ── Kırmızı build: build başına bir kez yorum + needs-human Task ──
+            c = _AdvFake(tracks=[track_wi()])
+            st_red = stt("test hattı", "prod", False, "build kırmızı", ev=red)
+            r1 = adv(c, st_red, open_jobs=lambda repo: 3)
+            human = [w for w in c.created if "needs-human" in (w.get("System.Tags") or "")]
+            check("kırmızı: izleme işine bir yorum (özet + build bağlantısı + işaret)",
+                  len(c.comments) == 1 and c.comments[0][0] == 500 and "CoreTest" in c.comments[0][1]
+                  and "https://x/b/33" in c.comments[0][1] and "tempo-upgrade-red:33" in c.comments[0][1], str(c.comments))
+            check("kırmızı: bir needs-human Task (tempo-upgrade, teknik borç, repo/dil/hedef, maskeli)",
+                  len(human) == 1 and "tempo-upgrade" in human[0]["System.Tags"] and "tempo-techdebt" in human[0]["System.Tags"]
+                  and "core" in human[0]["System.Title"] and "8.4" in human[0]["System.Title"]
+                  and "https://x/b/33" in human[0]["System.Description"] and "hunter2" not in human[0]["System.Description"]
+                  and "hunter2" not in c.comments[0][1], str(human))
+            check("kırmızı: prod kuyruğa girmez", r1[0]["queued_step"] is None and not jobs)
+            n_c, n_w = len(c.comments), len(c.created)
+            adv(c, st_red, open_jobs=lambda repo: 3)
+            check("aynı build ikinci turda sessiz", len(c.comments) == n_c and len(c.created) == n_w,
+                  str(c.comments[n_c:]))
+            red2 = dict(red, build={"id": 34, "url": "https://x/b/34", "queue_time": ""})
+            adv(c, stt("test hattı", "prod", False, "build kırmızı", ev=red2), open_jobs=lambda repo: 3)
+            check("yeni kırmızı build yeniden bildirilir", len(c.comments) == n_c + 1 and len(c.created) == n_w + 1
+                  and "tempo-upgrade-red:34" in c.comments[-1][1], str(c.comments[n_c:]))
+
+            # ── CI bekleme notu: since başına bir kez ──
+            wait = {"state": "none", "build": None, "summary": "", "overdue": True, "since": "2026-11-10T10:00:00Z"}
+            c = _AdvFake(tracks=[track_wi()])
+            for _ in range(2):
+                adv(c, stt("test hattı", "prod", False, "build yok", ev=wait), open_jobs=lambda repo: 3)
+            notes = sum(1 for _w, t in c.comments if "tempo-upgrade-ci-wait" in t)
+            check("CI bekleme notu bir kez", notes == 1 and "yeniden tetikleyin" in c.comments[0][1]
+                  and "2026-11-10T10:00:00Z" in c.comments[0][1], str(c.comments))
+            adv(c, stt("test hattı", "prod", False, "build yok", ev=dict(wait, since="2026-11-12T10:00:00Z")),
+                open_jobs=lambda repo: 3)
+            check("yeni since → yeni not", sum(1 for _w, t in c.comments if "tempo-upgrade-ci-wait" in t) == 2)
+            c = _AdvFake(tracks=[track_wi()])
+            adv(c, stt("test hattı", "prod", False, "build yok", ev=dict(wait, overdue=False)), open_jobs=lambda repo: 3)
+            check("süre dolmadan not yok", not c.comments)
+
+            # ── Hata öğe başına; 24 saatte bir yorum ──
+            def st_err(cl, repo, lang, **k):
+                if repo == "core":
+                    raise RuntimeError("Azure 503 geçici")
+                return stt("hazır", "ci", True, "")
+            c = _AdvFake(tracks=[track_wi(), track_wi(501, repo="web")])
+            jobs.clear()
+            r = adv(c, st_err, open_jobs=lambda repo: 3)
+            by = {x["repo"]: x for x in r}
+            check("A'nın hatası B'yi durdurmaz", set(by) == {"core", "web"} and "503" in by["core"]["note"]
+                  and by["web"]["queued_step"] == "ci" and len(jobs) == 1 and jobs[0]["wid"] == "501", str(r))
+            errs = [t for w, t in c.comments if w == 500 and "tempo-upgrade-err:" in t]
+            check("hata izleme işine bir kez yorumlanır", len(errs) == 1, str(c.comments))
+            adv(c, st_err, open_jobs=lambda repo: 3, now=NOW + _td(hours=2))
+            check("aynı hata 24 saat içinde yeniden yorumlanmaz",
+                  len([t for w, t in c.comments if w == 500 and "tempo-upgrade-err:" in t]) == 1)
+            c.clock = "2026-11-17T10:00:00Z"
+            adv(c, st_err, open_jobs=lambda repo: 3, now=NOW + _td(hours=25))
+            check("24 saat sonra yeniden yorumlanır",
+                  len([t for w, t in c.comments if w == 500 and "tempo-upgrade-err:" in t]) == 2)
+
+            # ── tamam → izleme işi kapanır (bir kez) ──
+            c = _AdvFake(tracks=[track_wi()])
+            r_done = adv(c, stt("tamam", None, False, "Yükseltme tamamlandı."), open_jobs=lambda repo: 3)
+            check("tamam → izleme işi kapanır", r_done[0]["closed"] and c.states == [(500, "Done")]
+                  and any("tamamlandı" in t for _w, t in c.comments), str((r_done, c.comments)))
+            check("ikinci turda kapalı iş yok", adv(c, stt("tamam", None, False, ""), open_jobs=lambda repo: 3) == []
+                  and c.states == [(500, "Done")])
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt("tamam", "code", False, "Kod reposu PR'ı #31 açık", code_pr={"id": 31, "status": "active"}),
+                    open_jobs=lambda repo: 3)
+            check("kod PR'ı açıkken kapanmaz", not r[0]["closed"] and not c.states, str(r))
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt("hazır", "ci", False, "x"), open_jobs=lambda repo: 3)
+            check("tamam dışı aşamada kapanmaz", not r[0]["closed"] and not c.states)
+
+        # ── Yoklayıcı turu ──
+        got = []
+        flags["CREW_TECHDEBT_UPGRADE_AUTO"] = False
+        check("AUTO kapalı: tur hiçbir Azure çağrısı yapmaz",
+              ut._tick(lambda: got.append(1), on_queued=lambda: got.append("w")) == [] and got == [])
+        flags["CREW_TECHDEBT_UPGRADE_AUTO"] = True
+        calls, woke = [], []
+        cpoll = _AdvFake(tracks=[track_wi(), track_wi(501, repo="web", area="P\\U"),
+                                 track_wi(502, repo="api", area="P\\T\\Sub")])
+
+        def fake_adv(client, *, team, track_ids=None, **k):
+            calls.append((team, sorted(track_ids or [])))
+            return [{"id": i, "queued": team == "U"} for i in sorted(track_ids or [])]
+        out = ut._tick(lambda: cpoll, on_queued=lambda: woke.append(1), advance_fn=fake_adv)
+        check("tur: takımlar izleme işlerinin alanından, her iş bir kez",
+              sorted(calls) == [("T", [500, 502]), ("U", [501])],
+              str(calls))
+        check("tur: kuyruğa giren varsa işçi uyandırılır (bir kez)", woke == [1] and len(out) == 3, str(woke))
+
+        # ── start_poller: tek thread, ilk tur bir aralık sonra, hata thread'i öldürmez ──
+        steps, events = _queue.Queue(), []
+        stop = _th.Event()
+
+        def fsleep(s):
+            events.append(("sleep", s))
+            steps.get(timeout=5)
+
+        ticks = []
+
+        def ftick(get_client, on_queued=None):
+            ticks.append(1)
+            if len(ticks) == 1:
+                raise RuntimeError("tur hatası")
+            return []
+        t1 = ut.start_poller(lambda: cpoll, interval_min=1, sleep=fsleep, tick=ftick, stop=stop)
+        t2 = ut.start_poller(lambda: cpoll, interval_min=1, sleep=fsleep, tick=ftick, stop=stop)
+        import time as _time
+        for _ in range(100):
+            if events:
+                break
+            _time.sleep(0.01)
+        check("start_poller iki kez → tek thread", t1 is t2 and t1.daemon and t1.is_alive())
+        check("ilk tur bir aralık beklendikten sonra (en az 5 dk)", events == [("sleep", 300)] and ticks == [], str(events))
+        steps.put("go")
+        for _ in range(200):
+            if len(events) >= 2:
+                break
+            _time.sleep(0.01)
+        steps.put("go")
+        for _ in range(200):
+            if len(ticks) >= 2:
+                break
+            _time.sleep(0.01)
+        check("turun hatası thread'i durdurmaz", len(ticks) == 2 and t1.is_alive(), str((ticks, events)))
+        stop.set()
+        steps.put("go")
+        t1.join(2)
+        check("durdurulunca thread biter", not t1.is_alive())
+
+        # ── Sunucu: yoklayıcı üç anahtar açıkken başlar, işçiyi sunucu uyandırır ──
+        import inspect
+        from agile_sdlc_crew import server
+        src = inspect.getsource(server._start_upgrade_poller)
+        check("sunucu: start_poller, POLL_MIN, _ensure_worker, üç anahtar",
+              "start_poller" in src and "CREW_TECHDEBT_UPGRADE_POLL_MIN" in src and "_ensure_worker" in src
+              and all(k in src for k in ('"CREW_TECHDEBT"', '"CREW_TECHDEBT_PHP_MODERN"', '"CREW_TECHDEBT_UPGRADE"')))
+        qsrc = inspect.getsource(ut)
+        check("quality/ işçiyi çağırmaz", "_ensure_worker()" not in qsrc)
+    finally:
+        pc.get = orig_get
+        ut._POLLER = None
+
+
 def test_upgrade_card():
     print("\n[U9] Sürüm yükseltme kartı — aşama şeridi ve düğmeler")
     from fastapi.testclient import TestClient
@@ -8067,7 +8430,7 @@ def test_upgrade_fix_round2():
         made = []
         q, err = safe(lambda: bump.queue_step(
             c_q, "core", "php", team="T", deps=deps,
-            create_job=lambda *a, **k: (made.append(1), 1)[1],
+            create_job=lambda *a, **k: (made.append(1), 1)[1], open_jobs=lambda t: [],
             status_fn=lambda cl_, r, l, **k: ut.status(cl_, r, l, to=k.get("to"), deps=deps, scan=sc_at, wait_h=72,
                                                        root=root)))
         check("B2: queue_step hata verir, iş açılmaz", q is None and err is not None and not made, str(q))
@@ -10291,6 +10654,7 @@ def main():
               test_upgrade_api_surface,
               test_upgrade_card,
               test_upgrade_bump_expect_step,
+              test_upgrade_advance,
               test_quality_review_fixes,
               test_quality_readiness,
               test_repo_ctx_cross_thread,

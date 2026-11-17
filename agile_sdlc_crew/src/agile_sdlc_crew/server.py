@@ -2472,6 +2472,23 @@ async def _start_pr_review_poller():
         pipeline_log.warning(f"PR oto-inceleme yoklayıcısı başlatılamadı: {e}")
 
 
+@app.on_event("startup")
+async def _start_upgrade_poller():
+    """Sürüm yükseltme otomatik ilerletmesi (spec §7): tek thread, ilk tur bir aralık sonra.
+    CREW_TECHDEBT_UPGRADE_AUTO ve diğer ayarlar her turda okunur (panelden kapatınca tur boş geçer).
+    Tur kuyruğa iş aldıysa işçiyi burası uyandırır — quality/ işçiyi bilmez."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew.quality import upgrade_track as _ut
+    if not (_pc.get("CREW_TECHDEBT") and _pc.get("CREW_TECHDEBT_PHP_MODERN") and _pc.get("CREW_TECHDEBT_UPGRADE")):
+        return
+    try:
+        _ut.start_poller(lambda: AzureDevOpsClient(),
+                         interval_min=lambda: _pc.get("CREW_TECHDEBT_UPGRADE_POLL_MIN"),
+                         on_queued=lambda: _ensure_worker())
+    except Exception as e:
+        pipeline_log.warning(f"Sürüm yükseltme yoklayıcısı başlatılamadı: {e}")
+
+
 # ── Backlog refinement (Scrum faz 6; backlog_refinement.py) ──
 
 class RefinementActionRequest(BaseModel):
