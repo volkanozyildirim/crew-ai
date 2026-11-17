@@ -839,7 +839,10 @@ def _error_comment(client, tid: int, msg: str, now) -> None:
         log.warning(f"⚠️ upgrade oto: #{tid} hata yorumu yazılamadı: {str(e)[:200]}")
 
 
-_RETRY_FREE = (None, "completed")   # son adım işi yok ya da tamamlandı → otomatik kuyruğa alınabilir
+# Otomatik ilerletme bir adımı YALNIZ o izleme işi + adım + hedef için hiç `upgrade_bump` işi yokken kuyruğa alır.
+# Tamamlanmış iş de sayılır: PR bırakmadan biten adım (401/403 → diff, CREW_TECHDEBT_UPGRADE_BUMP kapalı) devir
+# kaydı bulunamazsa hâlâ hazır görünür ve her turda yeniden kuyruğa girerdi. Gerisi karttaki düğmenin işi.
+_RETRY_FREE = (None,)
 
 
 def _advance_one(client, tr: dict, res: dict, *, team: str, deps, create_job, open_jobs, bump_jobs, status_fn,
@@ -865,14 +868,16 @@ def _advance_one(client, tr: dict, res: dict, *, team: str, deps, create_job, op
         elif ev.get("state") == "none" and ev.get("overdue"):
             _note(res, _ci_wait(client, tr, ev, comments))
     if nx.get("step") and nx.get("ready"):
-        # Son çalışması başarısız olan adım otomatik olarak yeniden açılmaz (her turda bir başarısız iş + yorum
-        # olurdu); yeniden deneme karttaki düğmenin, insanın.
+        # Bu adım için daha önce iş açıldıysa (sonucu ne olursa olsun) otomatik olarak yeniden açılmaz (her turda
+        # bir iş + yorum olurdu); yeniden deneme karttaki düğmenin, insanın.
         last = last_bump_job(tid, nx["step"], to)
-        if (last or {}).get("status") not in _RETRY_FREE:
+        if last is not None:
             label = STEP_LABEL.get(nx["step"], nx["step"])
             st_ = last.get("status")
             why = ("kuyrukta / çalışıyor" if st_ in ("queued", "running")
-                   else f"son çalışması başarısız ({st_}) — adım insanın yeniden denemesini bekliyor")
+                   else "son çalışması tamamlandı ama adım hâlâ hazır görünüyor (PR açılmamış olabilir) — yeniden "
+                        "atmak karttaki düğmenin işi" if st_ == "completed"
+                   else f"son çalışması başarısız ({st_}) — adım insanın yeniden denemesini bekliyor (karttaki düğme)")
             _note(res, f"{label} adımı otomatik kuyruğa alınmadı: iş #{last.get('id')} {why}")
             return
         # Tek adım işi; queue_step durumu yeniden hesaplar (bu turda açılan işler dahil) ve açık adım işi
@@ -907,7 +912,7 @@ def advance(client, *, team: str, track_ids=None, deps=None, create_job=None, op
             app_map_cache: dict | None = None, scan_fn=None, head_sha_fn=None, probe_fn=None) -> list[dict]:
     """Takımın açık her izleme işi için bir tur (spec §7): otomatik alım (tavanlı, sprint
     CREW_TECHDEBT_UPGRADE_SPRINT), kanıt sıradaki adımı bekletiyorsa kırmızı build / CI bekleme bildirimi (bir
-    kez), hazırsa tek sürüm adımı (son çalışması başarısızsa değil), `tamam`da kapanış. Bir öğenin hatası notuna
+    kez), hazırsa tek sürüm adımı (bu adım için hiç iş açılmamışsa), `tamam`da kapanış. Bir öğenin hatası notuna
     yazılır, sıradakine geçilir; CREW_TECHDEBT_UPGRADE_AUTO kapanırsa sıradaki öğeye geçilmez.
     `track_ids`: yalnız bu izleme işleri (yoklayıcı takımları gruplarken her işi bir kez verir).
     Enjeksiyon (testler): `open_jobs(repo) -> int` repodaki açık otomatik iş sayısı (varsayılan board);

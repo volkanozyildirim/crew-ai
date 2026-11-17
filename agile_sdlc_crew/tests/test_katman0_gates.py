@@ -8133,9 +8133,16 @@ def test_upgrade_advance():
                 r = adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
                         last_bump_job=lambda tid, step, to, s=stt_: {"id": 42, "status": s})
                 check(f"son adım işi {stt_} → kuyruk yok", r[0]["queued_step"] is None and not jobs, str(r))
+            # F4 (son düzeltme): PR bırakmadan tamamlanan adım (401/403 → diff, BUMP kapalı) hâlâ hazır görünür;
+            # otomatik ilerletme onu her turda yeniden kuyruğa almaz — adım işi HİÇ yoksa kuyruğa alınır.
+            rs = [adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
+                      last_bump_job=lambda tid, step, to: {"id": 43, "status": "completed"}) for _ in range(2)]
+            check("F4: son adım işi completed → iki turda da kuyruk yok, not düğmeyi söyler",
+                  not jobs and all(x[0]["queued_step"] is None and "#43" in x[0]["note"] and "tamamlandı" in x[0]["note"]
+                                   and "düğme" in x[0]["note"] for x in rs), str(rs))
             r = adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
-                    last_bump_job=lambda tid, step, to: {"id": 43, "status": "completed"})
-            check("son adım işi completed → kuyruğa", r[0]["queued_step"] == "ci" and len(jobs) == 1, str(r))
+                    last_bump_job=lambda tid, step, to: None)
+            check("F4: adım işi hiç yoksa kuyruğa", r[0]["queued_step"] == "ci" and len(jobs) == 1, str(r))
             jobs.clear()
             c = _AdvFake(tracks=[track_wi()])
             r = adv(c, stt("hazırlık", "ci", False, "Hazırlık bitmedi"), open_jobs=lambda repo: 3)
