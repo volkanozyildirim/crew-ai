@@ -1,6 +1,6 @@
 # Dil Sürümü Yükseltme — Tasarım
 
-**Tarih:** 2026-11-17 · **Durum:** tasarım onaylandı (kullanıcı, 2026-11-17); planın 11 görevi dalda uygulandı (2026-11-17) — sapmalar "Uygulama sırasında değişenler"de, gerçek Azure doğrulamasında bulunan çelişkiler CLAUDE.md'deki "Language version upgrade" maddesinde · **Dal:** `worktree-techdebt-upgrade`
+**Tarih:** 2026-11-17 · **Durum:** tasarım onaylandı (kullanıcı, 2026-11-17); planın 11 görevi dalda uygulandı (2026-11-17) — sapmalar "Uygulama sırasında değişenler"de; gerçek Azure doğrulamasında bulunan çelişkiler son gözden geçirmede giderildi (aynı bölüm), kalan doğrulanmamışlar CLAUDE.md'deki "Language version upgrade" maddesinde · **Dal:** `worktree-techdebt-upgrade`
 **Dayandığı tasarım:** `2026-10-19-techdebt-design.md` (Teknik borç alanı, aşama 2a modernleştirme)
 
 ## Amaç ve neden
@@ -367,16 +367,43 @@ Uygulamada bu tasarımdan ayrılınan yerler (her biri gözden geçirmede verilm
   `plan` / `sites` / `scan` / `status` testler için anahtar-sözcüklü enjeksiyon parametreleri alır
   (`index=`, `root=`, `read=`, `yml_files=`).
 - **Üretim kapısı CI dosyasının DURUMUNA bağlı**, Tempo'nun test hattı PR'ına değil: bütün
-  sabitlemeler hedefte **ve** sabitleme dosyalarının son first-parent commit'inden (Tempo'nun PR'ı
-  tamamlandıysa onun kapanışından) SONRA kuyruğa girmiş `<repo>-test` build'i yeşil. Satırı elle
-  değiştiren biri de kanıtsız geçemez; §6'daki "1. adımın PR'ı merge edilmiş" ifadesinden sıkı.
+  sabitlemeler hedefte **ve** sabitleme dosyalarının dalına yapılan SON PUSH'tan (Tempo'nun PR'ı
+  tamamlandıysa onun kapanışından; ikisinin geçi) SONRA kuyruğa girmiş `<repo>-test` build'i yeşil.
+  Satırı elle değiştiren biri de kanıtsız geçemez; §6'daki "1. adımın PR'ı merge edilmiş" ifadesinden sıkı.
+- **Kanıt saati push zamanı, commit zamanı değil** (son gözden geçirme): pipeline repolarına (`yml-files`)
+  doğrudan push yapılıyor, tamamlanmış PR hiç yok; önce yazılıp saatler sonra push edilen commit, aradaki
+  (hâlâ eski dosyayla koşmuş) build'leri kanıt saydırırdı. Saat `git/repositories/{repo}/pushes?
+  searchCriteria.refName=refs/heads/<dal>&$top=1` → `value[0].date`; okunamazsa kapı kapalı.
+- **Test hattının kaynağı `<repo>-test` build TANIMI** (son gözden geçirme): dört ayrı `yml-files` reposu
+  var (her Azure projesinde bir tane); core'un Core-test'i EcomLojistik/yml-files:`Test Pipelines/Core.yml`'ı
+  koşar, kod ise EcomBackend'e sabitliydi (core'da sabitleme 0 → üretim zayıf kanıtla açılabilirdi). Dosya
+  tanımın `repository` + `process.yamlFilename`'inden, o reponun dalından ve projesinden okunur (§2'deki
+  "`Test Pipelines/*.yml` içinde repoyu checkout eden dosyalar" keşfi kalktı). Tanım yok → sabitleme yok
+  ("Test kanıtı yok"); tanım YAML değil / dosyası kod reposunun kendisinde / dosya repoyu checkout etmiyor
+  (paylaşılan şablon) / `template:`/`extends:` var ve sürüm satırı yok / tanım yokken kod projesinin
+  yml-files'ında repoyu anan dosya var → okunamayan sabitleme, kapı kapalı. CI PR'ı o kaynakta aranır.
 - **Kanıt build TANIMINA bağlı:** "reponun herhangi bir PR build'i" değil, adı `<repo>-test` olan
-  tanımın build'i (büyük/küçük harf duyarsız, kod reposunun projesinde kesin çözümle). Tanım yok →
-  "Test kanıtı yok"; sabitleme yok ama tanım var → en yeni build yeşil olmalı ve PR açıklaması
+  tanımın build'i (büyük/küçük harf duyarsız, kod reposunun projesinde kesin çözümle; aynı adlı iki tanım
+  hata). Tanım yok → "Test kanıtı yok"; sabitleme yok ama tanım var → yalnız tanımın dosyası okunduysa,
+  repoyu anıyorsa ve sürüm satırı / şablonu yoksa en yeni build yeşil olmalı ve PR açıklaması
   "Test kanıtı zayıf" ile başlar; okunamayan her şey kapıyı kapalı tutar.
 - **Test hattı sabitlemeleri:** `phpVersion:` satırına ek olarak GoTool `version`, UsePythonVersion
-  `versionSpec`, `image: golang:` / `python:` / `php` tanınır. Okunamayan satır (`$(var)`, `3.x`) ve
-  üç parçalı sürüm (`1.24.4`, `golang:1.21.4`) otomatik yazılmaz — elle düzenlenir, kapı kapalı kalır.
+  `versionSpec`, liste biçimi değişken / parametre (`- name: phpVersion` + `value:`/`default:`),
+  `image: golang:` / `python:` / `php` tanınır. Sürüm görevinin bloğu görevin girintisinde ya da daha sığ
+  ilk satırda biter (sonraki adımın `version:`'ı alınmaz); değeri bulunamayan görev, değersiz liste
+  değişkeni ve anahtar adı geçip sabitleme çıkmayan dosya okunamayan sabitlemedir. Okunamayan satır
+  (`$(var)`, `3.x`) ve üç parçalı sürüm (`1.24.4`, `golang:1.21.4`) otomatik yazılmaz — elle düzenlenir,
+  kapı kapalı kalır.
+- **Üç parçalı imaj etiketi her yerde elle** (son gözden geçirme): FLODevOps ve kod reposu Dockerfile'ında
+  `golang:1.24.4-alpine`, `php:8.2.12-fpm`, `…/python-3-13-7:1.0` yeniden yazılmaz (rakam-dizisi kuralı
+  `golang:1.27.4` gibi var olmayabilecek bir etiket uydururdu); site `old == new`, "sürüm satırı elle
+  düzenlenmeli", gerekçe dosya:satır ve hedefi söyler.
+- **"Yayınlanmış" site kuralıyla aynı** (son gözden geçirme): seçicideki `published`, reponun her servis
+  imajının hedef sürümlü hâli o bölge reposunda zaten kullanılıyorsa (ve etiket üç parçalı değilse)
+  doğrudur — §2'deki imaj kanıtının aynısı (`_image_ok`); FLODevOps servisi olmayan repoda doğru.
+  Varsayılan hedef bilinen sürüm listesiyle kesişir (listede olmayan yayınlanmış sürüm varsayılan olmaz).
+- **İmaj isteği henüz açılmıyor:** §1/§2'deki "`imaj yayınlanmamış` site için DevOps'a imaj isteği açılır"
+  uygulanmadı — kart nedeni gösterir, repo `engelli` kalır; isteğin açılması sonraki iş.
 - **Site değişikliği yalnız rakam dizileri:** `old` ile `new` yalnız rakamlarda ayrışabilir, tek satır,
   ham baytlar. Bu yüzden composer'daki alternatifli kısıt (`^7.4|^8.0` → `>=8.4`) otomatik push
   edilmez ("kısıt elle düzenlenmeli").
@@ -390,9 +417,22 @@ Uygulamada bu tasarımdan ayrılınan yerler (her biri gözden geçirmede verilm
   yalnız kısıt satırını değiştirir; hatalı kısıtı o CI yakalar.
 - **Kırmızı build tepkisi** (`advance`'in işi): yalnız üretimi bekleten build kırmızıyken, izleme
   işi başına en çok **bir** açık needs-human Task; sonraki kırmızı build'ler onun altına yorum olur.
-- **Başarısız adım yeniden kuyruğa girmez:** son `upgrade_bump` işi başarısız olan adımı otomatik
-  ilerletme tekrar almaz; yeniden deneme karttaki düğmenin işidir. `/bump` `expect_step` taşır
-  (uyuşmazlık 409) ve aynı izleme işi için kuyrukta / çalışan iş varken yeni iş açmaz.
+- **Otomatik ilerletme bir adımı yalnız bir kez alır:** izleme işi + adım + hedef için HERHANGİ bir
+  `upgrade_bump` işi (başarısız, tamamlanmış, kuyrukta) varsa otomatik ilerletme o adımı tekrar
+  kuyruğa almaz; yeniden deneme karttaki düğmenin işidir (son gözden geçirme: PR bırakmadan tamamlanan
+  adım — 401/403 → diff, `CREW_TECHDEBT_UPGRADE_BUMP` kapalı — devir kaydı bulunamazsa her turda yeniden
+  kuyruğa giriyordu). `/bump` `expect_step` taşır (uyuşmazlık 409); `/bump` ve `/api/jobs/{id}/retry` aynı
+  izleme işi için kuyrukta / çalışan iş varken yeni iş açmaz (409).
+- **Katalog v4'ün yeni kuralları bayrağa bağlı** (son gözden geçirme): bu dalın EKLEDİĞİ kurallar
+  (13 PHP, 3 Next.js, 3 Go) `upgrade_catalog: true` taşır; modernleştirme taraması / alımı / Teknik borç
+  listesinden Rector kapsamı `CREW_TECHDEBT_UPGRADE` kapalıyken onları görmez (yeni davranış varsayılan
+  kapalı); yükseltme hattı her zaman görür. Yalnız `breaks:` alanı eklenen 11 eski kural işaretsiz.
+- **Taramanın `blocking` sayısı çözülmüş görünen işleri de sayar:** dedup, Resolved / Ready for
+  Production / grace içinde Done işi olan bulguyu "açık WI" diye atlar, `open_tasks` onu bitmiş sayar;
+  kodda duran engelleyen bulgu artık bu atlamalardan (ayrı kural başına bir) sayılır. İptal edilmiş ve
+  "insan baktı" sayılmaz.
+- **Sürüm satırı hedef commit'ten okunur:** `push_sites` önce hedef dalın commit'ini alır, dosyayı o
+  commit'ten okur — iki okuma arasındaki eşzamanlı düzenleme Tempo'nun dalında geri alınmaz.
 - **İnsanın kapattığı iş yeniden açılmaz:** Done'a çekilmiş `behavior` / `fix_min` needs-human grubu
   parmak izleri aynı kaldıkça "insan baktı" sayılır, açılmaz ve bekletmez; yeni dosya yine açılır.
 - **Katalog:** yükseltme kuralı olup `auto: false` olanlar (`legacy_autoload`, `serializable_only`,
