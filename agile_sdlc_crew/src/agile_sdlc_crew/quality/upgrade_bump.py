@@ -139,8 +139,10 @@ def _diff_text(files: list[tuple[str, str, str]]) -> str:
     return mask_secrets("".join(out))
 
 
-def _read_text(client, repo: str, path: str, branch: str, proj) -> str | None:
-    raw = client.get_file_bytes(repo, path, branch, project=proj)
+def _read_text(client, repo: str, path: str, branch: str, proj, commit: str | None = None) -> str | None:
+    """`commit` verilirse dal adıyla değil o commit'ten okunur (push o commit'in üstüne yapılır)."""
+    raw = (client.get_file_bytes(repo, path, branch, project=proj, version=commit, version_type="commit")
+           if commit else client.get_file_bytes(repo, path, branch, project=proj))
     if not raw:
         return None
     try:
@@ -187,22 +189,24 @@ def push_sites(client, sites: list[dict], *, branch: str, title: str, body: str,
         if any(g["branch"] != target for g in grp):
             raise ValueError(f"{repo}: siteler farklı hedef dallara gidiyor.")
         proj = project or None
+        # Önce hedef commit sabitlenir, dosyalar O commit'ten okunur: dal adıyla okunup commit sonradan alınsaydı
+        # aradaki eşzamanlı bir düzenleme Tempo'nun dalında geri alınırdı.
+        refs = {b.get("name"): b.get("objectId") for b in client.list_branches(repo, project=proj)}
+        target_oid = refs.get(f"refs/heads/{target}")
+        if not target_oid:
+            raise ValueError(f"{repo}: hedef dal '{target}' bulunamadı.")
         by_path: dict[str, list[dict]] = {}
         for g in grp:
             by_path.setdefault(_norm_path(g["path"]), []).append(g)
         files = []
         for path, group_sites in by_path.items():
-            old_text = _read_text(client, repo, path, target, proj)
+            old_text = _read_text(client, repo, path, target, proj, commit=target_oid)
             if old_text is None:
                 raise SiteChanged(f"{repo} {path}: dosya hedef dalda yok ya da boş; yazılmadı.")
             new_text = old_text
             for g in sorted(group_sites, key=lambda x: -int(x["line"])):
                 new_text = apply_site(new_text, dict(g, path=path))
             files.append((path, old_text, new_text))
-        refs = {b.get("name"): b.get("objectId") for b in client.list_branches(repo, project=proj)}
-        target_oid = refs.get(f"refs/heads/{target}")
-        if not target_oid:
-            raise ValueError(f"{repo}: hedef dal '{target}' bulunamadı.")
         create, push, existing = True, True, None
         if f"refs/heads/{branch}" in refs:
             create = False

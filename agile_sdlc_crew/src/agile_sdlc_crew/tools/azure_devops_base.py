@@ -383,9 +383,12 @@ class AzureDevOpsClient:
         return resp.json().get("value", [])
 
     def get_file_bytes(self, repo_id_or_name: str, file_path: str, branch: str | None = None,
-                       project: str | None = None) -> bytes | None:
+                       project: str | None = None, *, version: str | None = None,
+                       version_type: str | None = None) -> bytes | None:
         """Dosyanın HAM baytları (karakter kümesi tahmini / JSON çözümü yok); dosya yoksa None.
-        Yazma yolundaki tek-satır denetimi çözülmüş metne değil bayta dayanır."""
+        Yazma yolundaki tek-satır denetimi çözülmüş metne değil bayta dayanır. `version` verilirse dal adı
+        yerine o sürümden okunur (`version_type`, varsayılan "commit") — push edilecek dosya, üstüne push
+        yapılacak commit'ten okunsun."""
         url = f"{self._repo_api_url(repo_id_or_name, project)}/items"
         params: dict = {
             "path": file_path,
@@ -393,7 +396,10 @@ class AzureDevOpsClient:
             "download": "true",
             "api-version": self.API_VERSION,
         }
-        if branch:
+        if version:
+            params["versionDescriptor.version"] = version
+            params["versionDescriptor.versionType"] = version_type or "commit"
+        elif branch:
             params["versionDescriptor.version"] = branch
             params["versionDescriptor.versionType"] = "branch"
         headers = {**self._headers, "Accept": "application/octet-stream"}

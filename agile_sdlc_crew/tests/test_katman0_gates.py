@@ -6404,7 +6404,11 @@ class _BumpFake:
     def _bs(self, project, repo):
         return self.oids.setdefault((project, repo), {"main": "oid-main", "production": "oid-production"})
 
-    def get_file_bytes(self, repo, path, branch=None, project=None):
+    def get_file_bytes(self, repo, path, branch=None, project=None, *, version=None, version_type=None):
+        if version is not None:
+            # F8: commit'ten okuma — sahte depoda commit, o oid'i taşıyan dalın içeriğidir
+            assert version_type == "commit", version_type
+            branch = next((b for b, o in self._bs(project, repo).items() if o == version), None)
         v = self.files.get((project, repo, branch, path.lstrip("/")))
         return v if (v is None or isinstance(v, bytes)) else v.encode("utf-8")
 
@@ -9348,6 +9352,70 @@ def test_upgrade_final_f7_push_clock():
         azb.requests.get = og
 
 
+def test_upgrade_final_f8_pinned_read():
+    """F8: push_sites dosyayı hedef dalın ADIYLA değil, önce alınan hedef commit'inden (target_oid) okur — iki
+    okuma arasındaki eşzamanlı bir düzenleme Tempo'nun dalında geri alınmasın."""
+    print("\n[Sürüm yükseltme son düzeltme F8: sabit commit'ten okuma]")
+    import requests as _rq
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+
+    class _Shift(_BumpFake):
+        """Dalın adıyla okunan içerik eşzamanlı düzenlemeyle değişmiş (RUN y); hedef commit'teki RUN x."""
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.log = []
+
+        def list_branches(self, repo, project=None):
+            self.log.append(("refs", repo))
+            return super().list_branches(repo, project)
+
+        def get_file_bytes(self, repo, path, branch=None, project=None, *, version=None, version_type=None):
+            self.log.append(("read", branch, version, version_type))
+            if version_type == "commit" and version == "oid-production":
+                return b"FROM eu/php-8-2:1.0\nRUN x\n"
+            return super().get_file_bytes(repo, path, branch, project)
+    files = {("FLODevOps", "anatolia", "production", "build/core/Dockerfile"): "FROM eu/php-8-2:1.0\nRUN y\n"}
+    site = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+            "path": "/build/core/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+            "blocked": ""}
+    c = _Shift(files)
+    res = bump.push_sites(c, [site], branch="tempo/upgrade-php-core-8.4", title="t", body="b", wi_id=None)
+    reads = [x for x in c.log if x[0] == "read"]
+    first_read = next(i for i, x in enumerate(c.log) if x[0] == "read")
+    first_refs = next(i for i, x in enumerate(c.log) if x[0] == "refs")
+    check("F8 hedef commit önce alınır, dosya o commit'ten okunur",
+          first_refs < first_read and reads and reads[0][2:] == ("oid-production", "commit"), str(c.log))
+    check("F8 push hedef commit'teki içerikten (eşzamanlı düzenleme geri alınmaz) ve o commit'in üstüne",
+          res["prs"] and len(c.pushes) == 1 and _bump_dec(c.pushes[0]["changes"][0]) == "FROM eu/php-8-4:1.0\nRUN x\n"
+          and c.pushes[0]["old_object_id"] == "oid-production", str((res, c.pushes)))
+
+    # İstemci: get_file_bytes(version=, version_type=) — varsayılan davranış aynı
+    class _Cl(azb.AzureDevOpsClient):
+        _headers = {"Authorization": "x"}
+
+    class _R:
+        status_code, content = 200, b"x"
+
+        def raise_for_status(self):
+            pass
+    cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+    cl.__class__ = _Cl
+    cl._repo_api_url = lambda repo, project=None: f"https://x/{project}/_apis/git/repositories/{repo}"
+    seen = []
+    og = azb.requests.get
+    azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (seen.append(dict(params)), _R())[1]
+    try:
+        cl.get_file_bytes("r", "/a", "production", project="P", version="abc123", version_type="commit")
+        cl.get_file_bytes("r", "/a", "production", project="P")
+    finally:
+        azb.requests.get = og
+    check("F8 istemci: commit sürümüyle okuma", seen[0].get("versionDescriptor.version") == "abc123"
+          and seen[0].get("versionDescriptor.versionType") == "commit", str(seen[0]))
+    check("F8 istemci: varsayılan dal adıyla okuma değişmedi", seen[1].get("versionDescriptor.version") == "production"
+          and seen[1].get("versionDescriptor.versionType") == "branch", str(seen[1]))
+
+
 def test_php_rector_fix():
     """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
     başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
@@ -11417,7 +11485,7 @@ def main():
               test_upgrade_fix_round1,
               test_upgrade_fix_round2,
               test_upgrade_fix_round3,
-              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock,
+              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock, test_upgrade_final_f8_pinned_read,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,
