@@ -1,6 +1,6 @@
 # Dil Sürümü Yükseltme — Tasarım
 
-**Tarih:** 2026-11-17 · **Durum:** tasarım, onay bekliyor · **Dal:** `worktree-techdebt-upgrade`
+**Tarih:** 2026-11-17 · **Durum:** tasarım onaylandı (kullanıcı, 2026-11-17) · **Dal:** `worktree-techdebt-upgrade`
 **Dayandığı tasarım:** `2026-10-19-techdebt-design.md` (Teknik borç alanı, aşama 2a modernleştirme)
 
 ## Amaç ve neden
@@ -192,7 +192,7 @@ Durum **saklanmaz, türetilir** (Azure tek kayıt, teknik borç tasarımındaki 
 | `üretim` | FLODevOps PR'ları açık |
 | `tamam` | `current ≥ target` (bir sonraki `modern.target` okumasında kendiliğinden) |
 
-**Hangi bulgu engeller** (öneri — onayda kesinleşir, bkz. "Açık soru"):
+**Hangi bulgu engeller:**
 
 | Bulgu | Engeller mi |
 |---|---|
@@ -329,13 +329,11 @@ Panelden düzenlenebilenler `pipeline_config`'e kaydedilir; araç yolları kayde
 - Dış repolara (FLODevOps, `yml-files`) yazılan değişiklik tek satırlık sürüm değişimiyle sınırlı.
 - PR / WI metinleri `render.mask_secrets`'ten geçer.
 
-## Açık soru (onayda kesinleşir)
+## Karar: `behavior` bulguları yükseltmeyi bekletir (kullanıcı, 2026-11-17)
 
-**`behavior` bulguları yükseltmeyi bekletsin mi?** Öneri yukarıdaki tablo: evet, bir insan Task'ı
-kapatana kadar. Gerekçe: bunlar hata vermeden yanlış sonuç üreten yerler (`0 == "a"`, iç fonksiyona
-`null`), testlerin yakalama ihtimali en düşük sınıf. Bedeli: 7.4 → 8.x geçişinde yüzlerce yer
-çıkabilir ve yükseltme insan bakana kadar durur. Alternatif: bekletmesin, yalnız sürüm PR'larının
-açıklamasına sayı ve bağlantı yazılsın.
+Bir insan Task'ı kapatana kadar sürüm adımı açılmaz. Gerekçe: bunlar hata vermeden yanlış sonuç
+üreten yerler (`0 == "a"`, iç fonksiyona `null`), testlerin yakalama ihtimali en düşük sınıf.
+Bilinen bedeli: 7.4 → 8.x geçişinde yüzlerce yer çıkabilir ve yükseltme insan bakana kadar durur.
 
 ## Kullanıcıya sorulmadan verilen kararlar
 
