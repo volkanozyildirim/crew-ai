@@ -7050,10 +7050,16 @@ class _UpFake(_BumpFake):
         return list(self.issue_tasks.get(build_id, []))
 
     def get_last_commit_date(self, repo, path, branch, *, project=None):
-        v = self.commit_dates.get((project, repo, branch, path.lstrip("/")), "")
-        if isinstance(v, Exception):
-            raise v
-        return v
+        raise AssertionError("F7: kanıt saati dosyanın commit zamanından okunmaz (dalın son push'u)")
+
+    def get_last_push_date(self, repo, branch, *, project=None):
+        """F7: dalın son push'u. commit_dates anahtarındaki yol yok sayılır: aynı (proje, repo, dal) altındaki
+        değerlerin en geçi; biri hata ise yükselir, hiç yoksa ""."""
+        vals = [v for (p, r, b, _path), v in self.commit_dates.items() if (p, r, b) == (project, repo, branch)]
+        for v in vals:
+            if isinstance(v, Exception):
+                raise v
+        return max(vals) if vals and all(vals) else ""
 
     def list_iterations(self, team=""):
         return [{"path": "P\\T\\S1"}, {"path": "P\\T\\S2"}]
@@ -9233,6 +9239,115 @@ def test_upgrade_final_f1_pipeline_source():
           and not hasattr(azb.AzureDevOpsClient, "find_build_definition"))
 
 
+def test_upgrade_final_f7_push_clock():
+    """F7: kanıt saati dosyanın commit zamanı değil, sabitleme dosyasının dalına yapılan SON PUSH'un zamanı —
+    pipeline repolarına doğrudan push yapılıyor; önce yazılıp sonra push edilen commit eski bir build'i kanıt
+    saydırırdı. max(push, Tempo CI PR'ının kapanışı) korunur; okunamayan saat kapıyı kapalı tutar."""
+    print("\n[Sürüm yükseltme son düzeltme F7: push saati]")
+    import requests as _rq
+    from agile_sdlc_crew.quality import upgrade_track as ut
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+    T1, T2, T3, T4 = ("2026-11-10T09:00:00Z", "2026-11-10T10:00:00Z", "2026-11-10T11:00:00Z",
+                      "2026-11-10T12:00:00Z")
+    pin = {"repo": "yml-files", "project": "EcomLojistik", "branch": "main", "path": "Test Pipelines/Core.yml",
+           "line": 7, "version": "8.4"}
+    dv = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+          "path": "/build/l/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0", "blocked": ""}
+    CORE_DEF = {"core": {"id": 5, "name": "Core-test", "project": "EcomLojistik"}}
+
+    def b(bid, q):
+        return {"build_id": bid, "status": "completed", "result": "succeeded", "definition": "Core-test", "url": "",
+                "project": "EcomLojistik", "queue_time": q, "source_version": ""}
+
+    class _PushFake(_UpFake):
+        def __init__(self, pushes, **k):
+            super().__init__(**k)
+            self.pushes_asked, self.pushes_map = [], dict(pushes)
+
+        def get_last_push_date(self, repo, branch, *, project=None):
+            self.pushes_asked.append((project, repo, branch))
+            v = self.pushes_map.get((project, repo, branch), "")
+            if isinstance(v, Exception):
+                raise v
+            return v
+
+        def get_last_commit_date(self, *a, **k):
+            raise AssertionError("F7: kanıt saati commit zamanından okunmamalı")
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        (base / "core").mkdir()
+        sc = {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False, "sites": [dv],
+              "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": [pin],
+              "ci_source": _ci_src([pin])}
+        key = ("EcomLojistik", "yml-files", "main")
+
+        def st(c):
+            try:
+                return ut.status(c, "core", "php", to="8.4", deps=_upgrade_deps(base), scan=sc, wait_h=72,
+                                 root=base / "core"), None
+            except Exception as e:  # noqa: BLE001
+                return None, e
+        c = _PushFake({key: T3}, defs=CORE_DEF, builds={5: [b(2, T2)]})
+        s, err = st(c)
+        check("F7 commit T1'de ama push T3'te → T2'deki yeşil build kanıt değil",
+              s is not None and (s["evidence"] or {}).get("since") == T3 and (s["evidence"] or {}).get("state") == "none"
+              and not s["next"]["ready"] and c.pushes_asked == [key], str((s and s["evidence"], s and s["next"], err)))
+        s, err = st(_PushFake({key: T3}, defs=CORE_DEF, builds={5: [b(3, T4), b(2, T2)]}))
+        check("F7 push'tan sonra yeşil → prod hazır", s is not None and s["next"]["ready"], str((s and s["next"], err)))
+        for label, v in (("boş", ""), ("okunamayan", "dün"), ("hata", RuntimeError("500"))):
+            s, err = st(_PushFake({key: v}, defs=CORE_DEF, builds={5: [b(3, T4)]}))
+            check(f"F7 push saati {label} → kapı kapalı", s is not None and not s["next"]["ready"]
+                  and "son değişiklik zamanı okunamadı" in s["next"]["reason"], str((s and s["next"], err)))
+
+    # İstemci: get_last_push_date
+    class _Cl(azb.AzureDevOpsClient):
+        _headers = {"Authorization": "x"}
+
+    class _R:
+        def __init__(self, status=200, js=None):
+            self.status_code, self._js, self.ok = status, js, status < 400
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise _rq.HTTPError(str(self.status_code), response=self)
+
+        def json(self):
+            if self._js is None:
+                raise ValueError("JSON değil")
+            return self._js
+    cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+    cl.org_url, cl.project = "https://dev.azure.com/o", "P"
+    cl.__class__ = _Cl
+    cl._repo_api_url = lambda repo, project=None: f"https://x/{project or 'P'}/_apis/git/repositories/{repo}"
+    seen = []
+    og = azb.requests.get
+
+    def use(resp):
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            seen.append((url, dict(params or {}))), resp)[1]
+    try:
+        use(_R(200, {"value": [{"pushId": 9, "date": "2026-11-16T18:56:50.45Z"}]}))
+        when = cl.get_last_push_date("yml-files", "main", project="EcomLojistik")
+        check("F7 istemci: dalın son push'u (refName + $top=1) → date",
+              when == "2026-11-16T18:56:50.45Z" and seen[-1][0] == "https://x/EcomLojistik/_apis/git/repositories/yml-files/pushes"
+              and seen[-1][1].get("searchCriteria.refName") == "refs/heads/main" and seen[-1][1].get("$top") == 1,
+              str((when, seen[-1:])))
+        use(_R(200, {"value": []}))
+        check("F7 istemci: push yok → ''", cl.get_last_push_date("yml-files", "main", project="EcomLojistik") == "")
+        use(_R(200, {"value": [{"pushId": 9}]}))
+        check("F7 istemci: date yok → '' (okunamaz)", cl.get_last_push_date("yml-files", "main") == "")
+        for label, r in (("500", _R(500, {"x": 1})), ("JSON değil", _R(200, None))):
+            use(r)
+            try:
+                cl.get_last_push_date("yml-files", "main")
+                check(f"F7 istemci: {label} → hata", False)
+            except Exception:  # noqa: BLE001
+                check(f"F7 istemci: {label} → hata", True)
+    finally:
+        azb.requests.get = og
+
+
 def test_php_rector_fix():
     """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
     başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
@@ -11302,7 +11417,7 @@ def main():
               test_upgrade_fix_round1,
               test_upgrade_fix_round2,
               test_upgrade_fix_round3,
-              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source,
+              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

@@ -1101,6 +1101,27 @@ class AzureDevOpsClient:
             "source_version": b.get("sourceVersion") or "",
         } for b in resp.json().get("value", []) or []]
 
+    def get_last_push_date(self, repo_id_or_name: str, branch: str, *, project: str | None = None) -> str:
+        """Dala yapılan EN SON push'un zamanı (`value[0].date`). Pipeline repolarına doğrudan push yapılıyor:
+        commit zamanı, önce yazılıp sonra push edilen değişiklikte erkene düşer — kanıt saati push zamanıdır.
+        Push yoksa ya da `date` alanı yoksa "" (okunamaz → kapı kapalı). 200 dışı / JSON olmayan yanıt yükselir."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pushes"
+        resp = requests.get(url, headers=self._headers, timeout=30, params={
+            "api-version": self.API_VERSION,
+            "searchCriteria.refName": f"refs/heads/{branch}",
+            "$top": 1,
+        })
+        if resp.status_code != 200:
+            raise ValueError(f"Push listesi okunamadı (HTTP {resp.status_code}): {repo_id_or_name} {branch}")
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise ValueError(f"Push listesi JSON değil: {repo_id_or_name} {branch}")
+        vals = body.get("value") or []
+        return str((vals[0] or {}).get("date") or "") if vals and isinstance(vals[0], dict) else ""
+
     def get_last_commit_date(self, repo_id_or_name: str, path: str, branch: str, *,
                              project: str | None = None) -> str:
         """Dosyaya dokunan en son commit'in zamanı (committer, yoksa author) — dalın first-parent çizgisinde.

@@ -292,9 +292,10 @@ _PR_KNOWN = ("active", "completed", "abandoned")
 
 
 def _pins_since(client, pins: list[dict], ci_pr: dict | None = None) -> str | None:
-    """Kanıt saati: sabitleme dosyalarına dokunan en son commit (first-parent; hepsinin en yenisi) ile
-    Tempo'nun test hattı PR'ı tamamlanmışsa onun kapanış zamanının en geçi. Biri okunamazsa None (kapı kapalı):
-    commit araması merge'den önceki bir zamanı verse bile merge'den önce koşan build kanıt sayılmaz."""
+    """Kanıt saati: sabitleme dosyalarının dalına yapılan EN SON PUSH (hepsinin en yenisi) ile Tempo'nun test
+    hattı PR'ı tamamlanmışsa onun kapanış zamanının en geçi. Commit zamanı kullanılmaz: pipeline repolarına
+    doğrudan push yapılıyor; önce yazılıp saatler sonra push edilen commit, aradaki (hâlâ eski dosyayla koşmuş)
+    build'leri kanıt saydırırdı. Biri okunamazsa None (kapı kapalı)."""
     from agile_sdlc_crew.quality import upgrade_bump as bump
     best = None
     if ci_pr and ci_pr.get("status") == "completed":
@@ -303,11 +304,11 @@ def _pins_since(client, pins: list[dict], ci_pr: dict | None = None) -> str | No
             log.warning(f"⚠️ upgrade: test hattı PR'ı #{ci_pr.get('id')} kapanış zamanı okunamadı")
             return None
         best = (t, ci_pr.get("closed_at"))
-    for proj, repo, branch, path in sorted({(p.get("project") or "", p["repo"], p["branch"], p["path"]) for p in pins}):
+    for proj, repo, branch in sorted({(p.get("project") or "", p["repo"], p["branch"]) for p in pins}):
         try:
-            d = client.get_last_commit_date(repo, "/" + str(path).lstrip("/"), branch, project=proj or None)
+            d = client.get_last_push_date(repo, branch, project=proj or None)
         except Exception as e:  # noqa: BLE001 — zaman bilinmeden kanıt okunmaz (kapı kapalı)
-            log.warning(f"⚠️ upgrade: {repo} {path} son commit zamanı okunamadı: {e}")
+            log.warning(f"⚠️ upgrade: {proj}/{repo} {branch} son push zamanı okunamadı: {e}")
             return None
         t = bump._ts(d)
         if t is None:
@@ -545,7 +546,7 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         return nxt("prod", False, base_reason, dv)
     if pins:
         if not since:
-            return nxt("prod", False, "Test hattı dosyasının son değişiklik zamanı okunamadı (son commit ya da "
+            return nxt("prod", False, "Test hattı dosyasının son değişiklik zamanı okunamadı (dalın son push'u ya da "
                                       "test hattı PR'ının kapanışı) — kanıt aranamadı, üretim adımı açılmaz.", dv)
         state = (ev or {}).get("state")
         if state == "red":
