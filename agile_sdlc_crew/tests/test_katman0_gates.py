@@ -8897,6 +8897,76 @@ def test_upgrade_final_f3_published():
               and any(s["where"] == "devops" and s["blocked"] == upgrade.UNPUBLISHED for s in pl["sites"]), str(sel))
 
 
+def test_upgrade_final_f6_ci_parse():
+    """F6: test hattı satırı ayrıştırma delikleri — (a) sürümsüz GoTool / UsePythonVersion bloğu sonraki adımın
+    `version:`'ını almaz (blok, görevin girintisinde ya da daha sığ her satırda biter); (b) değeri bulunamayan
+    sürüm görevi okunamayan sabitlemedir (akış biçimi, satır sonu yorumu, tırnaklı görev adı); (c) liste biçimi
+    değişken (`- name: phpVersion` / `value:`) tanınır, anahtar adı geçip sabitleme çıkmazsa okunamayan sabitleme."""
+    print("\n[Sürüm yükseltme son düzeltme F6: test hattı ayrıştırma]")
+    from agile_sdlc_crew.quality import upgrade, upgrade_bump as bump
+
+    def scan_ci(repo, lang, to, yml):
+        try:
+            return upgrade._ci_scan(None, repo, lang, to, {"Test Pipelines/x.yml": yml}), None
+        except Exception as e:  # noqa: BLE001
+            return None, e
+    head = "resources:\n  repositories:\n    - repository: src\n      name: EcomBackend/{repo}\n"
+    go = head.format(repo="gocrons")
+    # (a) sürüm girdisi olmayan GoTool, sonraki adımın version'ı
+    for nxt in ("  - publish: out\n    artifact: x\n    version: '1.21'\n",
+                "  - download: current\n    version: '1.21'\n",
+                "  - ${{ if eq(1, 1) }}:\n    - script: echo\n      version: '1.21'\n",
+                "variables:\n  version: '1.21'\n"):
+        yml = go + "steps:\n  - task: GoTool@0\n    displayName: Go\n" + nxt
+        res, err = scan_ci("gocrons", "go", "1.25", yml)
+        sites, pins = res or ([], [])
+        check(f"F6a: sürümsüz GoTool başka adımın version'ını almaz ({nxt.split(':')[0].strip()})",
+              res is not None and sites == [] and len(pins) == 1 and pins[0]["version"] == ""
+              and pins[0]["line"] == 6 and "GoTool" in pins[0]["unparsed"] and "okunamadı" in pins[0]["unparsed"],
+              str((res, err)))
+    # (b) okunamayan sürüm görevi
+    for label, body in (("akış biçimi", "  - task: GoTool@0\n    inputs: { version: '1.24' }\n  - script: x\n"),
+                        ("dosya sonu", "  - task: GoTool@0\n    inputs:\n      goPath: x\n")):
+        res, err = scan_ci("gocrons", "go", "1.25", go + "steps:\n" + body)
+        pins = (res or ([], []))[1]
+        check(f"F6b: {label} → okunamayan sabitleme", res is not None and len(pins) == 1 and pins[0]["version"] == ""
+              and "okunamadı" in pins[0]["unparsed"], str((res, err)))
+    for task in ("- task: GoTool@0  # go kurulumu", "- task: 'GoTool@0'", '- task: "GoTool@0" # x'):
+        res, err = scan_ci("gocrons", "go", "1.25", go + f"steps:\n  {task}\n    inputs:\n      version: '1.24'\n")
+        sites, pins = res or ([], [])
+        check(f"F6b: görev satırı tanınır ({task})", res is not None and [p["version"] for p in pins] == ["1.24"]
+              and len(sites) == 1 and bump.pushable(sites[0]) and sites[0]["new"] == "'1.25'", str((res, err)))
+    py = head.format(repo="segflo") + "steps:\n  - task: UsePythonVersion@0\n  - script: pytest\n    versionSpec: '3.9'\n"
+    res, err = scan_ci("segflo", "python", "3.12", py)
+    check("F6a: UsePythonVersion de aynı kural", res is not None and res[0] == [] and len(res[1]) == 1
+          and res[1][0]["version"] == "" and "UsePythonVersion" in res[1][0]["unparsed"], str((res, err)))
+    # (c) liste biçimi değişkenler
+    core = head.format(repo="core")
+    res, err = scan_ci("core", "php", "8.4", core + "variables:\n- name: phpVersion\n  value: '8.2'\n")
+    sites, pins = res or ([], [])
+    check("F6c: - name: phpVersion / value: '8.2' → sabitleme + otomatik site",
+          res is not None and [(p["version"], p["line"]) for p in pins] == [("8.2", 7)] and len(sites) == 1
+          and sites[0]["old"] == "'8.2'" and sites[0]["new"] == "'8.4'" and bump.pushable(sites[0]), str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "parameters:\n  - name: 'phpVersion'\n    type: string\n"
+                                                    "    default: '8.2'\n")
+    check("F6c: parametre default'u da sabitleme", res is not None and [p["version"] for p in res[1]] == ["8.2"],
+          str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "variables:\n- name: phpVersion\n  value: $(v)\n")
+    check("F6c: liste biçimi okunamayan değer", res is not None and len(res[1]) == 1 and res[1][0]["version"] == ""
+          and res[0] == [], str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "variables:\n- name: phpVersion\n- name: other\n  value: '1'\n")
+    check("F6c: değersiz liste değişkeni okunamayan", res is not None and len(res[1]) == 1
+          and res[1][0]["version"] == "", str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "steps:\n  - script: php${{ variables.phpVersion }} -v\n")
+    check("F6c: anahtar geçiyor ama sabitleme yok → okunamayan (bilinmeyen 'yok' sayılmaz)",
+          res is not None and len(res[1]) == 1 and res[1][0]["version"] == "" and res[1][0]["line"] == 6,
+          str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "variables:\n  phpVersion: '8.2'\nsteps:\n"
+                                                    "  - script: sudo update-alternatives --set php /usr/bin/php$(phpVersion)\n")
+    check("F6c: sabitlenmiş anahtarın kullanımı ikinci sabitleme değil",
+          res is not None and [p["version"] for p in res[1]] == ["8.2"] and len(res[0]) == 1, str((res, err)))
+
+
 def test_php_rector_fix():
     """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
     başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
@@ -10966,7 +11036,7 @@ def main():
               test_upgrade_fix_round1,
               test_upgrade_fix_round2,
               test_upgrade_fix_round3,
-              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published,
+              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

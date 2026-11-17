@@ -292,61 +292,130 @@ def _ci_sites(client, repo, lang, to, yml_files) -> list[dict]:
     return _ci_scan(client, repo, lang, to, yml_files)[0]
 
 
+# Yalnız enjekte edilen `yml_files` yolu (testler): dosyaların hangi repoda durduğu verilmez, bu adla etiketlenir.
+_INJECTED_SRC = {"repo": "yml-files", "project": "EcomBackend", "branch": "main"}
+_CI_KEYS = {"php": "phpVersion", "python": "pythonVersion", "go": "goVersion"}
+
+
 def _ci_scan(client, repo, lang, to, yml_files) -> tuple[list[dict], list[dict] | None]:
     """(siteler, sabitlemeler). Sabitleme: repoyu checkout eden test hattı dosyasında dilin sürüm satırı, sürümü ne
     olursa olsun — `{repo, project, branch, path, line, version}`; site yalnız hedefin altındakiler. yml-files
     okunamazsa sabitlemeler None (bilinmiyor): "test hattı sabitlemesi yok" ile karışmasın diye."""
-    key = {"php": "phpVersion", "python": "pythonVersion", "go": "goVersion"}.get(lang)
-    if not key:
+    if not _CI_KEYS.get(lang):
         return [], []
-    branch = "main"
     if yml_files is None:
+        branch = "main"
         try:
-            branch = (client.get_repository(CI_REPO).get("defaultBranch") or "refs/heads/main").replace("refs/heads/", "")
-            items = client.get_items_in_path(CI_REPO, "/" + CI_DIR, branch=branch, recursion_level="oneLevel",
-                                             project=CI_PROJECT)
+            branch = (client.get_repository(_INJECTED_SRC["repo"]).get("defaultBranch") or "refs/heads/main"
+                      ).replace("refs/heads/", "")
+            items = client.get_items_in_path(_INJECTED_SRC["repo"], "/" + CI_DIR, branch=branch,
+                                             recursion_level="oneLevel", project=_INJECTED_SRC["project"])
             yml_files = {}
             for it in items:
                 p = (it.get("path") or "").lstrip("/")
                 if not it.get("isFolder") and p.lower().endswith((".yml", ".yaml")):
-                    yml_files[p] = client.get_file_content(CI_REPO, "/" + p, branch=branch, project=CI_PROJECT) or ""
+                    yml_files[p] = client.get_file_content(_INJECTED_SRC["repo"], "/" + p, branch=branch,
+                                                           project=_INJECTED_SRC["project"]) or ""
         except Exception as e:  # noqa: BLE001
             log.warning(f"⚠️ upgrade: yml-files okunamadı: {e}")
             return [], None
-    mention = re.compile(rf"(?im)^\s*(?:-\s*)?name:\s*['\"]?(?:[\w.-]+/)?{re.escape(repo)}['\"]?\s*$")
-    keyline = re.compile(rf"^\s*{key}\s*:(.*)$")
-    task_re, task_key = _CI_TASKS.get(lang, (None, None))
+        src = dict(_INJECTED_SRC, branch=branch)
+    else:
+        src = dict(_INJECTED_SRC)
+    mention = _mention_re(repo)
     out, pins = [], []
     for path in sorted(yml_files):
         if not path.startswith(CI_DIR + "/") or not mention.search(yml_files[path] or ""):
             continue
-        pending = None   # açık sürüm görevi (GoTool / UsePythonVersion) bloğunda aranan anahtar
-        for i, ln in enumerate((yml_files[path] or "").splitlines(), 1):
-            if re.match(r"^\s*#", ln):
-                continue
-            if task_re is not None and task_re.match(ln):
-                pending = task_key
-                continue
-            if _CI_BLOCK_END.match(ln):
-                pending = None
-                continue
-            if pending and (m := re.match(rf"^\s*{pending}\s*:(.*)$", ln)):
-                pending = None
-                _ci_value_pin(out, pins, m.group(1), path, i, branch, to)
-                continue
-            if (m := keyline.match(ln)):
-                _ci_value_pin(out, pins, m.group(1), path, i, branch, to)
-                continue
-            if (m := _CI_IMAGE_KEY.match(ln)):
-                _ci_image_pin(out, pins, m.group(1), m.group(2), lang, path, i, branch, to)
+        s_, p_ = _parse_ci_file(yml_files[path] or "", path, lang, to, src)
+        out += s_
+        pins += p_
+    return out, pins
+
+
+def _mention_re(repo: str):
+    """Dosya repoyu checkout ediyor mu: `name: <proje>/<repo>` satırı."""
+    return re.compile(rf"(?im)^\s*(?:-\s*)?name:\s*['\"]?(?:[\w.-]+/)?{re.escape(repo)}['\"]?\s*$")
+
+
+def _indent(ln: str) -> int:
+    return len(ln) - len(ln.lstrip(" "))
+
+
+def _parse_ci_file(text: str, path: str, lang: str, to: str, src: dict) -> tuple[list[dict], list[dict]]:
+    """Tek test hattı dosyasının sabitlemeleri ve siteleri. Tanınan biçimler: `<anahtar>: '8.2'`, liste biçimi
+    değişken / parametre (`- name: <anahtar>` + `value:` / `default:`), sürüm görevi bloğu (GoTool `version`,
+    UsePythonVersion `versionSpec`) ve dil imajı (`image:` / `container:`). Bilinmeyen 'yok' sayılmaz: değeri
+    bulunamayan sürüm görevi, değersiz liste değişkeni ve anahtar adı geçtiği hâlde ondan sabitleme çıkmayan dosya
+    okunamayan sabitleme (`version: ""`, `unparsed`) üretir — kapı kapalı kalır."""
+    key = _CI_KEYS.get(lang)
+    out: list[dict] = []
+    pins: list[dict] = []
+    if not key:
+        return out, pins
+    keyline = re.compile(rf"^\s*{key}\s*:(.*)$")
+    namevar = re.compile(rf"""^(\s*)-\s*name:\s*(['"]?){key}\2\s*(?:#.*)?$""")
+    key_word = re.compile(rf"(?<![\w]){key}(?![\w])")
+    task_re, task_key = _CI_TASKS.get(lang, (None, None))
+    task = None       # açık sürüm görevi bloğu: {"line", "indent", "name"}
+    var = None        # açık `- name: <anahtar>` öğesi: {"line", "indent"}
+    from_key = False  # anahtar adını taşıyan bir satırdan sabitleme çıktı mı
+    lines = text.splitlines()
+
+    def unread(line: int, why: str) -> None:
+        pins.append(_ci_pin(src, path, line, version="", unparsed=why))
+
+    for i, ln in enumerate(lines, 1):
+        if not ln.strip() or re.match(r"^\s*#", ln):
+            continue
+        ind = _indent(ln)
+        # Blok, görevin / öğenin girintisinde ya da daha sığ İLK satırda biter (sonraki adım, `- publish:`,
+        # `- ${{ … }}`, `variables:` …): sürümsüz görev başka bir adımın `version:`'ını almaz.
+        if task is not None and ind <= task["indent"]:
+            unread(task["line"], f"{task['name']} sürümü okunamadı")
+            task = None
+        if var is not None and ind <= var["indent"]:
+            unread(var["line"], f"{key} değeri okunamadı")
+            var = None
+        if task_re is not None and (m := task_re.match(ln)):
+            task = {"line": i, "indent": len(m.group(1)), "name": m.group(3).split("@")[0]}
+            continue
+        if (m := namevar.match(ln)):
+            var = {"line": i, "indent": len(m.group(1))}
+            from_key = True
+            continue
+        if task is not None and (m := re.match(rf"^\s*{task_key}\s*:(.*)$", ln)):
+            task = None
+            _ci_value_pin(out, pins, m.group(1), path, i, src, to)
+            from_key = from_key or bool(key_word.search(ln))
+            continue
+        if var is not None and (m := re.match(r"^\s*(?:value|default)\s*:(.*)$", ln)):
+            var = None
+            _ci_value_pin(out, pins, m.group(1), path, i, src, to)
+            continue
+        if (m := keyline.match(ln)):
+            _ci_value_pin(out, pins, m.group(1), path, i, src, to)
+            from_key = True
+            continue
+        if (m := _CI_IMAGE_KEY.match(ln)):
+            _ci_image_pin(out, pins, m.group(1), m.group(2), lang, path, i, src, to)
+    if task is not None:
+        unread(task["line"], f"{task['name']} sürümü okunamadı")
+    if var is not None:
+        unread(var["line"], f"{key} değeri okunamadı")
+    if not from_key:
+        first = next((i for i, ln in enumerate(lines, 1)
+                      if not re.match(r"^\s*#", ln) and key_word.search(ln)), None)
+        if first is not None:
+            unread(first, f"{key} geçiyor ama sürüm satırı tanınmadı")
     return out, pins
 
 
 # Sürüm görevi → bloğundaki sürüm anahtarı (gerçek test hatları: gocrons GoTool@0 version, Python
-# UsePythonVersion@0 versionSpec). Blok, sonraki adım/iş/aşama satırında biter.
-_CI_TASKS = {"go": (re.compile(r"^\s*-\s*task:\s*GoTool@\d+\s*$"), "version"),
-             "python": (re.compile(r"^\s*-\s*task:\s*UsePythonVersion@\d+\s*$"), "versionSpec")}
-_CI_BLOCK_END = re.compile(r"^\s*-\s*(?:task|script|bash|pwsh|powershell|checkout|job|stage|template|deployment)\s*:")
+# UsePythonVersion@0 versionSpec). Görev adı tırnaklı olabilir, satır sonunda yorum olabilir.
+_CI_TASKS = {"go": (re.compile(r"""^(\s*)-\s*task:\s*(['"]?)(GoTool@\d+)\2\s*(?:#.*)?$"""), "version"),
+             "python": (re.compile(r"""^(\s*)-\s*task:\s*(['"]?)(UsePythonVersion@\d+)\2\s*(?:#.*)?$"""),
+                        "versionSpec")}
 _CI_IMAGE_KEY = re.compile(r"^\s*(?:-\s*)?(image|container)\s*:(.*)$")
 _CI_IMG_NAME = {"go": "golang", "python": "python"}
 
@@ -359,28 +428,29 @@ def _unquote(value: str) -> tuple[str, str, str]:
     return raw, "", raw
 
 
-def _ci_pin(path, line, branch, **kw) -> dict:
-    return {"repo": CI_REPO, "project": CI_PROJECT, "branch": branch, "path": path, "line": line, **kw}
+def _ci_pin(src: dict, path, line, **kw) -> dict:
+    """Sabitleme: dosyanın durduğu repo / proje / dal tanımdan (ya da enjeksiyondan) gelir."""
+    return {"repo": src["repo"], "project": src["project"], "branch": src["branch"], "path": path, "line": line, **kw}
 
 
-def _ci_value_pin(out, pins, value, path, i, branch, to) -> None:
+def _ci_value_pin(out, pins, value, path, i, src, to) -> None:
     """`phpVersion: '8.2'` / GoTool `version:` / `versionSpec:` değeri."""
     raw, q, inner = _unquote(value)
     mm = re.fullmatch(r"(\d+)\.(\d+)(\.\d+)?", inner)
     if not mm:
         # `3.x`, `$(var)`, `8` …: sürüm okunamıyor — kapı kapalı kalır, satırı insan düzenler
-        pins.append(_ci_pin(path, i, branch, version="", unparsed=inner[:40]))
+        pins.append(_ci_pin(src, path, i, version="", unparsed=inner[:40]))
         return
     ver = f"{mm.group(1)}.{mm.group(2)}"
-    pins.append(_ci_pin(path, i, branch, version=ver))
+    pins.append(_ci_pin(src, path, i, version=ver))
     if _v(ver) < _v(to):
         if mm.group(3):   # 1.22.5: rakam-dizisi kuralı 1.25.5'e izin verirdi — yanlış; otomatik yazılmaz
-            out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, raw, raw, CI_HAND))
+            out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, raw, raw, CI_HAND))
         else:
-            out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, f"{q}{ver}{q}", f"{q}{to}{q}"))
+            out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, f"{q}{ver}{q}", f"{q}{to}{q}"))
 
 
-def _ci_image_pin(out, pins, key, value, lang, path, i, branch, to) -> None:
+def _ci_image_pin(out, pins, key, value, lang, path, i, src, to) -> None:
     """`image:` / `container:` değeri dilin imajıysa sabitlemedir (`golang:1.21.4`, `…/golang:1.21-alpine`,
     `python:3.11-slim`, `…/php-8-2:1.0`). `container:` etiketsizse kaynak takma adıdır (`container: golang`)."""
     _raw, _q, img = _unquote(value)
@@ -390,7 +460,6 @@ def _ci_image_pin(out, pins, key, value, lang, path, i, branch, to) -> None:
         if not re.search(r"(?:^|/)php(?:[-:]|$)", img):
             return
         v = pm.parse_php_image(img)
-        three = re.search(r"(?:^|/)php:\d+\.\d+\.\d+", img)
     else:
         name = _CI_IMG_NAME.get(lang)
         m = re.search(rf"(?:^|/){name}(?::([^\s/]*))?$", img) if name else None
@@ -399,20 +468,19 @@ def _ci_image_pin(out, pins, key, value, lang, path, i, branch, to) -> None:
         tag = (m.group(1) or "").split("-")[0]
         tm = re.fullmatch(r"(\d+)\.(\d+)(\.\d+)?", tag)
         v = (int(tm.group(1)), int(tm.group(2))) if tm else None
-        three = tm and tm.group(3)
     if key == "container" and ":" not in img:
         return
     if not v:
-        pins.append(_ci_pin(path, i, branch, version="", unparsed=img[:40]))
+        pins.append(_ci_pin(src, path, i, version="", unparsed=img[:40]))
         return
     ver = _fmt(v)
-    pins.append(_ci_pin(path, i, branch, version=ver))
+    pins.append(_ci_pin(src, path, i, version=ver))
     if v < _v(to):
         new = image_for(img, lang, to)
-        if three or new == img:
-            out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, img, img, CI_HAND))
+        if _three_part(img, lang) or new == img:
+            out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, img, CI_HAND))
         else:
-            out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, img, new))
+            out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, new))
 
 
 def _range_hard(constraint: str) -> bool:
