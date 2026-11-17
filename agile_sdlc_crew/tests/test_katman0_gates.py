@@ -8792,6 +8792,111 @@ def test_upgrade_fix_round3():
         azb.requests.get = og
 
 
+def _upgrade_deps(base):
+    """Son düzeltme testleri için ağsız Deps (board boş, freshen kapalı)."""
+    from agile_sdlc_crew.quality import intake
+    cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+           "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+           "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+    return intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                       record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+
+
+def test_upgrade_final_f2_three_part():
+    """F2: üç parçalı imaj etiketi (golang:1.24.4-alpine, php:8.2.12-fpm) yeniden yazılmaz — rakam-dizisi kuralı
+    golang:1.27.4 gibi var olmayabilecek bir etiket uydururdu. Site old == new, elle düzenlenir."""
+    print("\n[Sürüm yükseltme son düzeltme F2: üç parçalı imaj etiketi]")
+    from agile_sdlc_crew.quality import upgrade, upgrade_bump as bump, upgrade_track as ut
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "svc"
+        root.mkdir()
+        for lang, img, to in (("go", "golang:1.24.4-alpine", "1.27"), ("php", "php:8.2.12-fpm", "8.4"),
+                              ("go", "myreg.io/library/golang:1.24.4", "1.27"),
+                              ("python", "10.1.1.1:5000/python:3.11.9-slim", "3.13")):
+            (root / "Dockerfile").write_text(f"FROM {img} AS build\nRUN x\n", encoding="utf-8")
+            cs = [s for s in upgrade._code_sites("svc", root, lang, to) if s["path"] == "Dockerfile"]
+            check(f"F2 kod Dockerfile {img}: elle düzenlenir, etiket uydurulmaz",
+                  len(cs) == 1 and cs[0]["old"] == cs[0]["new"] == img and cs[0]["blocked"] == upgrade.CI_HAND
+                  and cs[0]["line"] == 1 and not bump.pushable(cs[0]), str(cs))
+        (root / "Dockerfile").write_text("FROM golang:1.24-alpine\n", encoding="utf-8")
+        cs = upgrade._code_sites("svc", root, "go", "1.27")
+        check("F2 iki parçalı etiket yine otomatik", len(cs) == 1 and cs[0]["new"] == "golang:1.27-alpine"
+              and bump.pushable(cs[0]), str(cs))
+        for img in ("golang:1.24.4", "10.1.1.1:5000/library/golang:1.24.4-alpine"):
+            index = {"gocrons": [{"src": "anatolia/build/alf", "images": [img]}],
+                     "x": [{"src": "anatolia/build/x", "images": [upgrade.image_for(img, "go", "1.27")]}]}
+            ss = upgrade._devops_sites(None, "gocrons", "go", "1.27", index, lambda d, p, i=img: f"FROM {i}\n")
+            check(f"F2 FLODevOps {img}: aynı bölgede yeni etiket olsa da elle",
+                  len(ss) == 1 and ss[0]["old"] == ss[0]["new"] == img and ss[0]["blocked"] == upgrade.CI_HAND
+                  and ss[0]["line"] == 1 and not bump.pushable(ss[0]), str(ss))
+        check("F2 _three_part: önekli/son ekli, iki parçalı değil",
+              upgrade._three_part("eu/golang:1.24.4-alpine", "go") and upgrade._three_part("php:8.2.12", "php")
+              and upgrade._three_part("prod-ar/python-3-13-7:1.0", "python")
+              and not upgrade._three_part("eu/prod-ar/php-8-2:1.0", "php")
+              and not upgrade._three_part("golang:1.24-alpine", "go"))
+        # gerekçe yol:satır ve hedefi söyler
+        dv = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+              "path": "/build/alf/Dockerfile", "line": 1, "old": "golang:1.24.4", "new": "golang:1.24.4",
+              "blocked": upgrade.CI_HAND}
+        groot = base / "gocrons"
+        groot.mkdir()
+        (groot / "go.mod").write_text("module x\n\ngo 1.24\n", encoding="utf-8")
+        sc = {"repo": "gocrons", "lang": "go", "current": "1.24", "target": "1.27", "up_to_date": False,
+              "sites": [dv], "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": [],
+              "ci_source": None}
+        s = ut.status(_UpFake(), "gocrons", "go", to="1.27", deps=_upgrade_deps(base), scan=sc, wait_h=72, root=groot)
+        check("F2 gerekçe dosya:satır ve hedefi söyler", not s["next"]["ready"] and s["stage"] == "engelli"
+              and "/build/alf/Dockerfile:1" in s["next"]["reason"] and "1.27" in s["next"]["reason"], str(s["next"]))
+        csite = dict(dv, where="code", repo="gocrons", project="", branch="", path="Dockerfile", line=3)
+        sc2 = dict(sc, sites=[csite])
+        s = ut.status(_UpFake(), "gocrons", "go", to="1.27", deps=_upgrade_deps(base), scan=sc2, wait_h=72,
+                      root=groot)
+        check("F2 kod sitesi gerekçesi dosya:satır ve hedef", not s["next"]["ready"]
+              and "Dockerfile:3" in s["next"]["reason"] and "1.27" in s["next"]["reason"], str(s["next"]))
+
+
+def test_upgrade_final_f3_published():
+    """F3: `selectable` imaj kanıtıyla tutarlı — bir sürüm 'yayınlanmış' ancak reponun her servis imajının yeni
+    hâli o bölgede zaten kullanılıyorsa (ve üç parçalı değilse); varsayılan hedef bilinen sürümlerle kesişir."""
+    print("\n[Sürüm yükseltme son düzeltme F3: yayınlanmış imaj tutarlılığı]")
+    from agile_sdlc_crew.quality import upgrade
+    idx_go = {"gocrons": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4"]}],
+              "x": [{"src": "anatolia/build/x", "images": ["golang:1.27.4", "golang:1.25.4", "golang:1.26.4"]}]}
+    svc = upgrade._devops_services("gocrons", "go", idx_go, None)
+    sel = upgrade.selectable("go", "1.24", idx_go, svc)
+    check("F3 Go golang:1.24.4 → hiçbir hedef yayınlanmış değil", sel and not any(s["published"] for s in sel),
+          str(sel))
+    ss = upgrade._devops_sites(None, "gocrons", "go", "1.27", idx_go, lambda d, p: "FROM golang:1.24.4\n")
+    check("F3 Go sitesi elle düzenlenir", len(ss) == 1 and ss[0]["blocked"] == upgrade.CI_HAND, str(ss))
+    check("F3 servisi olmayan repo → yayınlanmış", all(s["published"] for s in upgrade.selectable("go", "1.24", {}, {})))
+    idx = {"core": [{"src": "anatolia/build/l", "images": ["eu/php-8-2:1.0"]},
+                    {"src": "russia/build/l", "images": ["10.1.1.1:5000/php-8-2:1.0"]}],
+           "web": [{"src": "anatolia/build/w", "images": ["eu/php-8-4:1.0"]}]}
+    sel = {s["version"]: s for s in upgrade.selectable("php", "8.2", idx, upgrade._devops_services("core", "php", idx, None))}
+    check("F3 anatolia'da yeni imaj var, russia'da yok → 8.4 yayınlanmamış", sel["8.4"]["published"] is False,
+          str(sel))
+    idx2 = dict(idx, ru=[{"src": "russia/build/ru", "images": ["10.1.1.1:5000/php-8-4:1.0"]}])
+    sel = {s["version"]: s for s in upgrade.selectable("php", "8.2", idx2, upgrade._devops_services("core", "php", idx2, None))}
+    check("F3 iki bölgede de yeni imaj → 8.4 yayınlanmış", sel["8.4"]["published"] is True
+          and sel["8.3"]["published"] is False, str(sel))
+    check("F3 ortak yüklem _image_ok", upgrade._image_ok({"eu/php-8-4:1.0"}, "eu/php-8-2:1.0", "php", "8.4")
+          and not upgrade._image_ok({"golang:1.27.4"}, "golang:1.24.4", "go", "1.27")
+          and not upgrade._image_ok(set(), "eu/php-8-2:1.0", "php", "8.4"))
+    idx3 = {"a": [{"src": "anatolia/build/a", "images": ["eu/php-8-4:1.0", "eu/php-8-9:1.0"]}]}
+    check("F3 varsayılan hedef bilinen sürümlerle kesişir (8.9 listede yok)",
+          upgrade.default_target("php", "8.2", idx3) == "8.4", str(upgrade.default_target("php", "8.2", idx3)))
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        (base / "core").mkdir()
+        (base / "core" / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+        rd = lambda d, p: ("FROM 10.1.1.1:5000/php-8-2:1.0\n" if d == "russia" else "FROM eu/php-8-2:1.0\n")
+        pl = upgrade.plan(None, "core", "php", to="8.4", deps=_upgrade_deps(base), index=idx, read=rd, yml_files={})
+        sel = {s["version"]: s for s in pl["selectable"]}
+        check("F3 plan seçilebilirleri servislerle hesaplar", sel["8.4"]["published"] is False
+              and any(s["where"] == "devops" and s["blocked"] == upgrade.UNPUBLISHED for s in pl["sites"]), str(sel))
+
+
 def test_php_rector_fix():
     """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
     başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
@@ -10861,6 +10966,7 @@ def main():
               test_upgrade_fix_round1,
               test_upgrade_fix_round2,
               test_upgrade_fix_round3,
+              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

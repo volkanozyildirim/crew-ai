@@ -88,7 +88,8 @@ def published(lang: str, index: dict) -> set[str]:
 
 def default_target(lang: str, current: str, index: dict) -> str | None:
     if lang in ("php", "python"):
-        pub = sorted(published(lang, index), key=_v)
+        # Seçicinin gösteremeyeceği (listede olmayan) bir yayınlanmış sürüm varsayılan olmasın.
+        pub = sorted(published(lang, index) & set(known_versions(lang)), key=_v)
         return pub[-1] if pub and _v(pub[-1]) > _v(current) else None
     kv = known_versions(lang)
     return kv[-1] if kv else None
@@ -159,13 +160,60 @@ def _tool_ok(lang: str, version: str) -> bool:
     return bool(m) and (int(m.group(1)), int(m.group(2))) >= _v(version)
 
 
-def selectable(lang: str, current: str, index: dict) -> list[dict]:
+def _region_images(index: dict) -> dict[str, set[str]]:
+    """Bölge reposu (anatolia / russia / …) → o repoda kullanılan bütün imajlar."""
+    by: dict[str, set[str]] = {}
+    for es in (index or {}).values():
+        for e in es:
+            by.setdefault(str(e.get("src") or "").strip("/").split("/")[0], set()).update(e.get("images", []))
+    return by
+
+
+def _three_part(image: str, lang: str) -> bool:
+    """Dil imajının etiketi üç parçalı mı (`golang:1.24.4-alpine`, `php:8.2.12-fpm`, `…/python-3-13-7:1.0`;
+    kayıt deposu önekli ya da değil). Rakam-dizisi kuralı böyle bir etiketin yalnız ilk iki parçasını değiştirir ve
+    var olmayabilecek bir etiket uydururdu (`golang:1.27.4`) — site otomatik yazılmaz."""
+    name = _LANG_IMG_NAME.get(lang)
+    if not name:
+        return False
+    return re.search(rf"(?:^|/){name}(?::\d+\.\d+\.\d+|-\d+-\d+-\d+)(?![\d])", image or "") is not None
+
+
+def _image_ok(region_images, img: str, lang: str, to: str) -> bool:
+    """Spec §2 imaj kanıtı: `img`'in hedef sürümlü hâli (aynı önek ve etiket) aynı bölge reposunda başka bir
+    serviste zaten kullanılıyor ve etiket üç parçalı değil. `_devops_sites` ve `selectable` aynı yüklemi kullanır."""
+    if _three_part(img, lang):
+        return False
+    new = image_for(img, lang, to)
+    return new != img and new in (region_images or set())
+
+
+def selectable(lang: str, current: str, index: dict, services: dict | None = None) -> list[dict]:
+    """Seçilebilir sürümler. `services` (`_devops_services`'in bu repo için verdiği src → imajlar) verilirse
+    `published` site kuralıyla aynıdır: hedefin altındaki her dil imajının yeni hâli o bölgede kullanılıyor
+    (`_image_ok`); reponun FLODevOps servisi yoksa True. Verilmezse eski davranış (imaj sürümü görülmüş mü)."""
     pub = published(lang, index)
+    regions = _region_images(index) if services is not None else {}
+    name = _LANG_IMG_NAME.get(lang, "")
+
+    def ok(v: str) -> bool:
+        if services is None:
+            return True if lang not in ("php", "python") else v in pub
+        for src, images in services.items():
+            region = str(src).strip("/").split("/")[0]
+            for img in images:
+                iv = _image_version(img, lang)
+                if iv is None:
+                    if name and name in img:      # dil imajı ama sürümü okunamıyor: kanıtlanamaz
+                        return False
+                    continue
+                if iv < _v(v) and not _image_ok(regions.get(region, set()), img, lang, v):
+                    return False
+        return True
     out = []
     for v in known_versions(lang):
         if _v(current) < _v(v):
-            out.append({"version": v, "published": True if lang not in ("php", "python") else v in pub,
-                        "catalog": _has_catalog(lang, v), "tool": _tool_ok(lang, v)})
+            out.append({"version": v, "published": ok(v), "catalog": _has_catalog(lang, v), "tool": _tool_ok(lang, v)})
     return out
 
 
@@ -207,10 +255,7 @@ def _devops_services(repo, lang, index, per_src) -> dict[str, list[str]]:
 
 def _devops_sites(client, repo, lang, to, index, read, per_src=None) -> list[dict]:
     from agile_sdlc_crew.quality import app_map as am
-    by_devrepo: dict[str, set[str]] = {}
-    for es in (index or {}).values():
-        for e in es:
-            by_devrepo.setdefault(str(e.get("src") or "").split("/")[0], set()).update(e.get("images", []))
+    by_devrepo = _region_images(index)
     rd = read or (lambda d, p: am._read(client, d, p))
     name = _LANG_IMG_NAME.get(lang, "")
     out = []
@@ -229,13 +274,15 @@ def _devops_sites(client, repo, lang, to, index, read, per_src=None) -> list[dic
                 continue
             if text is None:
                 text = rd(devrepo, path) or ""
-            new = image_for(img, lang, to)
+            three = _three_part(img, lang)
+            new = img if three else image_for(img, lang, to)   # üç parçalı etiket uydurulmaz
             lines = [i for i, ln in enumerate(text.splitlines(), 1)
                      if (m := re.match(r"(?i)\s*FROM\s+(?:--\S+\s+)?(\S+)", ln)) and m.group(1) == img]
             if not lines:
                 out.append(_site("devops", devrepo, am.DEVOPS_PROJECT, am.DEVOPS_BRANCH, path, 0, img, new, NO_LINE))
                 continue
-            blocked = "" if new in by_devrepo.get(devrepo, set()) else UNPUBLISHED
+            blocked = (CI_HAND if three else
+                       "" if _image_ok(by_devrepo.get(devrepo, set()), img, lang, to) else UNPUBLISHED)
             for line in lines:
                 out.append(_site("devops", devrepo, am.DEVOPS_PROJECT, am.DEVOPS_BRANCH, path, line, img, new, blocked))
     return out
@@ -428,7 +475,10 @@ def _code_sites(repo, root: Path, lang, to) -> list[dict]:
             m = re.match(r"(?i)\s*FROM\s+(?:--\S+\s+)?(\S+)", ln)
             v = _image_version(m.group(1), lang) if m else None
             if v and v < _v(to):
-                add("Dockerfile", i, m.group(1), image_for(m.group(1), lang, to))
+                if _three_part(m.group(1), lang):   # `golang:1.24.4-alpine`: etiket uydurulmaz, elle
+                    add("Dockerfile", i, m.group(1), m.group(1), CI_HAND)
+                else:
+                    add("Dockerfile", i, m.group(1), image_for(m.group(1), lang, to))
     return out
 
 
@@ -464,7 +514,7 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
            "selectable": [], "sites": [], "ci_pins": [], "per_src": tv.get("per_src") or [], "up_to_date": False}
     if not current:
         return out
-    sel = selectable(lang, current, index)
+    sel = selectable(lang, current, index, _devops_services(repo, lang, index, out["per_src"]))
     if to is not None:
         if not isinstance(to, str) or not _VER_RE.match(to) or to not in {s["version"] for s in sel}:
             raise ValueError(f"Hedef sürüm seçilemez: {to!r}")

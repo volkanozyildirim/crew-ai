@@ -282,8 +282,9 @@ def _pushable(s: dict) -> bool:
     return bump.pushable(s)
 
 
-def _blocked_dv_reason(dv_blocked: list[dict]) -> str:
-    parts = "; ".join(f"{s.get('repo')} {s.get('path')}: {s.get('blocked')}" for s in dv_blocked)
+def _blocked_dv_reason(dv_blocked: list[dict], tgt: str = "") -> str:
+    hedef = f" (hedef {tgt})" if tgt else ""
+    parts = "; ".join(f"{s.get('repo')} {s.get('path')}:{s.get('line')}: {s.get('blocked')}{hedef}" for s in dv_blocked)
     return f"Üretim imajı güncellenemiyor ({parts}) — üretim adımı hiçbir bölge için açılmaz."
 
 
@@ -385,7 +386,8 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
             sites = [dict(s, branch=s.get("branch") or dflt) for s in sites]
         push = [s for s in sites if _pushable(s)]
         manual = [s for s in sites if not _pushable(s)]
-        man_txt = "; ".join(f"{s.get('path')}: {s.get('old')} — sürüm kısıtı elle düzenlenmeli" for s in manual)
+        man_txt = "; ".join(f"{s.get('path')}:{s.get('line')}: {s.get('old')} — "
+                            f"{s.get('blocked') or 'sürüm kısıtı elle düzenlenmeli'} (hedef {tgt})" for s in manual)
         cpr = out["prs"]["code"] = _pr(client, repo, br, None)
         if cpr and cpr.get("status") == "active":
             return nxt("code", False, f"Kod reposu PR'ı #{cpr.get('id')} açık — merge bekleniyor.", push, manual)
@@ -433,7 +435,7 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         base = "engelli"
         why = [str(b.get("detail") or b.get("name") or b) for b in out["blockers"]]
         if dv_blocked:
-            why.append(_blocked_dv_reason(dv_blocked))
+            why.append(_blocked_dv_reason(dv_blocked, tgt))
         why += [f"{s.get('repo')} {s.get('path')}:{s.get('line')}: {s.get('blocked')} — {tgt} yapılmalı"
                 for s in ci_blocked]
         if not_pre:
@@ -529,7 +531,7 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
                                   "okunduğunda açılır.", [s for s in code if _pushable(s)],
                    [s for s in code if not _pushable(s)])
     if dv_blocked:
-        return nxt("prod", False, _blocked_dv_reason(dv_blocked), dv)
+        return nxt("prod", False, _blocked_dv_reason(dv_blocked, tgt), dv)
     if not ok:
         return nxt("prod", False, base_reason, dv)
     if pins:
