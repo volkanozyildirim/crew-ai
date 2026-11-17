@@ -225,6 +225,7 @@ rules:
   # Go geri uyumlu; asıl tespit hedef sürümle `go build` + `go vet` (upgrade.probe). Aşağıdakiler go.mod'daki
   # `go` satırı hedefe çekilince varsayılanı değişen davranışlardır; bulgu go.mod'un `go` satırına düşer.
   - key: go122_loopvar
+    upgrade_catalog: true
     since: "1.22"
     kind: report
     breaks: behavior
@@ -237,6 +238,7 @@ rules:
     after: "// Go 1.22+: her tur kendi v'sini görür"
     ref: "https://go.dev/blog/loopvar-preview"
   - key: go122_httpmux
+    upgrade_catalog: true
     since: "1.22"
     kind: report
     breaks: behavior
@@ -249,6 +251,7 @@ rules:
     after: "mux.HandleFunc(\"GET /items/{id}\", h)  // Go 1.22: desen"
     ref: "https://go.dev/doc/godebug#go-122"
   - key: go123_timerchan
+    upgrade_catalog: true
     since: "1.23"
     kind: report
     breaks: behavior

@@ -66,6 +66,9 @@ class Rule:
     fix_min: tuple[int, int] = (7, 0)  # düzeltmenin çalıştığı en düşük PHP sürümü
     requires: list[str] = field(default_factory=list)            # PHP eklentileri
     requires_if: dict[str, list[str]] = field(default_factory=dict)  # bulunan yerde geçen ad → eklentiler
+    # Sürüm yükseltme dalının (katalog v4) EKLEDİĞİ kural: modernleştirme hattında yalnız CREW_TECHDEBT_UPGRADE
+    # açıkken görünür (yeni davranış varsayılan kapalı); yükseltme hattı her zaman görür.
+    upgrade_catalog: bool = False
 
     @property
     def since_str(self) -> str:
@@ -106,6 +109,7 @@ def load_rules(path: Path = RULES_PATH) -> list[Rule]:
             fixer=str(r.get("fixer") or ""), line_local=bool(r.get("line_local", True)),
             requires=[str(x) for x in r.get("requires") or []],
             requires_if={str(k): [str(x) for x in v or []] for k, v in (r.get("requires_if") or {}).items()},
+            upgrade_catalog=bool(r.get("upgrade_catalog")),
         ))
     return out
 
@@ -117,12 +121,28 @@ def rules_version(path: Path = RULES_PATH) -> str:
         return "0"
 
 
-def applicable(rules: list[Rule], version: str | None) -> list[Rule]:
-    """Yalnız hedef sürümün sunduğu kurallar (since ≤ hedef)."""
+def _upgrade_on() -> bool:
+    from agile_sdlc_crew import pipeline_config as pc
+    try:
+        return bool(pc.get("CREW_TECHDEBT_UPGRADE"))
+    except Exception:  # noqa: BLE001 — ayar okunamazsa yeni davranış kapalı
+        return False
+
+
+def lane_rules(rules, *, upgrade_lane: bool = False) -> list[Rule]:
+    """Hattın görebileceği kurallar — TEK yüklem: modernleştirme hattı (tarama, alım, Teknik borç listesinden Rector
+    kapsamı) CREW_TECHDEBT_UPGRADE kapalıyken `upgrade_catalog` kurallarını görmez; yükseltme hattı hep görür."""
+    if upgrade_lane or _upgrade_on():
+        return list(rules)
+    return [r for r in rules if not getattr(r, "upgrade_catalog", False)]
+
+
+def applicable(rules: list[Rule], version: str | None, *, upgrade_lane: bool = False) -> list[Rule]:
+    """Yalnız hedef sürümün sunduğu kurallar (since ≤ hedef), hattın görebildikleri arasından (lane_rules)."""
     if not version:
         return []
     v = _ver(version)
-    return [r for r in rules if r.since <= v]
+    return [r for r in lane_rules(rules, upgrade_lane=upgrade_lane) if r.since <= v]
 
 
 # ── Hedef sürüm ──────────────────────────────────────────────────────────
@@ -505,14 +525,15 @@ def pack_modern(units: list, *, source: str, tool_fix: bool = False, tool_rules:
 
 def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: str, board_index: dict, now: float,
                  cfg: dict, ext_ok=None, source: str = SOURCE, tool_fix: bool = False,
-                 tool_rules: set | frozenset = frozenset(), keep_closed=None) -> tuple[list, list[dict], dict]:
+                 tool_rules: set | frozenset = frozenset(), keep_closed=None,
+                 upgrade_lane: bool = False) -> tuple[list, list[dict], dict]:
     """(gruplar, atlananlar, kural özeti). Yalnız hedef sürümün sunduğu kurallar; dedup board'dan;
     dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez.
     `keep_closed(rule_key) -> str | None`: kapanmış (Done) işi olan birim — dedup 'recurring' dediğinde —
     yeniden açılmasın mı; dönen metin atlama nedenidir (`<neden> #<wi>`). Paketlemeden ÖNCE birim
     düzeyinde: aynı kuralın yeni dosyası yine yalnız kendi parmak iziyle gruba girer."""
     from agile_sdlc_crew.quality import dedup, rank
-    rules_by_key = {r.key: r for r in applicable(rules, version)}
+    rules_by_key = {r.key: r for r in applicable(rules, version, upgrade_lane=upgrade_lane)}
     units, summary = _units(scan.get("hits") or [], rules_by_key, repo, source)
     skipped: list[dict] = []
     live = []
@@ -1026,7 +1047,7 @@ def rector_scope_for(repo_root: Path, fingerprints: list[str], *, cfg: dict | No
     if not parsed or len({(p[1], p[2]) for p in parsed}) != 1:
         return None
     repo, rule = parsed[0][1], parsed[0][2]
-    rules = {r.key: r for r in load_rules()}
+    rules = {r.key: r for r in lane_rules(load_rules())}
     if repo.lower() != repo_root.name.lower() or rule not in tool_rules(rules.values()):
         return None
     cfg = cfg or load_cfg()

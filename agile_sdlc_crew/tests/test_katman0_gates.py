@@ -9520,6 +9520,96 @@ def test_upgrade_final_f9_retry_guard():
         server.db.get_job, server.db.create_job, server._ensure_worker, bump._open_bump_jobs = saved
 
 
+def test_upgrade_final_f10_catalog_flag():
+    """F10: katalog v4'ün bu dalda EKLENEN kuralları (`upgrade_catalog: true`) CREW_TECHDEBT_UPGRADE kapalıyken
+    modernleştirme hattında yok (yeni davranış varsayılan kapalı); yükseltme hattı onları her zaman görür."""
+    print("\n[Sürüm yükseltme son düzeltme F10: katalog bayrağı]")
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake, modern, php_modern as pm, upgrade
+    new_php = {"curly_offset", "removed_casts", "required_after_optional", "legacy_autoload", "php4_constructor",
+               "loose_compare_numeric", "null_to_internal", "removed_81", "serializable_only", "moved_to_pecl_84",
+               "noncanonical_casts_85", "backtick_exec_85", "deprecated_85"}
+    rules = {r.key: r for r in pm.load_rules()}
+    check("F10 eklenen PHP kuralları işaretli, v3'tekiler (breaks alanı eklenenler dahil) değil",
+          {k for k, r in rules.items() if r.upgrade_catalog} == new_php
+          and not rules["implicit_nullable"].upgrade_catalog and not rules["utf8_encode"].upgrade_catalog,
+          str(sorted(k for k, r in rules.items() if r.upgrade_catalog)))
+    nx = {r.key: r for r in modern.rules_for(modern.LANGS["nextjs"]["source"])}
+    go = {r.key: r for r in modern.rules_for(modern.LANGS["go"]["source"])}
+    check("F10 Next.js / Go eklenenleri işaretli",
+          {k for k, r in nx.items() if r.upgrade_catalog} == {"sync_route_params", "next_legacy_image", "next_lint"}
+          and {k for k, r in go.items() if r.upgrade_catalog} == {"go122_loopvar", "go122_httpmux", "go123_timerchan"},
+          str(({k for k, r in nx.items() if r.upgrade_catalog}, {k for k, r in go.items() if r.upgrade_catalog})))
+    hits = [{"rule": "implicit_nullable", "file": "app/A.php", "line": 3, "text": "x", "module": "app"},
+            {"rule": "str_contains", "file": "app/B.php", "line": 4, "text": "y", "module": "app"},
+            {"rule": "null_to_internal", "file": "app/C.php", "line": 5, "text": "strlen(null)", "module": "app"},
+            {"rule": "curly_offset", "file": "app/D.php", "line": 6, "text": "$s{0}", "module": "app"},
+            {"rule": "removed_81", "file": "app/E.php", "line": 7, "text": "strftime()", "module": "app"}]
+    v3_keys = {"implicit_nullable", "str_contains"}
+    orig = pc.get
+    flag = {"on": False}
+    pc.get = lambda k: flag["on"] if k == "CREW_TECHDEBT_UPGRADE" else orig(k)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            (base / "web").mkdir()
+            (base / "web" / "composer.json").write_text('{"require": {"php": "^8.4"}}', encoding="utf-8")
+            (base / "web" / "app").mkdir()
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+            deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                               record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+            kw = dict(deps=deps, scan_fn=lambda r, **k: {"files": 5, "sha": "s", "hits": list(hits), "adoption": {},
+                                                         "errors": []},
+                      head_sha_fn=lambda r: "s", app_map_cache={})
+            off = pm.scan(None, "web", **kw)
+            rows = off["auto"] + off["infra"] + off["human"]
+            check("F10 bayrak kapalı: modernleştirme taramasında yeni kural yok, özet v3 ile aynı",
+                  off["version"] == "8.4" and set(off["rules"]) == v3_keys
+                  and not ({r["rule"] for r in rows} & new_php), str((off["version"], sorted(off["rules"]))))
+            flag["on"] = True
+            on = pm.scan(None, "web", **kw)
+            check("F10 bayrak açık: yeni kurallar modernleştirmede de görünür",
+                  {"null_to_internal", "curly_offset", "removed_81"} <= set(on["rules"]), str(sorted(on["rules"])))
+            flag["on"] = False
+            # rector_scope_for (Teknik borç listesinden yeniden kuyruk): bayrak kapalıyken yeni kural araç kuralı değil
+            (base / "core").mkdir()
+            (base / "core" / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+            saved_sc = pm.scan_cached
+            pm.scan_cached = lambda *a, **k: {"hits": [{"rule": "curly_offset", "file": "app/D.php", "line": 6}]}
+            try:
+                fp = [pm.fingerprint("core", "curly_offset", "app/D.php")]
+                none_off = pm.rector_scope_for(base / "core", fp, cfg=cfg)
+                flag["on"] = True
+                some_on = pm.rector_scope_for(base / "core", fp, cfg=cfg)
+            finally:
+                pm.scan_cached = saved_sc
+                flag["on"] = False
+            check("F10 rector_scope_for: bayrak kapalı → yeni kural kapsam vermez; açık → verir",
+                  none_off is None and some_on == {"lang": "php", "repo": "core", "scope": {"curly_offset": ["app/D.php"]}},
+                  str((none_off, some_on)))
+            # Next.js modernleştirme grupları (modern.scan / take aynı build_groups'u kullanır)
+            nhits = [{"rule": "next_legacy_image", "file": "app/p.tsx", "line": 1, "text": "x", "module": "app"}]
+            g, _s, summ = pm.build_groups({"hits": nhits}, list(nx.values()), "15.0", repo="site", board_index={},
+                                          now=1e9, cfg=cfg, source=modern.LANGS["nextjs"]["source"])
+            check("F10 Next.js modernleştirme: bayrak kapalı → yeni kural grubu yok", not g and not summ, str(summ))
+            # yükseltme hattı her zaman görür (bayrak kapalı)
+            (base / "legacy").mkdir()
+            (base / "legacy" / "composer.json").write_text('{"require": {}}', encoding="utf-8")
+            idx = {"legacy": [{"src": "anatolia/build/l", "images": ["eu/php-7-4:1.0"]}],
+                   "web": [{"src": "anatolia/build/w", "images": ["eu/php-8-4:1.0"]}]}
+            up = upgrade.scan(None, "legacy", "php", to="8.4", deps=deps, index=idx, read=lambda d, p: "",
+                              yml_files={}, app_map_cache={}, head_sha_fn=lambda r: "s",
+                              scan_fn=lambda r, **k: {"files": 5, "sha": "s", "hits": list(hits), "adoption": {},
+                                                      "errors": []},
+                              probe_fn=lambda *a, **k: ([], {"ran": False, "tool": "", "reason": ""}))
+            check("F10 yükseltme hattı bayrak kapalıyken de yeni kuralları görür",
+                  {"null_to_internal", "curly_offset", "removed_81"} <= set(up["rules"]), str(sorted(up["rules"])))
+    finally:
+        pc.get = orig
+
+
 def test_php_rector_fix():
     """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
     başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
@@ -11589,7 +11679,7 @@ def main():
               test_upgrade_fix_round1,
               test_upgrade_fix_round2,
               test_upgrade_fix_round3,
-              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock, test_upgrade_final_f8_pinned_read, test_upgrade_final_f5_resolved_blocks, test_upgrade_final_f9_retry_guard,
+              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock, test_upgrade_final_f8_pinned_read, test_upgrade_final_f5_resolved_blocks, test_upgrade_final_f9_retry_guard, test_upgrade_final_f10_catalog_flag,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

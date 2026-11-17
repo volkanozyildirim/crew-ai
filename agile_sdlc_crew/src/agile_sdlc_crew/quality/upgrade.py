@@ -1290,7 +1290,7 @@ def _analyse(client, repo: str, lang: str, root: Path, current: str, to: str, cf
     groups, skipped, summary = pm.build_groups(
         {"hits": hits}, rules, "99.0", repo=repo, board_index=deps.board(client), now=deps.now(), cfg=cfg,
         ext_ok=pm._ext_checker(root) if lang == "php" else None, source=modern.LANGS[lang]["source"],
-        tool_rules=tools, keep_closed=keep_closed)
+        tool_rules=tools, keep_closed=keep_closed, upgrade_lane=True)
     for k, s in summary.items():
         s["breaks"] = rules_by_key[k].breaks
     _mark_groups(groups, rules_by_key, current, to)

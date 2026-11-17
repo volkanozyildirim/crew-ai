@@ -5,6 +5,8 @@
 # breaks: yükseltmeyi etkileyen kural — error (hedef sürümde çalışmaz) | behavior (sessizce başka davranır, otomatik düzeltilmez, insan bakar) | deprecation (uyarı verir; otomatik düzeltilebiliyorsa yükseltmeyi bekletir). Boş = yükseltme kuralı değil.
 # fix_min: kuralın düzeltmesinin çalıştığı en düşük PHP sürümü (varsayılan 7.0); örn. "8.4"
 # unit: file (dosya başına birim, paketlenir) | module (kaynak kökünden 2 dizin, paketlenmez)
+# upgrade_catalog: true → sürüm yükseltme dalının eklediği kural; modernleştirme taramasında yalnız
+#   CREW_TECHDEBT_UPGRADE açıkken görünür (yükseltme hattı her zaman görür).
 version: 4
 rules:
   # ── deprecation: hedef sürümde uyarı / hata üretir ──
@@ -200,6 +202,7 @@ rules:
 
   # ── yükseltme kırılma kuralları (7.4 → 8.5): hedef sürümde çalışmayan / sessizce başka davranan kod ──
   - key: curly_offset
+    upgrade_catalog: true
     since: "8.0"
     kind: deprecation
     breaks: error
@@ -217,6 +220,7 @@ rules:
     after: "$ilk = $isim[0];"
     ref: "https://www.php.net/manual/en/migration80.incompatible.php"
   - key: removed_casts
+    upgrade_catalog: true
     since: "8.0"
     kind: deprecation
     breaks: error
@@ -234,6 +238,7 @@ rules:
     after: "$f = (float) $deger;\n$n = null;"
     ref: "https://www.php.net/manual/en/migration80.incompatible.php"
   - key: required_after_optional
+    upgrade_catalog: true
     since: "8.0"
     kind: deprecation
     breaks: deprecation
@@ -250,6 +255,7 @@ rules:
     after: "function listele($sayfa, $filtre) { … }"
     ref: "https://www.php.net/manual/en/migration80.deprecated.php"
   - key: legacy_autoload
+    upgrade_catalog: true
     since: "8.0"
     kind: structural
     breaks: error
@@ -267,6 +273,7 @@ rules:
     after: "spl_autoload_register(function ($class) { require \"lib/$class.php\"; });"
     ref: "https://www.php.net/manual/en/migration80.incompatible.php"
   - key: php4_constructor
+    upgrade_catalog: true
     since: "8.0"
     kind: structural
     breaks: behavior
@@ -284,6 +291,7 @@ rules:
     after: "class Sepet {\n    function __construct() { $this->urunler = []; }\n}"
     ref: "https://www.php.net/manual/en/migration80.deprecated.php"
   - key: loose_compare_numeric
+    upgrade_catalog: true
     since: "8.0"
     kind: structural
     breaks: behavior
@@ -301,6 +309,7 @@ rules:
     after: "if ((string) 0 === 'abc') { … }   // niyeti açıkça yaz"
     ref: "https://www.php.net/manual/en/migration80.incompatible.php"
   - key: null_to_internal
+    upgrade_catalog: true
     since: "8.1"
     kind: structural
     breaks: behavior
@@ -318,6 +327,7 @@ rules:
     after: "$uzunluk = strlen('');"
     ref: "https://wiki.php.net/rfc/deprecate_null_to_scalar_internal_arg"
   - key: removed_81
+    upgrade_catalog: true
     since: "8.1"
     kind: deprecation
     breaks: deprecation
@@ -334,6 +344,7 @@ rules:
     after: "echo date('d.m.Y', $ts);"
     ref: "https://www.php.net/manual/en/migration81.deprecated.php"
   - key: serializable_only
+    upgrade_catalog: true
     since: "8.1"
     kind: structural
     breaks: deprecation
@@ -351,6 +362,7 @@ rules:
     after: "class Sepet implements Serializable {\n    public function __serialize(): array { … }\n    public function __unserialize(array $d): void { … }\n    // serialize()/unserialize() 7.x uyumu için kalır\n}"
     ref: "https://wiki.php.net/rfc/phase_out_serializable"
   - key: moved_to_pecl_84
+    upgrade_catalog: true
     requires_if: {imap_: [imap], pspell_: [pspell], oci_: [oci8]}
     since: "8.4"
     kind: structural
@@ -368,6 +380,7 @@ rules:
     after: "# php-8-4 imajına imap eklentisi PECL ile eklenir ya da çağrı ayrı bir kütüphaneye taşınır"
     ref: "https://www.php.net/manual/en/migration84.incompatible.php"
   - key: noncanonical_casts_85
+    upgrade_catalog: true
     since: "8.5"
     kind: deprecation
     breaks: deprecation
@@ -384,6 +397,7 @@ rules:
     after: "$a = (int) $x;\n$b = (float) $y;"
     ref: "https://www.php.net/manual/en/migration85.deprecated.php"
   - key: backtick_exec_85
+    upgrade_catalog: true
     since: "8.5"
     kind: deprecation
     breaks: deprecation
@@ -400,6 +414,7 @@ rules:
     after: "$cikti = shell_exec(\"ls -l $dizin\");"
     ref: "https://www.php.net/manual/en/migration85.deprecated.php"
   - key: deprecated_85
+    upgrade_catalog: true
     since: "8.5"
     kind: structural
     breaks: deprecation

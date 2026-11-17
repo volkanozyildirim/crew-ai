@@ -111,6 +111,7 @@ rules:
     after: "const c = await cookies()"
     ref: "https://nextjs.org/docs/app/building-your-application/upgrading/version-15#async-request-apis-breaking-change"
   - key: sync_route_params
+    upgrade_catalog: true
     since: "15.0"
     kind: structural
     breaks: behavior
@@ -126,6 +127,7 @@ rules:
     after: "export default async function Page({ params }) { const { slug } = await params; return slug }"
     ref: "https://nextjs.org/docs/app/building-your-application/upgrading/version-15#params--searchparams"
   - key: next_legacy_image
+    upgrade_catalog: true
     since: "13.0"
     kind: deprecation
     breaks: deprecation
@@ -140,6 +142,7 @@ rules:
     after: "import Image from 'next/image'\n<Image src={s} fill style={{ objectFit: 'cover' }} />"
     ref: "https://nextjs.org/docs/app/building-your-application/upgrading/codemods#next-image-experimental"
   - key: next_lint
+    upgrade_catalog: true
     since: "15.0"
     kind: report
     breaks: deprecation
