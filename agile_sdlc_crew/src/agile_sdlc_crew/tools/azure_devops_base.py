@@ -302,25 +302,41 @@ class AzureDevOpsClient:
         return fallback
 
     def _repo_project_strict(self, repo_id_or_name: str) -> str:
-        """Reponun projesi — yalnız KESİN bulunursa. _find_repo_project'in aksine hata yutmaz, yedek projeye
-        düşmez ve onun önbelleğini ne okur ne yazar (o önbellekte yedek değer olabilir): bir kapının kanıtı
-        yanlış projede aranıp "yok" okunmasın. 404 → sonraki proje; başka hata → yükselir; hiçbirinde yok →
-        ValueError. Olumlu sonuç ayrı bir önbellekte tutulur."""
+        """Reponun projesi — yalnız KESİN ve TEKİL bulunursa. _find_repo_project'in aksine hata yutmaz, yedek
+        projeye düşmez ve onun önbelleğini ne okur ne yazar (o önbellekte yedek değer olabilir): bir kapının
+        kanıtı yanlış projede aranıp "yok" okunmasın. Her yapılandırılmış proje sorulur: yalnız HTTP 200 + repo
+        `id`'si olan JSON olumludur; 404 olumsuz; başka her yanıt (203 oturum sayfası, 401, 5xx, JSON değil)
+        ve bağlantı hatası yükselir. Tek olumlu → o proje; birden çok → ValueError (aynı adlı repo iki projede
+        — hangisi olduğu bilinmeden aranmaz); hiç yok → ValueError. Olumlu sonuç ayrı önbellekte tutulur."""
         found = getattr(self, "_repo_project_found", None)
         if found is None:
             found = self._repo_project_found = {}
         if repo_id_or_name in found:
             return found[repo_id_or_name]
+        hits = []
         for proj in self.repo_projects:
             url = f"{self._project_api_url(proj)}/git/repositories/{repo_id_or_name}"
             resp = requests.get(url, headers=self._headers, params={"api-version": self.API_VERSION}, timeout=10)
             if resp.status_code == 404:
                 continue
-            resp.raise_for_status()
-            found[repo_id_or_name] = proj
-            return proj
-        raise ValueError(f"'{repo_id_or_name}' reposu Azure projelerinde bulunamadı "
-                         f"({', '.join(self.repo_projects)})")
+            if resp.status_code != 200:
+                raise ValueError(f"'{repo_id_or_name}' reposu {proj} projesinde sorgulanamadı "
+                                 f"(HTTP {resp.status_code}).")
+            try:
+                body = resp.json()
+            except ValueError:
+                body = None
+            if not isinstance(body, dict) or not body.get("id"):
+                raise ValueError(f"'{repo_id_or_name}' reposu {proj} projesinde sorgulanamadı (yanıt repo değil).")
+            hits.append(proj)
+        if len(hits) > 1:
+            raise ValueError(f"'{repo_id_or_name}' adlı repo birden çok projede var ({', '.join(hits)}) — test "
+                             "hattı tanımının hangi projede aranacağı belirsiz.")
+        if not hits:
+            raise ValueError(f"'{repo_id_or_name}' reposu Azure projelerinde bulunamadı "
+                             f"({', '.join(self.repo_projects)})")
+        found[repo_id_or_name] = hits[0]
+        return hits[0]
 
     def _repo_api_url(self, repo_id_or_name: str, project: str | None = None) -> str:
         proj = project or self._find_repo_project(repo_id_or_name)

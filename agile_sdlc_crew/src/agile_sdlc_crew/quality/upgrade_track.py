@@ -29,6 +29,8 @@ _KEY_RE = re.compile(r"tempo-upgrade-key:\s*([a-z]+):([A-Za-z0-9][\w.-]*):(\d+\.
 SIGNATURE = "<p><small><i>Tempo — Sürüm yükseltme</i></small></p>"
 STEP_LABEL = {"ci": "test hattı", "prod": "üretim", "code": "kod reposu"}
 NO_EVIDENCE = "Test kanıtı yok"
+WEAK_EVIDENCE = ("Test kanıtı zayıf: test hattında sürüm sabitlemesi bulunamadı; son yeşil build hedef sürümle "
+                 "koşmamış olabilir.")
 _PLAN_KW = ("index", "root", "read", "yml_files", "app_map_cache")
 _SCAN_KW = _PLAN_KW + ("scan_fn", "head_sha_fn", "probe_fn")
 _LOCK = threading.Lock()
@@ -425,7 +427,8 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         why = [str(b.get("detail") or b.get("name") or b) for b in out["blockers"]]
         if dv_blocked:
             why.append(_blocked_dv_reason(dv_blocked))
-        why += [f"{s.get('repo')} {s.get('path')}: {s.get('blocked')}" for s in ci_blocked]
+        why += [f"{s.get('repo')} {s.get('path')}:{s.get('line')}: {s.get('blocked')} — {tgt} yapılmalı"
+                for s in ci_blocked]
         if not_pre:
             why.append(f"{len(not_pre)} bulgu yalnız hedef sürümde düzeltilebilir (insan işi)")
         base_reason = "Engel var: " + "; ".join(why)
@@ -476,9 +479,9 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         return nxt("ci" if ci else "prod", False, "Test hattı (yml-files) dosyaları okunamadı — test hattının "
                                                    "durumu bilinmeden sürüm adımı atılmaz.", ci or dv)
     if unparsed:
-        return nxt("ci" if below else "prod", False, "Kapı kapalı — test hattı sürüm satırı okunamadı: " + ", ".join(
-            f"{p['path']}:{p['line']} ({p.get('unparsed', '')!r})" for p in unparsed)
-                   + " — satır elle düzenlenmeli.", ci if below else dv)
+        return nxt("ci" if below else "prod", False, "Kapı kapalı — test hattı sürüm satırı okunamadı: " + "; ".join(
+            f"{p['path']}:{p['line']} ({p.get('unparsed', '')!r}) — {tgt} yapılmalı" for p in unparsed)
+                   + " (satır elle düzenlenmeli).", ci if below else dv)
     if below:
         if ci_status == "active":
             return nxt("prod", False, f"Test hattı PR'ı #{ci_pr.get('id')} henüz merge edilmedi.", dv)
@@ -543,7 +546,8 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         if state == "no_pipeline":
             test_note = NO_EVIDENCE
         elif state == "green":
-            test_note = ""
+            # Sabitlemeye bağlı olmayan kanıt hedef sürüm kanıtı gibi sunulmaz: PR açıklamasının ilk satırı.
+            test_note = WEAK_EVIDENCE
         elif state == "red":
             return nxt("prod", False, f"Test hattı sabitlemesi yok ama '{repo}-test' tanımının en yeni build'i "
                                       "kırmızı — üretim adımı açılmaz. " + (ev.get("summary") or "")[:1500], dv)

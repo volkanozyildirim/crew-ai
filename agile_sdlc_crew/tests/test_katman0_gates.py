@@ -8018,6 +8018,173 @@ def test_upgrade_fix_round2():
               str((s and s["next"], err)))
 
 
+def test_upgrade_fix_round3():
+    """Görev 8 düzeltme turu 3. N1: gerçek test hattı dosyaları sürümü `goVersion` ile değil `GoTool@0` →
+    `inputs: version:` (gocrons), `image: golang:1.21.4` (myduck), `UsePythonVersion@0` → `versionSpec:` ile
+    sabitliyor — bunlar sabitleme sayılır; sabitlemesiz bir hattın yeşil build'i 'zayıf kanıt' notuyla gider.
+    N2: repo adı birden çok projede varsa ya da yanıt 200+JSON değilse proje çözümü hata verir."""
+    print("\n[Sürüm yükseltme: düzeltme turu 3]")
+    import requests as _rq
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_bump as bump, upgrade_track as ut
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+
+    def safe(fn):
+        try:
+            return fn(), None
+        except Exception as e:  # noqa: BLE001
+            return None, e
+
+    def scan_ci(repo, lang, to, yml, path="Test Pipelines/x.yml"):
+        return safe(lambda: upgrade._ci_scan(None, repo, lang, to, {path: yml}))
+
+    head = "trigger: none\nresources:\n  repositories:\n    - repository: src\n      type: git\n      name: EcomBackend/{repo}\n"
+    gotool = head.format(repo="gocrons") + ("steps:\n  - checkout: src\n  - task: GoTool@0\n    displayName: Go\n"
+                                            "    inputs:\n      version: '1.24.4'\n  - script: go test ./...\n")
+    res, err = scan_ci("gocrons", "go", "1.25", gotool)
+    sites, pins = res or ([], [])
+    check("N1a: GoTool@0 inputs version (1.24.4) → sabitleme 1.24, site elle, neden satır + hedef",
+          res is not None and [p["version"] for p in pins] == ["1.24"] and pins[0]["line"] == 12 and len(sites) == 1
+          and sites[0]["blocked"] == upgrade.CI_HAND and not bump.pushable(sites[0]), str((res, err)))
+    myduck = ("resources:\n  containers:\n    - container: golang\n      image: golang:1.21.4\n  repositories:\n"
+              "    - repository: s\n      name: EcomBackend/myduck\njobs:\n  - job: t\n    container: golang\n")
+    res, err = scan_ci("myduck", "go", "1.25", myduck)
+    sites, pins = res or ([], [])
+    check("N1a: image golang:1.21.4 → sabitleme 1.21 (konteyner takma adı 'golang' sabitleme değil)",
+          res is not None and [(p["version"], p["line"]) for p in pins] == [("1.21", 4)] and len(sites) == 1
+          and sites[0]["blocked"] == upgrade.CI_HAND, str((res, err)))
+    reg = head.format(repo="svc") + "container: myreg.io/library/golang:1.21-alpine\n"
+    res, err = scan_ci("svc", "go", "1.25", reg)
+    sites, pins = res or ([], [])
+    check("N1a: önekli + son ekli golang imajı (1.21-alpine) → sabitleme, otomatik site",
+          res is not None and [p["version"] for p in pins] == ["1.21"] and len(sites) == 1
+          and sites[0]["old"] == "myreg.io/library/golang:1.21-alpine"
+          and sites[0]["new"] == "myreg.io/library/golang:1.25-alpine" and bump.pushable(sites[0]), str((res, err)))
+    py = head.format(repo="segflo") + ("steps:\n  - task: UsePythonVersion@0\n    inputs:\n      versionSpec: '3.11'\n"
+                                       "      addToPath: true\n  - script: pytest\n")
+    res, err = scan_ci("segflo", "python", "3.12", py)
+    sites, pins = res or ([], [])
+    check("N1a: UsePythonVersion@0 versionSpec → sabitleme + otomatik site",
+          res is not None and [p["version"] for p in pins] == ["3.11"] and len(sites) == 1
+          and sites[0]["old"] == "'3.11'" and sites[0]["new"] == "'3.12'" and bump.pushable(sites[0]), str((res, err)))
+    pyimg = head.format(repo="segflo") + "container: python:3.11-slim\n"
+    res, err = scan_ci("segflo", "python", "3.12", pyimg)
+    check("N1a: image python:3.11-slim → sabitleme",
+          res is not None and [p["version"] for p in res[1]] == ["3.11"], str((res, err)))
+    phpimg = head.format(repo="core") + "container: eu/prod-ar/php-8-2:1.0\n"
+    res, err = scan_ci("core", "php", "8.4", phpimg)
+    check("N1a: PHP imajı php-8-2:1.0 → sabitleme + site (imaj ayrıştırıcısı)",
+          res is not None and [p["version"] for p in res[1]] == ["8.2"] and len(res[0]) == 1
+          and res[0][0]["new"] == "eu/prod-ar/php-8-4:1.0", str((res, err)))
+    var = gotool.replace("'1.24.4'", "$(goVersion)")
+    res, err = scan_ci("gocrons", "go", "1.25", var)
+    check("N1a: GoTool version $(goVersion) → okunamayan sabitleme",
+          res is not None and len(res[1]) == 1 and res[1][0]["version"] == ""
+          and res[1][0]["unparsed"] == "$(goVersion)" and res[0] == [], str((res, err)))
+    two = head.format(repo="gocrons") + ("steps:\n  - task: NodeTool@0\n    inputs:\n      version: '18.x'\n"
+                                         "  - task: GoTool@0\n    inputs:\n      version: '1.24'\n"
+                                         "  - script: echo\n    env:\n      version: '9.9'\n"
+                                         "  # - task: GoTool@0\n  #   inputs:\n  #     version: '1.10'\n")
+    res, err = scan_ci("gocrons", "go", "1.25", two)
+    check("N1a: başka görevin / betiğin version'ı ve yorum satırları sabitleme değil",
+          res is not None and [(p["version"], p["line"]) for p in res[1]] == [("1.24", 13)], str((res, err)))
+
+    # Gerekçe uygulanabilir: yol:satır + hedef
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "core"
+        root.mkdir()
+        (root / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+        deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                           record=lambda **k: None, now=lambda: 1e9, cfg=lambda: {"repos_dir": base})
+        dv_a = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+                "path": "/build/core/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+                "blocked": ""}
+
+        def st(sites, pins, c):
+            sc = {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False,
+                  "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins}
+            return safe(lambda: ut.status(c, "core", "php", to="8.4", deps=deps, scan=sc, wait_h=72, root=root))
+        bad = {"repo": "yml-files", "project": "EcomBackend", "branch": "main", "path": "Test Pipelines/core.yml",
+               "line": 7, "version": "", "unparsed": "$(phpVer)"}
+        s, err = st([dv_a], [bad], _UpFake())
+        check("N1a: okunamayan satırın gerekçesi yol:satır ve hedefi söyler",
+              s is not None and "Test Pipelines/core.yml:7" in s["next"]["reason"]
+              and "8.4 yapılmalı" in s["next"]["reason"], str((s and s["next"], err)))
+        ci_hand = {"where": "ci", "repo": "yml-files", "project": "EcomBackend", "branch": "main",
+                   "path": "Test Pipelines/core.yml", "line": 9, "old": "8.2.1", "new": "8.2.1", "blocked": upgrade.CI_HAND}
+        low = {"repo": "yml-files", "project": "EcomBackend", "branch": "main", "path": "Test Pipelines/core.yml",
+               "line": 9, "version": "8.2"}
+        s, err = st([dv_a, ci_hand], [low], _UpFake())
+        check("N1a: elle düzenlenecek CI satırının gerekçesi yol:satır ve hedefi söyler",
+              s is not None and not s["next"]["ready"] and "Test Pipelines/core.yml:9" in s["next"]["reason"]
+              and "8.4 yapılmalı" in s["next"]["reason"], str((s and s["next"], err)))
+
+        # N1b: sabitlemesiz hattın yeşil build'i zayıf kanıt
+        CORE_DEF = {"core": {"id": 5, "name": "Core-test", "project": "EcomBackend"}}
+
+        def b(bid, q, result="succeeded"):
+            return {"build_id": bid, "status": "completed", "result": result, "definition": "Core-test",
+                    "url": "", "project": "EcomBackend", "queue_time": q, "source_version": ""}
+        s, err = st([dv_a], [], _UpFake(defs=CORE_DEF, builds={5: [b(3, "2026-11-10T12:00:00Z")]}))
+        note = (s or {}).get("next", {}).get("test_note", "")
+        check("N1b: sabitleme yok + yeşil → hazır ama 'Test kanıtı zayıf' notu",
+              s is not None and s["next"]["ready"] and note.startswith("Test kanıtı zayıf")
+              and "sabitlemesi bulunamadı" in note, str((s and s["next"], err)))
+        title, body = bump._bodies({"repo": "core", "from": "8.2", "to": "8.4", "step": "prod", "sites": [dv_a],
+                                    "track_id": 500}, note or "x")
+        check("N1b: not üretim PR açıklamasının ilk satırı", body.splitlines()[0] == (note or "x"))
+        s, err = st([dv_a], [], _UpFake(defs=CORE_DEF, builds={5: [b(3, "2026-11-10T12:00:00Z", "failed")]}))
+        check("N1b: sabitleme yok + kırmızı → hazır değil", s is not None and not s["next"]["ready"])
+        s, err = st([dv_a], [], _UpFake(defs=CORE_DEF, builds={5: []}))
+        check("N1b: sabitleme yok + tamamlanmış build yok → hazır değil", s is not None and not s["next"]["ready"])
+
+    # N2: proje çözümü kesin ve tekil
+    class _Cl(azb.AzureDevOpsClient):
+        _headers = {"Authorization": "x"}
+
+    class _R:
+        def __init__(self, status=200, js=None, text=""):
+            self.status_code, self._js, self.text = status, js, text
+            self.ok = status < 400
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise _rq.HTTPError(str(self.status_code), response=self)
+
+        def json(self):
+            if self._js is None:
+                raise ValueError("JSON değil")
+            return self._js
+
+    def mk():
+        c = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+        c.org_url, c.project, c.repo_projects = "https://dev.azure.com/o", "P", ["EcomBackend", "Other"]
+        c._repo_project_cache = {}
+        c.__class__ = _Cl
+        return c
+    og = azb.requests.get
+    try:
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: _R(200, {"id": "g"})
+        p, err = safe(lambda: mk()._repo_project_strict("core"))
+        check("N2: iki projede aynı adlı repo → hata, projeler adlandırılır",
+              p is None and isinstance(err, ValueError) and "EcomBackend" in str(err) and "Other" in str(err),
+              str((p, err)))
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            _R(203, None, "<html>Sign in</html>") if "/EcomBackend/" in url else _R(404))
+        p, err = safe(lambda: mk()._repo_project_strict("core"))
+        check("N2: 203 HTML oturum sayfası olumlu sayılmaz → hata", p is None and err is not None, str((p, err)))
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            _R(200, {"value": []}) if "/EcomBackend/" in url else _R(404))
+        p, err = safe(lambda: mk()._repo_project_strict("core"))
+        check("N2: 200 ama repo id'siz JSON olumlu sayılmaz → hata", p is None and err is not None, str((p, err)))
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            _R(200, {"id": "g"}) if "/Other/" in url else _R(404))
+        p, err = safe(lambda: mk()._repo_project_strict("core"))
+        check("N2: tek olumlu yanıt → o proje", p == "Other", str((p, err)))
+    finally:
+        azb.requests.get = og
+
+
 def test_php_rector_fix():
     """#249 (core, list() → [], 64 dosya): LLM pipeline'ı planı 9 dosyada bıraktı, $5.40'a
     başarısız bitti. Rector sınıfı olan mekanik PHP kuralları artık modern_fix işine gider:
@@ -10058,6 +10225,7 @@ def main():
               test_upgrade_status_and_steps,
               test_upgrade_fix_round1,
               test_upgrade_fix_round2,
+              test_upgrade_fix_round3,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

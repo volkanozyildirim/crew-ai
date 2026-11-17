@@ -268,32 +268,104 @@ def _ci_scan(client, repo, lang, to, yml_files) -> tuple[list[dict], list[dict] 
             return [], None
     mention = re.compile(rf"(?im)^\s*(?:-\s*)?name:\s*['\"]?(?:[\w.-]+/)?{re.escape(repo)}['\"]?\s*$")
     keyline = re.compile(rf"^\s*{key}\s*:(.*)$")
+    task_re, task_key = _CI_TASKS.get(lang, (None, None))
     out, pins = [], []
     for path in sorted(yml_files):
         if not path.startswith(CI_DIR + "/") or not mention.search(yml_files[path] or ""):
             continue
+        pending = None   # açık sürüm görevi (GoTool / UsePythonVersion) bloğunda aranan anahtar
         for i, ln in enumerate((yml_files[path] or "").splitlines(), 1):
-            m = keyline.match(ln)
-            if not m:
+            if re.match(r"^\s*#", ln):
                 continue
-            raw = re.sub(r"\s+#.*$", "", m.group(1)).strip()
-            q, inner = "", raw
-            if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in "'\"":
-                q, inner = inner[0], inner[1:-1]
-            pin = {"repo": CI_REPO, "project": CI_PROJECT, "branch": branch, "path": path, "line": i}
-            mm = re.fullmatch(r"(\d+)\.(\d+)(\.\d+)?", inner)
-            if not mm:
-                # `3.x`, `$(var)`, `8` …: sürüm okunamıyor — kapı kapalı kalır, satırı insan düzenler
-                pins.append({**pin, "version": "", "unparsed": inner[:40]})
+            if task_re is not None and task_re.match(ln):
+                pending = task_key
                 continue
-            ver = f"{mm.group(1)}.{mm.group(2)}"
-            pins.append({**pin, "version": ver})
-            if _v(ver) < _v(to):
-                if mm.group(3):   # 1.22.5: rakam-dizisi kuralı 1.25.5'e izin verirdi — yanlış; otomatik yazılmaz
-                    out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, raw, raw, CI_HAND))
-                else:
-                    out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, f"{q}{ver}{q}", f"{q}{to}{q}"))
+            if _CI_BLOCK_END.match(ln):
+                pending = None
+                continue
+            if pending and (m := re.match(rf"^\s*{pending}\s*:(.*)$", ln)):
+                pending = None
+                _ci_value_pin(out, pins, m.group(1), path, i, branch, to)
+                continue
+            if (m := keyline.match(ln)):
+                _ci_value_pin(out, pins, m.group(1), path, i, branch, to)
+                continue
+            if (m := _CI_IMAGE_KEY.match(ln)):
+                _ci_image_pin(out, pins, m.group(1), m.group(2), lang, path, i, branch, to)
     return out, pins
+
+
+# Sürüm görevi → bloğundaki sürüm anahtarı (gerçek test hatları: gocrons GoTool@0 version, Python
+# UsePythonVersion@0 versionSpec). Blok, sonraki adım/iş/aşama satırında biter.
+_CI_TASKS = {"go": (re.compile(r"^\s*-\s*task:\s*GoTool@\d+\s*$"), "version"),
+             "python": (re.compile(r"^\s*-\s*task:\s*UsePythonVersion@\d+\s*$"), "versionSpec")}
+_CI_BLOCK_END = re.compile(r"^\s*-\s*(?:task|script|bash|pwsh|powershell|checkout|job|stage|template|deployment)\s*:")
+_CI_IMAGE_KEY = re.compile(r"^\s*(?:-\s*)?(image|container)\s*:(.*)$")
+_CI_IMG_NAME = {"go": "golang", "python": "python"}
+
+
+def _unquote(value: str) -> tuple[str, str, str]:
+    """(ham, tırnak, iç) — satır sonu yorumu atılır."""
+    raw = re.sub(r"\s+#.*$", "", value).strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"":
+        return raw, raw[0], raw[1:-1]
+    return raw, "", raw
+
+
+def _ci_pin(path, line, branch, **kw) -> dict:
+    return {"repo": CI_REPO, "project": CI_PROJECT, "branch": branch, "path": path, "line": line, **kw}
+
+
+def _ci_value_pin(out, pins, value, path, i, branch, to) -> None:
+    """`phpVersion: '8.2'` / GoTool `version:` / `versionSpec:` değeri."""
+    raw, q, inner = _unquote(value)
+    mm = re.fullmatch(r"(\d+)\.(\d+)(\.\d+)?", inner)
+    if not mm:
+        # `3.x`, `$(var)`, `8` …: sürüm okunamıyor — kapı kapalı kalır, satırı insan düzenler
+        pins.append(_ci_pin(path, i, branch, version="", unparsed=inner[:40]))
+        return
+    ver = f"{mm.group(1)}.{mm.group(2)}"
+    pins.append(_ci_pin(path, i, branch, version=ver))
+    if _v(ver) < _v(to):
+        if mm.group(3):   # 1.22.5: rakam-dizisi kuralı 1.25.5'e izin verirdi — yanlış; otomatik yazılmaz
+            out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, raw, raw, CI_HAND))
+        else:
+            out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, f"{q}{ver}{q}", f"{q}{to}{q}"))
+
+
+def _ci_image_pin(out, pins, key, value, lang, path, i, branch, to) -> None:
+    """`image:` / `container:` değeri dilin imajıysa sabitlemedir (`golang:1.21.4`, `…/golang:1.21-alpine`,
+    `python:3.11-slim`, `…/php-8-2:1.0`). `container:` etiketsizse kaynak takma adıdır (`container: golang`)."""
+    _raw, _q, img = _unquote(value)
+    if not img or " " in img:
+        return
+    if lang == "php":
+        if not re.search(r"(?:^|/)php(?:[-:]|$)", img):
+            return
+        v = pm.parse_php_image(img)
+        three = re.search(r"(?:^|/)php:\d+\.\d+\.\d+", img)
+    else:
+        name = _CI_IMG_NAME.get(lang)
+        m = re.search(rf"(?:^|/){name}(?::([^\s/]*))?$", img) if name else None
+        if not m:
+            return
+        tag = (m.group(1) or "").split("-")[0]
+        tm = re.fullmatch(r"(\d+)\.(\d+)(\.\d+)?", tag)
+        v = (int(tm.group(1)), int(tm.group(2))) if tm else None
+        three = tm and tm.group(3)
+    if key == "container" and ":" not in img:
+        return
+    if not v:
+        pins.append(_ci_pin(path, i, branch, version="", unparsed=img[:40]))
+        return
+    ver = _fmt(v)
+    pins.append(_ci_pin(path, i, branch, version=ver))
+    if v < _v(to):
+        new = image_for(img, lang, to)
+        if three or new == img:
+            out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, img, img, CI_HAND))
+        else:
+            out.append(_site("ci", CI_REPO, CI_PROJECT, branch, path, i, img, new))
 
 
 def _range_hard(constraint: str) -> bool:
