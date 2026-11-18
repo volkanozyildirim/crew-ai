@@ -13,8 +13,8 @@ log = logging.getLogger("pipeline")
 HUB = "https://hub.docker.com/v2/repositories/library"
 IMAGE_YAML = Path(__file__).resolve().parent.parent / "config" / "upgrade_image.yaml"
 _NAMES = ("php", "python", "golang")
-_TAG_RE = re.compile(r"[\w][\w.\-]*")
-_MINOR_RE = re.compile(r"\d+\.\d+")
+_TAG_RE = re.compile(r"[\w][\w.\-]*", re.ASCII)
+_MINOR_RE = re.compile(r"\d+\.\d+", re.ASCII)
 DOWN_S = 60
 
 
@@ -32,7 +32,8 @@ def _http_fetch(url: str, get=None) -> tuple[int, dict | None]:
 class Resolver:
     def __init__(self, fetch=None, patches: dict | None = None, ttl_s: float = 3600, clock=time.monotonic):
         self._fetch = fetch or _http_fetch
-        self._patches = {str(n): {str(k): v for k, v in (m or {}).items()} for n, m in (patches or {}).items()}
+        self._patches = ({str(n): {str(k): v for k, v in m.items()} for n, m in patches.items() if isinstance(m, dict)}
+                         if isinstance(patches, dict) else {})
         self._ttl = ttl_s
         self._clock = clock
         self._down_until = 0.0     # Hub hata verdi: bu ana kadar çağrı yapılmaz
@@ -66,7 +67,7 @@ class Resolver:
         if name not in _NAMES or not isinstance(minor, str) or not _MINOR_RE.fullmatch(minor):
             return None
         pinned = str((self._patches.get(name) or {}).get(minor) or "")
-        if re.fullmatch(rf"{re.escape(minor)}\.\d+", pinned):
+        if re.fullmatch(rf"{re.escape(minor)}\.\d+", pinned, re.ASCII):
             return pinned
         key = ("patch", name, minor)
         hit, val = self._cached(key)
@@ -75,7 +76,7 @@ class Resolver:
         res = self._get(f"{HUB}/{name}/tags?name={minor}.&page_size=100")
         if not res or res[0] != 200 or res[1] is None:
             return None
-        pat = re.compile(rf"^{re.escape(minor)}\.(\d+)$")
+        pat = re.compile(rf"^{re.escape(minor)}\.(\d+)$", re.ASCII)
         nums = [int(m.group(1)) for r in (res[1].get("results") or []) if isinstance(r, dict)
                 and isinstance(r.get("name"), str) and (m := pat.match(r["name"]))]
         out = f"{minor}.{max(nums)}" if nums else None
@@ -102,12 +103,18 @@ class Resolver:
 _DEFAULT: Resolver | None = None
 
 
+def _load_patches(path: Path = IMAGE_YAML) -> dict:
+    """yaml `patch:` elle sabitlemeleri; bozuk / beklenmedik biçim → sabitleme yok."""
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    patches = doc.get("patch") if isinstance(doc, dict) else None
+    return patches if isinstance(patches, dict) else {}
+
+
 def default() -> Resolver:
     global _DEFAULT
     if _DEFAULT is None:
-        try:
-            patches = (yaml.safe_load(IMAGE_YAML.read_text(encoding="utf-8")) or {}).get("patch") or {}
-        except (OSError, yaml.YAMLError):
-            patches = {}
-        _DEFAULT = Resolver(patches=patches)
+        _DEFAULT = Resolver(patches=_load_patches())
     return _DEFAULT

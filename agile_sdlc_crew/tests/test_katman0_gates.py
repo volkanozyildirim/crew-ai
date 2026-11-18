@@ -11518,6 +11518,26 @@ def test_upgrade_registry():
     r7 = ur.Resolver(fetch=_fake_hub({}, nl))
     check("sondaki \\n reddedilir", r7.latest_patch("php", "8.5\n") is None and r7.tag_exists("php", "8.5.1\n") is None
           and not nl)
+    # tam genişlikli rakam (re.ASCII): URL kurulmadan reddedilir
+    fw: list = []
+    r11 = ur.Resolver(fetch=_fake_hub({}, fw))
+    check("tam genişlikli rakam reddedilir",
+          r11.latest_patch("php", "\uff18.\uff15") is None and r11.tag_exists("php", "\uff18.\uff15.1") is None and not fw)
+    # bozuk yaml: yükleyici düşmez
+    bad_docs = ("patch: [1, 2]\n", "patch: abc\n", "- a\n- b\n", "just text\n", "patch: {php: [1], python: x}\n", "a: [\n")
+    for i, doc in enumerate(bad_docs):
+        with tempfile.TemporaryDirectory() as td:
+            yp = Path(td) / "u.yaml"
+            yp.write_text(doc, encoding="utf-8")
+            try:
+                got = ur._load_patches(yp)
+                rr = ur.Resolver(fetch=_fake_hub({}), patches=got)
+                check(f"bozuk yaml #{i} düşmez", isinstance(got, dict) and rr.latest_patch("php", "8.5") is None, repr(got))
+            except Exception as e:  # noqa: BLE001
+                check(f"bozuk yaml #{i} düşmez", False, repr(e))
+    check("olmayan yaml dosyası düşmez", ur._load_patches(Path("/nonexistent/u.yaml")) == {})
+    rt = ur.Resolver(fetch=_fake_hub({}), patches={"php": ["x"], "python": None, 3: {"a": "b"}})
+    check("Resolver non-dict girdilere dayanıklı", rt.latest_patch("php", "8.5") is None)
     # yaml pin doğrulaması
     r8 = ur.Resolver(fetch=_fake_hub({"php": ["8.5.12"]}), patches={"php": {"8.5": "8.4.1"}})
     check("geçersiz pin yok sayılır, Hub'a düşer", r8.latest_patch("php", "8.5") == "8.5.12")
@@ -11620,6 +11640,25 @@ def test_upgrade_patch_sites():
     out, cpins = upgrade._parse_ci_file(f"image: {dg}\n", "T/x.yml", "go", "1.27", src, resolver=rdg)
     check("digest sabitli CI image: yazılmaz (okunamayan sabitleme, kapı kapalı), Hub çağrısı yok",
           not out and len(cpins) == 1 and cpins[0]["version"] == "" and not dcalls, str((out, cpins)))
+    # iki parçalı özetli imaj: üç yolda da yeniden yazılmaz (resolver'lı ve resolver'sız), Hub'a gidilmez
+    dg2 = "python:3.11-slim@sha256:" + "b" * 64
+    for label, rr in (("resolver'lı", ur.Resolver(fetch=_fake_hub(hub, dcalls))), ("resolver'sız", None)):
+        s = dsites([dg2], "python", "3.13", rr)
+        check(f"iki parçalı özetli devops imajı ({label}): CI_HAND, old == new",
+              s[0]["blocked"] == upgrade.CI_HAND and s[0]["old"] == s[0]["new"] == dg2, str(s))
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "Dockerfile").write_text(f"FROM {dg2}\n", encoding="utf-8")
+            cs = upgrade._code_sites("svc", Path(td), "python", "3.13", resolver=rr)
+            check(f"iki parçalı özetli kod Dockerfile ({label}): CI_HAND, old == new",
+                  len(cs) == 1 and cs[0]["blocked"] == upgrade.CI_HAND and cs[0]["old"] == cs[0]["new"] == dg2, str(cs))
+        out, _cp = upgrade._parse_ci_file(f"image: {dg2}\n", "T/x.yml", "python", "3.13", src, resolver=rr)
+        check(f"iki parçalı özetli CI image ({label}): CI_HAND, old == new",
+              len(out) == 1 and out[0]["blocked"] == upgrade.CI_HAND and out[0]["old"] == out[0]["new"] == dg2, str(out))
+    idx2 = {"svc": [{"src": "anatolia/build/svc", "images": [dg2]}]}
+    sel2 = upgrade.selectable("python", "3.11", idx2, upgrade._devops_services("svc", "python", idx2, None),
+                              resolver=ur.Resolver(fetch=_fake_hub(hub, dcalls)))
+    check("selectable: özetli imaj üst sürüm için yayınlı sayılmaz", not any(x["published"] for x in sel2), str(sel2))
+    check("özetli imajlarda Hub hiç çağrılmadı", not dcalls, str(dcalls))
     # plan: ayar açık + resolver=None → modül tekili
     from agile_sdlc_crew import pipeline_config as pc
     from agile_sdlc_crew.quality import intake

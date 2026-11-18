@@ -236,9 +236,11 @@ def _prod_image(region_images, img: str, lang: str, to: str, *, resolver=None) -
     ya da genel imajın etiketi yoksa elle (`CI_HAND`, yeni == eski). `_devops_sites` ve `selectable` aynı yüklemi
     kullanır."""
     name = _LANG_IMG_NAME.get(lang)
+    if "@" in img:   # özetle (digest) sabitlenmiş: etiketi değişirse özet eski imaja kalır — hiçbir yolda (çözücüsüz de) yazılmaz
+        return img, CI_HAND
     three = _three_part(img, lang)
     if three:
-        full = resolver.latest_patch(name, to) if resolver and name and "@" not in img else None
+        full = resolver.latest_patch(name, to) if resolver and name else None
         new = image_for_full(img, lang, full) if full else img
         if new == img:
             return img, CI_HAND
@@ -625,7 +627,9 @@ def _ci_image_pin(out, pins, key, value, lang, path, i, src, to, *, resolver=Non
     pins.append(_ci_pin(src, path, i, version=ver))
     if v < _v(to):
         new = image_for(img, lang, to)
-        if _three_part(img, lang):
+        if "@" in img:   # özetle sabitlenmiş imaj hiçbir yolda yeniden yazılmaz (çözücüsüz de; bilinçli hata düzeltmesi)
+            out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, img, CI_HAND))
+        elif _three_part(img, lang):
             new = _library_patch(img, lang, to, resolver)
             if new:
                 out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, new))
@@ -697,7 +701,9 @@ def _code_sites(repo, root: Path, lang, to, *, resolver=None) -> list[dict]:
             m = re.match(r"(?i)\s*FROM\s+(?:--\S+\s+)?(\S+)", ln)
             v = _image_version(m.group(1), lang) if m else None
             if v and v < _v(to):
-                if _three_part(m.group(1), lang):   # `golang:1.24.4-alpine`: etiket uydurulmaz — Hub'da varsa yazılır
+                if "@" in m.group(1):   # özetle sabitlenmiş: hiçbir yolda (çözücüsüz de) yeniden yazılmaz
+                    add("Dockerfile", i, m.group(1), m.group(1), CI_HAND)
+                elif _three_part(m.group(1), lang):   # `golang:1.24.4-alpine`: etiket uydurulmaz — Hub'da varsa yazılır
                     new = _library_patch(m.group(1), lang, to, resolver)
                     add("Dockerfile", i, m.group(1), new or m.group(1), "" if new else CI_HAND)
                 else:
