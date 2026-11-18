@@ -706,8 +706,12 @@ def _tick(get_client) -> None:
         return
     rep = None
     try:
+        from agile_sdlc_crew.quality import modern
         client = get_client()
-        rep = report(client, force=True)
+        # Tek TAZE index (24 sa'lik disk önbelleği değil): rapor da giderme de aynı nesneyi kullanır; giderme yollarını
+        # (`via` → dizin, `users` → bölge) bayat veriden türetmesin.
+        index = modern.build_index(client, max_age_h=0)
+        rep = report(client, force=True, index=index)
     finally:
         _end(rep)       # tarama bitti: alert / giderme `intake._LOCK`'ta dakikalarca bekleyebilir, kart "Taranıyor" demesin
     from agile_sdlc_crew.quality import intake
@@ -715,38 +719,51 @@ def _tick(get_client) -> None:
     results = alert(client, rep, team=team, deps=intake.default_deps())
     if pc.get("CREW_TECHDEBT_IMAGE_VULN_FIX"):
         try:                         # giderme hatası turu düşürmez; uyarı zaten yapıldı
-            _fix_round(client, rep, results, team=team)
+            _fix_round(client, rep, results, team=team, index=index)
         except Exception as e:  # noqa: BLE001
             log.warning(f"⚠️ image_vuln: giderme turu hata verdi: {str(e)[:300]}")
 
 
 def _fix_round(client, rep: dict, results: list[dict] | None, *, team: str, index: dict | None = None, resolver=None,
                apply_fn=None) -> list[dict]:
-    """Uyarının üretildiği turda gidermeyi de başlatır: `kritik` / `yüksek` her imaj için `image_fix.apply`. Yürüyen
-    eylem varsa sonuç (PR / izleme bağlantıları) imajın uyarı işine yorum olarak eklenir. Bir imajın hatası
-    ötekilerini durdurmaz."""
+    """Uyarının üretildiği turda gidermeyi de başlatır. Tur başına en çok `CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS` imaj
+    (`alert` ile AYNI sıra: destek bitmiş, düzeltmeli kritik sayısı, servis sayısı; yalnız `kritik` / `yüksek`),
+    tüm tur için TEK izleme-başlatma bütçesi (`CREW_TECHDEBT_UPGRADE_MAX_OPEN`, yalnız başarılı yeni başlatma tüketir);
+    gerisi `sırada`. Yoklayıcı (`auto=True`) durdurulan izlemeyi yeniden açmaz. Yürüyen eylem varsa sonuç imajın
+    uyarı işine yorum olur (iş yoksa log satırı). Bir imajın hatası ötekilerini durdurmaz."""
     from agile_sdlc_crew.quality import image_fix, modern, upgrade_registry, upgrade_track
-    recs = [r for r in rep.get("images") or [] if r.get("level") in ("kritik", "yüksek")]
+    recs = sorted((r for r in rep.get("images") or [] if r.get("level") in ("kritik", "yüksek")), key=_alert_rank)
     if not recs:
         return []
     if index is None:
         index = modern.build_index(client, max_age_h=0)     # yazmadan önce yollar taze index'ten türetilir
     resolver = resolver or upgrade_registry.default()
     apply_fn = apply_fn or image_fix.apply
+    cap = max(1, int(_knob("CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS", 3)))
+    budget = [image_fix._max_open_default()]
     wi = {r["image"]: r["wi"] for r in results or [] if r.get("wi")}
     out = []
-    for rec in recs:
+    for n, rec in enumerate(recs):
+        if n >= cap:
+            out.append({"image": rec["image"], "state": "sırada", "actions": []})
+            log.info(f"image_vuln: {rec['image']} gidermesi sırada (tur başına en çok {cap} imaj)")
+            continue
         try:
-            acts = apply_fn(client, rec, team=team, index=index, resolver=resolver)
+            acts = apply_fn(client, rec, team=team, index=index, resolver=resolver, budget=budget, auto=True)
         except Exception as e:  # noqa: BLE001
             log.warning(f"⚠️ image_vuln: {rec['image']} gidermesi başarısız: {str(e)[:300]}")
             continue
         out.append({"image": rec["image"], "actions": image_fix.public(acts)})
-        if wi.get(rec["image"]) and any(a.get("ran") for a in acts):
+        if not any(a.get("ran") for a in acts):
+            continue
+        if wi.get(rec["image"]):
             try:
                 client.add_comment(int(wi[rec["image"]]), image_fix.comment_html(acts) + upgrade_track.SIGNATURE)
             except Exception as e:  # noqa: BLE001 — PR'lar zaten açıldı
                 log.warning(f"⚠️ image_vuln: giderme yorumu yazılamadı: {str(e)[:200]}")
+        else:
+            log.info(f"image_vuln: {rec['image']} gidermesi başlatıldı (uyarı işi yok): "
+                     + "; ".join(f"{a['kind']}={a['state']}" for a in acts if a.get("ran")))
     return out
 
 

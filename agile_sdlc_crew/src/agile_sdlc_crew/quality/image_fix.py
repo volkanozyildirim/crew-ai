@@ -110,6 +110,14 @@ def _scan_text(entry: dict) -> str:
     return ""
 
 
+def _on(key: str) -> bool:
+    from agile_sdlc_crew import pipeline_config as pc
+    try:
+        return bool(pc.get(key))
+    except KeyError:
+        return False
+
+
 def _guard(kind: str, fn, *a, **kw) -> dict:
     try:
         return fn(*a, **kw)
@@ -119,31 +127,45 @@ def _guard(kind: str, fn, *a, **kw) -> dict:
 
 # ── Plan ─────────────────────────────────────────────────────────────────
 
-def plan(client, entry: dict, *, index: dict, resolver, cfg=None, find_open_fn=None) -> list[dict]:
-    """Yazma yok. Rapor kaydı (`image_vuln.report` öğesi) → eylem listesi (modül belgesine bakın)."""
+def plan(client, entry: dict, *, index: dict, resolver, cfg=None, find_open_fn=None, find_any_fn=None,
+         auto: bool = False) -> list[dict]:
+    """Yazma yok. Rapor kaydı (`image_vuln.report` öğesi) → eylem listesi (modül belgesine bakın). `auto` (yoklayıcı):
+    daha önce HİÇ izleme açılmış repo (kapatılmışı dahil) `durduruldu` sayılır — kullanıcının durdurduğu izleme
+    kendiliğinden yeniden açılmaz; düğme (auto=False) yeniden başlatabilir."""
     from agile_sdlc_crew.quality import upgrade_image
     cfg = cfg or upgrade_image.load_cfg()
     out: list[dict] = []
     patch, eol = entry.get("patch"), entry.get("eol")
     sc = entry.get("scan") or {}
+    bump_on = _on("CREW_TECHDEBT_UPGRADE_BUMP")
+
+    def pr_action(kind: str, fn, *a):
+        # Tempo'nun bütün sürüm PR'ları gibi `_BUMP` kapalıyken PR açılmaz (yazma yolu kapalı).
+        if not bump_on:
+            return _act(kind, "elle", "sürüm PR'ları kapalı (CREW_TECHDEBT_UPGRADE_BUMP)")
+        return _guard(kind, fn, *a)
     if patch and patch.get("latest"):
         if entry.get("via"):
             for d in entry["via"]:
                 m = _DIR_RE.match(d)
                 if m and m.group(4):
-                    out.append(_guard("taban-dizin", _plan_dir, client, entry, d, index, resolver, cfg))
+                    out.append(pr_action("taban-dizin", _plan_dir, client, entry, d, index, resolver, cfg))
                 else:
-                    out.append(_guard("taban-yama", _plan_own, client, entry, d, resolver, cfg))
+                    out.append(pr_action("taban-yama", _plan_own, client, entry, d, resolver, cfg))
         else:
-            out.append(_guard("imaj-yama", _plan_public, client, entry, index, resolver, cfg))
+            out.append(pr_action("imaj-yama", _plan_public, client, entry, index, resolver, cfg))
     if eol:
-        out.append(_guard("yükseltme", _plan_upgrade, client, entry, index, find_open_fn))
+        out.append(_guard("yükseltme", _plan_upgrade, client, entry, index, find_open_fn, find_any_fn, auto))
     if not patch and not eol and sc.get("state") == "tamam" and (sc.get("critical") or sc.get("high")):
         flags = ", ".join(_flags(entry, cfg)) or "bölge bilinmiyor"
-        out.append(_act("yeniden-üret", "devops",
-                        f"Sürüm değişikliği gidermez: işletim sistemi paketlerinde düzeltmesi yayınlanmış bulgu var "
-                        f"({int(sc.get('critical') or 0)} kritik, {int(sc.get('high') or 0)} yüksek). İmaj yeniden "
-                        f"üretilmeli — DevOps üretmeli. Bölge bayrakları: {flags}."))
+        what = (f"Sürüm değişikliği gidermez: işletim sistemi paketlerinde düzeltmesi yayınlanmış bulgu var "
+                f"({int(sc.get('critical') or 0)} kritik, {int(sc.get('high') or 0)} yüksek). ")
+        if entry.get("via"):
+            why = f"İmaj yeniden üretilmeli — DevOps üretmeli. Bölge bayrakları: {flags}."
+        else:
+            why = (f"Servis imajı yeniden derlendiğinde taze taban çekilir — servisi yeniden yayınla. "
+                   f"Kullanan bölgeler: {flags}.")
+        out.append(_act("yeniden-üret", "devops", what + why))
     return out
 
 
@@ -152,8 +174,11 @@ def _plan_own(client, entry: dict, d: str, resolver, cfg: dict) -> dict:
     kind = "taban-yama"
     lang, latest = entry.get("lang"), str(entry["patch"]["latest"])
     repo, proj, branch = cfg["repo"], cfg.get("project") or None, cfg["branch"]
+    dm = _DIR_RE.match(d)
     if lang not in _OWN_NAMES or not _THREE.match(latest):
         return _act(kind, "elle", f"{lang or 'bu'} dili için taban dizin yaması desteklenmiyor.")
+    if not dm or dm.group(4) or dm.group(1) != _OWN_NAMES[lang]:
+        return _act(kind, "elle", f"'{_clean(d)[:60]}' dizin adı {lang} iki parçalı taban dizini değil; yazılmaz.")
     path = text = None
     for name in ("Dockerfile", "dockerfile"):
         text = _read(client, repo, f"/{d}/{name}", branch, proj)
@@ -178,7 +203,7 @@ def _plan_own(client, entry: dict, d: str, resolver, cfg: dict) -> dict:
         suffix = m.group(2) or ""
     if cur.rsplit(".", 1)[0] != latest.rsplit(".", 1)[0]:
         return _act(kind, "elle", f"{path}: staging sürümü ({cur}) başka bir minörde.", dir=d)
-    branch_name = f"tempo/image-patch-{d}-{latest}"
+    branch_name = f"tempo/image-patch-{d}-{cur}-{latest}"      # eski → yeni çiftini adında taşır
     base = dict(dir=d, target=latest, branch=branch_name)
     if _ver(cur) >= _ver(latest):
         return _act(kind, "güncel", "staging'de güncel — DevOps üretip taşımalı", **base)
@@ -191,6 +216,10 @@ def _plan_own(client, entry: dict, d: str, resolver, cfg: dict) -> dict:
     from agile_sdlc_crew.quality import upgrade_bump
     if not upgrade_bump.pushable(site):
         return _act(kind, "elle", f"{path}: sürüm satırı yalnız rakam değişimiyle yazılamıyor.", **base)
+    try:
+        upgrade_bump.apply_site(text, site)                    # kuru çalıştırma: yazma anında bozulacaksa şimdi elle
+    except ValueError as e:
+        return _act(kind, "elle", _why(e), **base)
     state, pr, why = _pr_state(client, repo, branch_name, proj)
     return _act(kind, state, why, pr=pr, sites=[site], **base)
 
@@ -218,8 +247,11 @@ def _plan_dir(client, entry: dict, d: str, index: dict, resolver, cfg: dict) -> 
                 to=f"{m.group(2)}.{m.group(3)}", lang=lang)
 
 
-def _slug(image: str, suffix: str) -> str:
-    return re.sub(r"[^a-z0-9.]+", "-", (image.partition(":")[0].rsplit("/", 1)[-1] + suffix).lower()).strip("-.")
+def _slug(image: str) -> str:
+    """Dal adı gövdesi: `library/golang:1.24.4-alpine` → `golang-1.24.4-alpine` (eski etiket dahil: aynı yamaya giden iki
+    ayrı eski etiket aynı dalı paylaşmaz)."""
+    name, _, tag = image.partition(":")
+    return re.sub(r"[^a-z0-9.]+", "-", f"{name.rsplit('/', 1)[-1]}-{tag}".lower()).strip("-.")
 
 
 def _plan_public(client, entry: dict, index: dict, resolver, cfg: dict) -> dict:
@@ -239,7 +271,7 @@ def _plan_public(client, entry: dict, index: dict, resolver, cfg: dict) -> dict:
     if ok is not True:
         return _act(kind, "elle", f"Docker Hub'da {hub}:{latest + suffix} etiketi {'yok' if ok is False else 'doğrulanamadı'}.",
                     target=new)
-    slug = _slug(image, suffix)
+    slug = _slug(image)
     if not slug or ".." in slug:
         return _act(kind, "elle", f"'{image}' için dal adı türetilemedi.", target=new)
     branch = f"tempo/image-patch-{slug}-{latest}"
@@ -274,6 +306,7 @@ def _plan_public(client, entry: dict, index: dict, resolver, cfg: dict) -> dict:
 
 
 def _region_sites(client, region: str, paths: list[str], old: str, new: str, proj: str, branch: str):
+    from agile_sdlc_crew.quality import upgrade_bump
     sites: list[dict] = []
     for path in paths:
         p = f"/{path}/Dockerfile"
@@ -288,8 +321,13 @@ def _region_sites(client, region: str, paths: list[str], old: str, new: str, pro
             tok = fm.group(1)
             if tok == old:
                 hit = True
-                sites.append({"where": "devops", "repo": region, "project": proj, "branch": branch, "path": p, "line": n,
-                              "old": old, "new": new, "blocked": ""})
+                site = {"where": "devops", "repo": region, "project": proj, "branch": branch, "path": p, "line": n,
+                        "old": old, "new": new, "blocked": ""}
+                try:
+                    upgrade_bump.apply_site(text, site)       # kuru çalıştırma: satırda eski metin tek olmalı
+                except ValueError as e:
+                    return [], f"{p}:{n}: {_why(e)}"
+                sites.append(site)
             elif "@" in tok and tok.split("@", 1)[0] == old:
                 return [], f"{p}:{n}: özetle sabitlenmiş imaj yeniden yazılmaz."
         if not hit:
@@ -316,14 +354,19 @@ def _agg_plan(units: list[dict]) -> str:
     return states[0]
 
 
-def _plan_upgrade(client, entry: dict, index: dict, find_open_fn) -> dict:
-    """Desteği biten imajı kullanan her repo için sürüm yükseltme izlemesi (varsayılan hedefle)."""
+def _plan_upgrade(client, entry: dict, index: dict, find_open_fn, find_any_fn=None, auto: bool = False) -> dict:
+    """Desteği biten imajı kullanan her repo için sürüm yükseltme izlemesi (varsayılan hedefle). Hedef, imajın
+    üretimdeki minörünün üstünde olmalıdır (`default_target`); yükseltme özelliği kapalıyken hiç planlanmaz."""
     from agile_sdlc_crew.quality import intake, upgrade, upgrade_track
     kind, lang = "yükseltme", entry.get("lang") or ""
     if lang not in TRACKED_LANGS:
         label = "Node" if lang == "node" else (lang or "Bu dilin")
         return _act(kind, "elle", f"{label} sürümü izlenmiyor — elle")
+    off = next((k for k in ("CREW_TECHDEBT_UPGRADE", "CREW_TECHDEBT_PHP_MODERN") if not _on(k)), None)
+    if off:
+        return _act(kind, "elle", f"sürüm yükseltme kapalı ({off})")
     find_open = find_open_fn or upgrade_track.find_open
+    find_any = find_any_fn or upgrade_track.find_any
     ver = str(entry.get("version") or "")
     parts = ver.split(".")
     minor = ".".join(parts[:2]) if len(parts) >= 2 else ""
@@ -349,12 +392,21 @@ def _plan_upgrade(client, entry: dict, index: dict, find_open_fn) -> dict:
             except Exception:  # noqa: BLE001
                 u["url"] = ""
         else:
+            if auto:
+                try:
+                    old = find_any(client, lang, repo)
+                except Exception as e:  # noqa: BLE001 — geçmiş okunamazsa yoklayıcı açmaz
+                    u["state"], u["reason"] = "belirsiz", f"izleme geçmişi okunamadı: {_why(e)}"
+                    continue
+                if old:
+                    u.update(state="durduruldu", wi=old.get("id"),
+                             reason="izleme daha önce kapatılmış — yeniden başlatma karttan")
+                    continue
             u["state"] = "yok"
     states = [u["state"] for u in units]
-    state = ("yok" if "yok" in states else "belirsiz" if "belirsiz" in states
-             else "izleniyor" if "izleniyor" in states else "hedef yok")
+    state = next((s for s in ("yok", "belirsiz", "izleniyor", "durduruldu") if s in states), "hedef yok")
     return _act(kind, state, "" if units else "imajı kullanan repo taze index'te bulunamadı", repos=units,
-                target=", ".join(sorted({u["to"] for u in units if u["to"]})) or None)
+                cap=_max_open_default(), target=", ".join(sorted({u["to"] for u in units if u["to"]})) or None)
 
 
 # ── Uygulama ─────────────────────────────────────────────────────────────
@@ -430,17 +482,22 @@ def _body_public(entry: dict, a: dict) -> str:
 
 
 def apply(client, entry: dict, *, team: str, index: dict, resolver, deps=None, push_fn=None, open_pr_fn=None,
-          start_fn=None, max_open: int | None = None, cfg=None, find_open_fn=None) -> list[dict]:
+          start_fn=None, max_open: int | None = None, cfg=None, find_open_fn=None, find_any_fn=None,
+          budget: list | None = None, auto: bool = False) -> list[dict]:
     """Modül kilidi altında `plan` yeniden hesaplanır; yalnız `yok` durumundaki eylemler yürür. Bir eylemin (ya da
-    bölgenin) hatası ötekilerini durdurmaz. Her eylem `ran` alanıyla döner (bu çağrıda yazma denendi mi)."""
+    bölgenin) hatası ötekilerini durdurmaz. Her eylem `ran` alanıyla döner (bu çağrıda yazma denendi mi).
+    `budget`: izleme başlatma sayacı `[kalan]` (yoklayıcı turu tek sayacı paylaşır); yalnız BAŞARILI yeni başlatma
+    tüketir. `auto`: yoklayıcı — durdurulan izleme yeniden açılmaz."""
     from agile_sdlc_crew.quality import upgrade_bump, upgrade_image, upgrade_track
     cfg = cfg or upgrade_image.load_cfg()
     push_fn = push_fn or upgrade_bump.push_sites
     open_pr_fn = open_pr_fn or upgrade_image.open_pr
     start_fn = start_fn or upgrade_track.start
-    budget = [_max_open_default() if max_open is None else max(0, int(max_open))]
+    if budget is None:
+        budget = [_max_open_default() if max_open is None else max(0, int(max_open))]
     with _LOCK:
-        acts = plan(client, entry, index=index, resolver=resolver, cfg=cfg, find_open_fn=find_open_fn)
+        acts = plan(client, entry, index=index, resolver=resolver, cfg=cfg, find_open_fn=find_open_fn,
+                    find_any_fn=find_any_fn, auto=auto)
         out = []
         for a in acts:
             if a["state"] != "yok":
@@ -499,10 +556,12 @@ def _run_upgrade(client, entry: dict, a: dict, team: str, deps, start_fn, budget
         if budget[0] <= 0:
             u.update(state="sırada", reason="CREW_TECHDEBT_UPGRADE_MAX_OPEN sınırı — sonraki turda açılır")
             continue
-        budget[0] -= 1
         try:
             r = start_fn(client, u["repo"], lang, to=u["to"], team=team, deps=deps)
-            u.update(state="açıldı" if r.get("created", True) else "izleniyor", wi=r.get("id"), reason="")
+            created = bool(r.get("created", True))
+            if created:
+                budget[0] -= 1                  # yalnız başarılı YENİ başlatma sınırı tüketir
+            u.update(state="açıldı" if created else "izleniyor", wi=r.get("id"), reason="")
             try:
                 from agile_sdlc_crew.quality import intake
                 u["url"] = intake._wi_url(client, int(r["id"]))
@@ -523,8 +582,8 @@ def public(acts: list[dict]) -> list[dict]:
 
 def comment_html(acts: list[dict]) -> str:
     """Uyarı işine düşen yorum: eylem, durum, PR / izleme bağlantıları (yalnız https). Her metin kaçışlıdır."""
-    def esc(s) -> str:
-        return html.escape(mask_secrets(str(s if s is not None else "")))
+    def esc(s, n: int = 300) -> str:
+        return html.escape(mask_secrets(str(s if s is not None else ""))[:n])     # önce kes, sonra kaçışla
 
     def link(url, text) -> str:
         u = _https(url)
@@ -540,6 +599,6 @@ def comment_html(acts: list[dict]) -> str:
                     link(u.get("url"), f"izleme #{u.get('wi')}") if u.get("wi") else "")
             bits.append(f"{esc(u['repo'])}: {esc(u['state'])} {tail}".strip())
         if a.get("reason"):
-            bits.append(f"<i>{esc(a['reason'])[:300]}</i>")
+            bits.append(f"<i>{esc(a['reason'])}</i>")
         rows.append("<li>" + " · ".join(bits) + "</li>")
     return "<p><b>Giderme (Tempo):</b> uyarıyla birlikte başlatıldı.</p><ul>" + "".join(rows) + "</ul>"

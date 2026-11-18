@@ -13375,7 +13375,9 @@ def test_image_vuln_alerts():
     iv._POLLER = None
     # _tick: ayarlar kapalıysa Azure'a gidilmez; açıksa rapor + uyarı sırayla
     seen: list = []
-    _rep, _alert, _get3 = iv.report, iv.alert, pc.get
+    from agile_sdlc_crew.quality import modern as _mdl
+    _rep, _alert, _get3, _bi3 = iv.report, iv.alert, pc.get, _mdl.build_index
+    _mdl.build_index = lambda c, **kw: {}
     try:
         knobs3 = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": False}
         pc.get = lambda k: knobs3[k] if k in knobs3 else _get3(k)
@@ -13399,7 +13401,7 @@ def test_image_vuln_alerts():
         check("_tick: başka tarama sürerken atlanır", seen == [])
         iv._RUN["running"] = False
     finally:
-        iv.report, iv.alert, pc.get = _rep, _alert, _get3
+        iv.report, iv.alert, pc.get, _mdl.build_index = _rep, _alert, _get3, _bi3
 
     # ── varsayılan iş açma yolu: teknik borç hikâyesi + needs-human Task (sahte client, yazma yok) ──
     from agile_sdlc_crew.quality import intake
@@ -13482,6 +13484,17 @@ class _FixClient(_FakeBaseImages):
 
 
 def test_image_fix():
+    from agile_sdlc_crew import pipeline_config as pc
+    knobs = {"CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE_BUMP": True}
+    _get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+    try:
+        _image_fix_body()
+    finally:
+        pc.get = _get
+
+
+def _image_fix_body():
     """Giderme: uyarıyla birlikte sürüm çalışması. Sahte client / resolver / enjekte fonksiyonlar; ağ, Azure, MySQL yok."""
     print("\n[taban imaj güvenliği: giderme]")
     import asyncio
@@ -13532,7 +13545,7 @@ def test_image_fix():
           a and a["state"] == "yok" and len(s) == 1 and s[0]["repo"] == "base-images" and s[0]["branch"] == "staging"
           and s[0]["project"] == "FLODevOps" and s[0]["path"] == "/php-8-4/Dockerfile" and s[0]["line"] == 1
           and s[0]["old"] == "8.4.27" and s[0]["new"] == "8.4.30" and bump.pushable(s[0]), str(a))
-    check("plan taban-yama: sabit dal adı", a["branch"] == "tempo/image-patch-php-8-4-8.4.30")
+    check("plan taban-yama: sabit dal adı", a["branch"] == "tempo/image-patch-php-8-4-8.4.27-8.4.30")
     check("plan: yalnız yama işareti → başka eylem yok (yükseltme / yeniden üretme yok)", [x["kind"] for x in acts] == ["taban-yama"])
     c2 = _FixClient(DF, files={"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.30\nFROM php:${PHP_VERSION}-fpm-trixie\n"})
     a = kind(fx.plan(c2, php84, index=index, resolver=res), "taban-yama")
@@ -13550,7 +13563,7 @@ def test_image_fix():
     a = kind(fx.plan(c5, php84, index=index, resolver=nohub), "taban-yama")
     check("plan taban-yama: etiket Hub'da yok → elle", a["state"] == "elle" and "8.4.30-fpm-trixie" in a["reason"], str(a))
     for status, want in (("active", "pr açık"), ("abandoned", "pr reddedildi")):
-        cp = _FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.30": {"id": 9, "status": status, "url": "https://x/9"}})
+        cp = _FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.27-8.4.30": {"id": 9, "status": status, "url": "https://x/9"}})
         a = kind(fx.plan(cp, php84, index=index, resolver=res), "taban-yama")
         check(f"plan taban-yama: PR {status} → {want}", a["state"] == want and a["pr"]["id"] == 9, str(a))
 
@@ -13585,13 +13598,13 @@ def test_image_fix():
           and us["russia"]["sites"][0] == {"where": "devops", "repo": "russia", "project": "FLODevOps", "branch": "production",
                                           "path": "/build/alf/Dockerfile", "line": 1, "old": "golang:1.24.4",
                                           "new": "golang:1.24.13", "blocked": ""} and a["state"] == "yok", str(a)[:400])
-    check("plan imaj-yama: sabit dal adı, hedef imaj", a["branch"] == "tempo/image-patch-golang-1.24.13" and a["target"] == "golang:1.24.13")
+    check("plan imaj-yama: sabit dal adı, hedef imaj", a["branch"] == "tempo/image-patch-golang-1.24.4-1.24.13" and a["target"] == "golang:1.24.13")
     ga = rec("golang:1.24.4-alpine", "go", "1.24.4", patch={"latest": "1.24.13"}, users={"anatolia": ["build/alf"]})
     alp = {("anatolia", "/build/alf/Dockerfile"): "FROM golang:1.24.4-alpine AS build\nRUN x\n"}
     ia = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4-alpine"]}]}
     a = kind(fx.plan(_FixClient(alp), ga, index=ia, resolver=res), "imaj-yama")
     check("plan imaj-yama: etiket soneki korunur, dal adı soneki taşır",
-          a["repos"][0]["sites"][0]["new"] == "golang:1.24.13-alpine" and a["branch"] == "tempo/image-patch-golang-alpine-1.24.13", str(a)[:300])
+          a["repos"][0]["sites"][0]["new"] == "golang:1.24.13-alpine" and a["branch"] == "tempo/image-patch-golang-1.24.4-alpine-1.24.13", str(a)[:300])
     a = kind(fx.plan(cl(), go, index=index, resolver=ur.Resolver(fetch=_fake_hub({"golang": ["1.24.4"]}))), "imaj-yama")
     check("plan imaj-yama: yeni etiket Hub'da yok → elle, site yok",
           a["state"] == "elle" and not any(u.get("sites") for u in a.get("repos") or []), str(a)[:300])
@@ -13614,8 +13627,8 @@ def test_image_fix():
     odd = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"}, users={"evil-repo": ["build/x"]})
     a = kind(fx.plan(cl(), odd, index=index, resolver=res), "imaj-yama")
     check("plan imaj-yama: bölge repoları dışındaki ad hiçbir zaman yazılmaz", a["state"] == "elle")
-    cg = _FixClient(DF, region_prs={("russia", "tempo/image-patch-golang-1.24.13"): {"id": 3, "status": "active", "url": "https://x/3"},
-                                    ("global", "tempo/image-patch-golang-1.24.13"): {"id": 5, "status": "abandoned", "url": "https://x/5"}})
+    cg = _FixClient(DF, region_prs={("russia", "tempo/image-patch-golang-1.24.4-1.24.13"): {"id": 3, "status": "active", "url": "https://x/3"},
+                                    ("global", "tempo/image-patch-golang-1.24.4-1.24.13"): {"id": 5, "status": "abandoned", "url": "https://x/5"}})
     a = kind(fx.plan(cg, go, index=index, resolver=res), "imaj-yama")
     us = {u["repo"]: u for u in a["repos"]}
     check("plan imaj-yama: bölge başına PR durumu (açık / terk / yok)",
@@ -13675,7 +13688,7 @@ def test_image_fix():
     d = [i for i, (x, y) in enumerate(zip(text.splitlines(), new_text.splitlines())) if x != y]
     check("apply taban-yama: tek push_fn çağrısı, taslak PR sonucu işlenir",
           len(pushes) == 1 and a["state"] == "açıldı" and a["pr"]["id"] == 101 and a["ran"] is True
-          and pushes[0]["branch"] == "tempo/image-patch-php-8-4-8.4.30" and pushes[0]["wi_id"] is None, str(out)[:300])
+          and pushes[0]["branch"] == "tempo/image-patch-php-8-4-8.4.27-8.4.30" and pushes[0]["wi_id"] is None, str(out)[:300])
     check("apply taban-yama: site yalnız rakamlarda ayrışır, tek satır değişir",
           d == [0] and re.sub(r"\d+", "#", text.splitlines()[0]) == re.sub(r"\d+", "#", new_text.splitlines()[0])
           and new_text.splitlines()[0] == "ARG PHP_VERSION=8.4.30", str((d, new_text[:40])))
@@ -13683,10 +13696,10 @@ def test_image_fix():
           "yama geride" in pushes[0]["body"] and "mainLocation" in pushes[0]["body"] and "yandexLocation" in pushes[0]["body"]
           and "8.4.27" in pushes[0]["title"] and "8.4.30" in pushes[0]["title"], pushes[0]["body"][:300])
     pushes.clear()
-    ao = fx.apply(_FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.30": {"id": 9, "status": "active", "url": "u"}}),
+    ao = fx.apply(_FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.27-8.4.30": {"id": 9, "status": "active", "url": "u"}}),
                   php84, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
     check("apply: açık PR varken hiç yazma yok", kind(ao, "taban-yama")["state"] == "pr açık" and kind(ao, "taban-yama")["ran"] is False)
-    ab = fx.apply(_FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.30": {"id": 9, "status": "abandoned", "url": "u"}}),
+    ab = fx.apply(_FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.27-8.4.30": {"id": 9, "status": "abandoned", "url": "u"}}),
                   php84, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
     check("apply: terk edilmiş PR yeniden açılmaz", kind(ab, "taban-yama")["state"] == "pr reddedildi" and kind(ab, "taban-yama")["ran"] is False)
     ag = fx.apply(c2, php84, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
@@ -13697,13 +13710,13 @@ def test_image_fix():
     a = kind(out, "imaj-yama")
     check("apply imaj-yama: üç bölge → üç push_fn çağrısı (russia dahil), aynı dal adı",
           [p["sites"][0]["repo"] for p in pushes] == ["anatolia", "global", "russia"]
-          and {p["branch"] for p in pushes} == {"tempo/image-patch-golang-1.24.13"} and a["state"] == "açıldı"
+          and {p["branch"] for p in pushes} == {"tempo/image-patch-golang-1.24.4-1.24.13"} and a["state"] == "açıldı"
           and all(len(p["sites"]) == 1 for p in pushes), str([(p["sites"][0]["repo"], p["branch"]) for p in pushes]))
     check("apply imaj-yama: PR metni bütün bölgeleri ve tetikleyen işareti yazar",
           all(r in pushes[0]["body"] for r in ("anatolia", "global", "russia")) and "yama geride" in pushes[0]["body"]
           and "golang:1.24.4" in pushes[0]["body"] and "golang:1.24.13" in pushes[0]["body"], pushes[0]["body"][:400])
     pushes.clear()
-    cg2 = _FixClient(DF, region_prs={("russia", "tempo/image-patch-golang-1.24.13"): {"id": 3, "status": "active", "url": "https://x/3"}})
+    cg2 = _FixClient(DF, region_prs={("russia", "tempo/image-patch-golang-1.24.4-1.24.13"): {"id": 3, "status": "active", "url": "https://x/3"}})
     fx.apply(cg2, go, team="T", index=index, resolver=res, push_fn=push_fn, open_pr_fn=never, start_fn=never)
     check("apply imaj-yama: açık PR'ı olan bölgeye yazılmaz, kalanlara yazılır",
           [p["sites"][0]["repo"] for p in pushes] == ["anatolia", "global"])
@@ -13790,14 +13803,14 @@ def test_image_fix():
     check("uçtan uca: dal + push + taslak PR, PR base-images → staging",
           kinds == ["branch", "push", "pr"] and c.calls[2][2] == "staging" and c.calls[2][5] is True
           and kind(out, "taban-yama")["state"] == "açıldı", str(c.calls)[:300])
-    pushed = c.files["tempo/image-patch-php-8-4-8.4.30"]["/php-8-4/Dockerfile"].decode()
+    pushed = c.files["tempo/image-patch-php-8-4-8.4.27-8.4.30"]["/php-8-4/Dockerfile"].decode()
     check("uçtan uca: dalda yalnız birinci satır değişti", pushed.startswith("ARG PHP_VERSION=8.4.30\n")
           and pushed.splitlines()[1:] == c.files["staging"]["/php-8-4/Dockerfile"].decode().splitlines()[1:])
     out = fx.apply(c, php84, team="T", index=index, resolver=res, open_pr_fn=never, start_fn=never)
     check("uçtan uca: ikinci çalıştırma yeni yazma yapmaz (açık PR)", len(c.calls) == 3 and kind(out, "taban-yama")["state"] == "pr açık")
 
     # ── dal adı doğrulaması ──────────────────────────────────────────────
-    for n in ["tempo/image-patch-php-8-4-8.4.30", "tempo/image-patch-golang-alpine-1.24.13", "tempo/upgrade-php-core-8.4"]:
+    for n in ["tempo/image-patch-php-8-4-8.4.27-8.4.30", "tempo/image-patch-golang-1.24.4-alpine-1.24.13", "tempo/upgrade-php-core-8.4"]:
         try:
             bump._validate_branch(n, {"staging"})
             check(f"dal kabul: {n}", True)
@@ -13812,7 +13825,7 @@ def test_image_fix():
         except ValueError:
             check(f"dal red: {n}", True)
     try:
-        bump._validate_branch("tempo/image-patch-php-8-4-8.4.30", {"tempo/image-patch-php-8-4-8.4.30"})
+        bump._validate_branch("tempo/image-patch-php-8-4-8.4.27-8.4.30", {"tempo/image-patch-php-8-4-8.4.27-8.4.30"})
         check("dal red: hedef dal", False)
     except ValueError as ex:
         check("dal red: hedef dal", "hedef dal" in str(ex))
@@ -13836,7 +13849,7 @@ def test_image_fix():
     results = [{"image": "php:8.4.27-fpm-bookworm", "state": "açıldı", "wi": 901}, {"image": "golang:1.24.4", "state": "açık iş", "wi": 902}]
     out = iv._fix_round(pcl, rep, results, team="Ekip", index={}, resolver=res, apply_fn=apply_fn)
     check("yoklayıcı giderme: yalnız kritik / yüksek imajlar; bir imajın hatası ötekini durdurmaz",
-          called == ["php:8.4.27-fpm-bookworm", "golang:1.24.4"] and len(out) == 1, str(called))
+          called == ["golang:1.24.4", "php:8.4.27-fpm-bookworm"] and len(out) == 1, str(called))
     check("yoklayıcı giderme: sonuç uyarı işine yorum (yalnız yürüyen eylem varsa), https olmayan bağlantı yok",
           len(comments) == 1 and comments[0][0] == 901 and "https://x/8" in comments[0][1]
           and "javascript:" not in comments[0][1], str(comments)[:300])
@@ -13845,10 +13858,11 @@ def test_image_fix():
                   apply_fn=lambda c, r, **kw: [{"kind": "yeniden-üret", "state": "devops", "ran": False, "reason": "x", "pr": None}])
     check("yoklayıcı giderme: yürüyen eylem yoksa yorum yok", comments == [])
     seen: list = []
-    _rep, _alert, _fr, _get = iv.report, iv.alert, iv._fix_round, pc.get
+    _rep, _alert, _fr, _get, _bi0 = iv.report, iv.alert, iv._fix_round, pc.get, modern.build_index
     try:
         knobs = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": True, "CREW_TECHDEBT_IMAGE_VULN_FIX": False}
         pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+        modern.build_index = lambda c, **kw: {}
         iv.report = lambda client, **kw: {"images": []}
         iv.alert = lambda client, rep, **kw: seen.append("alert") or []
         iv._fix_round = lambda client, rep, results, **kw: seen.append("fix") or []
@@ -13866,7 +13880,7 @@ def test_image_fix():
         iv._tick(lambda: pcl)
         check("_tick: giderme hatası turu düşürmez, uyarı yapılmıştı", seen == ["alert"], str(seen))
     finally:
-        iv.report, iv.alert, iv._fix_round, pc.get = _rep, _alert, _fr, _get
+        iv.report, iv.alert, iv._fix_round, pc.get, modern.build_index = _rep, _alert, _fr, _get, _bi0
 
     # ── rapor kaydına fix (yazmasız) ─────────────────────────────────────
     r2 = {"images": [dict(php84), dict(os_only, image="x:1"), {"image": "boş"}]}
@@ -13955,6 +13969,357 @@ def test_image_fix():
           "/api/techdebt/images/fix" in fseg and "confirm(" in fseg and "disabled=true" in fseg and "loadImageVuln(" in fseg)
     check("kart: aralanan metin escHtml'den geçer, yalnız https bağlantı", "${a.reason}" not in seg and "${a.state}" not in seg
           and "^https:" in lseg)
+
+
+class _RegionFake:
+    """Bölge repoları (production) için repo başına depolu sahte client; gerçek `push_sites` ile koşar."""
+    org_url = "https://dev.azure.com/org"
+    project = "FLODevOps"
+
+    def __init__(self, dockerfiles, fail_repos=()):
+        self.br = {}
+        for (repo, path), text in dockerfiles.items():
+            self.br.setdefault((repo, "production"), {})[path] = text.encode()
+        self.prs, self.calls, self.fail_repos = {}, [], set(fail_repos)
+
+    def list_branches(self, repo, project=None):
+        return [{"name": f"refs/heads/{b}", "objectId": f"oid-{b}"} for (r, b) in self.br if r == repo]
+
+    def get_file_content(self, repo, path, branch=None, project=None):
+        data = self.br.get((repo, branch), {}).get(path)
+        if data is None:
+            raise FileNotFoundError(path)
+        return data.decode()
+
+    def get_file_bytes(self, repo, path, branch=None, project=None, version=None, version_type=None, **kw):
+        if version:
+            branch = version[len("oid-"):]
+        return self.br.get((repo, branch), {}).get(path)
+
+    def create_branch(self, repo, name, source, project=None, source_object_id=None):
+        if repo in self.fail_repos:
+            raise OSError("Azure düştü")
+        self.calls.append(("branch", repo, name))
+        self.br[(repo, name)] = dict(self.br[(repo, source)])
+        return {"value": [{"success": True}]}
+
+    def push_changes(self, repo, branch, changes, msg, project=None, old_object_id=None):
+        import base64 as _b64
+        self.calls.append(("push", repo, branch))
+        for c in changes:
+            self.br[(repo, branch)][c["path"]] = _b64.b64decode(c["content"])
+        return {}
+
+    def create_pull_request(self, repo, src, tgt="main", title="", description="", work_item_ids=None, draft=False,
+                            project=None):
+        self.calls.append(("pr", repo, src))
+        self.prs[(repo, src)] = {"id": 50 + len(self.prs), "status": "active", "url": "https://x/pr", "target": tgt,
+                                 "created_by": "me"}
+        return {"pullRequestId": self.prs[(repo, src)]["id"], "repository": {"name": repo, "project": {"name": "FLODevOps"}}}
+
+    def find_pull_request(self, repo, branch, project=None):
+        return self.prs.get((repo, branch))
+
+    def get_authenticated_user(self):
+        return {"id": "me"}
+
+
+def test_image_fix_round1():
+    """Giderme düzeltme turu 1: durdurulan izleme yeniden açılmaz, taze index, tur başına sınır, anahtarlara uyum."""
+    print("\n[taban imaj güvenliği: giderme — düzeltme turu 1]")
+    from agile_sdlc_crew import pipeline_config as pc
+    knobs = {"CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE_BUMP": True,
+             "CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS": 3, "CREW_TECHDEBT_UPGRADE_MAX_OPEN": 3}
+    _get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+    try:
+        _image_fix_round1_body(knobs)
+    finally:
+        pc.get = _get
+
+
+def _image_fix_round1_body(knobs):
+    import functools
+    from agile_sdlc_crew.quality import image_fix as fx, image_vuln as iv, modern
+    from agile_sdlc_crew.quality import upgrade_bump as bump, upgrade_registry as ur, upgrade_track as ut
+    from agile_sdlc_crew import pipeline_config as pc
+
+    hub = {"php": ["8.4.30", "8.4.30-fpm-trixie"], "golang": ["1.24.13", "1.24.13-alpine", "1.25.14"],
+           "python": ["3.13.18", "3.13.18-slim-bookworm"]}
+    res = ur.Resolver(fetch=_fake_hub(hub))
+
+    def rec(image, lang, version, *, via=(), users=None, patch=None, eol=None, crit=0, high=0, level="kritik"):
+        return {"image": image, "lang": lang, "version": version, "via": list(via), "touched": "", "error": "",
+                "users": users if users is not None else {"anatolia": ["build/alf"]},
+                "scan": {"state": "tamam", "critical": crit, "high": high, "packages": [], "os": "", "created": "",
+                         "ignored": {"critical": 0, "high": 0, "packages": []}},
+                "patch": patch, "eol": eol, "level": level, "actions": []}
+
+    def kind(acts, k):
+        return next((a for a in acts if a["kind"] == k), None)
+
+    def never(*a, **k):
+        raise AssertionError("yazma yapılmamalıydı")
+    DF = {(r, "/build/alf/Dockerfile"): "FROM golang:1.24.4\nRUN go build\n" for r in ("anatolia", "global", "russia")}
+    idx = {"alf": [{"src": f"{r}/build/alf", "images": ["golang:1.24.4"]} for r in ("anatolia", "global", "russia")]}
+    go = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"},
+             users={"anatolia": ["build/alf"], "global": ["build/alf"], "russia": ["build/alf"]})
+    ev = rec("golang:1.99.0", "go", "1.24.4", eol={"eol": "2020-01-01"})
+    mi = {"a": [{"src": "anatolia/build/a", "images": ["golang:1.99.0"]}], "b": [{"src": "global/build/b", "images": ["golang:1.99.0"]}],
+          "c": [{"src": "russia/build/c", "images": ["golang:1.99.0"]}]}
+    started: list = []
+
+    def start_fn(client, repo, lang, **kw):
+        started.append(repo)
+        return {"id": 700 + len(started), "created": True}
+
+    # ── C1: durdurulan izleme yoklayıcıda yeniden açılmaz ───────────────
+    from types import SimpleNamespace as NS
+    rows = [{"id": 5, "fields": {"System.State": "Closed", "System.Tags": "tempo-upgrade-track",
+                                 "System.Description": "<p>tempo-upgrade-key: go:alf:1.27</p>"}},
+            {"id": 6, "fields": {"System.State": "New", "System.Tags": "tempo-upgrade-track",
+                                 "System.Description": "<p>tempo-upgrade-key: go:live:1.27</p>"}}]
+    tc = NS(query_work_items=lambda q, **kw: rows)
+    check("find_open kapalı izleme işini görmez, find_any görür",
+          ut.find_open(tc, "go", "alf") is None and (ut.find_any(tc, "go", "alf") or {}).get("id") == 5
+          and ut.find_any(tc, "go", "alf", to="1.28") is None and ut.find_any(tc, "go", "nope") is None)
+    mi1 = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.99.0"]}]}
+    fo, fa = (lambda c, lang, repo: None), (lambda c, lang, repo: {"id": 5})
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi1, resolver=res, find_open_fn=fo, find_any_fn=fa, auto=True), "yükseltme")
+    check("plan auto: daha önce kapatılmış izleme → durduruldu, açılabilir değil",
+          a["state"] == "durduruldu" and a["repos"][0]["state"] == "durduruldu" and "karttan" in a["repos"][0]["reason"], str(a)[:300])
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=fo, find_any_fn=fa, auto=True)
+    check("apply auto: durdurulan izleme için start çağrılmaz", started == [] and kind(out, "yükseltme")["ran"] is False)
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=fo, find_any_fn=fa, auto=False)
+    check("apply düğme (auto=False): kapatılmış izleme yeniden başlatılabilir", started == ["alf"] and kind(out, "yükseltme")["state"] == "açıldı")
+    started.clear()
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=fo, find_any_fn=lambda *a: None, auto=True)
+    check("apply auto: hiç izlemesi olmayan repo başlar", started == ["alf"])
+    started.clear()
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=fo, auto=True, find_any_fn=lambda *a: (_ for _ in ()).throw(OSError("ağ")))
+    check("apply auto: izleme geçmişi okunamazsa açılmaz", started == [] and kind(out, "yükseltme")["state"] == "belirsiz")
+
+    # ── I3 / I6: anahtarlar ──────────────────────────────────────────────
+    knobs["CREW_TECHDEBT_UPGRADE"] = False
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi1, resolver=res, find_open_fn=fo), "yükseltme")
+    check("yükseltme: CREW_TECHDEBT_UPGRADE kapalı → elle, neden ayarı söyler",
+          a["state"] == "elle" and "CREW_TECHDEBT_UPGRADE" in a["reason"], str(a))
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never, find_open_fn=fo)
+    check("yükseltme: anahtar kapalıyken start asla çağrılmaz", kind(out, "yükseltme")["state"] == "elle")
+    knobs["CREW_TECHDEBT_UPGRADE"] = True
+    knobs["CREW_TECHDEBT_PHP_MODERN"] = False
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi1, resolver=res, find_open_fn=fo), "yükseltme")
+    check("yükseltme: CREW_TECHDEBT_PHP_MODERN kapalı → elle", a["state"] == "elle" and "PHP_MODERN" in a["reason"], str(a))
+    knobs["CREW_TECHDEBT_PHP_MODERN"] = True
+    knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = False
+    p84 = rec("php:8.4.27-fpm-bookworm", "php", "8.4.27", via=["php-8-4"], patch={"latest": "8.4.30"})
+    py = rec("python:3.13.7-slim-bookworm", "python", "3.13.7", via=["python-3-13-7"], patch={"latest": "3.13.18"})
+    for r_, k_ in ((p84, "taban-yama"), (py, "taban-dizin"), (go, "imaj-yama")):
+        a = kind(fx.plan(_FixClient(DF), r_, index=idx, resolver=res), k_)
+        check(f"{k_}: _BUMP kapalı → elle, neden ayarı söyler", a["state"] == "elle" and "CREW_TECHDEBT_UPGRADE_BUMP" in a["reason"], str(a))
+    out = fx.apply(_FixClient(DF), go, team="T", index=idx, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+    check("imaj-yama: _BUMP kapalıyken hiç yazma yok", kind(out, "imaj-yama")["state"] == "elle")
+    knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = True
+
+    # ── I4: dal adı eski etiketi taşır ───────────────────────────────────
+    g5 = rec("golang:1.24.5", "go", "1.24.5", patch={"latest": "1.24.13"}, users={"anatolia": ["build/alf"]})
+    i5 = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4", "golang:1.24.5"]}]}
+    df5 = {("anatolia", "/build/alf/Dockerfile"): "FROM golang:1.24.4\nFROM golang:1.24.5\n"}
+    pr4 = {("anatolia", "tempo/image-patch-golang-1.24.4-1.24.13"): {"id": 3, "status": "active", "url": "https://x/3"}}
+    g4 = dict(go, users={"anatolia": ["build/alf"]})
+    a4 = kind(fx.plan(_FixClient(df5, region_prs=pr4), g4, index=i5, resolver=res), "imaj-yama")
+    a5 = kind(fx.plan(_FixClient(df5, region_prs=pr4), g5, index=i5, resolver=res), "imaj-yama")
+    check("dal adı: eski etiket dahil, iki eski sürüm aynı dalı paylaşmaz; birinin PR'ı ötekini kapsamaz",
+          a4["branch"] == "tempo/image-patch-golang-1.24.4-1.24.13" and a5["branch"] == "tempo/image-patch-golang-1.24.5-1.24.13"
+          and a4["state"] == "pr açık" and a5["state"] == "yok", f"{a4['branch']} {a4['state']} {a5['branch']} {a5['state']}")
+    lib = rec("library/golang:1.24.4-alpine", "go", "1.24.4", patch={"latest": "1.24.13"}, users={"anatolia": ["build/alf"]})
+    il = {"alf": [{"src": "anatolia/build/alf", "images": ["library/golang:1.24.4-alpine"]}]}
+    al = kind(fx.plan(_FixClient({("anatolia", "/build/alf/Dockerfile"): "FROM library/golang:1.24.4-alpine\n"}), lib,
+                      index=il, resolver=res), "imaj-yama")
+    check("dal adı: library/ atılır, sonek slug'a girer, tek ek desene uyar",
+          al["branch"] == "tempo/image-patch-golang-1.24.4-alpine-1.24.13" and bump._BRANCH_IMAGE.fullmatch(al["branch"])
+          and al["state"] == "yok", str(al)[:300])
+    ao = kind(fx.plan(_FixClient(DF), p84, index=idx, resolver=res), "taban-yama")
+    check("taban-yama dalı da eski → yeni çiftini taşır ve desene uyar",
+          ao["branch"] == "tempo/image-patch-php-8-4-8.4.27-8.4.30" and bump._BRANCH_IMAGE.fullmatch(ao["branch"]), str(ao)[:200])
+
+    # ── küçük: kuru çalıştırma, dizin dili, metinler ─────────────────────
+    dup = dict(DF)
+    dup[("global", "/build/alf/Dockerfile")] = "FROM golang:1.24.4 # eski golang:1.24.4\n"
+    a = kind(fx.plan(_FixClient(dup), go, index=idx, resolver=res), "imaj-yama")
+    check("kuru çalıştırma: satırda eski imaj iki kez → bütün eylem elle, hiçbir bölge yazılmaz",
+          a["state"] == "elle" and {u["repo"]: u["state"] for u in a["repos"]}["global"] == "elle", str(a)[:300])
+    out = fx.apply(_FixClient(dup), go, team="T", index=idx, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+    check("kuru çalıştırma: apply hiçbir bölgeye yazmaz", kind(out, "imaj-yama")["ran"] is False)
+    for via, why in ((["python-8-4"], "dili"), (["foo-8-4"], "dizin")):
+        a = kind(fx.plan(_FixClient(DF), rec("php:8.4.27", "php", "8.4.27", via=via, patch={"latest": "8.4.30"}),
+                         index=idx, resolver=res), "taban-yama")
+        check(f"_plan_own: dizin adı / dili uyuşmuyor ({via[0]}) → elle", a["state"] == "elle", str(a)[:200])
+    html_ = fx.comment_html([{"kind": "x", "state": "açıldı", "reason": "a" * 299 + "<b>", "pr": None}])
+    ital = html_[html_.index("<i>"):html_.index("</i>")]
+    check("comment_html: önce keser sonra kaçışlar (yarım varlık yok)", "&lt;" in ital and not re.findall(r"&[a-z]+(?![a-z;])", ital), ital[-30:])
+    pub = kind(fx.plan(_FixClient(DF), rec("python:3.11", "python", "3.11", crit=2, high=5), index=idx, resolver=res), "yeniden-üret")
+    own = kind(fx.plan(_FixClient(DF), rec("php:8.4.27", "php", "8.4.27", via=["php-8-4"], crit=2, high=5), index=idx, resolver=res), "yeniden-üret")
+    check("yeniden-üret: genel imaj → servisi yeniden yayınla; kendi imajımız → DevOps + bayraklar",
+          "servisi yeniden yayınla" in pub["reason"] and "DevOps" not in pub["reason"]
+          and "DevOps üretmeli" in own["reason"] and "mainLocation" in own["reason"], f"{pub['reason']} | {own['reason']}")
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi, resolver=res, find_open_fn=lambda *x: None), "yükseltme")
+    check("yükseltme eylemi sınırı (cap) taşır", a["cap"] == 3, str(a)[:200])
+
+    # ── I1: yoklayıcı tek taze index ─────────────────────────────────────
+    seen: dict = {"bi": [], "report": None, "fix": None}
+    IDX = {"fresh": []}
+    _bi, _rep, _alert, _fr = modern.build_index, iv.report, iv.alert, iv._fix_round
+    try:
+        knobs.update({"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": True, "CREW_TECHDEBT_IMAGE_VULN_FIX": True})
+        modern.build_index = lambda c, **kw: seen["bi"].append(kw.get("max_age_h")) or IDX
+        iv.report = lambda c, **kw: seen.update(report=kw.get("index")) or {"images": []}
+        iv.alert = lambda c, rep, **kw: []
+        iv._fix_round = lambda c, rep, results, **kw: seen.update(fix=kw.get("index")) or []
+        iv._reset_state()
+        iv._tick(lambda: NS(team="Ekip"))
+        check("_tick: tek taze index (max_age_h=0) hem rapora hem gidermeye verilir",
+              seen["bi"] == [0] and seen["report"] is IDX and seen["fix"] is IDX, str(seen["bi"]))
+    finally:
+        modern.build_index, iv.report, iv.alert, iv._fix_round = _bi, _rep, _alert, _fr
+        knobs.pop("CREW_TECHDEBT_IMAGE_VULN_FIX", None)
+
+    # ── I2: tur başına sınır, tek bütçe ──────────────────────────────────
+    recs = [rec("a:1", "go", "1.24.4", eol={"eol": "2020"}, crit=5, users={"anatolia": ["x"]}),
+            rec("b:1", "go", "1.24.4", eol={"eol": "2020"}, crit=9, users={"anatolia": ["x"]}),
+            rec("c:1", "go", "1.24.4", crit=50, users={"anatolia": ["x"]}),
+            rec("d:1", "go", "1.24.4", crit=40, users={"anatolia": ["x"]}),
+            rec("e:1", "go", "1.24.4", crit=30, users={"anatolia": ["x"]}),
+            rec("f:1", "go", "1.24.4", crit=20, users={"anatolia": ["x"]}),
+            rec("g:1", "go", "1.24.4", crit=10, users={"anatolia": ["x"]})]
+    touched: list = []
+    pcl = NS(team="Ekip", add_comment=lambda wid, text: touched.append(("comment", wid)))
+
+    def apply_fn(client, r, **kw):
+        touched.append(r["image"])
+        return [{"kind": "taban-yama", "state": "açıldı", "ran": True, "reason": "", "pr": {"id": 1, "url": "https://x/1"}}]
+    out = iv._fix_round(pcl, {"images": recs}, [{"image": "b:1", "state": "açıldı", "wi": 41}], team="Ekip", index={}, resolver=res,
+                        apply_fn=apply_fn)
+    check("tur başına sınır: 7 kritik imajdan yalnız 3'ü (destek bitmiş önce, sonra kritik sayısı) işlenir",
+          [t for t in touched if isinstance(t, str)] == ["b:1", "a:1", "c:1"], str(touched))
+    check("sınırı aşan imajlar 'sırada' sonucu taşır", sorted(o["image"] for o in out if o.get("state") == "sırada") == ["d:1", "e:1", "f:1", "g:1"], str(out)[:300])
+    check("alert işi olan imaja yorum yazılır", ("comment", 41) in touched)
+    knobs["CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS"] = 5
+    touched.clear()
+    iv._fix_round(pcl, {"images": recs}, [], team="Ekip", index={}, resolver=res, apply_fn=apply_fn)
+    check("sınır ayardan okunur (5)", len([t for t in touched if isinstance(t, str)]) == 5)
+    knobs["CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS"] = 3
+
+    def three(images):
+        return [rec(i, "go", "1.24.4", eol={"eol": "2020"}, crit=9 - n) for n, i in enumerate(images)]
+    mi3 = {"a": [{"src": "anatolia/build/a", "images": ["golang:1.90.0"]}], "b": [{"src": "global/build/b", "images": ["golang:1.91.0"]}],
+           "c": [{"src": "russia/build/c", "images": ["golang:1.92.0"]}]}
+    recs3 = three(["golang:1.90.0", "golang:1.91.0", "golang:1.92.0"])
+    real = functools.partial(fx.apply, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                             find_open_fn=lambda *a: None, find_any_fn=lambda *a: None)
+    knobs["CREW_TECHDEBT_UPGRADE_MAX_OPEN"] = 2
+    started.clear()
+    out = iv._fix_round(pcl, {"images": recs3}, [], team="Ekip", index=mi3, resolver=res, apply_fn=real)
+    st = [u["state"] for o in out for a in o["actions"] for u in a.get("repos") or []]
+    check("tek izleme bütçesi tüm tur için: 3 imajdan yalnız 2 başlatma, üçüncüsü 'sırada'",
+          started == ["a", "b"] and sorted(st) == ["açıldı", "açıldı", "sırada"], f"{started} {st}")
+
+    def flaky(client, repo, lang, **kw):
+        if repo == "a":
+            raise OSError("Azure düştü")
+        return start_fn(client, repo, lang, **kw)
+    started.clear()
+    real2 = functools.partial(fx.apply, push_fn=never, open_pr_fn=never, start_fn=flaky,
+                              find_open_fn=lambda *a: None, find_any_fn=lambda *a: None)
+    out = iv._fix_round(pcl, {"images": recs3}, [], team="Ekip", index=mi3, resolver=res, apply_fn=real2)
+    st = {u["repo"]: u["state"] for o in out for a in o["actions"] for u in a.get("repos") or []}
+    check("başarısız başlatma bütçeyi tüketmez (a hata, b ve c başlar)", started == ["b", "c"] and st["a"] == "hata", f"{started} {st}")
+
+    def existing(client, repo, lang, **kw):
+        started.append(repo)
+        return {"id": 1, "created": False}
+    started.clear()
+    real3 = functools.partial(fx.apply, push_fn=never, open_pr_fn=never, start_fn=existing,
+                              find_open_fn=lambda *a: None, find_any_fn=lambda *a: None)
+    iv._fix_round(pcl, {"images": recs3}, [], team="Ekip", index=mi3, resolver=res, apply_fn=real3)
+    check("created=False bütçeyi tüketmez (üçü de denenir)", started == ["a", "b", "c"], str(started))
+    knobs["CREW_TECHDEBT_UPGRADE_MAX_OPEN"] = 3
+
+    # ── I5: plan anlık görüntü başına en çok bir kez, bir hata ötekini düşürmez ──
+    calls: list = []
+    real_plan = fx.plan
+
+    def counting(client, entry, **kw):
+        calls.append(entry["image"])
+        if entry["image"] == "golang:1.24.4":
+            raise RuntimeError("plan patladı")
+        return real_plan(client, entry, **kw)
+    idx5 = {"a": [{"src": "anatolia/build/a", "images": ["golang:1.24.4", "php:8.4.27-fpm-bookworm", "python:3.11"]}]}
+    fx.plan = counting
+    try:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            clk = [1000.0]
+            skw = dict(index=idx5, resolver=res, eol_fn=lambda *a, **k: None, cache_dir=Path(td), ttl_h=24, now=1000.0,
+                       ignore_packages=set())
+            fc = _FixClient(DF)
+            dec = lambda rep: iv.attach_fix(fc, rep, index=idx5, resolver=res)
+            iv._reset_state()
+            s1 = iv._snapshot(fc, lambda: clk[0], dec, skw)
+            n1 = len(calls)
+            clk[0] += 30
+            iv._snapshot(fc, lambda: clk[0], dec, skw)
+            iv._snapshot(fc, lambda: clk[0], dec, skw)
+            check("plan: imaj başına anlık görüntü başına bir kez; bellekten sunulan GET'lerde hiç", n1 == 3 and len(calls) == 3, str(calls))
+            clk[0] += 40
+            iv._snapshot(fc, lambda: clk[0], dec, skw)
+            check("plan: 60 sn geçince yeni anlık görüntüde yeniden (3 daha)", len(calls) == 6, str(calls))
+            fixed = {r["image"]: r.get("fix") for r in s1["images"]}
+            check("bir imajın planı patlayınca ötekilerin planı düşmez",
+                  "fix" not in next(r for r in s1["images"] if r["image"] == "golang:1.24.4")
+                  and all("fix" in r for r in s1["images"] if r["image"] != "golang:1.24.4"), str(fixed)[:200])
+            iv._reset_state()
+    finally:
+        fx.plan = real_plan
+
+    # ── gerçek push_sites: kısmi imaj-yama sonrası yeniden deneme ────────
+    multi = {("anatolia", "/build/alf/Dockerfile"): ("FROM --platform=linux/amd64 golang:1.24.4 AS builder\nRUN x\n"
+                                                     "from golang:1.24.4 AS other\nFROM scratch\n"),
+             ("global", "/build/alf/Dockerfile"): "FROM golang:1.24.4\n",
+             ("russia", "/build/alf/Dockerfile"): "FROM golang:1.24.4\n"}
+    a = kind(fx.plan(_RegionFake(multi), go, index=idx, resolver=res), "imaj-yama")
+    ana = next(u for u in a["repos"] if u["repo"] == "anatolia")
+    check("çok FROM'lu Dockerfile: --platform / küçük harfli from / AS ile her eşleşen satır bir site",
+          [(s["line"], s["old"], s["new"]) for s in ana["sites"]] == [(1, "golang:1.24.4", "golang:1.24.13"), (3, "golang:1.24.4", "golang:1.24.13")],
+          str(ana["sites"]))
+    rf = _RegionFake(multi, fail_repos={"global"})
+    out = fx.apply(rf, go, team="T", index=idx, resolver=res, open_pr_fn=never, start_fn=never)
+    us = {u["repo"]: u["state"] for u in kind(out, "imaj-yama")["repos"]}
+    check("kısmi imaj-yama (gerçek push_sites): anatolia / russia açıldı, global hata",
+          us == {"anatolia": "açıldı", "global": "hata", "russia": "açıldı"}, str(us))
+    pushed = rf.br[("anatolia", a["branch"])]["/build/alf/Dockerfile"].decode()
+    check("çok FROM'lu dosyada yalnız eşleşen iki satır değişti",
+          pushed == ("FROM --platform=linux/amd64 golang:1.24.13 AS builder\nRUN x\nfrom golang:1.24.13 AS other\nFROM scratch\n"), pushed)
+    rf.fail_repos.clear()
+    rf.calls.clear()
+    out = fx.apply(rf, go, team="T", index=idx, resolver=res, open_pr_fn=never, start_fn=never)
+    prs = [c for c in rf.calls if c[0] == "pr"]
+    check("yeniden deneme: yalnız global için PR açılır, başarılı bölgelerde ikinci PR yok",
+          [c[1] for c in prs] == ["global"] and not any(c[1] in ("anatolia", "russia") for c in rf.calls), str(rf.calls))
+    us = {u["repo"]: u["state"] for u in kind(out, "imaj-yama")["repos"]}
+    check("yeniden deneme sonucu: anatolia / russia 'pr açık', global 'açıldı'",
+          us == {"anatolia": "pr açık", "global": "açıldı", "russia": "pr açık"}, str(us))
+
+    # ── kart: onay metni sınırı ve yeniden okuma uyarısı ─────────────────
+    html_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    seg = html_src[html_src.index("function _ivFixConfirm"):]
+    seg = seg[:seg.index("\n}\n")]
+    check("onay metni: izleme sayısı sınırı yansıtır, yolların uygulamada yeniden okunduğunu söyler",
+          "en çok" in seg and "a.cap" in seg and "yeniden okun" in seg, seg[:300])
 
 
 def main():
@@ -14057,7 +14422,7 @@ def main():
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
               test_upgrade_registry, test_upgrade_patch_sites, test_upgrade_image_template,
               test_upgrade_image_wiring,
-              test_image_vuln_inventory, test_image_vuln_signals, test_image_vuln_hardening, test_image_vuln_settings, test_image_vuln_alerts, test_image_fix,
+              test_image_vuln_inventory, test_image_vuln_signals, test_image_vuln_hardening, test_image_vuln_settings, test_image_vuln_alerts, test_image_fix, test_image_fix_round1,
               test_upgrade_scan_take,
               test_upgrade_bump_sites,
               test_upgrade_client_find_pr_and_bytes,

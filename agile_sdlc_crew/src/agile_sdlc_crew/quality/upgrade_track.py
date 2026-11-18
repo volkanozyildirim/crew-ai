@@ -60,14 +60,14 @@ def _pick(kw: dict, keys) -> dict:
 
 # ── İzleme Task'ı ────────────────────────────────────────────────────────
 
-def _track_rows(client, extra: str = "") -> list[dict]:
+def _track_rows(client, extra: str = "", *, open_only: bool = True) -> list[dict]:
     q = ("SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project "
          f"AND [System.Tags] CONTAINS '{TRACK_TAG}'" + extra)
     out = []
     for wi in client.query_work_items(q) or []:
         f = wi.get("fields") or {}
         tags = {t.strip().lower() for t in str(f.get("System.Tags") or "").split(";")}
-        if not _is_open(f) or TRACK_TAG not in tags:     # etiket WIQL'e ek olarak burada da doğrulanır
+        if (open_only and not _is_open(f)) or TRACK_TAG not in tags:     # etiket WIQL'e ek olarak burada da doğrulanır
             continue
         m = _KEY_RE.search(html.unescape(f.get("System.Description") or ""))
         if not m:
@@ -82,6 +82,15 @@ def find_open(client, lang: str, repo: str) -> dict | None:
     iki takım aynı repoyu ayrı ayrı izlemeye başlamasın."""
     rows = _track_rows(client, f" AND [System.Description] CONTAINS '{KEY_PREFIX} {_q(lang)}:{_q(repo)}:'")
     rows = [r for r in rows if r["lang"] == lang and r["repo"].lower() == repo.lower()]
+    return min(rows, key=lambda r: r["id"]) if rows else None
+
+
+def find_any(client, lang: str, repo: str, to: str | None = None) -> dict | None:
+    """Repo × dil için HİÇ izleme işi açılmış mı (kapatılmış / tamamlanmış dahil; `to` verilirse yalnız o hedef).
+    Yoklayıcı, kullanıcının durdurduğu ("durdur" Task'ı kapatır) izlemeyi yeniden açmasın diye bunu sorar."""
+    rows = _track_rows(client, f" AND [System.Description] CONTAINS '{KEY_PREFIX} {_q(lang)}:{_q(repo)}:'",
+                       open_only=False)
+    rows = [r for r in rows if r["lang"] == lang and r["repo"].lower() == repo.lower() and (to is None or r["to"] == to)]
     return min(rows, key=lambda r: r["id"]) if rows else None
 
 
