@@ -567,4 +567,6 @@ sonra servis sayısı, kalanlar `sırada`; `_NOTIFY`: turda TEK özet mesaj, (im
 yeniden gitmez) ve Teknik borç kartı. Gerçek taramadan sonra eklendi: `config/image_vuln.yaml`
 `ignore_packages` (`linux-libc-dev` — çekirdek başlıkları, konteynerde tarayıcı gürültüsü): yok sayılan
 paket `critical` / `high` sayısına ve seviyeye girmez ama gizlenmez (`scan.ignored`, kartta "yok sayılan:");
-önbellek ham taramayı tutar, süzme rapor kurulurken yapılır. Giderme (Görev 3) ayrı.
+önbellek ham taramayı tutar, süzme rapor kurulurken yapılır.
+
+**Uygulandı (2026-11-18, giderme).** `quality/image_fix.py`: `plan` (yazmasız; rapor kaydına `fix` olarak eklenir) ve `apply` (modül kilidi altında yeniden planlar, yalnız `yok` durumundaki eylemleri yürütür). Eylemler: `taban-yama` (`base-images@staging` tek sürüm satırı, `push_sites`), `taban-dizin` (`upgrade_image.open_pr`; `build` artık üç parçalı hedefte aynı minörün küçük yamasını kaynak alır), `imaj-yama` (bölge reposu başına bir taslak PR, yollar taze `build_index`'ten; bir bölge belirsizse hiçbiri yazılmaz), `yükseltme` (`upgrade_track.start`, `_MAX_OPEN` aşımı `sırada`; Node izlenmiyor → elle), `yeniden-üret` (`devops`, yazma yok). Dallar `tempo/image-patch-<dizin|imaj-slug>-<yama>` (`_validate_branch` yalnız bu bir yeni desene açıldı). `CREW_TECHDEBT_IMAGE_VULN_FIX` (kapalı) yoklayıcıda uyarıdan sonra gidermeyi çalıştırır ve sonucu uyarı işine yorum olarak yazar; `POST /api/techdebt/images/fix` kart düğmesi içindir (yalnız `_IMAGE_VULN` şartı; 404 bilinmeyen imaj, 409 yürüyecek eylem yok, hata 502).

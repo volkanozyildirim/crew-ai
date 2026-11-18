@@ -153,15 +153,18 @@ def _lines(text: str) -> list[str]:
     return re.findall(r"[^\n]*\n|[^\n]+", text)
 
 
-def _pick_source(client, name: str, to: str, cfg: dict) -> str:
+def _pick_source(client, name: str, to: str, cfg: dict, *, target_patch: int | None = None) -> str:
+    """Hedefin altındaki en büyük sürümlü dizin. `target_patch` (üç parçalı hedef dizin) verilirse aynı minörün
+    daha küçük yamaları da aday olur (`python-3-13-7` → `python-3-13-18`); verilmezse yalnız küçük minörler."""
     want = tuple(int(x) for x in to.split("."))
+    limit = (*want, target_patch) if target_patch is not None else None
     best = None
     for d in _folders(client, cfg):
         m = _DIR_RE.match(d)
         if not m or m.group(1) != name:
             continue
         ver = (int(m.group(2)), int(m.group(3)), int(m.group(4) or 0))
-        if ver[:2] < want and (best is None or ver > best[0]):
+        if (ver < limit if limit else ver[:2] < want) and (best is None or ver > best[0]):
             best = (ver, d)
     if not best:
         raise ImageTemplateError(f"Kaynak dizin bulunamadı: '{cfg['branch']}' dalında {to} sürümünden küçük "
@@ -183,7 +186,7 @@ def build(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, c
     tm = _DIR_RE.match(target)
     if not tm or tm.group(1) != name or f"{tm.group(2)}.{tm.group(3)}" != to:
         raise ImageTemplateError(f"Dizin adı '{target}' hedef sürümle ({to}) uyuşmuyor.")
-    source = _pick_source(client, name, to, cfg)
+    source = _pick_source(client, name, to, cfg, target_patch=int(tm.group(4)) if tm.group(4) else None)
     if tm.group(4):
         full = f"{tm.group(2)}.{tm.group(3)}.{tm.group(4)}"
     else:

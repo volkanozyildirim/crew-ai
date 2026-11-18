@@ -643,9 +643,64 @@ def _tick(get_client) -> None:
         from agile_sdlc_crew.quality import intake
         client = get_client()
         rep = report(client, force=True)
-        alert(client, rep, team=str(getattr(client, "team", "") or ""), deps=intake.default_deps())
+        team = str(getattr(client, "team", "") or "")
+        results = alert(client, rep, team=team, deps=intake.default_deps())
+        if pc.get("CREW_TECHDEBT_IMAGE_VULN_FIX"):
+            try:                         # giderme hatası turu düşürmez; uyarı zaten yapıldı
+                _fix_round(client, rep, results, team=team)
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"⚠️ image_vuln: giderme turu hata verdi: {str(e)[:300]}")
     finally:
         _end(rep)
+
+
+def _fix_round(client, rep: dict, results: list[dict] | None, *, team: str, index: dict | None = None, resolver=None,
+               apply_fn=None) -> list[dict]:
+    """Uyarının üretildiği turda gidermeyi de başlatır: `kritik` / `yüksek` her imaj için `image_fix.apply`. Yürüyen
+    eylem varsa sonuç (PR / izleme bağlantıları) imajın uyarı işine yorum olarak eklenir. Bir imajın hatası
+    ötekilerini durdurmaz."""
+    from agile_sdlc_crew.quality import image_fix, modern, upgrade_registry, upgrade_track
+    recs = [r for r in rep.get("images") or [] if r.get("level") in ("kritik", "yüksek")]
+    if not recs:
+        return []
+    if index is None:
+        index = modern.build_index(client, max_age_h=0)     # yazmadan önce yollar taze index'ten türetilir
+    resolver = resolver or upgrade_registry.default()
+    apply_fn = apply_fn or image_fix.apply
+    wi = {r["image"]: r["wi"] for r in results or [] if r.get("wi")}
+    out = []
+    for rec in recs:
+        try:
+            acts = apply_fn(client, rec, team=team, index=index, resolver=resolver)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"⚠️ image_vuln: {rec['image']} gidermesi başarısız: {str(e)[:300]}")
+            continue
+        out.append({"image": rec["image"], "actions": image_fix.public(acts)})
+        if wi.get(rec["image"]) and any(a.get("ran") for a in acts):
+            try:
+                client.add_comment(int(wi[rec["image"]]), image_fix.comment_html(acts) + upgrade_track.SIGNATURE)
+            except Exception as e:  # noqa: BLE001 — PR'lar zaten açıldı
+                log.warning(f"⚠️ image_vuln: giderme yorumu yazılamadı: {str(e)[:200]}")
+    return out
+
+
+def attach_fix(client, rep: dict, *, index: dict | None = None, resolver=None) -> dict:
+    """Rapor kayıtlarına `fix` (yazmasız `image_fix.plan`) ekler. Okunamayan durum belirsiz eylem olur; hiçbir hata
+    raporu düşürmez."""
+    from agile_sdlc_crew.quality import image_fix, modern, upgrade_registry
+    try:
+        if index is None:
+            index = modern.build_index(client)
+        resolver = resolver or upgrade_registry.default()
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"⚠️ image_vuln: giderme planı kurulamadı: {str(e)[:200]}")
+        return rep
+    for rec in rep.get("images") or []:
+        try:
+            rec["fix"] = image_fix.public(image_fix.plan(client, rec, index=index, resolver=resolver))
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"⚠️ image_vuln: {rec.get('image')} giderme planı başarısız: {str(e)[:200]}")
+    return rep
 
 
 def start_poller(get_client, *, interval_h, sleep=None, tick=None,

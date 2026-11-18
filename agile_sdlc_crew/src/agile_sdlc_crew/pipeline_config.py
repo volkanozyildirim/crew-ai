@@ -595,6 +595,13 @@ SCHEMA: list[dict] = [
         "desc": "Kritik imaj için günlük özetin Telegram ayarıyla bir mesaj gönderir; aynı imaj ve aynı işaret kümesi için tekrar göndermez.",
     },
     {
+        "key": "CREW_TECHDEBT_IMAGE_VULN_FIX",
+        "label": "Taban imaj güvenliği · uyarıyla birlikte gidermeyi başlatsın",
+        "type": "bool",
+        "default": False,
+        "desc": "Uyarı üretildiği turda gidermeyi de başlatır (yama PR'ı, taban dizin şablonu, sürüm yükseltme izlemesi). Başka ekiplerin repolarına taslak PR yazar — varsayılan kapalı. Kapalıyken giderme karttaki düğmeyle elle başlatılır.",
+    },
+    {
         "key": "CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS",
         "label": "Taban imaj güvenliği · tur başına en çok yeni iş",
         "type": "int",

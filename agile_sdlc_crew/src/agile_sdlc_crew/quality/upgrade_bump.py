@@ -31,6 +31,8 @@ from agile_sdlc_crew.quality.render import mask_secrets
 _SAFE_NEW = re.compile(r"[\w.\-:/'\">=^~|, ]+", re.ASCII)
 # Tempo'nun kendi dalı: tempo/upgrade-<dil>-<repo>-<büyük>.<küçük>
 _BRANCH = re.compile(r"tempo/upgrade-[a-z]+-[A-Za-z0-9][\w.-]*-\d+\.\d+", re.ASCII)
+# Taban imaj yama giderme dalı (image_fix): tempo/image-patch-<dizin | imaj-slug>-<A>.<B>.<yama>
+_BRANCH_IMAGE = re.compile(r"tempo/image-patch-[a-z0-9][a-z0-9.-]*-\d+\.\d+\.\d+", re.ASCII)
 _NOT_PUSHED_MSG = "kısıt elle düzenlenmeli"
 
 
@@ -86,10 +88,10 @@ def _norm_path(path: str) -> str:
 
 
 def _validate_branch(branch: str, targets: set[str]) -> None:
-    if (not isinstance(branch, str) or not _BRANCH.fullmatch(branch)
+    if (not isinstance(branch, str) or not (_BRANCH.fullmatch(branch) or _BRANCH_IMAGE.fullmatch(branch))
             or ".." in branch or "refs/" in branch):
         raise ValueError(f"Geçersiz dal adı: {str(branch)[:80]!r} "
-                         "(tempo/upgrade-<dil>-<repo>-<sürüm> olmalı).")
+                         "(tempo/upgrade-<dil>-<repo>-<sürüm> ya da tempo/image-patch-<ad>-<yama> olmalı).")
     if branch in targets:
         raise ValueError(f"'{branch}' bir hedef dal; hedef dala doğrudan yazılmaz.")
 

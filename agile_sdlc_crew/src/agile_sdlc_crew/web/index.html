@@ -647,6 +647,7 @@ header {
           <button class="sm-btn ghost small" id="tdImgRescan" onclick="loadImageVuln(true)" title="Önbelleği atla, imajları yeniden tara (dakikalar sürebilir)">Yeniden tara</button>
         </div>
         <div id="tdImgNote" style="padding:0 14px 8px;font-size:12px;color:var(--text-dim)"></div>
+        <div id="tdImgFixMsg" style="padding:0 14px 8px;font-size:12px"></div>
         <div id="tdImgList" style="padding:0 0 12px"></div>
       </div>
     </div>
@@ -1224,7 +1225,44 @@ function renderImageVuln(r){
       return `<tr><td><span class="chip ${lv[0]}">${_ivE(lv[1])}</span></td>
         <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}${det}${ign}</td>
         <td>${reg(x.users)}</td><td class="num">${sc.state==='tamam'?(sc.critical||0):'—'}</td><td class="num">${sc.state==='tamam'?(sc.high||0):'—'}</td>
-        <td>${sig.join(' ')||'—'}</td><td>${_ivE((x.actions||[]).join('; ')||'—')}</td></tr>`}).join('')+'</table>';
+        <td>${sig.join(' ')||'—'}</td><td>${_ivE((x.actions||[]).join('; ')||'—')}${_ivFixRows(x.fix)}${(x.fix||[]).some(_ivOpenable)?`<div style="margin-top:6px"><button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="fixImageVuln(this)" title="Uyarıyı gideren çalışmayı başlatır: taslak PR'lar ve sürüm yükseltme izlemesi">Gidermeyi başlat</button></div>`:''}</td></tr>`}).join('')+'</table>';
+  _ivFixAll={};rows.forEach(x=>{_ivFixAll[x.image]=x.fix||[]});
+}
+// Giderme eylemleri (sunucu `fix` alanı): tür, durum, PR / izleme bağlantıları. Bağlantı yalnız https; her metin escHtml'den geçer.
+let _ivFixAll={};
+function _ivLink(url,text){return /^https:\/\//.test(url||'')?`<a href="${_ivE(url)}" target="_blank" rel="noopener">${_ivE(text)}</a>`:_ivE(text)}
+const _ivOpenable=a=>a&&a.state==='yok';
+const _ivFixState={'yok':'dim','açıldı':'ok','pr açık':'run','izleniyor':'run','şablon var':'run','güncel':'ok','devops':'human','elle':'human','hata':'fail','belirsiz':'human','sırada':'dim','pr reddedildi':'dim','pr kapandı':'dim','hedef yok':'dim'};
+function _ivFixRows(fix){
+  if(!fix||!fix.length)return '';
+  return '<div style="margin-top:6px;font-size:11.5px">'+fix.map(a=>{
+    const units=(a.repos||[]).map(u=>`<div style="margin-left:10px;color:var(--text-dim)">${_ivE(u.repo)}: ${_ivE(u.state)}${u.pr?' '+_ivLink(u.pr.url,'PR #'+u.pr.id):''}${u.wi?' '+_ivLink(u.url,'izleme #'+u.wi):''}${u.reason?' — '+_ivE(u.reason):''}</div>`).join('');
+    return `<div style="margin-bottom:4px"><span class="chip dim">${_ivE(a.kind)}</span> <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(a.state)}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${a.reason?`<div style="color:var(--text-dim)">${_ivE(a.reason)}</div>`:''}${units}</div>`}).join('')+'</div>';
+}
+// Onay metni: hangi repolara hangi PR'ların / izleme işlerinin açılacağı, bölge başına.
+function _ivFixConfirm(image,fix){
+  const lines=[];
+  (fix||[]).filter(_ivOpenable).forEach(a=>{
+    if(a.kind==='taban-yama'){const s=(a.sites||[])[0]||{};lines.push(`${s.repo||'base-images'} (${s.branch||'staging'}): 1 taslak PR — ${a.dir} ${s.old} → ${s.new}`)}
+    else if(a.kind==='taban-dizin')lines.push(`base-images: ${a.dir} dizin şablonu için 1 taslak PR (imajı DevOps üretir)`);
+    else if(a.kind==='imaj-yama')(a.repos||[]).filter(u=>u.state==='yok').forEach(u=>lines.push(`${u.repo} (production): 1 taslak PR — ${(u.sites||[]).length} FROM satırı → ${a.target}`));
+    else if(a.kind==='yükseltme'){const n=(a.repos||[]).filter(u=>u.state==='yok');lines.push(`${n.length} repo için sürüm yükseltme izleme işi (${n.map(u=>u.repo+' → '+u.to).join(', ')})`)}
+  });
+  return `${image} için giderme başlatılacak:\n\n- ${lines.join('\n- ')}\n\nDevam?`;
+}
+async function fixImageVuln(btn){
+  const image=btn.dataset.image||'';
+  if(!image||!confirm(_ivFixConfirm(image,_ivFixAll[image])))return;
+  const msg=document.getElementById('tdImgFixMsg');
+  const btns=[...document.querySelectorAll('.ivFixBtn')];
+  btns.forEach(b=>b.disabled=true);msg.textContent='Giderme başlatılıyor…';
+  try{
+    const resp=await fetch('/api/techdebt/images/fix',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image,team:_tdTeam()})});
+    const r=await resp.json().catch(()=>({}));
+    if(!resp.ok)msg.innerHTML=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;
+    else msg.innerHTML=`Giderme başlatıldı (${_ivE(image)}): `+(r.actions||[]).map(a=>`${_ivE(a.kind)} — ${_ivE(a.state)}${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}`).join('; ');
+  }catch(e){msg.textContent=String(e)}
+  finally{btns.forEach(b=>{if(b.isConnected)b.disabled=false});loadImageVuln(false)}
 }
 
 // ── Maliyet analizi (salt okunur; /api/costs) ──

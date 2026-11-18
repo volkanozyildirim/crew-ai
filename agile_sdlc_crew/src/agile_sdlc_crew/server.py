@@ -2155,10 +2155,63 @@ async def techdebt_images(force: int = 0):
     if not _pc.get("CREW_TECHDEBT_IMAGE_VULN"):
         return JSONResponse({"error": "Taban imaj güvenliği kapalı (CREW_TECHDEBT_IMAGE_VULN)"}, status_code=403)
     try:
-        res = await asyncio.to_thread(_iv.serve, AzureDevOpsClient(), force=bool(force))
+        client = AzureDevOpsClient()
+        res = await asyncio.to_thread(_iv.serve, client, force=bool(force))
+        res = await asyncio.to_thread(_iv.attach_fix, client, res)      # her kayda yazmasız giderme planı
         return JSONResponse({"enabled": True, **res})
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
+
+
+class TechdebtImageFixRequest(BaseModel):
+    image: str = ""
+    team: str = ""
+
+
+def _image_fix_run(image: str, team: str) -> tuple[int, dict]:
+    """Taze rapordaki kaydı bulur ve gidermeyi uygular. `image` yalnız o kayıtlarla eşleştirilir (yol / dal / sorgu
+    parçası olarak asla kullanılmaz). → (HTTP kodu, gövde)."""
+    from agile_sdlc_crew.quality import image_fix as _fx
+    from agile_sdlc_crew.quality import image_vuln as _iv
+    from agile_sdlc_crew.quality import modern as _md
+    from agile_sdlc_crew.quality import upgrade_registry as _ur
+    client = AzureDevOpsClient()
+    index = _md.build_index(client, max_age_h=0)     # yazma yolları önbellekten değil taze index'ten türetilir
+    # Taramayı beklemeden: önbellekteki tarama + sürüm işaretleri (yeni tarama başlatılmaz, önbelleğe yazılmaz).
+    rep = _iv.report(client, index=index, scan_fn=lambda _image: _iv._empty_scan("bekliyor"))
+    rec = next((r for r in rep.get("images") or [] if r.get("image") == image), None)
+    if rec is None:
+        return 404, {"error": "Bu imaj güncel raporda yok — kartı yenileyin."}
+    acts = _fx.apply(client, rec, team=team, index=index, resolver=_ur.default())
+    if not any(a.get("ran") for a in acts):
+        why = [{"kind": a.get("kind"), "state": a.get("state"), "reason": a.get("reason")} for a in acts]
+        return 409, {"error": "Başlatılacak giderme yok — " + ("; ".join(
+            f"{w['kind']}: {w['state']}" + (f" ({w['reason']})" if w["reason"] else "") for w in why) or "eylem yok"),
+                     "reasons": why}
+    return 200, {"image": image, "actions": _fx.public(acts)}
+
+
+@app.post("/api/techdebt/images/fix")
+async def techdebt_images_fix(req: TechdebtImageFixRequest):
+    """Karttaki "Gidermeyi başlat": imajın uyarısını gideren çalışmayı başlatır (yama PR'ı, taban dizin şablonu,
+    sürüm yükseltme izlemesi). Ayar şartı yalnız `CREW_TECHDEBT_IMAGE_VULN` — düğme `_FIX` kapalıyken de çalışır."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew.quality.render import mask_secrets as _mask
+    bad = _techdebt_off()
+    if bad:
+        return bad
+    if not _pc.get("CREW_TECHDEBT_IMAGE_VULN"):
+        return JSONResponse({"error": "Taban imaj güvenliği kapalı (CREW_TECHDEBT_IMAGE_VULN)"}, status_code=403)
+    image = (req.image or "").strip()
+    if not image or len(image) > 200:
+        return JSONResponse({"error": "imaj seçin"}, status_code=400)
+    try:
+        code, body = await asyncio.to_thread(_image_fix_run, image, (req.team or "").strip())
+        return JSONResponse(body, status_code=code)
+    except Exception as e:  # noqa: BLE001 — traceback / sır sızmaz
+        pipeline_log.warning(f"image_fix: giderme başlatılamadı: {_mask(str(e))[:300]}")
+        return JSONResponse({"error": f"Giderme başlatılamadı: {_mask(str(e) or type(e).__name__)[:300]}"},
+                            status_code=502)
 
 
 @app.get("/api/techdebt/modern/repos")
