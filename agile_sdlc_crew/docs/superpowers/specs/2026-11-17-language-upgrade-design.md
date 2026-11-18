@@ -559,3 +559,12 @@ imajı taramak — kullanıcı gerek görmedi.
 
 **Kapsam dışı.** Yayınlanmış imajın taranması, imajın üretilmesi / yayınlanması (DevOps), uygulama
 bağımlılıkları (composer / npm — ayrı konu).
+
+**Uygulandı (2026-11-18, uç / yoklayıcı / uyarı / kart).** `GET /api/techdebt/images` (taramada beklemez:
+önbellekten döner, eksikse tek arka plan taraması + `scanning: true`), günlük yoklayıcı, uyarı (`_TASK`:
+tur başına en çok `_MAX_TASKS`=3 yeni needs-human Task — önce destek bitmiş, sonra düzeltmeli kritik sayısı,
+sonra servis sayısı, kalanlar `sırada`; `_NOTIFY`: turda TEK özet mesaj, (imaj, işaret) kümesi değişmedikçe
+yeniden gitmez) ve Teknik borç kartı. Gerçek taramadan sonra eklendi: `config/image_vuln.yaml`
+`ignore_packages` (`linux-libc-dev` — çekirdek başlıkları, konteynerde tarayıcı gürültüsü): yok sayılan
+paket `critical` / `high` sayısına ve seviyeye girmez ama gizlenmez (`scan.ignored`, kartta "yok sayılan:");
+önbellek ham taramayı tutar, süzme rapor kurulurken yapılır. Giderme (Görev 3) ayrı.

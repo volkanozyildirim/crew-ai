@@ -641,6 +641,14 @@ header {
         <div id="tdmMsg" style="padding:0 14px;font-size:12px"></div>
         <div id="tdmResult" style="padding:0 14px 12px"></div>
       </div>
+      <div class="card" id="tdImgCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Taban imaj güvenliği</span><span id="tdImgCount" class="chip dim"></span><span style="flex:1"></span>
+          <span id="tdImgStatus" style="font-size:12px;color:var(--text-dim)"></span>
+          <button class="sm-btn ghost small" id="tdImgRescan" onclick="loadImageVuln(true)" title="Önbelleği atla, imajları yeniden tara (dakikalar sürebilir)">Yeniden tara</button>
+        </div>
+        <div id="tdImgNote" style="padding:0 14px 8px;font-size:12px;color:var(--text-dim)"></div>
+        <div id="tdImgList" style="padding:0 0 12px"></div>
+      </div>
     </div>
   </section>
 
@@ -1167,6 +1175,56 @@ function showTab(name){
   if(name==='cost'&&typeof loadCosts==='function'&&!_cost)loadCosts();
   if(name==='techdebt'&&typeof loadTechdebt==='function')loadTechdebt();
   if(name==='techdebt'&&typeof loadModernRepos==='function')loadModernRepos();
+  if(name==='techdebt'&&typeof loadImageVuln==='function')loadImageVuln(false);
+}
+
+// ── Taban imaj güvenliği (/api/techdebt/images) ──
+// Sunucu taramada beklemez: önbellek eksikse {scanning:true,…eldeki kısım…} döner; kart bitene kadar yoklar.
+// Seviye / işaret / eylem metinleri Python'dan gelir; UI yalnızca çizer. Her metin escHtml'den geçer.
+let _ivTimer=null;
+const _ivE=s=>escHtml(String(s==null?'':s));
+const _ivLevel={'kritik':['fail','Kritik'],'yüksek':['human','Yüksek'],'bilgi':['dim','Bilgi'],'temiz':['ok','Temiz'],'bilinmiyor':['dim','Bilinmiyor']};
+async function loadImageVuln(force){
+  const card=document.getElementById('tdImgCard');if(!card)return;
+  clearTimeout(_ivTimer);
+  const st=document.getElementById('tdImgStatus');
+  try{
+    const resp=await fetch('/api/techdebt/images'+(force?'?force=1':''));
+    if(resp.status===403){card.style.display='none';return}
+    const r=await resp.json();
+    card.style.display='flex';
+    if(!resp.ok){st.innerHTML=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;return}
+    renderImageVuln(r);
+    // tarama sürerken (sekme açıkken) 8 sn'de bir yeniden sor; bitince durur
+    if(r.scanning){_ivTimer=setTimeout(()=>{const p=document.getElementById('paneTechdebt');if(p&&p.classList.contains('on'))loadImageVuln(false)},8000)}
+  }catch(e){card.style.display='flex';st.textContent=String(e)}
+}
+function renderImageVuln(r){
+  const rows=r.images||[];
+  document.getElementById('tdImgCount').textContent=rows.length+' imaj';
+  const crit=rows.filter(x=>x.level==='kritik').length;
+  document.getElementById('tdImgStatus').innerHTML=r.scanning
+    ?'<span style="color:var(--run)">Taranıyor… (imaj başına dakikalar sürebilir)</span>'
+    :(r.scanner===false?'<span style="color:var(--warning)">Tarayıcı yok — yalnız sürüm işaretleri</span>':`${crit} kritik · son tarama ${_ivE((r.scanned_at||'').replace('T',' '))}`);
+  document.getElementById('tdImgRescan').disabled=!!r.scanning;
+  document.getElementById('tdImgNote').textContent=r.note||'Yayınlanmış imaj değil, dayandığı resmî imaj taranır; sonuç alt sınırdır.';
+  const box=document.getElementById('tdImgList');
+  if(!rows.length){box.innerHTML='<div class="board-empty" style="padding:12px 14px">Üretim imajı bulunamadı.</div>';return}
+  const reg=u=>Object.keys(u||{}).map(k=>`<span class="chip dim" title="${_ivE((u[k]||[]).join('\n'))}">${_ivE(k)} ${(u[k]||[]).length}</span>`).join(' ');
+  box.innerHTML='<table class="perf"><tr><th>Seviye</th><th>İmaj</th><th>Kullanan servisler</th><th class="num">Kritik</th><th class="num">Yüksek</th><th>İşaretler</th><th>Önerilen eylem</th></tr>'
+    +rows.map(x=>{
+      const lv=_ivLevel[x.level]||['dim',x.level];const sc=x.scan||{};const ig=sc.ignored||{};
+      const sig=[];
+      if(x.patch)sig.push(`<span class="chip human" title="Aynı minörün Docker Hub'daki son yaması">yama geride → ${_ivE(x.patch.latest)}</span>`);
+      if(x.eol)sig.push(`<span class="chip fail">destek bitti${x.eol.eol?' '+_ivE(x.eol.eol):''}</span>`);
+      if(sc.state&&sc.state!=='tamam')sig.push(`<span class="chip dim" title="${_ivE(sc.reason||'')}">${_ivE(sc.state)}</span>`);
+      const pk=(sc.packages||[]);
+      const det=pk.length?`<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--text-dim)">${pk.length} paket</summary><ul style="margin:4px 0 0 16px">${pk.slice(0,40).map(p=>`<li><code>${_ivE(p.name)}</code> ${_ivE(p.installed)} → ${_ivE(p.fixed)} <span class="chip ${p.severity==='CRITICAL'?'fail':'human'}">${_ivE(p.severity)}</span></li>`).join('')}</ul>${pk.length>40?`<div style="color:var(--text-dim)">… ve ${pk.length-40} paket daha</div>`:''}</details>`:'';
+      const ign=(ig.packages&&ig.packages.length)?`<div style="color:var(--text-dim);font-size:11.5px" title="config/image_vuln.yaml — sayıma girmez, gizlenmez">yok sayılan: ${_ivE(ig.packages.join(', '))} (${ig.critical||0} kritik, ${ig.high||0} yüksek)</div>`:'';
+      return `<tr><td><span class="chip ${lv[0]}">${_ivE(lv[1])}</span></td>
+        <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}${det}${ign}</td>
+        <td>${reg(x.users)}</td><td class="num">${sc.state==='tamam'?(sc.critical||0):'—'}</td><td class="num">${sc.state==='tamam'?(sc.high||0):'—'}</td>
+        <td>${sig.join(' ')||'—'}</td><td>${_ivE((x.actions||[]).join('; ')||'—')}</td></tr>`}).join('')+'</table>';
 }
 
 // ── Maliyet analizi (salt okunur; /api/costs) ──

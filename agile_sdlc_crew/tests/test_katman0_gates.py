@@ -12989,6 +12989,349 @@ def test_image_vuln_settings():
           and by["CREW_TECHDEBT_IMAGE_VULN_SCAN_H"]["default"] == 24 and by["CREW_TECHDEBT_IMAGE_VULN_SCAN_H"].get("min") == 1)
 
 
+def _iv_rec(image, level="kritik", *, crit=1, eol=None, users=1, patch=None, actions=None, pkgs=None):
+    return {"image": image, "lang": "php", "version": "8.4.27", "via": [], "touched": "",
+            "users": {"anatolia": [f"build/s{i}" for i in range(users)]}, "error": "",
+            "scan": {"state": "tamam", "critical": crit, "high": 3, "packages": pkgs or [], "os": "debian 12",
+                     "created": "2026-11-05", "ignored": {"critical": 0, "high": 0, "packages": []}},
+            "patch": patch, "eol": eol, "level": level,
+            "actions": actions if actions is not None else ["yeniden üret"]}
+
+
+def test_image_vuln_alerts():
+    """Uç, yoklayıcı, uyarı (iş + Telegram özeti, tavan), yok sayılan paketler. Ağ / Docker / Azure / Telegram yok."""
+    print("\n[taban imaj güvenliği: uç, yoklayıcı, uyarı]")
+    import threading
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import daily
+    from agile_sdlc_crew.quality import image_vuln as iv, render
+
+    knobs = {"CREW_TECHDEBT_IMAGE_VULN_TASK": True, "CREW_TECHDEBT_IMAGE_VULN_NOTIFY": True,
+             "CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS": 3}
+    _get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+    _tg = daily.telegram_configured
+    try:
+        # ── alert: iş açma, tavan, sıra ──────────────────────────────────
+        board: dict = {}
+        opened: list = []
+
+        def open_fn(client, rec, *, team, deps):
+            opened.append(rec["image"])
+            board[f"image_vuln:{rec['image']}"] = {"wi": 900 + len(opened), "state": "New", "closed_at": 0.0}
+            return {"id": 900 + len(opened), "url": "https://x/_workitems/edit/%d" % (900 + len(opened))}
+        deps = SimpleNamespace(board=lambda c: board, now=lambda: 1000.0)
+        rep = {"images": [_iv_rec("golang:1.24.4", crit=23, eol={"eol": "2026-02-10"}, users=3),
+                          _iv_rec("php:7.4.33-fpm", crit=18, eol={"eol": "2022-11-28"}, users=2),
+                          _iv_rec("php:8.4.27", crit=5, users=11),
+                          _iv_rec("python:3.12", crit=9, users=1),
+                          _iv_rec("node:20.17.0", crit=9, users=4),
+                          _iv_rec("debian:12", level="yüksek", crit=0)]}
+        with tempfile.TemporaryDirectory() as td:
+            kw = dict(team="T", deps=deps, open_fn=open_fn, notify_fn=lambda t: True, cache_dir=Path(td))
+            knobs["CREW_TECHDEBT_IMAGE_VULN_TASK"] = False
+            out = iv.alert(None, rep, **kw)
+            check("_TASK kapalı → hiç iş açılmaz", opened == [] and not any(r.get("state") == "açıldı" for r in out))
+            knobs["CREW_TECHDEBT_IMAGE_VULN_TASK"] = True
+            iv.alert(None, rep, **{**kw, "team": ""})
+            check("takım yoksa iş açılmaz (yazma yolu kapalı)", opened == [])
+            out = iv.alert(None, rep, **kw)
+            check("tavan 3: destek bitmişler önce, sonra düzeltmeli kritik sayısı, sonra servis sayısı",
+                  opened == ["golang:1.24.4", "php:7.4.33-fpm", "node:20.17.0"], str(opened))
+            st = {r["image"]: r["state"] for r in out}
+            check("kalanlar 'sırada', yüksek seviyeli imaj listede yok",
+                  st.get("php:8.4.27") == "sırada" and st.get("python:3.12") == "sırada" and "debian:12" not in st
+                  and st["golang:1.24.4"] == "açıldı", str(st))
+            n = len(opened)
+            out = iv.alert(None, rep, **kw)
+            st = {r["image"]: r["state"] for r in out}
+            check("ikinci çağrı: açık işi olana ikinci iş açılmaz; açık iş tavana sayılmaz",
+                  st["golang:1.24.4"] == "açık iş" and len(opened) - n == 2 and opened[n:] == ["python:3.12", "php:8.4.27"],
+                  f"{st} {opened[n:]}")
+            out = iv.alert(None, rep, **kw)
+            check("üçüncü çağrı: hepsinin işi var → yeni iş yok",
+                  len(opened) == n + 2 and all(r["state"] == "açık iş" for r in out))
+            knobs["CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS"] = 1
+            board.clear(); opened.clear()
+            iv.alert(None, rep, **kw)
+            check("tavan ayardan okunur (1)", len(opened) == 1)
+
+            # ── alert: Telegram özeti ───────────────────────────────────
+            msgs: list = []
+            nkw = {**kw, "notify_fn": lambda t: msgs.append(t) or True, "cache_dir": Path(td) / "n"}
+            knobs["CREW_TECHDEBT_IMAGE_VULN_TASK"] = False
+            iv.alert(None, rep, **nkw)
+            check("tek özet mesaj (imaj başına değil), seviye sayıları + imaj + eylem",
+                  len(msgs) == 1 and "golang:1.24.4" in msgs[0] and "yeniden üret" in msgs[0]
+                  and "kritik" in msgs[0].lower() and "5" in msgs[0], str(msgs))
+            iv.alert(None, rep, **nkw)
+            check("aynı (imaj, işaret) kümesi → tekrar gönderilmez", len(msgs) == 1)
+            rep2 = {"images": [dict(r) for r in rep["images"]]}
+            rep2["images"][2] = _iv_rec("php:8.4.27", crit=5, users=11, patch={"latest": "8.4.30"})
+            iv.alert(None, rep2, **nkw)
+            check("işaret kümesi değişince yeniden gönderilir", len(msgs) == 2)
+            iv.alert(None, {"images": [_iv_rec("a:1", level="temiz", crit=0)]}, **nkw)
+            check("kritik yokken mesaj yok", len(msgs) == 2)
+            fail_msgs: list = []
+            fkw = {**nkw, "cache_dir": Path(td) / "f", "notify_fn": lambda t: fail_msgs.append(t) and False}
+            iv.alert(None, rep, **fkw)
+            iv.alert(None, rep, **fkw)
+            check("gönderilemeyen mesaj kaydedilmez (sonraki turda yeniden denenir)", len(fail_msgs) == 2)
+            knobs["CREW_TECHDEBT_IMAGE_VULN_NOTIFY"] = False
+            iv.alert(None, rep2, **{**nkw, "cache_dir": Path(td) / "off"})
+            check("_NOTIFY kapalı → mesaj yok", len(msgs) == 2)
+            knobs["CREW_TECHDEBT_IMAGE_VULN_NOTIFY"] = True
+            daily.telegram_configured = lambda: False
+            iv.alert(None, rep, **{**nkw, "notify_fn": None, "cache_dir": Path(td) / "noc"})
+            check("Telegram ayarı yoksa sessizce atlanır (çökmez)", True)
+    finally:
+        pc.get = _get
+        daily.telegram_configured = _tg
+
+    # ── iş metni ve Task alanları ───────────────────────────────────────
+    pkgs = [{"name": f"pkg{i}", "installed": "1", "fixed": "2", "severity": "CRITICAL", "cves": ["CVE-2026-0001"]}
+            for i in range(20)]
+    pkgs[0]["name"] = "<img src=x onerror=alert(1)>"
+    rec = _iv_rec("golang:1.24.4", crit=23, eol={"eol": "2026-02-10"}, users=2, pkgs=pkgs,
+                  patch={"latest": "1.24.13"}, actions=["yeniden üret", "sürüm yükselt (destek 2026-02-10'da bitti)"])
+    rec["users"]["russia"] = ["build/core"]
+    body = iv.task_body(rec)
+    check("gövde: sınır cümlesi aynen",
+          "Yayınlanmış imaj değil, dayandığı resmî imaj tarandı; kendi eklediğimiz katmanlar ve derleme anında "
+          "kurulan yamalar görülmez — sonuç alt sınırdır." in body)
+    check("gövde: paket adı kaçışlı, ham HTML yok", "<img" not in body and "&lt;img" in body)
+    check("gövde: yalnız ilk 15 paket", "pkg14" in body and "pkg15" not in body and "pkg19" not in body)
+    check("gövde: bölge başına servisler + eylem", "anatolia" in body and "russia" in body and "build/core" in body
+          and "yeniden üret" in body)
+    g = iv.task_group(rec)
+    desc = render.task_description(g)
+    tags = render.task_tags(g, lane="techdebt").split("; ")
+    check("Task: etiketler", all(t in tags for t in ("tempo-quality", "tempo-techdebt", "tech-debt", "tempo-image-vuln", "needs-human")),
+          str(tags))
+    check("Task: parmak izi image_vuln:<imaj>", g.fingerprints == ["image_vuln:golang:1.24.4"]
+          and "tempo-fp: image_vuln:golang:1.24.4" in desc and g.needs_human)
+    check("Task: başlık", "Taban imaj güvenliği: golang:1.24.4" in render.task_title(g))
+    check("Task: kabul/davranış metni kalite (NR) metni değil",
+          "New Relic" not in desc and render.acceptance_block(g) and "hata sınıfı" not in render.acceptance_block(g))
+    from agile_sdlc_crew.quality import dedup
+    check("Task: pano dedup bu satırı okur", render.parse_fingerprints(desc) == ["image_vuln:golang:1.24.4"]
+          and "image_vuln:golang:1.24.4" in dedup.index_board([{"id": 7, "fields": {"System.State": "New", "System.Description": desc}}]))
+
+    # ── yok sayılan paketler ────────────────────────────────────────────
+    with tempfile.TemporaryDirectory() as td:
+        y = Path(td) / "image_vuln.yaml"
+        y.write_text("ignore_packages: [linux-libc-dev]\n")
+        check("yaml okunur", iv.load_ignore(y) == {"linux-libc-dev"})
+        y.write_text("ignore_packages: [unclosed\n  - : :\n")
+        check("bozuk yaml → yok sayma yok, çökme yok", iv.load_ignore(y) == set())
+        y.write_text("ignore_packages: 5\n")
+        check("beklenmedik biçim → yok sayma yok", iv.load_ignore(y) == set())
+        check("dosya yok → yok sayma yok", iv.load_ignore(Path(td) / "nope.yaml") == set())
+        check("depodaki yaml linux-libc-dev'i yok sayar", "linux-libc-dev" in iv.load_ignore())
+
+        libc = {"name": "linux-libc-dev", "installed": "1", "fixed": "2", "severity": "CRITICAL", "cves": [],
+                "critical": 1, "high": 4}
+        ssl = {"name": "libssl3", "installed": "1", "fixed": "2", "severity": "HIGH", "cves": [], "critical": 0, "high": 2}
+        raw = {"state": "tamam", "critical": 1, "high": 6, "packages": [libc, ssl], "os": "debian 12", "created": ""}
+        f = iv.apply_ignore(raw, {"linux-libc-dev"})
+        check("yok sayılan paket sayıma girmez, gizlenmez",
+              f["critical"] == 0 and f["high"] == 2 and [p["name"] for p in f["packages"]] == ["libssl3"]
+              and f["ignored"] == {"critical": 1, "high": 4, "packages": ["linux-libc-dev"]}, str(f))
+        check("ham tarama değişmez", raw["critical"] == 1 and len(raw["packages"]) == 2 and "ignored" not in raw)
+
+        client = _iv_client({})
+        index = {"a": [{"src": "anatolia/build/a", "images": ["php:8.4.27-fpm-bookworm"]}]}
+        ran: list = []
+
+        def scan_fn(image):
+            ran.append(image)
+            return {**raw, "critical": 1, "high": 4, "packages": [dict(libc)]}
+        hub = SimpleNamespace(latest_patch=lambda n, m: None)
+        kw = dict(index=index, scan_fn=scan_fn, resolver=hub, eol_fn=lambda *a, **k: None, cache_dir=Path(td) / "c",
+                  ttl_h=24, now=1000.0)
+        r1 = iv.report(client, ignore_packages={"linux-libc-dev"}, **kw)
+        im = r1["images"][0]
+        check("yalnız yok sayılan pakette bulgu → seviye kritik değil",
+              im["level"] != "kritik" and im["scan"]["critical"] == 0 and im["scan"]["ignored"]["critical"] == 1, str(im["scan"]))
+        r2 = iv.report(client, ignore_packages=set(), **kw)
+        check("önbellek ham tarama tutar: yaml değişince yeniden tarama olmadan etki eder",
+              r2["images"][0]["level"] == "kritik" and r2["images"][0]["scan"]["critical"] == 1 and len(ran) == 1, f"{len(ran)}")
+        # eski biçimli önbellek (paket başına sayım yok): yok sayılan pakette doğru sayım için yeniden taranır
+        old = {"state": "tamam", "critical": 1, "high": 4, "os": "", "created": "",
+               "packages": [{"name": "linux-libc-dev", "installed": "1", "fixed": "2", "severity": "CRITICAL", "cves": []}]}
+        iv._cache_write(Path(td) / "c", "php:8.4.27-fpm-bookworm", old, 1000.0)
+        n = len(ran)
+        iv.report(client, ignore_packages={"linux-libc-dev"}, **kw)
+        check("paket başına sayımı olmayan eski önbellek yok sayılan pakette yeniden taranır", len(ran) == n + 1)
+
+    # ── uç: önbellek / tarama ───────────────────────────────────────────
+    with tempfile.TemporaryDirectory() as td:
+        client = _iv_client({})
+        index = {"a": [{"src": "anatolia/build/a", "images": ["php:8.4.27-fpm-bookworm", "golang:1.24.4"]}]}
+        ran = []
+
+        def scan_fn2(image):
+            ran.append(image)
+            return {"state": "tamam", "critical": 0, "high": 0, "packages": [], "os": "", "created": ""}
+        skw = dict(index=index, scan_fn=scan_fn2, resolver=hub, eol_fn=lambda *a, **k: None,
+                   cache_dir=Path(td), ttl_h=24, now=1000.0, ignore_packages=set())
+        spawned: list = []
+        iv._RUN.update(running=False, done_at=0.0, report=None)
+        res = iv.serve(client, spawn=spawned.append, **skw)
+        check("önbellek boş → scanning true + eldeki kısım, tarama bu çağrıda koşmaz",
+              res["scanning"] is True and len(spawned) == 1 and ran == [] and len(res["images"]) == 2
+              and all(r["scan"]["state"] == "bekliyor" for r in res["images"]), str(res)[:300])
+        res = iv.serve(client, spawn=spawned.append, **skw)
+        check("tarama sürerken ikinci istek ikinci tarama başlatmaz (kilit)", res["scanning"] is True and len(spawned) == 1)
+        spawned[0]()
+        check("arka plan taraması tüm imajları taradı, kilit bırakıldı", sorted(ran) == ["golang:1.24.4", "php:8.4.27-fpm-bookworm"]
+              and iv._RUN["running"] is False)
+        res = iv.serve(client, spawn=spawned.append, **skw)
+        check("önbellek dolu → scanning false, images, yeni tarama yok",
+              res["scanning"] is False and len(res["images"]) == 2 and len(spawned) == 1 and len(ran) == 2)
+        res = iv.serve(client, force=True, spawn=spawned.append, **skw)
+        check("force → yeniden tarama başlatır, eldeki sonuç yine döner",
+              res["scanning"] is True and len(spawned) == 2 and len(res["images"]) == 2)
+        spawned[1]()
+        check("force taraması önbelleği atladı", len(ran) == 4)
+        # tarayıcı yok: sonuç önbelleğe girmez → her GET yeni tarama başlatmasın
+        with tempfile.TemporaryDirectory() as td2:
+            def noscan(image):
+                return {"state": "tarayıcı yok", "critical": 0, "high": 0, "packages": [], "os": "", "created": ""}
+            nkw2 = {**skw, "scan_fn": noscan, "cache_dir": Path(td2)}
+            iv._RUN.update(running=False, done_at=0.0, report=None)
+            sp2: list = []
+            iv.serve(client, spawn=sp2.append, **nkw2)
+            sp2[0]()
+            res = iv.serve(client, spawn=sp2.append, **nkw2)
+            check("taranamayan imaj sonsuz yeniden tarama döngüsü kurmaz (son sonuç döner)",
+                  len(sp2) == 1 and res["scanning"] is False
+                  and {r["scan"]["state"] for r in res["images"]} == {"tarayıcı yok"}, str(res)[:200])
+        iv._RUN.update(running=False, done_at=0.0, report=None)
+
+    # ── uç: sunucu işleyicisi ───────────────────────────────────────────
+    import asyncio
+    from agile_sdlc_crew import server
+    _get2 = pc.get
+    _serve, _cl = iv.serve, server.AzureDevOpsClient
+    try:
+        knobs2 = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": False}
+        pc.get = lambda k: knobs2[k] if k in knobs2 else _get2(k)
+        server.AzureDevOpsClient = lambda: object()
+        iv.serve = lambda client, force=False, **kw: {"scanning": False, "images": [{"image": "x"}], "force": force}
+        r = asyncio.run(server.techdebt_images())
+        check("ayar kapalı → 403 Türkçe neden", r.status_code == 403 and "taban imaj" in json.loads(r.body)["error"].lower())
+        knobs2["CREW_TECHDEBT"] = False
+        knobs2["CREW_TECHDEBT_IMAGE_VULN"] = True
+        check("CREW_TECHDEBT kapalı → 403", asyncio.run(server.techdebt_images()).status_code == 403)
+        knobs2["CREW_TECHDEBT"] = True
+        r = asyncio.run(server.techdebt_images(force=1))
+        body = json.loads(r.body)
+        check("ayar açık → 200 + images, force iletilir", r.status_code == 200 and body["images"] and body["force"] is True)
+        iv.serve = lambda client, **kw: (_ for _ in ()).throw(ValueError("kötü"))
+        check("hata Türkçe JSON'a çevrilir (400)", asyncio.run(server.techdebt_images()).status_code == 400)
+    finally:
+        pc.get = _get2
+        iv.serve, server.AzureDevOpsClient = _serve, _cl
+
+    # ── yoklayıcı ───────────────────────────────────────────────────────
+    iv._POLLER = None
+    calls: list = []
+    sleeps: list = []
+    stop = threading.Event()
+    done = threading.Event()
+
+    def tick(get_client):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("Azure düştü")
+        stop.set()
+        done.set()
+    th = iv.start_poller(lambda: None, interval_h=lambda: 6, sleep=lambda s: sleeps.append(s), tick=tick, stop_event=stop)
+    done.wait(5)
+    th.join(5)
+    check("yoklayıcı: ilk tur bir aralık sonra, aralık saat → saniye", sleeps and sleeps[0] == 6 * 3600, str(sleeps))
+    check("yoklayıcı: istisna döngüyü durdurmaz (ikinci tur koştu)", len(calls) == 2, str(calls))
+    check("yoklayıcı: daemon thread", th.daemon)
+    iv._POLLER = None
+    # _tick: ayarlar kapalıysa Azure'a gidilmez; açıksa rapor + uyarı sırayla
+    seen: list = []
+    _rep, _alert, _get3 = iv.report, iv.alert, pc.get
+    try:
+        knobs3 = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": False}
+        pc.get = lambda k: knobs3[k] if k in knobs3 else _get3(k)
+        iv.report = lambda client, **kw: seen.append(("report", kw.get("force"))) or {"images": []}
+        iv.alert = lambda client, rep, **kw: seen.append(("alert", kw.get("team"))) or []
+        cl = SimpleNamespace(team="Ekip")
+        iv._tick(lambda: cl)
+        check("_tick: ayar kapalı → hiçbir şey yapmaz", seen == [])
+        knobs3["CREW_TECHDEBT_IMAGE_VULN"] = True
+        iv._tick(lambda: cl)
+        check("_tick: force=True rapor sonra uyarı (istemcinin takımıyla)", seen == [("report", True), ("alert", "Ekip")], str(seen))
+        iv._RUN["running"] = True
+        seen.clear()
+        iv._tick(lambda: cl)
+        check("_tick: başka tarama sürerken atlanır", seen == [])
+        iv._RUN["running"] = False
+    finally:
+        iv.report, iv.alert, pc.get = _rep, _alert, _get3
+
+    # ── varsayılan iş açma yolu: teknik borç hikâyesi + needs-human Task (sahte client, yazma yok) ──
+    from agile_sdlc_crew.quality import intake
+
+    class _FC:
+        org_url, project = "https://dev.azure.com/o", "P"
+
+        def __init__(self):
+            self.created, self.updates = [], []
+
+        def list_iterations(self, team=""):
+            return [{"name": "Sprint 42", "path": "P\\Sprint 42", "attributes": {"timeFrame": "current"}}]
+
+        def query_work_items(self, wiql, limit=0):
+            return []
+
+        def get_team_area_path(self, team=""):
+            return "P\\Team"
+
+        def get_authenticated_user(self):
+            return {"uniqueName": "me@flo.com.tr"}
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append((type_name, fields, parent_id))
+            return {"id": 2000 + len(self.created) - 1, "fields": fields}
+
+        def update_work_item(self, wid, ops):
+            self.updates.append((wid, ops))
+            return {}
+    fc, recorded, queued = _FC(), [], []
+    ideps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: True,
+                        queue=lambda wid, title: queued.append(wid), record=lambda **kw: recorded.append(kw),
+                        now=lambda: 2e9, cfg=lambda: {"task_fields": {}, "sonar_url": "", "nr_days": 7})
+    got = iv._open_task(fc, rec, team="Team", deps=ideps)
+    tasks = [x for x in fc.created if x[0] == "Task"]
+    check("varsayılan yol: bir Task, needs-human, kuyruğa alınmaz, parmak izi kaydı",
+          got["id"] == 2001 and len(tasks) == 1 and "needs-human" in tasks[0][1]["System.Tags"]
+          and "tempo-image-vuln" in tasks[0][1]["System.Tags"] and queued == []
+          and recorded and recorded[0]["fingerprint"] == "image_vuln:golang:1.24.4" and recorded[0]["needs_human"] is True,
+          str(tasks)[:300])
+    check("varsayılan yol: Task açıklamasında kaçışlı gövde + sınır cümlesi",
+          "&lt;img" in tasks[0][1]["System.Description"] and "sonuç alt sınırdır" in tasks[0][1]["System.Description"])
+
+    html_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    seg = html_src[html_src.index("async function loadImageVuln"):html_src.index("function renderImageVuln")
+                   + html_src[html_src.index("function renderImageVuln"):].index("\n}\n")]
+    check("kart: uç, 403'te gizlenir, yeniden tara, yok sayılan satırı, bölge sayıları",
+          "/api/techdebt/images" in seg and "resp.status===403" in seg and 'id="tdImgCard"' in html_src
+          and "yok sayılan:" in seg and "loadImageVuln(true)" in html_src and "u[k]||[]).length" in seg)
+    check("kart: her aralanan metin escHtml'den geçer (ham ${x.image} / ${p.name} yok)",
+          "${x.image}" not in seg and "${p.name}" not in seg and "_ivE=s=>escHtml(" in html_src)
+
+    by = {f["key"]: f for f in pc.SCHEMA}
+    mt = by.get("CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS", {})
+    check("_MAX_TASKS int, varsayılan 3, min 1", mt.get("type") == "int" and mt.get("default") == 3 and mt.get("min") == 1, str(mt))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -13089,7 +13432,7 @@ def main():
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
               test_upgrade_registry, test_upgrade_patch_sites, test_upgrade_image_template,
               test_upgrade_image_wiring,
-              test_image_vuln_inventory, test_image_vuln_signals, test_image_vuln_hardening, test_image_vuln_settings,
+              test_image_vuln_inventory, test_image_vuln_signals, test_image_vuln_hardening, test_image_vuln_settings, test_image_vuln_alerts,
               test_upgrade_scan_take,
               test_upgrade_bump_sites,
               test_upgrade_client_find_pr_and_bytes,

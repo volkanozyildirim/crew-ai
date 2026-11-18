@@ -595,6 +595,14 @@ SCHEMA: list[dict] = [
         "desc": "Kritik imaj için günlük özetin Telegram ayarıyla bir mesaj gönderir; aynı imaj ve aynı işaret kümesi için tekrar göndermez.",
     },
     {
+        "key": "CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS",
+        "label": "Taban imaj güvenliği · tur başına en çok yeni iş",
+        "type": "int",
+        "default": 3,
+        "min": 1,
+        "desc": "Bir uyarı turunda açılacak en çok yeni Task sayısı. Sıra: destek bitmiş imajlar, sonra düzeltmeli kritik sayısı, sonra kullanan servis sayısı; açık işi olan imaj sayıya girmez. Kalanlar kartta 'sırada' görünür, sonraki turda açılır.",
+    },
+    {
         "key": "CREW_TECHDEBT_UPGRADE_POLL_MIN",
         "label": "Yükseltme · izleme sıklığı (dk)",
         "type": "int",

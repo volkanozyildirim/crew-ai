@@ -2143,6 +2143,24 @@ def _modern_off():
     return None
 
 
+@app.get("/api/techdebt/images")
+async def techdebt_images(force: int = 0):
+    """Taban imaj güvenliği raporu. Taramada beklemez: önbellekten döner; eksik / `force` ise taramayı arka planda
+    başlatır ve `scanning: true` ile eldekini verir (imaj başına ~20 sn–dakikalar sürebilir)."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew.quality import image_vuln as _iv
+    bad = _techdebt_off()
+    if bad:
+        return bad
+    if not _pc.get("CREW_TECHDEBT_IMAGE_VULN"):
+        return JSONResponse({"error": "Taban imaj güvenliği kapalı (CREW_TECHDEBT_IMAGE_VULN)"}, status_code=403)
+    try:
+        res = await asyncio.to_thread(_iv.serve, AzureDevOpsClient(), force=bool(force))
+        return JSONResponse({"enabled": True, **res})
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
 @app.get("/api/techdebt/modern/repos")
 async def techdebt_modern_repos():
     """Yerel repolar × dil (PHP/Go/Python/Next.js) + hedef sürüm (yazma yok)."""
@@ -2535,6 +2553,20 @@ async def _start_upgrade_poller():
                          on_queued=lambda: _ensure_worker())
     except Exception as e:
         pipeline_log.warning(f"Sürüm yükseltme yoklayıcısı başlatılamadı: {e}")
+
+
+@app.on_event("startup")
+async def _start_image_vuln_poller():
+    """Taban imaj güvenliği günlük turu: ayrı daemon thread (pipeline işlerini etkilemez), ilk tur bir aralık sonra;
+    ayarlar her turda okunur. Aralık = `CREW_TECHDEBT_IMAGE_VULN_SCAN_H`."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew.quality import image_vuln as _iv
+    if not (_pc.get("CREW_TECHDEBT") and _pc.get("CREW_TECHDEBT_IMAGE_VULN")):
+        return
+    try:
+        _iv.start_poller(lambda: AzureDevOpsClient(), interval_h=lambda: _pc.get("CREW_TECHDEBT_IMAGE_VULN_SCAN_H"))
+    except Exception as e:
+        pipeline_log.warning(f"Taban imaj güvenliği yoklayıcısı başlatılamadı: {e}")
 
 
 # ── Backlog refinement (Scrum faz 6; backlog_refinement.py) ──

@@ -350,6 +350,11 @@ def expected_behavior(g: Group) -> list[str]:
     'eksik anahtarda ne olmalı / hangi dosya / nasıl doğrulanır' soruları
     kalite işlerinde hep aynı cevaba sahip — her seferinde insana sormak
     yerine burada sabitlenir."""
+    if g.source == "image_vuln":
+        return ["Taban imaj DevOps tarafından yeniden üretilir ya da desteklenen sürüme alınır; Tempo imajı üretmez "
+                "veya yayınlamaz. Karar ve takvim insanındır.",
+                "Yeniden üretim sonrası tarama tekrarlandığında bu imajda düzeltmesi yayınlanmış kritik açık ve "
+                "destek bitişi kalmaz; kapanış bu kontrolle doğrulanır."]
     if g.source in MODERN_SOURCES:
         if g.needs_human:
             return ["Bu bir tasarım kararıdır: kapsamı (hangi sınıflar, hangi sırayla, hangi dış API korunacak) "
@@ -420,6 +425,8 @@ def acceptance_block(g: Group) -> str:
 def acceptance_criteria(g: Group) -> str:
     """Açıklamaya VE AcceptanceCriteria alanına yazılır: alan boşsa hazırlık
     kapısı (flow._readiness_score) her kalite işinden 15 puan düşer."""
+    if g.source == "image_vuln":
+        return "İmaj yeniden üretilir / desteklenen sürüme alınır; sonraki taramada kritik seviyeden çıkar."
     if g.source == "newrelic":
         return "Bu action'da bu hata sınıfı/mesajı bir daha üretilmez; mevcut davranış korunur."
     if g.source in MODERN_SOURCES:
@@ -455,8 +462,11 @@ def task_description(g: Group, *, sonar_url: str = "", nr_days: int = 7, php_tar
         parts.append(f"<p><b>Tekrarladı</b> — önceki: #{int(g.recurring_of)}</p>")
     if g.needs_human:
         parts.append(f"<p><b>Neden insan:</b> {_e(g.human_reason)}</p>")
-    parts.append(UNTRUSTED_NOTE)
-    if g.source == "newrelic":
+    if not g.body_html:
+        parts.append(UNTRUSTED_NOTE)
+    if g.body_html:
+        parts.append(g.body_html)
+    elif g.source == "newrelic":
         parts += _nr_body(g, nr_days)
     elif g.source in MODERN_SOURCES:
         parts += _modern_body(g, php_target)

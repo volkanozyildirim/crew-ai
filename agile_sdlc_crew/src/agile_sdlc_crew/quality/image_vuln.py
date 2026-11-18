@@ -10,6 +10,7 @@ gitmeden `valid_image` ile doğrulanır; kabuk yok, `verify._env()`, zaman aşı
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from datetime import date, datetime
@@ -27,7 +29,8 @@ log = logging.getLogger("pipeline")
 _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 CACHE_DIR = _CONFIG_DIR / "quality_image_vuln_cache"
 TRIVY_CACHE = Path.home() / ".cache" / "tempo-trivy"    # ~1.7 GB veritabanı: repo içinde DEĞİL
-PROD_BRANCH = "production"                              # üretim imajları bu daldan üretildi (yaml'daki staging değil)
+IGNORE_PATH = _CONFIG_DIR / "image_vuln.yaml"           # yok sayılan paketler (linux-libc-dev: çekirdek başlıkları)
+PROD_BRANCH = "production"                             # üretim imajları bu daldan üretildi (yaml'daki staging değil)
 OWN_REGISTRY = "prod-ar"                                # kendi imajımız: `…/prod-ar/<dizin>:<etiket>`
 
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*(:[\w][\w.-]*)?$", re.ASCII)
@@ -276,9 +279,10 @@ def _parse_scan(doc: dict) -> dict:
             p = pkgs.get(name)
             if p is None:
                 p = pkgs[name] = {"name": name, "installed": str(v.get("InstalledVersion") or ""), "fixed": fixed,
-                                  "severity": sev, "cves": []}
+                                  "severity": sev, "cves": [], "critical": 0, "high": 0}
             elif _SEV_RANK[sev] > _SEV_RANK[p["severity"]]:
                 p.update(severity=sev, installed=str(v.get("InstalledVersion") or ""), fixed=fixed)
+            p["critical" if sev == "CRITICAL" else "high"] += 1     # yok sayma (ignore_packages) için paket başına sayım
             if cve and len(p["cves"]) < MAX_CVES and cve not in p["cves"]:
                 p["cves"].append(cve)
     out["packages"] = sorted(pkgs.values(), key=lambda p: (-_SEV_RANK[p["severity"]], p["name"]))
@@ -463,13 +467,62 @@ def _judge(rec: dict) -> tuple[str, list[str]]:
     return "temiz", actions
 
 
+def load_ignore(path: Path | None = None) -> set[str]:
+    """`config/image_vuln.yaml` → yok sayılan paket adları. Bozuk / beklenmedik biçim / dosya yok → boş küme
+    (çökmez; bozuksa uyarı loglanır): yanlış yaml hiçbir bulguyu sessizce gizlemez."""
+    import yaml
+    p = Path(path) if path else IGNORE_PATH
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        log.warning(f"⚠️ image_vuln: {p.name} okunamadı, paket yok sayma kapalı ({type(e).__name__})")
+        return set()
+    names = doc.get("ignore_packages") if isinstance(doc, dict) else None
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        log.warning(f"⚠️ image_vuln: {p.name} biçimi geçersiz (ignore_packages: [paket, …]); paket yok sayma kapalı")
+        return set()
+    return {n.strip() for n in names if n.strip()}
+
+
+def _pkg_count(p: dict, kind: str) -> int:
+    v = p.get(kind)
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    return 1 if str(p.get("severity") or "").upper() == kind.upper() else 0
+
+
+def _counts_missing(scan: dict, ignore: set[str]) -> bool:
+    """Eski biçimli önbellek: yok sayılan pakette paket başına sayım yok → doğru düşüm için yeniden taranmalı."""
+    return any(isinstance(p, dict) and p.get("name") in ignore
+               and not all(isinstance(p.get(k), int) and not isinstance(p.get(k), bool) for k in ("critical", "high"))
+               for p in scan.get("packages") or [])
+
+
+def apply_ignore(scan: dict, ignore: set[str]) -> dict:
+    """Ham taramadan yok sayılan paketleri süzer: `critical` / `high` ve `packages` onlarsız; bulgular `ignored`
+    alanında sayılır, paket adlarıyla (gizlenmez). Ham sözlük değişmez (önbellek ham kalır)."""
+    pkgs = [p for p in scan.get("packages") or [] if isinstance(p, dict)]
+    hit = [p for p in pkgs if p.get("name") in ignore]
+    ic = sum(_pkg_count(p, "critical") for p in hit)
+    ih = sum(_pkg_count(p, "high") for p in hit)
+    return {**scan, "critical": max(0, int(scan.get("critical") or 0) - ic), "high": max(0, int(scan.get("high") or 0) - ih),
+            "packages": [p for p in pkgs if p.get("name") not in ignore],
+            "ignored": {"critical": ic, "high": ih, "packages": sorted({str(p["name"]) for p in hit})}}
+
+
 def report(client, *, index: dict | None = None, force: bool = False, scan_fn=None, resolver=None, eol_fn=None,
            read=None, cache_dir: Path | None = None, ttl_h: float | None = None, now: float | None = None,
-           today: date | None = None) -> dict:
-    """Envanter + üç işaret; imaj başına tarama sonucu `CACHE_DIR`'de (TTL `CREW_TECHDEBT_IMAGE_VULN_SCAN_H`)."""
+           today: date | None = None, ignore_packages: set[str] | None = None) -> dict:
+    """Envanter + üç işaret; imaj başına tarama sonucu `CACHE_DIR`'de (TTL `CREW_TECHDEBT_IMAGE_VULN_SCAN_H`).
+    Önbellek HAM taramayı tutar; yok sayılan paketler (`config/image_vuln.yaml`) rapor kurulurken süzülür."""
     from agile_sdlc_crew.quality import modern
     if index is None:
         index = modern.build_index(client)
+    ignore = load_ignore() if ignore_packages is None else set(ignore_packages)
     cache_dir = Path(cache_dir) if cache_dir else CACHE_DIR
     ttl = float(ttl_h if ttl_h is not None else _knob("CREW_TECHDEBT_IMAGE_VULN_SCAN_H", 24))
     clock = now if now is not None else time.time()
@@ -485,11 +538,13 @@ def report(client, *, index: dict | None = None, force: bool = False, scan_fn=No
             scan["reason"] = "yalnız herkese açık Docker Hub imajı taranır; kayıt deposu adlı imaj taranmaz"
         else:
             scan = None if force else _cache_read(cache_dir, rec["image"], ttl, clock)
+            if scan is not None and _counts_missing(scan, ignore):
+                scan = None
             if scan is None:
                 scan = scan_fn(rec["image"])
                 if scan.get("state") == "tamam":
                     _cache_write(cache_dir, rec["image"], scan, clock)
-        rec["scan"] = scan
+        rec["scan"] = apply_ignore(scan, ignore)
         rec["patch"] = patch_lag(rec["lang"], rec["version"], resolver=resolver) if rec["lang"] else None
         rec["eol"] = eol_fn(rec["lang"], rec["version"], today=today) if rec["lang"] else None
         rec["level"], rec["actions"] = _judge(rec)
@@ -500,3 +555,318 @@ def report(client, *, index: dict | None = None, force: bool = False, scan_fn=No
                                                       or trivy_cmd() is not None)
     return {"scanned_at": datetime.fromtimestamp(clock).isoformat(timespec="seconds"), "scanner": scanner,
             "images": images, "note": NOTE}
+
+
+# ── Uç: önbellekten dön, taramayı arka planda yap ────────────────────────
+
+SOURCE = "image_vuln"
+TASK_REPO = "base-images"           # giderme (yeniden üretim) bu repoda yapılır; Task açıklamasının "Repo:" satırı
+TASK_TAG = "tempo-image-vuln"
+LIMIT = ("Yayınlanmış imaj değil, dayandığı resmî imaj tarandı; kendi eklediğimiz katmanlar ve derleme anında "
+         "kurulan yamalar görülmez — sonuç alt sınırdır.")
+RETRY_S = 600                       # taranamayan imaj için son sonuç bu süre taze sayılır (GET döngüsü kurulmasın)
+
+_STATE_LOCK = threading.Lock()
+_RUN: dict = {"running": False, "done_at": 0.0, "report": None}     # aynı anda tek tarama
+
+
+def _begin() -> bool:
+    with _STATE_LOCK:
+        if _RUN["running"]:
+            return False
+        _RUN["running"] = True
+        return True
+
+
+def _end(rep: dict | None) -> None:
+    with _STATE_LOCK:
+        _RUN["running"] = False
+        if rep is not None:
+            _RUN.update(done_at=time.time(), report=rep)
+
+
+def _spawn_thread(fn) -> None:
+    threading.Thread(target=fn, daemon=True, name="image-vuln-scan").start()
+
+
+def serve(client, *, force: bool = False, spawn=None, **kw) -> dict:
+    """Karta dönen rapor. Asla taramada beklemez: önbellekteki kısmı hemen döner; önbellek eksikse (ya da `force`)
+    taramayı arka plan iş parçacığında başlatır ve `scanning: true` ile eldekini verir. Aynı anda tek tarama.
+    `kw` `report`'a gider (enjeksiyon: `scan_fn`, `cache_dir`, `index`, …)."""
+    snap_kw = {k: v for k, v in kw.items() if k != "scan_fn"}
+    snap = report(client, force=False, scan_fn=lambda image: _empty_scan("bekliyor"), **snap_kw)
+    pending = sum(1 for r in snap["images"] if r["scan"]["state"] == "bekliyor")
+    with _STATE_LOCK:
+        running, last = _RUN["running"], _RUN["report"]
+        fresh = last is not None and time.time() - _RUN["done_at"] < RETRY_S
+    if running:
+        return {**snap, "scanning": True}
+    if not force and pending == 0:
+        return {**snap, "scanning": False}
+    if not force and fresh:
+        return {**last, "scanning": False}        # son tarama bitti ama bu imajlar taranamadı: sonuç, döngü değil
+    if not _begin():
+        return {**snap, "scanning": True}
+
+    def job():
+        rep = None
+        try:
+            rep = report(client, force=force, **kw)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"⚠️ image_vuln: arka plan taraması başarısız: {str(e)[:300]}")
+        finally:
+            _end(rep)
+    try:
+        (spawn or _spawn_thread)(job)
+    except Exception:
+        _end(None)
+        raise
+    return {**snap, "scanning": True}
+
+
+# ── Yoklayıcı ────────────────────────────────────────────────────────────
+
+_POLLER: threading.Thread | None = None
+_POLLER_LOCK = threading.Lock()
+
+
+def _tick(get_client) -> None:
+    """Günlük tur: `report(force=True)` + `alert`. Ayarlar her turda okunur; başka tarama sürüyorsa atlanır."""
+    from agile_sdlc_crew import pipeline_config as pc
+    if not (pc.get("CREW_TECHDEBT") and pc.get("CREW_TECHDEBT_IMAGE_VULN")):
+        return
+    if not _begin():
+        log.info("image_vuln: tarama sürüyor, günlük tur atlandı")
+        return
+    rep = None
+    try:
+        from agile_sdlc_crew.quality import intake
+        client = get_client()
+        rep = report(client, force=True)
+        alert(client, rep, team=str(getattr(client, "team", "") or ""), deps=intake.default_deps())
+    finally:
+        _end(rep)
+
+
+def start_poller(get_client, *, interval_h, sleep=None, tick=None,
+                 stop_event: threading.Event | None = None) -> threading.Thread:
+    """Süreç başına TEK daemon thread (ikinci çağrı aynısını döner). İlk tur bir aralık sonra; `interval_h` sayı ya
+    da her turda okunan çağrılabilir (saat, en az 1). Bir turun hatası thread'i durdurmaz; pipeline işlerinden
+    ayrı thread'de koşar."""
+    global _POLLER
+    with _POLLER_LOCK:
+        if _POLLER is not None and _POLLER.is_alive():
+            return _POLLER
+        sleep = sleep or time.sleep
+        tick = tick or _tick
+        stop_event = stop_event or threading.Event()
+
+        def hours() -> float:
+            try:
+                v = interval_h() if callable(interval_h) else interval_h
+                return max(1.0, float(v or 24))
+            except Exception:  # noqa: BLE001
+                return 24.0
+
+        def loop():
+            while not stop_event.is_set():
+                sleep(hours() * 3600)
+                if stop_event.is_set():
+                    break
+                try:
+                    tick(get_client)
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"⚠️ image_vuln: günlük tur hata verdi: {str(e)[:300]}")
+
+        _POLLER = threading.Thread(target=loop, daemon=True, name="image-vuln-poller")
+        _POLLER.start()
+        return _POLLER
+
+
+# ── Uyarı: Task + Telegram özeti ─────────────────────────────────────────
+
+def _fp(image: str) -> str:
+    from agile_sdlc_crew.quality import rank
+    return rank.cap_fingerprint(f"{SOURCE}:{image}")
+
+
+def _signals(rec: dict) -> list[str]:
+    sc = rec.get("scan") or {}
+    out = []
+    if sc.get("critical"):
+        out.append("critical")
+    if sc.get("high"):
+        out.append("high")
+    if rec.get("patch"):
+        out.append("patch")
+    if rec.get("eol"):
+        out.append("eol")
+    return out
+
+
+def _alert_rank(rec: dict) -> tuple:
+    """Önce destek bitmiş, sonra düzeltmeli kritik sayısı (çok olan önce), sonra kullanan servis sayısı."""
+    users = sum(len(p) for p in (rec.get("users") or {}).values())
+    return (0 if rec.get("eol") else 1, -int((rec.get("scan") or {}).get("critical") or 0), -users, rec["image"])
+
+
+def _e(s) -> str:
+    from agile_sdlc_crew.quality import rank
+    return html.escape(rank.defang(str(s if s is not None else "")))
+
+
+def task_body(rec: dict) -> str:
+    """Task gövdesi: işaretler, ilk 15 paket, kullanan servisler (bölge başına), önerilen eylem, sınır cümlesi.
+    İmaj / paket adları güvenilmez metindir: hepsi kaçışlanır."""
+    sc = rec.get("scan") or {}
+    sig = []
+    if sc.get("critical") or sc.get("high"):
+        sig.append(f"Düzeltmesi yayınlanmış açık: {int(sc.get('critical') or 0)} kritik, {int(sc.get('high') or 0)} yüksek")
+    if rec.get("patch"):
+        sig.append(f"Yama geride: aynı minörün son yaması {_e(rec['patch'].get('latest'))} (kullanılan {_e(rec.get('version'))})")
+    if rec.get("eol"):
+        d = rec["eol"].get("eol")
+        sig.append(f"Destek bitti ({_e(d)})" if d else "Destek bitti")
+    parts = [f"<p><b>Taban imaj:</b> <code>{_e(rec['image'])}</code> · seviye: {_e(rec.get('level'))}"
+             + (f" · işletim sistemi: {_e(sc.get('os'))}" if sc.get("os") else "") + "</p>",
+             "<p><b>İşaretler:</b></p><ul>" + "".join(f"<li>{x}</li>" for x in sig) + "</ul>"]
+    ig = sc.get("ignored") or {}
+    if ig.get("packages"):
+        parts.append(f"<p><small>Yok sayılan paketler (sayıma girmedi): {_e(', '.join(ig['packages']))} — "
+                     f"{int(ig.get('critical') or 0)} kritik, {int(ig.get('high') or 0)} yüksek</small></p>")
+    pk = sc.get("packages") or []
+    if pk:
+        rows = "".join(
+            f"<li><code>{_e(p.get('name'))}</code> {_e(p.get('installed'))} → {_e(p.get('fixed'))} "
+            f"({_e(p.get('severity'))}{', ' + _e(', '.join(p.get('cves') or [])) if p.get('cves') else ''})</li>"
+            for p in pk[:15])
+        more = f"<p><small>… ve {len(pk) - 15} paket daha</small></p>" if len(pk) > 15 else ""
+        parts.append(f"<p><b>Paketler (ilk 15):</b></p><ul>{rows}</ul>{more}")
+    users = "".join(f"<li><b>{_e(r)}</b>: {_e(', '.join(p))}</li>" for r, p in (rec.get("users") or {}).items())
+    if users:
+        parts.append(f"<p><b>Kullanan servisler:</b></p><ul>{users}</ul>")
+    parts.append("<p><b>Önerilen eylem:</b> " + _e("; ".join(rec.get("actions") or [])) + "</p>")
+    parts.append(f"<p><i>{LIMIT}</i></p>")
+    return "".join(parts)
+
+
+def task_group(rec: dict):
+    """Teknik borç hattının Task'ı: needs-human, parmak izi `image_vuln:<imaj>`, ek etiket `tempo-image-vuln`."""
+    from agile_sdlc_crew.quality.model import Finding, Group
+    crit = int((rec.get("scan") or {}).get("critical") or 0)
+    return Group(source=SOURCE, repo=TASK_REPO, title=f"Taban imaj güvenliği: {rec['image']}",
+                 fingerprints=[_fp(rec["image"])],
+                 findings=[Finding(source=SOURCE, repo=TASK_REPO, count=max(1, crit))],
+                 score=float(crit), sp=1, needs_human=True,
+                 human_reason="İmajın yeniden üretilmesi / sürüm yükseltmesi DevOps ve insan kararıdır; Tempo imaj üretmez.",
+                 extra_tags=[TASK_TAG], body_html=task_body(rec))
+
+
+def _open_task(client, rec: dict, *, team: str, deps) -> dict:
+    """Mevcut teknik borç yardımcılarıyla (story + Task + SP + kayıt) bir needs-human Task açar."""
+    from agile_sdlc_crew.quality import intake, php_modern
+    with intake._LOCK:
+        out = php_modern._open_and_report(client, [task_group(rec)], [], repo=TASK_REPO, source=SOURCE, team=team,
+                                          sprint="", task_cfg=deps.cfg(), deps=deps, head={},
+                                          log_line="🛡️ Taban imaj güvenliği")
+    row = next(iter((out.get("human_tasks") or []) + (out.get("tasks") or [])), {})
+    if not row.get("id"):
+        raise RuntimeError(row.get("error") or "Task açılamadı")
+    return {"id": row["id"], "url": intake._wi_url(client, row["id"])}
+
+
+def _notified_path(cache_dir: Path) -> Path:
+    return Path(cache_dir) / "notified.json"      # imaj önbellek dosyaları 40 hex + .json: çakışmaz
+
+
+def _notify_key(crit: list[dict]) -> str:
+    items = sorted([r["image"], _signals(r)] for r in crit)
+    return hashlib.sha1(json.dumps(items, ensure_ascii=False).encode("utf-8")).hexdigest() if items else ""
+
+
+def _summary_text(images: list[dict], crit: list[dict]) -> str:
+    n: dict = {}
+    for r in images:
+        n[r["level"]] = n.get(r["level"], 0) + 1
+    top = sorted(crit, key=_alert_rank)[:5]
+    lines = ["Tempo — taban imaj güvenliği",
+             f"Kritik: {n.get('kritik', 0)} · Yüksek: {n.get('yüksek', 0)} · Bilinmiyor: {n.get('bilinmiyor', 0)} · "
+             f"Bilgi/temiz: {n.get('bilgi', 0) + n.get('temiz', 0)}", "", "En önemli imajlar:"]
+    for r in top:
+        sc = r["scan"]
+        lines.append(f"• {r['image']} — {'; '.join(r.get('actions') or ['inceleme'])} "
+                     f"[{sc.get('critical', 0)} kritik, {sc.get('high', 0)} yüksek]")
+    if len(crit) > len(top):
+        lines.append(f"… ve {len(crit) - len(top)} imaj daha (kartta)")
+    lines += ["", "Yayınlanmış imaj değil, dayandığı imaj tarandı; sonuç alt sınırdır."]
+    return "\n".join(lines)
+
+
+def alert(client, rep: dict, *, team: str, deps, open_fn=None, notify_fn=None, cache_dir: Path | None = None,
+          max_tasks: int | None = None) -> list[dict]:
+    """Kritik imajlar için (a) `_TASK` açıksa en çok `_MAX_TASKS` YENİ needs-human Task — sıra: destek bitmiş, düzeltmeli
+    kritik sayısı, servis sayısı; açık işi olan imaj sayıya girmez, kalanlar `sırada` — ve (b) `_NOTIFY` açıksa
+    TEK özet Telegram mesajı (imaj, işaret kümesi değişmedikçe yeniden gitmez). → imaj başına durum listesi."""
+    images = rep.get("images") or []
+    crit = [r for r in images if r.get("level") == "kritik"]
+    results: list[dict] = []
+    if _knob("CREW_TECHDEBT_IMAGE_VULN_TASK", False) and crit:
+        if not (team or "").strip():
+            log.warning("⚠️ image_vuln: takım bilinmiyor (AZURE_DEVOPS_TEAM) — Task açılmadı")
+        else:
+            cap = max(1, int(max_tasks if max_tasks is not None else _knob("CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS", 3)))
+            results = _open_tasks(client, crit, team=team, deps=deps, open_fn=open_fn or _open_task, cap=cap)
+    if _knob("CREW_TECHDEBT_IMAGE_VULN_NOTIFY", False):
+        _notify(images, crit, notify_fn, Path(cache_dir) if cache_dir else CACHE_DIR)
+    return results
+
+
+def _open_tasks(client, crit: list[dict], *, team: str, deps, open_fn, cap: int) -> list[dict]:
+    from agile_sdlc_crew.quality import dedup
+    try:
+        board = deps.board(client)
+    except Exception as e:  # noqa: BLE001 — pano okunamazsa tekilleştirilemez: yazma yok
+        log.warning(f"⚠️ image_vuln: pano okunamadı, Task açılmadı: {str(e)[:200]}")
+        return []
+    grace = int(_knob("CREW_QUALITY_REOPEN_GRACE_DAYS", 3))
+    out: list[dict] = []
+    opened = 0
+    for rec in sorted(crit, key=_alert_rank):
+        v, wi = dedup.verdict(board.get(_fp(rec["image"])), last_seen=0.0, now=deps.now(), grace_days=grace)
+        if v in ("blocked", "suppressed"):
+            out.append({"image": rec["image"], "state": "açık iş", "wi": wi})
+            continue
+        if opened >= cap:
+            out.append({"image": rec["image"], "state": "sırada", "wi": None})
+            continue
+        opened += 1
+        try:
+            res = open_fn(client, rec, team=team, deps=deps)
+            out.append({"image": rec["image"], "state": "açıldı", "wi": res.get("id"), "url": res.get("url")})
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"⚠️ image_vuln: {rec['image']} için Task açılamadı: {str(e)[:200]}")
+            out.append({"image": rec["image"], "state": "hata", "wi": None, "error": str(e)[:200]})
+    return out
+
+
+def _notify(images: list[dict], crit: list[dict], notify_fn, cache_dir: Path) -> None:
+    from agile_sdlc_crew import daily
+    if notify_fn is None:
+        if not daily.telegram_configured():
+            return
+        notify_fn = daily.send_telegram
+    path = _notified_path(cache_dir)
+    try:
+        last = json.loads(path.read_text(encoding="utf-8")).get("key", "")
+    except (OSError, ValueError, AttributeError):
+        last = ""
+    key = _notify_key(crit)
+    if key == last:
+        return
+    if crit and not notify_fn(_summary_text(images, crit)):
+        return                       # gitmedi: kaydedilmez, sonraki turda yeniden denenir
+    try:                             # kritik kalmadıysa anahtar sıfırlanır (geri dönerse yeniden haber verilir)
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"key": key}), encoding="utf-8")
+    except OSError as e:
+        log.warning(f"⚠️ image_vuln: bildirim durumu yazılamadı: {e}")

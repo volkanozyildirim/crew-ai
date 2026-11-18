@@ -1,0 +1,10 @@
+# Taban imaj güvenliği (quality/image_vuln.py) — yok sayılan paketler.
+#
+# Burada adı geçen paketteki bulgular `critical` / `high` sayısına girmez ve imajın seviyesini belirlemez; ama
+# GİZLENMEZ: tarama sonucunda `ignored` alanında, kartta "yok sayılan: …" satırında görünür. Önbellekte ham tarama
+# durur, süzme rapor kurulurken yapılır — bu dosyayı değiştirmek yeniden tarama gerektirmez.
+#
+# linux-libc-dev: çekirdek başlık dosyaları. Konteyner çekirdeği ana makinenin çekirdeğidir, imajdaki başlıklar
+# çalışmaz; tarayıcı gürültüsüdür (php 8.2 / 8.4 imajları yalnız bu yüzden "kritik" çıkıyordu).
+ignore_packages:
+  - linux-libc-dev
