@@ -451,3 +451,41 @@ Uygulamada bu tasarımdan ayrılınan yerler (her biri gözden geçirmede verilm
 - Kartın görsel ayrıntısı (mevcut kart bileşenleri ve tema değişkenleriyle).
 - Uygulama sırası önerisi: (A) hedef + katalog + tarama/alım, (B) probe + engeller, (C) sürüm
   adımı + izleme, (D) otomatik ilerletme. Her biri kendi başına yayınlanabilir.
+
+## Ek (2026-11-18): taban imaj şablonu ve yama sürümü
+
+**Neden.** PHP 8.5 seçilebiliyor ama üretim adımı "imaj yayınlanmamış"ta takılıyordu; Go'nun bütün
+üretim imajları üç parçalı (`golang:1.24.4`) olduğundan her Go üretim adımı elle düzenlemeydi.
+Kullanıcı kararı: imajı Tempo üretmez, **şablonunu oluşturan PR'ı Tempo açar**; PHP dahil hiçbiri
+elle yapılmaz. DevOps işleri TR + global + **RU**'yu birlikte kapsar.
+
+**Ölçülen gerçek (salt-okunur, 2026-11-18).** Taban imajlar `FLODevOps/base-images` reposunda:
+dizin başına `Dockerfile` + `tag.txt`; akış `staging → preprod → production`; `staging` ileride
+(trixie). Kökteki `Jenkinsfile` tek dizini derleyip bölge bayraklarıyla iter: `mainLocation`
+(anatolia), `globalLocation`, `payLocation`, `yandexLocation` (RU — VK registry
+`10.131.167.220:5000`). RU'nun ayrı Dockerfile'ı yok. PHP dizinleri iki parçalı (`php-8-4`),
+Python / Node üç parçalı (`python-3-13-18`). Go'nun taban imajı yok; Python servislerinin çoğu genel
+`python:3.11[-slim]` kullanıyor.
+
+**Yaklaşımlar.** (a) Yama sürümlerini elle bakılan bir YAML'da tutmak — otomatik değil, her yama
+çıkışında bakım; (b) Docker Hub'ın genel etiket ucundan okumak, YAML yalnız elle sabitleme için —
+**seçilen**: bakım yok, okunamazsa kapalı kalır; (c) imajı Tempo'nun derlemesi — kullanıcı
+istemedi, Jenkins anahtarı gerekir.
+
+**Tasarım.**
+- `CREW_TECHDEBT_UPGRADE_PATCH` (kapalı): üç parçalı etiket hedef minörün Docker Hub'daki en büyük
+  yama sürümüyle yazılır (`golang:1.24.4-alpine` → `golang:1.27.N-alpine`, GoTool `'1.24.4'` →
+  `'1.27.N'`); genel (library) imajın yeni etiketi Hub'da varsa üretim sitesi engelsizdir. Etiket
+  yok / Hub okunamadı → bugünkü gibi elle. Kendi imajımızda kanıt değişmez: aynı bölge reposunda
+  kullanılıyor olmalı.
+- `CREW_TECHDEBT_UPGRADE_IMAGE` (kapalı): `imaj yayınlanmamış` sitenin imajı kendi taban imajımızsa
+  ve `base-images@staging`'de dizini yoksa, en yakın alt sürüm dizini kopyalanır, sürüm satırı ve
+  YAML'daki dile özgü düzeltmeler (PHP 8.5: opcache kurulum satırları) uygulanır, `tag.txt`
+  bekleyen sitelerin etiketidir; `tempo/base-image-<dizin>` dalından `staging`'e **taslak PR**
+  açılır. Açıklama bekleyen servisleri bölge başına ve her bölgenin Jenkins bayrağını yazar.
+  Durum saklanmaz: dizin var mı + sabit dalın PR'ı. Terk edilen PR yeniden açılmaz.
+- Hazırlığın bitmesini beklemez (imajın yayınlanması süre alır); kartta düğme, otomatik ilerletme
+  açıksa kendiliğinden.
+
+**Kapsam dışı.** Node (Tempo Node sürümünü izlemiyor), imajın üretilmesi / yayınlanması, `preprod`
+ve `production` dallarına taşıma (DevOps akışı).
