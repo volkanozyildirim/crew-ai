@@ -28,6 +28,9 @@ _TAG_RE = re.compile(r"[\w][\w.\-]*")
 SITES_PER_REGION = 10
 MAX_FILES = 20
 MAX_BYTES = 2_000_000
+MAX_COMPARE_FILES = 100            # dal/hedef karşılaştırması: bundan büyük ağaç → reddedilir
+MAX_COMPARE_BYTES = 10_000_000
+MAX_TAG = 64
 PR_MAX = 4000
 _CONT_RE = re.compile(r"\s*(?:&&|;)\s*\\\s*$")     # satır sonu: `&& \` ya da `; \` (zincir devam ediyor)
 
@@ -62,7 +65,7 @@ def needed(sites: list[dict], lang: str, *, cfg=None) -> list[dict]:
     if not name:
         return []
     cfg = cfg or load_cfg()
-    img = rf"((?:[^/\s]+/)+)({re.escape(name)}-\d+-\d+(?:-\d+)?):(\S+)"
+    img = rf"((?:[^/\s]+/)+)({re.escape(name)}-\d+-\d+(?:-\d+)?):([^\n]*)"
     pat = re.compile(rf"^{img}$")
     groups: dict[str, dict] = {}
     for s in sites:
@@ -83,7 +86,7 @@ def needed(sites: list[dict], lang: str, *, cfg=None) -> list[dict]:
     for g in groups.values():
         tags = sorted(g.pop("tags"))
         g["tag"] = tags[0]
-        bad_tag = [t for t in tags if not _TAG_RE.fullmatch(t)]
+        bad_tag = [t[:MAX_TAG] for t in tags if not _TAG_RE.fullmatch(t) or len(t) > MAX_TAG]
         unknown = [r for r in g["regions"] if r not in (cfg.get("regions") or {})]
         g["error"] = (f"geçersiz etiket: {_clean(', '.join(bad_tag))}" if bad_tag
                       else f"bilinmeyen bölge: {_clean(', '.join(unknown))}" if unknown
@@ -175,7 +178,7 @@ def build(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, c
         raise ImageTemplateError(f"Hedef sürüm okunamadı: {to!r}.")
     target = entry["dir"]
     tag = str(entry.get("tag") or "")
-    if not _TAG_RE.fullmatch(tag):
+    if not _TAG_RE.fullmatch(tag) or len(tag) > MAX_TAG:
         raise ImageTemplateError(f"İmaj etiketi geçersiz: {tag!r}.")
     tm = _DIR_RE.match(target)
     if not tm or tm.group(1) != name or f"{tm.group(2)}.{tm.group(3)}" != to:
@@ -296,22 +299,45 @@ def _denied(e: Exception) -> bool:
 
 
 def _branch_matches(client, cfg: dict, branch: str, head: str, built: dict, target_head: str) -> bool:
-    """Tempo'nun dalı (PR'sız) tam beklenen içerikte mi: dosya kümesi = hedef dalın kümesi + şablon dosyaları ve
-    şablon dosyalarının baytları eşit. Okunamayan / farklı her şey False."""
+    """Tempo'nun dalı (PR'sız) SABİT hedef commit'ten (`target_head`) tam olarak şablon dosyalarıyla ayrışıyor mu:
+    dosya kümesi = hedef + şablon, şablon dosyaları bayt bayt `built`, diğer HER dosya hedef commit'tekiyle bayt
+    bayt aynı. İçerikler sabit commit'lerden okunur (dal başı `head`, hedef `target_head`); listeleme dal adıyla
+    yapılır ama ardından iki başın da değişmediği doğrulanır. Büyük ağaç / okunamayan / farklı her şey False."""
     proj = cfg.get("project") or None
     try:
         def paths(ref):
             return {str(i.get("path")) for i in client.get_items_in_path(
                 cfg["repo"], "/", branch=ref, recursion_level="full", project=proj) if not i.get("isFolder")}
-        if paths(branch) != paths(cfg["branch"]) | set(built["files"]):
+        mine, theirs = paths(branch), paths(cfg["branch"])
+        refs = {b.get("name"): b.get("objectId") for b in client.list_branches(cfg["repo"], project=proj)}
+        if refs.get(f"refs/heads/{branch}") != head or refs.get(f"refs/heads/{cfg['branch']}") != target_head:
             return False
-        return all(client.get_file_bytes(cfg["repo"], p, project=proj, version=head, version_type="commit") == b
-                   for p, b in built["files"].items())
+        if mine != theirs | set(built["files"]) or len(mine) > MAX_COMPARE_FILES:
+            return False
+        total = 0
+        for p in sorted(mine):
+            got = client.get_file_bytes(cfg["repo"], p, project=proj, version=head, version_type="commit")
+            want = built["files"][p] if p in built["files"] else client.get_file_bytes(
+                cfg["repo"], p, project=proj, version=target_head, version_type="commit")
+            total += len(got or b"")
+            if got is None or got != want or total > MAX_COMPARE_BYTES:
+                return False
+        return True
     except Exception:  # noqa: BLE001
         return False
 
 
 def open_pr(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, repo: str = "") -> dict:
+    """Taslak şablon PR'ı açar. Her başarısızlık `ImageTemplateError` olarak çıkar (ham ağ hatası sızmaz)."""
+    try:
+        return _open(client, lang, to, entry, cfg=cfg, resolver=resolver, repo=repo)
+    except ImageTemplateError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise ImageTemplateError(f"base-images okunurken/yazılırken hata: {mask_secrets(str(e))[:300]}") from e
+
+
+def _open(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, repo: str = "") -> dict:
     cfg = cfg or load_cfg()
     proj = cfg.get("project") or None
     with _LOCK:
@@ -359,9 +385,13 @@ def open_pr(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None,
             raise ImageTemplateError(f"'{branch}' dalı, {stage} aşamasında hata: {why}. "
                                      f"Push {'yapıldı' if pushed else 'yapılmadı'}.") from e
     pid = res.get("pullRequestId")
-    url = res.get("url") or ""
+    # Web bağlantısı `AzureDevOpsClient.find_pull_request` ile aynı biçimde; yanıtın `url`'si REST adresidir,
+    # yalnız org/proje bilinmiyorsa yedek olarak döner.
     base = getattr(client, "org_url", None)
-    if not url and base and cfg.get("project"):
-        name = (res.get("repository") or {}).get("name") or cfg["repo"]
-        url = f"{base}/{cfg['project']}/_git/{name}/pullrequest/{pid}"
+    repo_res = res.get("repository") or {}
+    proj_name = (repo_res.get("project") or {}).get("name") or cfg.get("project")
+    if base and proj_name and pid:
+        url = f"{base}/{proj_name}/_git/{repo_res.get('name') or cfg['repo']}/pullrequest/{pid}"
+    else:
+        url = res.get("url") or ""
     return {"state": "pr açık", "pr": {"id": pid, "url": url}, "notes": built["notes"]}

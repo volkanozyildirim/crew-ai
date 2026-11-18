@@ -11243,6 +11243,8 @@ class _FakeBaseImages:
         self.branch_result = branch_result
         self.move_head_after = move_head_after   # list_branches çağrı sayısı; sonrası staging başı ilerler
         self.list_n = 0
+        self.fail_list_after = None         # bu kadar list_branches çağrısından sonra OSError
+        self.org_url = "https://dev.azure.com/org"
         self.oids: dict = {}                # dal -> başın objectId'si (yoksa "oid-<dal>")
         self.files = {"staging": dict(files if files is not None else {
             "/Jenkinsfile": b"pipeline {}", "/README.md": b"# x",
@@ -11256,7 +11258,7 @@ class _FakeBaseImages:
         self.calls: list = []
 
     def list_branches(self, repo, project=None):
-        if self.fail_list:
+        if self.fail_list or (self.fail_list_after is not None and self.list_n >= self.fail_list_after):
             raise OSError("ağ yok")
         self.list_n += 1
         moved = self.move_head_after is not None and self.list_n > self.move_head_after
@@ -11319,7 +11321,8 @@ class _FakeBaseImages:
             raise OSError("PR servisi çöktü")
         self.calls.append(("pr", src, tgt, title, description, draft, project))
         self.prs[src] = {"id": 77, "status": "active", "url": "http://pr/77"}
-        return {"pullRequestId": 77, "url": "http://pr/77", "repository": {"name": repo}}
+        return {"pullRequestId": 77, "url": "https://dev.azure.com/org/_apis/git/repositories/x/pullRequests/77",
+                "repository": {"name": repo, "project": {"name": "FLODevOps"}}}
 
     def find_pull_request(self, repo, branch, project=None):
         return self.prs.get(branch)
@@ -11532,8 +11535,6 @@ def test_upgrade_image_template():
         check(f"needed: etiket {bad_tag!r} → error", len(e_) == 1 and "geçersiz etiket" in e_[0]["error"], str(e_))
         check(f"state: etiket {bad_tag!r} → belirsiz, PR yok",
               ui.state(_FakeBaseImages(), e_[0])["state"] == "belirsiz")
-    check("needed: boşluklu / eğik çizgili etiket hiç girmez",
-          ui.needed([site("anatolia", pre["anatolia"] + "php-8-5:1.0 x")], "php") == [])
     e_ = ui.needed([site("mars", pre["mars"] + "php-8-5:1.0")], "php")
     check("needed: bilinmeyen bölge → error", len(e_) == 1 and e_[0]["error"] == "bilinmeyen bölge: mars", str(e_))
     foreign = site("anatolia", pre["anatolia"] + "php-8-5:1.0")
@@ -11549,7 +11550,48 @@ def test_upgrade_image_template():
     check("açıklama ≤ 4000, RU cümlesi + bayraklar duruyor, liste kısaldı",
           len(dv) <= 4000 and "RU registry" in dv and "yandexLocation" in dv and "mainLocation" in dv
           and "servis daha" in dv, str(len(dv)))
-    check("URL: sonuç url'si tercih edilir", r["pr"]["url"] == "http://pr/77")
+    check("URL: web bağlantısı (API url'si değil)",
+          r["pr"]["url"] == "https://dev.azure.com/org/FLODevOps/_git/base-images/pullrequest/77", r["pr"]["url"])
+    # round 2: içerik eşitliği, etiket, ağ hatası
+    cj = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cj, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    cj.fail_at = None
+    cj.files[bname]["/Jenkinsfile"] = b"pipeline { evil }"
+    k = len(cj.calls)
+    try:
+        ui.open_pr(cj, "php", "8.5", entry, resolver=res)
+        check("aynı yollar, değişmiş Jenkinsfile → reddedilir", False)
+    except ui.ImageTemplateError:
+        check("aynı yollar, değişmiş Jenkinsfile → reddedilir, yazma yok", len(cj.calls) == k)
+    ck = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(ck, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    ck.fail_at = None
+    ck.files["staging"]["/README.md"] = b"# staging moved"      # hedef içeriği dal açıldıktan sonra değişti
+    ck.oids["staging"] = "oid-staging-moved"
+    k = len(ck.calls)
+    try:
+        ui.open_pr(ck, "php", "8.5", entry, resolver=res)
+        check("hedef kaydı → dal artık eşit değil", False)
+    except ui.ImageTemplateError:
+        check("hedef sabit commit'ten farklı → reddedilir, yazma yok", len(ck.calls) == k)
+    for tg in ("a/b", "1.0 x", "x" * 65):
+        e_ = ui.needed([site("anatolia", pre["anatolia"] + f"php-8-5:{tg}")], "php")
+        check(f"needed: etiket {tg[:12]!r} → entry error", len(e_) == 1 and "geçersiz etiket" in e_[0]["error"], str(e_))
+    cn2 = _FakeBaseImages()
+    cn2.fail_list_after = 3
+    try:
+        ui.open_pr(cn2, "php", "8.5", entry, resolver=res)
+        check("ağ hatası → ImageTemplateError", False)
+    except ui.ImageTemplateError:
+        check("build sonrası ağ hatası ImageTemplateError, yazma yok", cn2.calls == [])
+    except OSError:
+        check("build sonrası ağ hatası ImageTemplateError", False, "ham OSError")
 
     c5 = _FakeBaseImages()
     r1 = ui.open_pr(c5, "php", "8.5", entry, resolver=res, repo="svc-a")
