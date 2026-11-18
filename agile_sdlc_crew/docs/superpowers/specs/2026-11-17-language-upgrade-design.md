@@ -489,3 +489,47 @@ istemedi, Jenkins anahtarı gerekir.
 
 **Kapsam dışı.** Node (Tempo Node sürümünü izlemiyor), imajın üretilmesi / yayınlanması, `preprod`
 ve `production` dallarına taşıma (DevOps akışı).
+
+## Ek (2026-11-18): taban imaj güvenlik uyarısı
+
+**Neden.** Üretimde kullandığımız taban imajlarda bilinen güvenlik açığı varsa kimse elle taramadan
+haberdar olunmalı (kullanıcı isteği). Kullanıcı kararı: **erişim gerektirmeyen yol** — yayınlanmış
+imajın kendisi taranmaz (GCP / VK registry kimliği istenmez), dayandığı resmî imaj ve sürüm taranır.
+
+**Ölçülen (2026-11-18).** `php:8.4.27-fpm-bookworm` (üretimdeki `php-8-4`'ün dayanağı) Trivy ile
+19 sn'de tarandı (Docker soketi gerekmez, Trivy imajı registry'den kendi çeker; ilk koşuda ~1.7 GB
+veritabanı önbelleği): 311 HIGH + 4 CRITICAL, 124'ünün düzeltmesi yayınlanmış. Ham sayı gürültü —
+uyarı yalnız **düzeltmesi olan** açıklara dayanır. Trivy kaynak koddan derlenen çalışma zamanını
+(PHP, CPython) görmez → dilin yama sürümü ayrıca karşılaştırılır.
+
+**Yaklaşımlar.** (a) yalnız sürüm karşılaştırması (yama geride mi, destek bitti mi) — ucuz ama işletim
+sistemi paketlerini görmez; (b) (a) + dayanak imajın Trivy taraması — **seçilen**; (c) yayınlanmış
+imajı taramak — kullanıcı gerek görmedi.
+
+**Tasarım.**
+- **Envanter:** `modern.build_index`'in bölge başına (anatolia / global / russia) `FROM` imajları.
+  Kendi taban imajımız (`…/<dizin>:<etiket>`) → `base-images@production`'daki `<dizin>/Dockerfile`'ın
+  `FROM` satırı (aynı dosyadaki `ARG` varsayılanı yerine konur); genel imaj → kendisi; `ARG`'ı
+  çözülemeyen ya da dizini bulunamayan → "taranamadı" (neden gösterilir, sessizce atlanmaz).
+- **Üç işaret:** (1) Trivy: dayanak imajda düzeltmesi yayınlanmış CRITICAL / HIGH açıklar (paket
+  başına gruplanır); (2) **yama geride:** aynı minörün Docker Hub'daki en büyük yaması kullanılandan
+  büyük (`upgrade_registry.latest_patch`); (3) **destek bitmiş:** endoflife.date'e göre sürümün
+  güvenlik desteği sona ermiş. Ek bilgi: taban dizinine `production`'da son dokunulan tarih
+  ("en az N gündür yeniden üretilmedi" — yeniden üretim tarihi registry'siz bilinemez, bu alt sınır).
+- **Sınır açıkça yazılır:** bizim eklediğimiz katmanlar (nginx, filebeat, New Relic, PECL) taranmaz;
+  sonuç alt sınırdır. Derleme anında `debsecan` ile kurulan yamalar da görülmez → işletim sistemi
+  bulguları "imaj yeniden üretilirse kapanır" önerisiyle sunulur, kesin açık diye değil.
+- **Uyarı:** Teknik borç sekmesinde "Taban imaj güvenliği" kartı (imaj, kullanan servisler bölge
+  başına, işaretler, önerilen eylem: *yeniden üret* / *yama sürümünü yükselt* / *sürüm yükselt*).
+  Günlük yoklayıcı; düzeltmesi olan CRITICAL ya da destek bitmiş bir imaj için imaj başına **bir**
+  `needs-human` iş (etiket `tempo-image-vuln`, parmak izi `image_vuln:<dayanak imaj>`, pano
+  üzerinden tekilleştirme) ve — günlük özetin Telegram ayarı tanımlıysa — bir mesaj. Aynı imaj için
+  açık iş varken yenisi açılmaz.
+- **Güvenlik:** imaj adı repo içeriğidir → alt sürece gitmeden katı desenle doğrulanır, kabuk yok;
+  tarayıcı yolu `CREW_TRIVY_BIN` yalnız ortam değişkeni (yoksa `docker run aquasec/trivy`); ikisi de
+  yoksa kart "tarayıcı yok" der, sürüm işaretleri yine çalışır.
+- **Ayarlar:** `CREW_TECHDEBT_IMAGE_VULN` (kapalı), `_SCAN_H` (24), `_TASK` (kapalı — iş açma),
+  `_NOTIFY` (kapalı — Telegram).
+
+**Kapsam dışı.** Yayınlanmış imajın taranması, otomatik düzeltme (yeniden üretim DevOps'ta; sürüm
+yükseltme mevcut akış), uygulama bağımlılıkları (composer / npm — ayrı konu).
