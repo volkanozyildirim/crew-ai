@@ -26,6 +26,15 @@ _LABEL = {"php": "PHP", "python": "Python"}
 _DIR_RE = re.compile(r"^([a-z]+)-(\d+)-(\d+)(?:-(\d+))?$")
 _TAG_RE = re.compile(r"[\w][\w.\-]*")
 SITES_PER_REGION = 10
+MAX_FILES = 20
+MAX_BYTES = 2_000_000
+PR_MAX = 4000
+_CONT_RE = re.compile(r"\s*(?:&&|;)\s*\\\s*$")     # satır sonu: `&& \` ya da `; \` (zincir devam ediyor)
+
+
+def _clean(text) -> str:
+    """Depodan gelen metin PR açıklamasına girmeden: ters tırnak ve denetim karakterleri atılır."""
+    return re.sub(r"[`\x00-\x1f\x7f]", "", str(text))
 
 
 class ImageTemplateError(Exception):
@@ -46,22 +55,26 @@ def branch_name(dir_name: str) -> str:
     return f"tempo/base-image-{dir_name}"
 
 
-def needed(sites: list[dict], lang: str) -> list[dict]:
-    """Yayınlanmamış, kendi taban imajımız olan devops siteleri dizine göre gruplanır."""
+def needed(sites: list[dict], lang: str, *, cfg=None) -> list[dict]:
+    """Yayınlanmamış, kendi taban imajımız olan devops siteleri dizine göre gruplanır. İmaj yalnız, sitenin
+    `new`'i `old` ile AYNI kayıt/yol önekini taşıyorsa bizimdir (Tempo'nun kullanımdaki imajı yeniden yazması)."""
     name = _NAMES.get(lang)
     if not name:
         return []
-    pat = re.compile(rf"^(?:[^/\s]+/)+({re.escape(name)}-\d+-\d+(?:-\d+)?):([\w.\-]+)$")
+    cfg = cfg or load_cfg()
+    img = rf"((?:[^/\s]+/)+)({re.escape(name)}-\d+-\d+(?:-\d+)?):(\S+)"
+    pat = re.compile(rf"^{img}$")
     groups: dict[str, dict] = {}
     for s in sites:
         if s.get("where") != "devops" or s.get("blocked") != UNPUBLISHED:
             continue
         m = pat.match(str(s.get("new") or ""))
-        if not m:
+        o = pat.match(str(s.get("old") or ""))
+        if not m or not o or o.group(1) != m.group(1):
             continue
-        g = groups.setdefault(m.group(1), {"dir": m.group(1), "tags": [], "regions": [], "sites": []})
-        if m.group(2) not in g["tags"]:
-            g["tags"].append(m.group(2))
+        g = groups.setdefault(m.group(2), {"dir": m.group(2), "tags": [], "regions": [], "sites": []})
+        if m.group(3) not in g["tags"]:
+            g["tags"].append(m.group(3))
         region = str(s.get("repo") or "")
         if region not in g["regions"]:
             g["regions"].append(region)
@@ -70,7 +83,11 @@ def needed(sites: list[dict], lang: str) -> list[dict]:
     for g in groups.values():
         tags = sorted(g.pop("tags"))
         g["tag"] = tags[0]
-        g["error"] = f"bölgeler farklı etiket istiyor: {', '.join(tags)}" if len(tags) > 1 else ""
+        bad_tag = [t for t in tags if not _TAG_RE.fullmatch(t)]
+        unknown = [r for r in g["regions"] if r not in (cfg.get("regions") or {})]
+        g["error"] = (f"geçersiz etiket: {_clean(', '.join(bad_tag))}" if bad_tag
+                      else f"bilinmeyen bölge: {_clean(', '.join(unknown))}" if unknown
+                      else f"bölgeler farklı etiket istiyor: {', '.join(tags)}" if len(tags) > 1 else "")
         out.append(g)
     return out
 
@@ -123,6 +140,12 @@ def state(client, entry: dict, *, cfg=None) -> dict:
     return out
 
 
+def _head(client, cfg: dict) -> str | None:
+    refs = {b.get("name"): b.get("objectId")
+            for b in client.list_branches(cfg["repo"], project=cfg.get("project") or None)}
+    return refs.get(f"refs/heads/{cfg['branch']}")
+
+
 def _lines(text: str) -> list[str]:
     return re.findall(r"[^\n]*\n|[^\n]+", text)
 
@@ -143,7 +166,7 @@ def _pick_source(client, name: str, to: str, cfg: dict) -> str:
     return best[1]
 
 
-def build(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None) -> dict:
+def build(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, commit: str | None = None) -> dict:
     cfg = cfg or load_cfg()
     name = _NAMES.get(lang)
     if not name:
@@ -165,17 +188,26 @@ def build(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None) -
         if not full:
             raise ImageTemplateError(f"{name} {to} için yama sürümü bulunamadı (Docker Hub okunamadı ya da etiket yok).")
     proj = cfg.get("project") or None
+    commit = commit or _head(client, cfg)
+    if not commit:
+        raise ImageTemplateError(f"Hedef dal '{cfg['branch']}' bulunamadı.")
     items = client.get_items_in_path(cfg["repo"], "/" + source, branch=cfg["branch"], recursion_level="full",
                                      project=proj)
-    files: dict[str, bytes] = {}
     prefix = f"/{source}/"
-    for i in items:
-        p = str(i.get("path") or "")
-        if i.get("isFolder") or not p.startswith(prefix):
-            continue
-        data = client.get_file_bytes(cfg["repo"], p, branch=cfg["branch"], project=proj)
+    paths = [str(i.get("path") or "") for i in items
+             if not i.get("isFolder") and str(i.get("path") or "").startswith(prefix)]
+    if len(paths) > MAX_FILES:
+        raise ImageTemplateError(f"Kaynak dizinde ('{source}') {len(paths)} dosya var; "
+                                 f"en çok {MAX_FILES} kopyalanır.")
+    files: dict[str, bytes] = {}
+    total = 0
+    for p in paths:
+        data = client.get_file_bytes(cfg["repo"], p, project=proj, version=commit, version_type="commit")
         if data is None:
             raise ImageTemplateError(f"Kaynak dosya okunamadı: {p}.")
+        total += len(data)
+        if total > MAX_BYTES:
+            raise ImageTemplateError(f"Kaynak dizin ('{source}') {MAX_BYTES // 1_000_000} MB'tan büyük; kopyalanmadı.")
         files[f"/{target}/{p[len(prefix):]}"] = data
     docker = [p for p in files if p[len(target) + 2:].lower() == "dockerfile"]
     if len(docker) != 1:
@@ -207,11 +239,17 @@ def build(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None) -
                                  f"{'yok' if ok is False else 'doğrulanamadı'}.")
     for fx in (cfg.get("fixes") or {}).get(lang, {}).get(to) or []:
         rx = re.compile(fx["drop"])
-        hit = {k for k, ln in enumerate(lines) if rx.search(ln.rstrip("\r\n"))}
-        bad = [k for k in sorted(hit) if not lines[k].rstrip().endswith("\\")]
-        if bad:
-            raise ImageTemplateError("Düzeltme satırı '\\' ile bitmiyor (RUN zincirinin ortası değil): "
-                                     f"{lines[bad[0]].strip()[:120]}")
+        hit = set()
+        for k, ln in enumerate(lines):
+            raw = ln.rstrip("\r\n")
+            if not rx.search(raw):
+                continue
+            cmd = _CONT_RE.sub("", raw.strip()) if _CONT_RE.search(raw) else None
+            if cmd is None or not rx.fullmatch(cmd):
+                raise ImageTemplateError(
+                    "Düzeltme satırı yalnız ilgili komutu içermiyor ya da '&& \\' ile bitmiyor (RUN zincirinin "
+                    f"ortası değil); elle bakılmalı: {_clean(raw.strip())[:120]}")
+            hit.add(k)
         if not hit:
             notes.append(f"düzeltme uygulanmadı: {fx.get('note', fx['drop'])}")
             continue
@@ -223,27 +261,54 @@ def build(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None) -
 
 
 def _description(entry: dict, built: dict, cfg: dict, repo: str) -> str:
+    """PR açıklaması. Depodan gelen her metin `_clean`'den geçer; 4000 sınırı burada korunur: önce servis listeleri
+    kısalır (10 → 5 → 3 → 1 → 0), bayrak bloğu ve RU uyarısı asla kesilmez."""
     regs = cfg.get("regions") or {}
-    out = ["Tempo bu şablonu sürüm yükseltme için hazırladı. **İmaj üretilmedi / yayınlanmadı.**", "",
-           f"Kaynak dizin: `{built['source']}` → `{entry['dir']}` (etiket `{entry['tag']}`).", "", "Değişiklikler:"]
-    out += [f"- {n}" for n in built["notes"]]
-    out += ["", "Derleme doğrulanmadı: imaj derlenip denenmeden bu PR birleştirilmemeli.", "", "## Yayın", "",
-            f"Jenkins `baseImage={entry['dir']}` ile derlenir; bekleyen bölgeler ve bayrakları:"]
-    for r in entry.get("regions") or []:
-        paths = [str(s.get("path")) for s in entry["sites"] if s.get("repo") == r]
-        out.append(f"- **{r}** → `{regs.get(r, '?')}` — bekleyen servisler:")
-        out += [f"  - `{p}`" for p in paths[:SITES_PER_REGION]]
-        if len(paths) > SITES_PER_REGION:
-            out.append(f"  - … ve {len(paths) - SITES_PER_REGION} servis daha")
-    if "russia" in (entry.get("regions") or []):
-        out += ["", "RU registry'sine itilmezse russia servisleri geçemez."]
-    if repo:
-        out += ["", f"İsteyen repo: `{repo}`."]
-    return "\n".join(out)
+    dir_, tag = _clean(entry["dir"]), _clean(entry["tag"])
+
+    def render(limit: int, notes: list[str]) -> str:
+        out = ["Tempo bu şablonu sürüm yükseltme için hazırladı. **İmaj üretilmedi / yayınlanmadı.**", "",
+               f"Kaynak dizin: `{_clean(built['source'])}` → `{dir_}` (etiket `{tag}`).", "", "Değişiklikler:"]
+        out += [f"- {_clean(n)[:300]}" for n in notes]
+        out += ["", "Derleme doğrulanmadı: imaj derlenip denenmeden bu PR birleştirilmemeli.", "", "## Yayın", "",
+                f"Jenkins `baseImage={dir_}` ile derlenir; bekleyen bölgeler ve bayrakları:"]
+        for r in entry.get("regions") or []:
+            paths = [_clean(s.get("path")) for s in entry["sites"] if s.get("repo") == r]
+            out.append(f"- **{_clean(r)}** → `{_clean(regs.get(r, '?'))}` — {len(paths)} bekleyen servis:")
+            out += [f"  - `{p[:200]}`" for p in paths[:limit]]
+            if len(paths) > limit:
+                out.append(f"  - … ve {len(paths) - limit} servis daha")
+        if "russia" in (entry.get("regions") or []):
+            out += ["", "RU registry'sine itilmezse russia servisleri geçemez."]
+        if repo:
+            out += ["", f"İsteyen repo: `{_clean(repo)[:100]}`."]
+        return "\n".join(out)
+    notes = list(built["notes"])[:5]
+    for limit in (SITES_PER_REGION, 5, 3, 1, 0):
+        text = render(limit, notes)
+        if len(text) <= PR_MAX:
+            return text
+    return render(0, notes[:1])[:PR_MAX]
 
 
 def _denied(e: Exception) -> bool:
     return getattr(getattr(e, "response", None), "status_code", None) in (401, 403)
+
+
+def _branch_matches(client, cfg: dict, branch: str, head: str, built: dict, target_head: str) -> bool:
+    """Tempo'nun dalı (PR'sız) tam beklenen içerikte mi: dosya kümesi = hedef dalın kümesi + şablon dosyaları ve
+    şablon dosyalarının baytları eşit. Okunamayan / farklı her şey False."""
+    proj = cfg.get("project") or None
+    try:
+        def paths(ref):
+            return {str(i.get("path")) for i in client.get_items_in_path(
+                cfg["repo"], "/", branch=ref, recursion_level="full", project=proj) if not i.get("isFolder")}
+        if paths(branch) != paths(cfg["branch"]) | set(built["files"]):
+            return False
+        return all(client.get_file_bytes(cfg["repo"], p, project=proj, version=head, version_type="commit") == b
+                   for p, b in built["files"].items())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def open_pr(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, repo: str = "") -> dict:
@@ -254,44 +319,49 @@ def open_pr(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None,
         if st["state"] != "yok":
             return {"state": st["state"], "pr": st["pr"], "reason": st["reason"], "notes": []}
         branch = branch_name(entry["dir"])
-        head = f"refs/heads/{cfg['branch']}"
-        refs = {b.get("name"): b.get("objectId") for b in client.list_branches(cfg["repo"], project=proj)}
-        oid = refs.get(head)
+        oid = _head(client, cfg)
         if not oid:
             raise ImageTemplateError(f"Hedef dal '{cfg['branch']}' bulunamadı.")
-        built = build(client, lang, to, entry, cfg=cfg, resolver=resolver)
-        again = {b.get("name"): b.get("objectId") for b in client.list_branches(cfg["repo"], project=proj)}
-        if again.get(head) != oid:
+        built = build(client, lang, to, entry, cfg=cfg, resolver=resolver, commit=oid)
+        refs = {b.get("name"): b.get("objectId") for b in client.list_branches(cfg["repo"], project=proj)}
+        if refs.get(f"refs/heads/{cfg['branch']}") != oid:
             raise ImageTemplateError(f"'{cfg['branch']}' dalı hazırlık sırasında ilerledi; yeniden deneyin.")
-        create = True
-        if f"refs/heads/{branch}" in refs:
-            if refs[f"refs/heads/{branch}"] != oid:
-                raise ImageTemplateError(f"'{branch}' dalı var, PR'ı yok ve '{cfg['branch']}' ile aynı commit'te "
-                                         "değil; dala dokunulmadı. Kalan dalı silip yeniden deneyin.")
-            create = False                                  # önceki denemeden kalan boş dal
-        title = f"{entry['dir']} taban imaj şablonu ({_LABEL[lang]} {built['full']})"
+        create = push = True
+        existing = refs.get(f"refs/heads/{branch}")
+        if existing:
+            if existing == oid:
+                create = False                              # önceki denemeden kalan boş dal
+            elif _branch_matches(client, cfg, branch, existing, built, oid):
+                create = push = False                       # dal tam beklenen içerikte, yalnız PR eksik
+            else:
+                raise ImageTemplateError(f"'{branch}' dalı var, PR'ı yok ve içeriği beklenenden farklı; dala "
+                                         "dokunulmadı. Kalan dalı silip yeniden deneyin.")
+        title = f"{_clean(entry['dir'])} taban imaj şablonu ({_LABEL[lang]} {_clean(built['full'])})"
         changes = [{"changeType": "add", "path": p, "contentType": "base64encoded",
                     "content": base64.b64encode(b).decode("ascii")} for p, b in sorted(built["files"].items())]
+        stage, pushed = "dal oluşturma", not push
         try:
             if create:
                 res = client.create_branch(cfg["repo"], branch, cfg["branch"], project=proj, source_object_id=oid)
                 vals = res.get("value") if isinstance(res, dict) else None
                 if not (vals and vals[0].get("success")):
-                    why = (vals or [{}])[0].get("updateStatus") or "yanıt okunamadı"
-                    raise ImageTemplateError(f"Dal oluşturulamadı ({why}).")
-            client.push_changes(cfg["repo"], branch, changes, title, project=proj, old_object_id=oid)
+                    raise ImageTemplateError(f"dal oluşturulamadı ({(vals or [{}])[0].get('updateStatus') or 'yanıt okunamadı'})")
+            if push:
+                stage = "push"
+                client.push_changes(cfg["repo"], branch, changes, title, project=proj, old_object_id=oid)
+                pushed = True
+            stage = "PR oluşturma"
             res = client.create_pull_request(cfg["repo"], branch, cfg["branch"], title=title,
                                              description=mask_secrets(_description(entry, built, cfg, repo)),
                                              draft=True, project=proj)
-        except requests.HTTPError as e:
-            if _denied(e):
-                raise ImageTemplateError("base-images reposuna yazma yetkisi yok (401/403); "
-                                         "PR tamamlanamadı.") from e
-            raise
+        except Exception as e:  # noqa: BLE001 — her hata dal adını ve push durumunu söyler
+            why = ("yazma yetkisi yok (401/403)" if _denied(e) else mask_secrets(str(e))[:300])
+            raise ImageTemplateError(f"'{branch}' dalı, {stage} aşamasında hata: {why}. "
+                                     f"Push {'yapıldı' if pushed else 'yapılmadı'}.") from e
     pid = res.get("pullRequestId")
     url = res.get("url") or ""
     base = getattr(client, "org_url", None)
-    if base:
+    if not url and base and cfg.get("project"):
         name = (res.get("repository") or {}).get("name") or cfg["repo"]
-        url = f"{base}/{cfg.get('project')}/_git/{name}/pullrequest/{pid}"
+        url = f"{base}/{cfg['project']}/_git/{name}/pullrequest/{pid}"
     return {"state": "pr açık", "pr": {"id": pid, "url": url}, "notes": built["notes"]}

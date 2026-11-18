@@ -11237,7 +11237,13 @@ class _FakeBaseImages:
              b"    apt-get update && \\\n    # Opcache\n    docker-php-ext-install opcache && \\\n"
              b"    docker-php-ext-enable opcache && \\\n    echo done")
 
-    def __init__(self, files=None, prs=None, fail_list=False):
+    def __init__(self, files=None, prs=None, fail_list=False, fail_at=None, branch_result=None,
+                 move_head_after=None):
+        self.fail_at = fail_at              # "branch" | "push" | "pr" | "deny-branch" | "deny-push"
+        self.branch_result = branch_result
+        self.move_head_after = move_head_after   # list_branches çağrı sayısı; sonrası staging başı ilerler
+        self.list_n = 0
+        self.oids: dict = {}                # dal -> başın objectId'si (yoksa "oid-<dal>")
         self.files = {"staging": dict(files if files is not None else {
             "/Jenkinsfile": b"pipeline {}", "/README.md": b"# x",
             "/php-7-4/Dockerfile": b"FROM php:7.4-fpm", "/php-7-4/tag.txt": b"1.0",
@@ -11252,7 +11258,11 @@ class _FakeBaseImages:
     def list_branches(self, repo, project=None):
         if self.fail_list:
             raise OSError("ağ yok")
-        return [{"name": f"refs/heads/{b}", "objectId": f"oid-{b}"} for b in self.files]
+        self.list_n += 1
+        moved = self.move_head_after is not None and self.list_n > self.move_head_after
+        return [{"name": f"refs/heads/{b}",
+                 "objectId": self.oids.get(b, f"oid-{b}") + ("-moved" if moved and b == "staging" else "")}
+                for b in self.files]
 
     def get_items_in_path(self, repo, path, branch=None, recursion_level="oneLevel", project=None):
         fs = self.files[branch]
@@ -11271,23 +11281,42 @@ class _FakeBaseImages:
                 out.append({"path": p, "isFolder": False})
         return [{"path": d, "isFolder": True} for d in sorted(dirs)] + out
 
-    def get_file_bytes(self, repo, path, branch=None, project=None, **kw):
+    def get_file_bytes(self, repo, path, branch=None, project=None, version=None, version_type=None, **kw):
+        if version:
+            assert version_type == "commit", version_type
+            branch = re.sub(r"-moved$", "", version[len("oid-"):])
         return self.files[branch or "staging"].get(path)
 
+    def _deny(self):
+        import requests as _rq
+        e = _rq.HTTPError("403")
+        e.response = SimpleNamespace(status_code=403)
+        raise e
+
     def create_branch(self, repo, name, source_branch="main", project=None, source_object_id=None):
+        if self.fail_at == "deny-branch":
+            self._deny()
         self.calls.append(("branch", name, source_branch, source_object_id))
+        if self.branch_result is not None:
+            return self.branch_result
         self.files[name] = dict(self.files[source_branch])
+        self.oids[name] = f"oid-{source_branch}"     # yeni dal kaynağın commit'inde
         return {"value": [{"success": True}]}
 
     def push_changes(self, repo, branch, changes, msg, project=None, old_object_id=None):
         import base64 as _b64
+        if self.fail_at == "deny-push":
+            self._deny()
         self.calls.append(("push", branch, changes, old_object_id, project))
+        self.oids[branch] = f"oid-{branch}"          # push dalın başını ilerletir
         for c in changes:
             self.files[branch][c["path"]] = _b64.b64decode(c["content"])
         return {}
 
     def create_pull_request(self, repo, src, tgt="main", title="", description="", work_item_ids=None,
                             draft=False, project=None):
+        if self.fail_at == "pr":
+            raise OSError("PR servisi çöktü")
         self.calls.append(("pr", src, tgt, title, description, draft, project))
         self.prs[src] = {"id": 77, "status": "active", "url": "http://pr/77"}
         return {"pullRequestId": 77, "url": "http://pr/77", "repository": {"name": repo}}
@@ -11307,8 +11336,10 @@ def test_upgrade_image_template():
 
     def site(region, new, blocked="imaj yayınlanmamış", where="devops", path="/build/channel/Dockerfile"):
         return {"where": where, "repo": region, "project": "FLODevOps", "branch": "production", "path": path,
-                "line": 1, "old": "x", "new": new, "blocked": blocked}
-    pre = {"anatolia": "europe-west1-docker.pkg.dev/flo-prod-main/prod-ar/", "russia": "10.131.167.220:5000/prod-ar/"}
+                "line": 1, "old": re.sub(r"(php|python)-\d+-\d+(?:-\d+)?:", r"\1-8-2:", new), "new": new,
+                "blocked": blocked}
+    pre = {"anatolia": "europe-west1-docker.pkg.dev/flo-prod-main/prod-ar/", "russia": "10.131.167.220:5000/prod-ar/",
+           "mars": "m.example/"}
     sites = [site("anatolia", pre["anatolia"] + "php-8-5:1.0", path="/a/Dockerfile"),
              site("anatolia", pre["anatolia"] + "php-8-5:1.0", path="/b/Dockerfile"),
              site("russia", pre["russia"] + "php-8-5:1.0", path="/r/Dockerfile"),
@@ -11399,6 +11430,126 @@ def test_upgrade_image_template():
           r=ur.Resolver(fetch=lambda u: (500, None), patches={"php": {"8.5": "8.5.12"}}), frag="doğrulanamadı")
     bad = dict(cfg, fixes={"php": {"8.5": [{"drop": r"echo done", "note": "x"}]}})
     fails("drop satırı \\ ile bitmiyor", c, "php", "8.5", entry, frag="\\", cfg_=bad)
+
+    # --- fix round 1: dar düzeltme kuralı
+    def php_with(body: bytes):
+        return _FakeBaseImages({"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm-trixie\n" + body,
+                                "/php-8-4/tag.txt": b"1.0"})
+    multi = php_with(b"RUN set -ex && \\\n    docker-php-ext-install opcache pdo_mysql gd && \\\n    echo done")
+    fails("çok eklentili opcache satırı atılmaz", multi, "php", "8.5", entry, frag="docker-php-ext-install opcache pdo_mysql")
+    head = php_with(b"RUN docker-php-ext-install opcache \\\n    && echo done")
+    fails("RUN ile başlayan satır atılmaz", head, "php", "8.5", entry, frag="RUN docker-php-ext-install opcache")
+    last = php_with(b"RUN set -ex && \\\n    echo a && \\\n    docker-php-ext-enable opcache")
+    fails("zincirin son satırı atılmaz", last, "php", "8.5", entry, frag="docker-php-ext-enable opcache")
+    check("gerçek iki satır atılır, çevresi korunur",
+          b"docker-php-ext" not in ui.build(c, "php", "8.5", entry, resolver=res)["files"]["/php-8-5/Dockerfile"])
+
+    # --- fix round 1: yazma korumaları
+    def pr_calls(cl):
+        return [x[0] for x in cl.calls]
+    bname = "tempo/base-image-php-8-5"
+    cf = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cf, "php", "8.5", entry, resolver=res)
+        check("PR hatası → ImageTemplateError", False)
+    except ui.ImageTemplateError as ex:
+        check("PR hatası dalı adlandırır, push yapıldı der", bname in str(ex) and "Push yapıldı" in str(ex), str(ex))
+    check("PR hatasından sonra dal + push yazılmış", pr_calls(cf) == ["branch", "push"], str(pr_calls(cf)))
+    cf.fail_at = None
+    k = len(cf.calls)
+    r = ui.open_pr(cf, "php", "8.5", entry, resolver=res)
+    check("aynı içerikli dal: yalnız PR açılır", pr_calls(cf)[k:] == ["pr"] and r["state"] == "pr açık", str(cf.calls[k:]))
+    cd = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cd, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    cd.fail_at = None
+    cd.files[bname]["/php-8-5/tag.txt"] = b"9.9"
+    k = len(cd.calls)
+    try:
+        ui.open_pr(cd, "php", "8.5", entry, resolver=res)
+        check("farklı içerikli dal reddedilir", False)
+    except ui.ImageTemplateError as ex:
+        check("farklı içerikli dal reddedilir, yazma yok", len(cd.calls) == k and "farklı" in str(ex), str(ex))
+    ce = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(ce, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    ce.fail_at = None
+    ce.files[bname]["/php-8-5/EXTRA"] = b"x"
+    k = len(ce.calls)
+    try:
+        ui.open_pr(ce, "php", "8.5", entry, resolver=res)
+        check("fazladan dosyalı dal reddedilir", False)
+    except ui.ImageTemplateError:
+        check("fazladan dosyalı dal reddedilir, yazma yok", len(ce.calls) == k)
+    cl_ = _FakeBaseImages()
+    cl_.files[bname] = dict(cl_.files["staging"])
+    cl_.oids[bname] = "oid-staging"
+    r = ui.open_pr(cl_, "php", "8.5", entry, resolver=res)
+    check("boş kalan dal yeniden kullanılır (branch yok, push + PR)", pr_calls(cl_) == ["push", "pr"] and r["state"] == "pr açık",
+          str(pr_calls(cl_)))
+    cg = _FakeBaseImages()
+    cg.files[bname] = dict(cg.files["staging"], **{"/other": b"x"})
+    cg.oids[bname] = "oid-other-commit"
+    try:
+        ui.open_pr(cg, "php", "8.5", entry, resolver=res)
+        check("başka commit'li dal reddedilir", False)
+    except ui.ImageTemplateError:
+        check("başka commit'li dal reddedilir, yazma yok", cg.calls == [])
+    cmv = _FakeBaseImages(move_head_after=3)
+    try:
+        ui.open_pr(cmv, "php", "8.5", entry, resolver=res)
+        check("hedef dal ilerledi → hata", False)
+    except ui.ImageTemplateError as ex:
+        check("hedef dal build sırasında ilerledi → yazma yok", cmv.calls == [] and "ilerledi" in str(ex), str(ex))
+    for where in ("deny-branch", "deny-push"):
+        cdn = _FakeBaseImages(fail_at=where)
+        try:
+            ui.open_pr(cdn, "php", "8.5", entry, resolver=res)
+            check(f"{where}: ImageTemplateError", False)
+        except ui.ImageTemplateError as ex:
+            check(f"{where}: ImageTemplateError, yetki + dal adı", "401/403" in str(ex) and bname in str(ex), str(ex))
+    cnb = _FakeBaseImages(branch_result={"value": [{"success": False, "updateStatus": "PermissionRequired"}]})
+    try:
+        ui.open_pr(cnb, "php", "8.5", entry, resolver=res)
+        check("create_branch success False → hata", False)
+    except ui.ImageTemplateError as ex:
+        check("create_branch success False → hata, push yok",
+              "PermissionRequired" in str(ex) and "Push yapılmadı" in str(ex) and pr_calls(cnb) == ["branch"], str(ex))
+    nu = _FakeBaseImages({"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm\n\xff\xfe",
+                          "/php-8-4/tag.txt": b"1.0"})
+    fails("UTF-8 olmayan Dockerfile", nu, "php", "8.5", entry, frag="UTF-8")
+    big = _FakeBaseImages({**{f"/php-8-4/f{i}": b"x" for i in range(21)}, "/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm"})
+    fails("21 dosya → hata", big, "php", "8.5", entry, frag="dosya var")
+    huge = _FakeBaseImages({"/php-8-4/blob": b"x" * 2_100_000, "/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm"})
+    fails("2 MB üstü → hata", huge, "php", "8.5", entry, frag="MB")
+    # needed: geçersiz etiket / bilinmeyen bölge / başka önek
+    for bad_tag in (".5", "-x"):
+        e_ = ui.needed([site("anatolia", pre["anatolia"] + f"php-8-5:{bad_tag}")], "php")
+        check(f"needed: etiket {bad_tag!r} → error", len(e_) == 1 and "geçersiz etiket" in e_[0]["error"], str(e_))
+        check(f"state: etiket {bad_tag!r} → belirsiz, PR yok",
+              ui.state(_FakeBaseImages(), e_[0])["state"] == "belirsiz")
+    check("needed: boşluklu / eğik çizgili etiket hiç girmez",
+          ui.needed([site("anatolia", pre["anatolia"] + "php-8-5:1.0 x")], "php") == [])
+    e_ = ui.needed([site("mars", pre["mars"] + "php-8-5:1.0")], "php")
+    check("needed: bilinmeyen bölge → error", len(e_) == 1 and e_[0]["error"] == "bilinmeyen bölge: mars", str(e_))
+    foreign = site("anatolia", pre["anatolia"] + "php-8-5:1.0")
+    foreign["old"] = "other.example/x/php-8-2:1.0"
+    check("needed: old ile farklı önek → bizim imajımız değil", ui.needed([foreign], "php") == [])
+    # PR metni: ters tırnak / denetim karakteri, sınır, RU cümlesi korunur
+    evil = dict(entry, sites=[site("anatolia", pre["anatolia"] + "php-8-5:1.0", path="/a`b\x07/Dockerfile")]
+                + [site("russia", pre["russia"] + "php-8-5:1.0", path=f"/r{i}/" + "x" * 150) for i in range(300)])
+    cev = _FakeBaseImages()
+    r = ui.open_pr(cev, "php", "8.5", evil, resolver=res, repo="rp`o")
+    dv = cev.calls[-1][4]
+    check("açıklama: ters tırnak/denetim karakteri yok", "/ab/Dockerfile" in dv and "\x07" not in dv and "rp`o" not in dv)
+    check("açıklama ≤ 4000, RU cümlesi + bayraklar duruyor, liste kısaldı",
+          len(dv) <= 4000 and "RU registry" in dv and "yandexLocation" in dv and "mainLocation" in dv
+          and "servis daha" in dv, str(len(dv)))
+    check("URL: sonuç url'si tercih edilir", r["pr"]["url"] == "http://pr/77")
 
     c5 = _FakeBaseImages()
     r1 = ui.open_pr(c5, "php", "8.5", entry, resolver=res, repo="svc-a")

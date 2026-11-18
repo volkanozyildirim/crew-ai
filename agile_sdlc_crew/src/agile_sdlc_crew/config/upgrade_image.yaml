@@ -7,5 +7,6 @@ patch: {}            # elle sabitleme, ör. {php: {"8.5": "8.5.12"}}
 fixes:
   php:
     "8.5":
-      - drop: 'docker-php-ext-(install|enable)\s+opcache\b'
+      # `drop`: satırın komut kısmının (baştaki boşluk ve sondaki `&& \\` / `; \\` hariç) TAMAMEN eşleşmesi gereken regex
+      - drop: 'docker-php-ext-(install|enable) opcache'
         note: "Opcache 8.5'te çekirdeğe gömülü; kurulum adımı hata verir."
