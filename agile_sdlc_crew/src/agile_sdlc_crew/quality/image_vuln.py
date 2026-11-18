@@ -727,7 +727,9 @@ def _tick(get_client) -> None:
 def _fix_round(client, rep: dict, results: list[dict] | None, *, team: str, index: dict | None = None, resolver=None,
                apply_fn=None) -> list[dict]:
     """Uyarının üretildiği turda gidermeyi de başlatır. Tur başına en çok `CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS` imaj
-    (`alert` ile AYNI sıra: destek bitmiş, düzeltmeli kritik sayısı, servis sayısı; yalnız `kritik` / `yüksek`),
+    (`alert` ile AYNI sıra: destek bitmiş, düzeltmeli kritik sayısı, servis sayısı; yalnız `kritik` / `yüksek`); sınıra
+    YALNIZ gerçekten yazma denenen imaj sayılır (PR açık / izleniyor / durduruldu / güncel olanlar slot yemez, yoksa
+    haftalarca aynı destek bitmiş imajlar sınırı doldurur ve sıradakiler hiç işlenmezdi); `bastırıldı` uyarıya dokunulmaz;
     tüm tur için TEK izleme-başlatma bütçesi (`CREW_TECHDEBT_UPGRADE_MAX_OPEN`, yalnız başarılı yeni başlatma tüketir);
     gerisi `sırada`. Yoklayıcı (`auto=True`) durdurulan izlemeyi yeniden açmaz. Yürüyen eylem varsa sonuç imajın
     uyarı işine yorum olur (iş yoksa log satırı). Bir imajın hatası ötekilerini durdurmaz."""
@@ -742,27 +744,39 @@ def _fix_round(client, rep: dict, results: list[dict] | None, *, team: str, inde
     cap = max(1, int(_knob("CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS", 3)))
     budget = [image_fix._max_open_default()]
     wi = {r["image"]: r["wi"] for r in results or [] if r.get("wi")}
+    state_of = {r["image"]: r.get("state") for r in results or []}
     out = []
-    for n, rec in enumerate(recs):
-        if n >= cap:
-            out.append({"image": rec["image"], "state": "sırada", "actions": []})
-            log.info(f"image_vuln: {rec['image']} gidermesi sırada (tur başına en çok {cap} imaj)")
+    ran_images = 0
+    for rec in recs:
+        image = rec["image"]
+        if state_of.get(image) == "bastırıldı":      # insan uyarıyı kapattı / reddetti: yoklayıcı dokunmaz
+            out.append({"image": image, "state": "bastırıldı", "actions": []})
+            continue
+        if ran_images >= cap:
+            out.append({"image": image, "state": "sırada", "actions": []})
+            log.info(f"image_vuln: {image} gidermesi sırada (tur başına en çok {cap} imaj)")
             continue
         try:
             acts = apply_fn(client, rec, team=team, index=index, resolver=resolver, budget=budget, auto=True)
         except Exception as e:  # noqa: BLE001
-            log.warning(f"⚠️ image_vuln: {rec['image']} gidermesi başarısız: {str(e)[:300]}")
+            log.warning(f"⚠️ image_vuln: {image} gidermesi başarısız: {str(e)[:300]}")
             continue
-        out.append({"image": rec["image"], "actions": image_fix.public(acts)})
+        out.append({"image": image, "actions": image_fix.public(acts)})
+        unsure = [f"{a['kind']}: {a.get('reason') or 'belirsiz'}" for a in acts if a.get("state") == "belirsiz"]
+        unsure += [f"{a['kind']}/{u['repo']}: {u.get('reason') or 'belirsiz'}" for a in acts for u in a.get("repos") or []
+                   if u.get("state") == "belirsiz"]
+        if unsure:                                   # nöbetçi için: imaj başına TEK satır, iş yorumu yok
+            log.warning(f"⚠️ image_vuln: {image} gidermesi belirsiz (yazılmadı): " + "; ".join(dict.fromkeys(unsure))[:600])
         if not any(a.get("ran") for a in acts):
-            continue
-        if wi.get(rec["image"]):
+            continue                                 # yazılacak bir şey yoktu: slot yemez, yorum düşmez
+        ran_images += 1
+        if wi.get(image):
             try:
-                client.add_comment(int(wi[rec["image"]]), image_fix.comment_html(acts) + upgrade_track.SIGNATURE)
+                client.add_comment(int(wi[image]), image_fix.comment_html(acts) + upgrade_track.SIGNATURE)
             except Exception as e:  # noqa: BLE001 — PR'lar zaten açıldı
                 log.warning(f"⚠️ image_vuln: giderme yorumu yazılamadı: {str(e)[:200]}")
         else:
-            log.info(f"image_vuln: {rec['image']} gidermesi başlatıldı (uyarı işi yok): "
+            log.info(f"image_vuln: {image} gidermesi başlatıldı (uyarı işi yok): "
                      + "; ".join(f"{a['kind']}={a['state']}" for a in acts if a.get("ran")))
     return out
 

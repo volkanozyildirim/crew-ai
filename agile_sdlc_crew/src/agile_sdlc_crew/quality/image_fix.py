@@ -21,18 +21,20 @@ import threading
 
 from agile_sdlc_crew.quality import app_map, image_vuln
 from agile_sdlc_crew.quality.render import mask_secrets
-from agile_sdlc_crew.quality.upgrade_image import _DIR_RE, _clean, _pr_view
+from agile_sdlc_crew.quality.upgrade_image import _DIR_RE as _UI_DIR_RE
+from agile_sdlc_crew.quality.upgrade_image import _clean, _pr_view
 
 log = logging.getLogger("pipeline")
 
 _LOCK = threading.Lock()
 TRACKED_LANGS = ("php", "python", "go")           # Tempo'nun sürüm yükseltmesini izlediği diller
 _OWN_NAMES = {"php": "php", "python": "python"}   # taban imaj şablonu olan diller (Go'nun taban imajı yok)
-_THREE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
-_TAG3 = re.compile(r"^(\d+\.\d+\.\d+)(.*)$", re.S)
-_ARG_PHP = re.compile(r"^ARG PHP_VERSION=(\d+\.\d+\.\d+)\s*$")
-_FROM_PHP = re.compile(r"^FROM\s+php:\$\{PHP_VERSION\}(\S*)\s*$")
-_FROM_PY = re.compile(r"^FROM\s+python:(\d+\.\d+\.\d+)(-\S+)?\s*$")
+_DIR_RE = re.compile(_UI_DIR_RE.pattern, re.ASCII)   # ASCII dışı rakamlı ad (`８`) int()'e girmesin, dal adını bozmasın
+_THREE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$", re.ASCII)
+_TAG3 = re.compile(r"^(\d+\.\d+\.\d+)(.*)$", re.S | re.ASCII)
+_ARG_PHP = re.compile(r"^ARG PHP_VERSION=(\d+\.\d+\.\d+)\s*$", re.ASCII)
+_FROM_PHP = re.compile(r"^FROM\s+php:\$\{PHP_VERSION\}(\S*)\s*$", re.ASCII)
+_FROM_PY = re.compile(r"^FROM\s+python:(\d+\.\d+\.\d+)(-\S+)?\s*$", re.ASCII)
 BODY_MAX = 3900                                    # Azure PR açıklaması sınırı 4000
 _RANK = ("hata", "sırada", "açıldı")
 
@@ -76,6 +78,36 @@ def _pr_state(client, repo: str, branch: str, project: str | None) -> tuple[str,
     status = pr.get("status")
     state = {"active": "pr açık", "abandoned": "pr reddedildi"}.get(status, "pr kapandı")
     return state, _pr_view(pr), (f"PR #{pr.get('id')} '{status}'" if state == "pr kapandı" else "")
+
+
+def _branch_ok(branch: str, target: str) -> str:
+    """Hesaplanan dal adı push anında reddedilecekse (`_validate_branch`) şimdi neden döner; uygunsa ""."""
+    from agile_sdlc_crew.quality import upgrade_bump
+    try:
+        upgrade_bump._validate_branch(branch, {target})
+    except ValueError as e:
+        return f"dal adı geçersiz: {_why(e)}"
+    return ""
+
+
+def _older_open_pr(client, repo: str, project: str | None, prefix: str, own: str) -> dict | None:
+    """Aynı eski imaj için başka (daha eski bir yamaya giden) dalın AÇIK PR'ı var mı? Yalnız `list_branches` (zaten push
+    öncesi okunan hafif çağrı) + öneke uyan her dal için tam ad aramasıyla; terk / tamamlanmış PR engellemez."""
+    refs = [str(b.get("name") or "").removeprefix("refs/heads/") for b in client.list_branches(repo, project=project)]
+    for name in sorted(r for r in refs if r.startswith(prefix) and r != own):
+        pr = client.find_pull_request(repo, name, project=project)
+        if pr and pr.get("status") == "active":
+            return pr
+    return None
+
+
+def _pr_or_older(client, repo: str, project: str | None, branch: str, prefix: str):
+    state, pr, why = _pr_state(client, repo, branch, project)
+    if state == "yok":
+        older = _older_open_pr(client, repo, project, prefix, branch)
+        if older:
+            return "pr açık", _pr_view(older), f"önceki yama PR'ı açık: #{older.get('id')} — önce o kapanmalı"
+    return state, pr, why
 
 
 # ── Kullananlar (taze index'ten) ─────────────────────────────────────────
@@ -128,7 +160,7 @@ def _guard(kind: str, fn, *a, **kw) -> dict:
 # ── Plan ─────────────────────────────────────────────────────────────────
 
 def plan(client, entry: dict, *, index: dict, resolver, cfg=None, find_open_fn=None, find_any_fn=None,
-         auto: bool = False) -> list[dict]:
+         auto: bool = False, current_fn=None) -> list[dict]:
     """Yazma yok. Rapor kaydı (`image_vuln.report` öğesi) → eylem listesi (modül belgesine bakın). `auto` (yoklayıcı):
     daha önce HİÇ izleme açılmış repo (kapatılmışı dahil) `durduruldu` sayılır — kullanıcının durdurduğu izleme
     kendiliğinden yeniden açılmaz; düğme (auto=False) yeniden başlatabilir."""
@@ -155,7 +187,8 @@ def plan(client, entry: dict, *, index: dict, resolver, cfg=None, find_open_fn=N
         else:
             out.append(pr_action("imaj-yama", _plan_public, client, entry, index, resolver, cfg))
     if eol:
-        out.append(_guard("yükseltme", _plan_upgrade, client, entry, index, find_open_fn, find_any_fn, auto))
+        out.append(_guard("yükseltme", _plan_upgrade, client, entry, index, find_open_fn, find_any_fn, auto,
+                           current_fn))
     if not patch and not eol and sc.get("state") == "tamam" and (sc.get("critical") or sc.get("high")):
         flags = ", ".join(_flags(entry, cfg)) or "bölge bilinmiyor"
         what = (f"Sürüm değişikliği gidermez: işletim sistemi paketlerinde düzeltmesi yayınlanmış bulgu var "
@@ -220,7 +253,10 @@ def _plan_own(client, entry: dict, d: str, resolver, cfg: dict) -> dict:
         upgrade_bump.apply_site(text, site)                    # kuru çalıştırma: yazma anında bozulacaksa şimdi elle
     except ValueError as e:
         return _act(kind, "elle", _why(e), **base)
-    state, pr, why = _pr_state(client, repo, branch_name, proj)
+    bad = _branch_ok(branch_name, branch)
+    if bad:
+        return _act(kind, "elle", bad, **base)
+    state, pr, why = _pr_or_older(client, repo, proj, branch_name, f"tempo/image-patch-{d}-{cur}-")
     return _act(kind, state, why, pr=pr, sites=[site], **base)
 
 
@@ -248,10 +284,10 @@ def _plan_dir(client, entry: dict, d: str, index: dict, resolver, cfg: dict) -> 
 
 
 def _slug(image: str) -> str:
-    """Dal adı gövdesi: `library/golang:1.24.4-alpine` → `golang-1.24.4-alpine` (eski etiket dahil: aynı yamaya giden iki
-    ayrı eski etiket aynı dalı paylaşmaz)."""
+    """Dal adı gövdesi: `library/golang:1.24.4-alpine` → `library-golang-1.24.4-alpine` (eski etiket ve ad dahil: aynı
+    yamaya giden iki ayrı eski etiket / `golang` ile `library/golang` aynı dalı paylaşmaz)."""
     name, _, tag = image.partition(":")
-    return re.sub(r"[^a-z0-9.]+", "-", f"{name.rsplit('/', 1)[-1]}-{tag}".lower()).strip("-.")
+    return re.sub(r"[^a-z0-9.]+", "-", f"{name}-{tag}".lower()).strip("-.")
 
 
 def _plan_public(client, entry: dict, index: dict, resolver, cfg: dict) -> dict:
@@ -275,6 +311,9 @@ def _plan_public(client, entry: dict, index: dict, resolver, cfg: dict) -> dict:
     if not slug or ".." in slug:
         return _act(kind, "elle", f"'{image}' için dal adı türetilemedi.", target=new)
     branch = f"tempo/image-patch-{slug}-{latest}"
+    bad = _branch_ok(branch, app_map.DEVOPS_BRANCH)
+    if bad:
+        return _act(kind, "elle", bad, target=new)
     proj, dbranch = app_map.DEVOPS_PROJECT, app_map.DEVOPS_BRANCH
     fresh: dict[str, list[str]] = {}
     for _repo, region, path, _raw in _users(index, entry):
@@ -299,7 +338,7 @@ def _plan_public(client, entry: dict, index: dict, resolver, cfg: dict) -> dict:
                 u["reason"] = "FROM satırı yalnız rakam değişimiyle yazılamıyor."
                 continue
             u["sites"] = sites
-            u["state"], u["pr"], u["reason"] = _pr_state(client, region, branch, proj)
+            u["state"], u["pr"], u["reason"] = _pr_or_older(client, region, proj, branch, f"tempo/image-patch-{slug}-")
         except Exception as e:  # noqa: BLE001
             u["state"], u["reason"] = "belirsiz", f"okunamadı: {_why(e)}"
     return _act(kind, _agg_plan(units), _bad_reason(units), repos=units, branch=branch, target=new)
@@ -354,7 +393,17 @@ def _agg_plan(units: list[dict]) -> str:
     return states[0]
 
 
-def _plan_upgrade(client, entry: dict, index: dict, find_open_fn, find_any_fn=None, auto: bool = False) -> dict:
+def _repo_current(client, repo: str, lang: str, index: dict) -> str | None:
+    """Reponun GERÇEK şimdiki sürümü — `upgrade_track.start` → `upgrade.plan`'ın okuduğu kaynakla aynı
+    (`modern.target`: yerel klon + FLODevOps index'i; tarama yok). Okunamazsa None."""
+    from pathlib import Path
+    from agile_sdlc_crew.quality import modern, php_modern as pm
+    deps = pm.default_deps()
+    return modern.target(client, repo, Path(pm._root(deps.cfg(), repo, deps)), lang, index=index).get("version")
+
+
+def _plan_upgrade(client, entry: dict, index: dict, find_open_fn, find_any_fn=None, auto: bool = False,
+                  current_fn=None) -> dict:
     """Desteği biten imajı kullanan her repo için sürüm yükseltme izlemesi (varsayılan hedefle). Hedef, imajın
     üretimdeki minörünün üstünde olmalıdır (`default_target`); yükseltme özelliği kapalıyken hiç planlanmaz."""
     from agile_sdlc_crew.quality import intake, upgrade, upgrade_track
@@ -367,6 +416,7 @@ def _plan_upgrade(client, entry: dict, index: dict, find_open_fn, find_any_fn=No
         return _act(kind, "elle", f"sürüm yükseltme kapalı ({off})")
     find_open = find_open_fn or upgrade_track.find_open
     find_any = find_any_fn or upgrade_track.find_any
+    current_fn = current_fn or _repo_current
     ver = str(entry.get("version") or "")
     parts = ver.split(".")
     minor = ".".join(parts[:2]) if len(parts) >= 2 else ""
@@ -402,9 +452,16 @@ def _plan_upgrade(client, entry: dict, index: dict, find_open_fn, find_any_fn=No
                     u.update(state="durduruldu", wi=old.get("id"),
                              reason="izleme daha önce kapatılmış — yeniden başlatma karttan")
                     continue
+            try:
+                cur = current_fn(client, repo, lang, index)
+            except Exception:  # noqa: BLE001 — okunamazsa `start` kendi okumasında aynı koşulu yakalar
+                cur = None
+            if cur and upgrade._v(cur) >= upgrade._v(to):
+                u.update(state="güncel", reason="repo zaten hedef sürümde")
+                continue
             u["state"] = "yok"
     states = [u["state"] for u in units]
-    state = next((s for s in ("yok", "belirsiz", "izleniyor", "durduruldu") if s in states), "hedef yok")
+    state = next((s for s in ("yok", "belirsiz", "izleniyor", "durduruldu", "güncel") if s in states), "hedef yok")
     return _act(kind, state, "" if units else "imajı kullanan repo taze index'te bulunamadı", repos=units,
                 cap=_max_open_default(), target=", ".join(sorted({u["to"] for u in units if u["to"]})) or None)
 
@@ -447,7 +504,11 @@ def _agg_run(units: list[dict], prior: str) -> str:
     for s in _RANK:
         if s in states:
             return s
-    return "elle" if "elle" in states else prior
+    if "elle" in states:
+        return "elle"
+    if prior == "yok" and "yok" not in states:          # hiçbir birim yazılmadı (ör. hepsi güncel)
+        return next((s for s in ("belirsiz", "izleniyor", "durduruldu", "güncel") if s in states), prior)
+    return prior
 
 
 def _body_own(entry: dict, a: dict, cfg: dict) -> str:
@@ -483,7 +544,7 @@ def _body_public(entry: dict, a: dict) -> str:
 
 def apply(client, entry: dict, *, team: str, index: dict, resolver, deps=None, push_fn=None, open_pr_fn=None,
           start_fn=None, max_open: int | None = None, cfg=None, find_open_fn=None, find_any_fn=None,
-          budget: list | None = None, auto: bool = False) -> list[dict]:
+          budget: list | None = None, auto: bool = False, current_fn=None) -> list[dict]:
     """Modül kilidi altında `plan` yeniden hesaplanır; yalnız `yok` durumundaki eylemler yürür. Bir eylemin (ya da
     bölgenin) hatası ötekilerini durdurmaz. Her eylem `ran` alanıyla döner (bu çağrıda yazma denendi mi).
     `budget`: izleme başlatma sayacı `[kalan]` (yoklayıcı turu tek sayacı paylaşır); yalnız BAŞARILI yeni başlatma
@@ -497,7 +558,7 @@ def apply(client, entry: dict, *, team: str, index: dict, resolver, deps=None, p
         budget = [_max_open_default() if max_open is None else max(0, int(max_open))]
     with _LOCK:
         acts = plan(client, entry, index=index, resolver=resolver, cfg=cfg, find_open_fn=find_open_fn,
-                    find_any_fn=find_any_fn, auto=auto)
+                    find_any_fn=find_any_fn, auto=auto, current_fn=current_fn)
         out = []
         for a in acts:
             if a["state"] != "yok":
@@ -512,7 +573,7 @@ def apply(client, entry: dict, *, team: str, index: dict, resolver, deps=None, p
                 elif a["kind"] == "imaj-yama":
                     _run_public(client, entry, a, push_fn)
                 elif a["kind"] == "yükseltme":
-                    _run_upgrade(client, entry, a, team, deps, start_fn, budget)
+                    _run_upgrade(client, entry, a, team, deps, start_fn, budget, index)
             except Exception as e:  # noqa: BLE001
                 log.warning(f"⚠️ image_fix: {a['kind']} başarısız: {_why(e)}")
                 a.update(state="hata", reason=_why(e))
@@ -545,7 +606,7 @@ def _run_public(client, entry: dict, a: dict, push_fn) -> None:
     a["reason"] = "; ".join(f"{u['repo']}: {u['reason']}" for u in a["repos"] if u["state"] in ("hata", "elle") and u["reason"])
 
 
-def _run_upgrade(client, entry: dict, a: dict, team: str, deps, start_fn, budget: list) -> None:
+def _run_upgrade(client, entry: dict, a: dict, team: str, deps, start_fn, budget: list, index: dict | None = None) -> None:
     lang = entry.get("lang")
     for u in a["repos"]:
         if u["state"] != "yok":
@@ -556,8 +617,10 @@ def _run_upgrade(client, entry: dict, a: dict, team: str, deps, start_fn, budget
         if budget[0] <= 0:
             u.update(state="sırada", reason="CREW_TECHDEBT_UPGRADE_MAX_OPEN sınırı — sonraki turda açılır")
             continue
+        u["attempted"] = True
         try:
-            r = start_fn(client, u["repo"], lang, to=u["to"], team=team, deps=deps)
+            # Aynı taze index start'a da gider: izleme Task gövdesi (sürüm yerleri) yazma kararıyla aynı veriden kurulur.
+            r = start_fn(client, u["repo"], lang, to=u["to"], team=team, deps=deps, index=index)
             created = bool(r.get("created", True))
             if created:
                 budget[0] -= 1                  # yalnız başarılı YENİ başlatma sınırı tüketir
@@ -567,8 +630,14 @@ def _run_upgrade(client, entry: dict, a: dict, team: str, deps, start_fn, budget
                 u["url"] = intake._wi_url(client, int(r["id"]))
             except Exception:  # noqa: BLE001
                 u["url"] = ""
+        except ValueError as e:
+            if str(e).startswith("Repo hedef sürümde"):          # start'ın kendi okumasında: yazma denenmedi, hata değil
+                u.update(state="güncel", reason="repo zaten hedef sürümde", attempted=False)
+            else:
+                u.update(state="hata", reason=_why(e))
         except Exception as e:  # noqa: BLE001
             u.update(state="hata", reason=_why(e))
+    a["ran"] = any(u.get("attempted") for u in a["repos"])       # tur sınırı / yorum yalnız gerçekten denenen için
     a["state"] = _agg_run(a["repos"], a["state"])
     a["reason"] = "; ".join(f"{u['repo']}: {u['reason']}" for u in a["repos"] if u["state"] in ("hata", "sırada") and u["reason"])
 
