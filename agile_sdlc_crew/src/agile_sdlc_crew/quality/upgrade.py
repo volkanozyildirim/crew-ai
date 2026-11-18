@@ -238,7 +238,7 @@ def _prod_image(region_images, img: str, lang: str, to: str, *, resolver=None) -
     name = _LANG_IMG_NAME.get(lang)
     three = _three_part(img, lang)
     if three:
-        full = resolver.latest_patch(name, to) if resolver and name else None
+        full = resolver.latest_patch(name, to) if resolver and name and "@" not in img else None
         new = image_for_full(img, lang, full) if full else img
         if new == img:
             return img, CI_HAND
@@ -568,7 +568,8 @@ def _unquote(value: str) -> tuple[str, str, str]:
 def _library_patch(img: str, lang: str, to: str, resolver) -> str | None:
     """CI / kod reposu üç parçalı genel imaj: yama sürümü çözülür ve yeni etiket Hub'da varsa yeni imaj, yoksa None."""
     name = _LANG_IMG_NAME.get(lang)
-    full = resolver.latest_patch(name, to) if resolver and name and is_library_image(img, lang) else None
+    full = (resolver.latest_patch(name, to)
+            if resolver and name and "@" not in img and is_library_image(img, lang) else None)
     new = image_for_full(img, lang, full) if full else img
     return new if new != img and _library_tag_ok(new, lang, resolver) else None
 

@@ -11265,6 +11265,59 @@ def test_upgrade_registry():
           rn.latest_patch("node", "8.5") is None and rn.latest_patch("php", "8") is None
           and rn.tag_exists("node", "1.2.3") is None and not nc)
     check("default() tekil", ur.default() is ur.default())
+    # User-Agent: varsayılan fetch başlığı gönderir (ağ yok, get enjekte)
+    seen: dict = {}
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"results": []}
+
+    def _get(url, **kw):
+        seen.update(kw, url=url)
+        return _R()
+    st, _d = ur._http_fetch("https://hub.docker.com/x", get=_get)
+    check("varsayılan fetch User-Agent başlığı gönderir",
+          st == 200 and seen["headers"] == {"User-Agent": "tempo-upgrade"} and seen["timeout"] == 10, str(seen))
+    # hata belleği: Hub çökünce 60 sn çağrı yapılmaz, süre dolunca tekrar denenir
+    now = [1000.0]
+    fc: list = []
+
+    def failing(url):
+        fc.append(url)
+        raise OSError("zaman aşımı")
+    rd = ur.Resolver(fetch=failing, clock=lambda: now[0])
+    for _ in range(3):
+        rd.latest_patch("golang", "1.27")
+        rd.tag_exists("golang", "1.27.3")
+    check("çöken Hub bir kez çağrılır", len(fc) == 1, str(fc))
+    now[0] += 61
+    rd.latest_patch("golang", "1.27")
+    check("bellek dolunca yeniden denenir", len(fc) == 2, str(fc))
+    sc: list = []
+    r5 = ur.Resolver(fetch=lambda u: (sc.append(u) or (500, None)), clock=lambda: now[0])
+    r5.latest_patch("php", "8.5")
+    r5.tag_exists("php", "8.5.1")
+    check("500 de belleğe alınır", len(sc) == 1, str(sc))
+    # 404 çökme sayılmaz, kesin cevap 1 sa önbellekte
+    hc: list = []
+    r6 = ur.Resolver(fetch=_fake_hub({}, hc), clock=lambda: now[0])
+    r6.tag_exists("php", "9.9.9")
+    r6.tag_exists("php", "9.9.8")
+    check("404 sonrası Hub çökmüş sayılmaz", len(hc) == 2)
+    # tam eşleşme: sondaki satır sonu URL'ye girmez
+    nl: list = []
+    r7 = ur.Resolver(fetch=_fake_hub({}, nl))
+    check("sondaki \\n reddedilir", r7.latest_patch("php", "8.5\n") is None and r7.tag_exists("php", "8.5.1\n") is None
+          and not nl)
+    # yaml pin doğrulaması
+    r8 = ur.Resolver(fetch=_fake_hub({"php": ["8.5.12"]}), patches={"php": {"8.5": "8.4.1"}})
+    check("geçersiz pin yok sayılır, Hub'a düşer", r8.latest_patch("php", "8.5") == "8.5.12")
+    r9 = ur.Resolver(fetch=_fake_hub({}), patches={"php": {8.5: "8.5.7"}})
+    check("float anahtarlı pin kabul edilir", r9.latest_patch("php", "8.5") == "8.5.7")
+    r10 = ur.Resolver(fetch=_fake_hub({}), patches={"php": {"8.5": "8.5.x"}})
+    check("rakam olmayan pin yok sayılır", r10.latest_patch("php", "8.5") is None)
 
 
 def test_upgrade_patch_sites():
@@ -11345,6 +11398,47 @@ def test_upgrade_patch_sites():
         check("kod Dockerfile: Hub okunamadı → CI_HAND", cs[0]["blocked"] == upgrade.CI_HAND and cs[0]["old"] == cs[0]["new"], str(cs))
         cs = upgrade._code_sites("svc", root, "go", "1.27")
         check("kod Dockerfile: resolver=None → CI_HAND", cs[0]["blocked"] == upgrade.CI_HAND, str(cs))
+    # digest sabitli imaj: yeniden yazılmaz, Hub'a gidilmez
+    dg = "golang:1.24.4@sha256:" + "a" * 64
+    dcalls: list = []
+    rdg = ur.Resolver(fetch=_fake_hub(hub, dcalls))
+    s = dsites([dg], "go", "1.27", rdg)
+    check("digest sabitli devops imajı: CI_HAND, old == new, Hub çağrısı yok",
+          s[0]["blocked"] == upgrade.CI_HAND and s[0]["old"] == s[0]["new"] == dg and not dcalls, str(s))
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "Dockerfile").write_text(f"FROM {dg}\n", encoding="utf-8")
+        cs = upgrade._code_sites("svc", Path(td), "go", "1.27", resolver=rdg)
+        check("digest sabitli kod Dockerfile: CI_HAND, Hub çağrısı yok",
+              cs[0]["blocked"] == upgrade.CI_HAND and cs[0]["old"] == cs[0]["new"] and not dcalls, str(cs))
+    out, cpins = upgrade._parse_ci_file(f"image: {dg}\n", "T/x.yml", "go", "1.27", src, resolver=rdg)
+    check("digest sabitli CI image: yazılmaz (okunamayan sabitleme, kapı kapalı), Hub çağrısı yok",
+          not out and len(cpins) == 1 and cpins[0]["version"] == "" and not dcalls, str((out, cpins)))
+    # plan: ayar açık + resolver=None → modül tekili
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake
+    saved_get, saved_default = pc.get, ur._DEFAULT
+    pc.get = lambda k: True if k == "CREW_TECHDEBT_UPGRADE_PATCH" else saved_get(k)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "gocrons"
+            root.mkdir()
+            (root / "go.mod").write_text("module gocrons\n\ngo 1.24.0\n", encoding="utf-8")
+            idx = {"gocrons": [{"src": "anatolia/build/gocrons", "images": ["golang:1.24.4"]}]}
+            deps = intake.Deps(gather=None, board=None, repo_ok=lambda r: True, queue=None, record=None, now=None,
+                               cfg=lambda: {"repos_dir": td})
+            rd = lambda d, p: "FROM golang:1.24.4\n"
+            ur._DEFAULT = res
+            on = upgrade.plan(None, "gocrons", "go", to="1.27", deps=deps, index=idx, root=root, read=rd, yml_files={})
+            dv = [x for x in on["sites"] if x["where"] == "devops"]
+            check("plan: ayar açık → varsayılan çözücü kullanılır",
+                  len(dv) == 1 and dv[0]["new"] == "golang:1.27.3" and dv[0]["blocked"] == "", str(on["sites"]))
+            pc.get = saved_get
+            off = upgrade.plan(None, "gocrons", "go", to="1.27", deps=deps, index=idx, root=root, read=rd, yml_files={})
+            dv = [x for x in off["sites"] if x["where"] == "devops"]
+            check("plan: ayar kapalı → çözücü yok (bugünkü davranış)",
+                  len(dv) == 1 and dv[0]["blocked"] == upgrade.CI_HAND and dv[0]["old"] == dv[0]["new"], str(off["sites"]))
+    finally:
+        pc.get, ur._DEFAULT = saved_get, saved_default
     # yardımcılar
     check("image_for_full: etiket + varyant", upgrade.image_for_full("golang:1.24.4-alpine", "go", "1.27.3") == "golang:1.27.3-alpine")
     check("image_for_full: kayıt deposu önekli", upgrade.image_for_full("eu/prod-ar/python-3-13-7:1.0", "python", "3.14.2")

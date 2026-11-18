@@ -13,13 +13,16 @@ log = logging.getLogger("pipeline")
 HUB = "https://hub.docker.com/v2/repositories/library"
 IMAGE_YAML = Path(__file__).resolve().parent.parent / "config" / "upgrade_image.yaml"
 _NAMES = ("php", "python", "golang")
-_TAG_RE = re.compile(r"^[\w][\w.\-]*$")
-_MINOR_RE = re.compile(r"^\d+\.\d+$")
+_TAG_RE = re.compile(r"[\w][\w.\-]*")
+_MINOR_RE = re.compile(r"\d+\.\d+")
+DOWN_S = 60
 
 
-def _http_fetch(url: str) -> tuple[int, dict | None]:
-    import requests
-    r = requests.get(url, timeout=10)
+def _http_fetch(url: str, get=None) -> tuple[int, dict | None]:
+    if get is None:
+        import requests
+        get = requests.get
+    r = get(url, timeout=10, headers={"User-Agent": "tempo-upgrade"})
     try:
         return r.status_code, r.json()
     except ValueError:
@@ -27,10 +30,12 @@ def _http_fetch(url: str) -> tuple[int, dict | None]:
 
 
 class Resolver:
-    def __init__(self, fetch=None, patches: dict | None = None, ttl_s: float = 3600):
+    def __init__(self, fetch=None, patches: dict | None = None, ttl_s: float = 3600, clock=time.monotonic):
         self._fetch = fetch or _http_fetch
-        self._patches = patches or {}
+        self._patches = {str(n): {str(k): v for k, v in (m or {}).items()} for n, m in (patches or {}).items()}
         self._ttl = ttl_s
+        self._clock = clock
+        self._down_until = 0.0     # Hub hata verdi: bu ana kadar çağrı yapılmaz
         self._cache: dict[tuple, tuple[float, object]] = {}
 
     def fetch(self, url: str):
@@ -38,25 +43,31 @@ class Resolver:
 
     def _cached(self, key: tuple):
         hit = self._cache.get(key)
-        if hit and time.monotonic() - hit[0] < self._ttl:
+        if hit and self._clock() - hit[0] < self._ttl:
             return True, hit[1]
         return False, None
 
     def _get(self, url: str) -> tuple[int, dict | None] | None:
+        if self._clock() < self._down_until:
+            return None
         try:
             status, data = self._fetch(url)
-            return int(status), data if isinstance(data, dict) else None
+            status = int(status)
         except Exception as e:  # noqa: BLE001
             log.warning(f"⚠️ upgrade: Docker Hub okunamadı ({url}): {e}")
+            self._down_until = self._clock() + DOWN_S
             return None
+        if status not in (200, 404):
+            self._down_until = self._clock() + DOWN_S
+        return status, data if isinstance(data, dict) else None
 
     def latest_patch(self, name: str, minor: str) -> str | None:
         """`("php", "8.5") → "8.5.12"`: önce elle sabitleme, sonra Hub'daki en büyük tam `A.B.N` etiketi."""
-        if name not in _NAMES or not isinstance(minor, str) or not _MINOR_RE.match(minor):
+        if name not in _NAMES or not isinstance(minor, str) or not _MINOR_RE.fullmatch(minor):
             return None
-        pinned = ((self._patches or {}).get(name) or {}).get(minor)
-        if pinned:
-            return str(pinned)
+        pinned = str((self._patches.get(name) or {}).get(minor) or "")
+        if re.fullmatch(rf"{re.escape(minor)}\.\d+", pinned):
+            return pinned
         key = ("patch", name, minor)
         hit, val = self._cached(key)
         if hit:
@@ -69,12 +80,12 @@ class Resolver:
                 and isinstance(r.get("name"), str) and (m := pat.match(r["name"]))]
         out = f"{minor}.{max(nums)}" if nums else None
         if out:
-            self._cache[key] = (time.monotonic(), out)
+            self._cache[key] = (self._clock(), out)
         return out
 
     def tag_exists(self, name: str, tag: str) -> bool | None:
         """200 → True, 404 → False, diğer / hata → None."""
-        if name not in _NAMES or not isinstance(tag, str) or not _TAG_RE.match(tag):
+        if name not in _NAMES or not isinstance(tag, str) or not _TAG_RE.fullmatch(tag):
             return None
         key = ("tag", name, tag)
         hit, val = self._cached(key)
@@ -84,7 +95,7 @@ class Resolver:
         if not res or res[0] not in (200, 404):
             return None
         out = res[0] == 200
-        self._cache[key] = (time.monotonic(), out)
+        self._cache[key] = (self._clock(), out)
         return out
 
 
