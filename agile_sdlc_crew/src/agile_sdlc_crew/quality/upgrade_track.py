@@ -31,7 +31,7 @@ STEP_LABEL = {"ci": "test hattı", "prod": "üretim", "code": "kod reposu"}
 NO_EVIDENCE = "Test kanıtı yok"
 WEAK_EVIDENCE = ("Test kanıtı zayıf: test hattında sürüm sabitlemesi bulunamadı; son yeşil build hedef sürümle "
                  "koşmamış olabilir.")
-_PLAN_KW = ("index", "root", "read", "yml_files", "app_map_cache")
+_PLAN_KW = ("index", "root", "read", "yml_files", "app_map_cache", "resolver")
 _SCAN_KW = _PLAN_KW + ("scan_fn", "head_sha_fn", "probe_fn")
 _LOCK = threading.Lock()
 

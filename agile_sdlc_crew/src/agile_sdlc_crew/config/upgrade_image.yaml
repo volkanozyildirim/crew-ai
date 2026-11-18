@@ -1,0 +1,11 @@
+# Yükseltmede taban imaj şablonu ve yama sürümü (spec: language-upgrade-design.md, "Ek 2026-11-18").
+repo: base-images
+project: FLODevOps
+branch: staging
+regions: {anatolia: mainLocation, global: globalLocation, russia: yandexLocation}
+patch: {}            # elle sabitleme, ör. {php: {"8.5": "8.5.12"}}
+fixes:
+  php:
+    "8.5":
+      - drop: 'docker-php-ext-(install|enable)\s+opcache\b'
+        note: "Opcache 8.5'te çekirdeğe gömülü; kurulum adımı hata verir."

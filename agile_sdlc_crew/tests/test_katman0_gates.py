@@ -11214,6 +11214,148 @@ def test_upgrade_plan_sites():
               and c3[0]["new"] == c3[0]["old"], str(c3))
 
 
+def _fake_hub(tags: dict, calls: list | None = None, down: bool = False):
+    """Docker Hub taklidi: `tags` = {ad: [etiket, …]}; liste ucu `name=<minor>.` süzer, tek etiket ucu 200 / 404."""
+    def fetch(url):
+        if calls is not None:
+            calls.append(url)
+        if down:
+            raise OSError("ağ yok")
+        m = re.search(r"/library/(\w+)/tags\?name=([\d.]+)&", url)
+        if m:
+            return 200, {"results": [{"name": t} for t in tags.get(m.group(1), []) if m.group(2) in t]}
+        m = re.search(r"/library/(\w+)/tags/([^/?]+)$", url)
+        if m:
+            return (200, {"name": m.group(2)}) if m.group(2) in tags.get(m.group(1), []) else (404, None)
+        return 500, None
+    return fetch
+
+
+def test_upgrade_registry():
+    """Docker Hub yama çözücüsü: en büyük yama, elle sabitleme, hata → None, etiket kanıtı, önbellek."""
+    print("\n[upgrade: yama sürümü çözücü]")
+    from agile_sdlc_crew.quality import upgrade_registry as ur
+    calls: list = []
+    r = ur.Resolver(fetch=_fake_hub({"php": ["8.5.2", "8.5.12", "8.5.9-fpm", "8.5", "8.4.30"]}, calls))
+    check("en büyük yama (8.5.12; -fpm ve iki parçalı sayılmaz)", r.latest_patch("php", "8.5") == "8.5.12")
+    n = len(calls)
+    check("ikinci çağrı önbellekten", r.latest_patch("php", "8.5") == "8.5.12" and len(calls) == n)
+    check("etiket 200 → True", r.tag_exists("php", "8.5.12") is True)
+    check("etiket 404 → False", r.tag_exists("php", "8.9.9") is False)
+    n = len(calls)
+    r.tag_exists("php", "8.5.12")
+    r.tag_exists("php", "8.9.9")
+    check("etiket sonucu (olumsuz dahil) önbellekte", len(calls) == n)
+    pc: list = []
+    rp = ur.Resolver(fetch=_fake_hub({}, pc), patches={"php": {"8.5": "8.5.99"}})
+    check("yaml patch Hub'a gitmeden döner", rp.latest_patch("php", "8.5") == "8.5.99" and not pc)
+    check("yaml patch başka minörü etkilemez", rp.latest_patch("php", "8.4") is None)
+    bad = ur.Resolver(fetch=lambda u: (500, None))
+    check("500 → None", bad.latest_patch("php", "8.5") is None and bad.tag_exists("php", "8.5.1") is None)
+    junk = ur.Resolver(fetch=lambda u: (200, None))
+    check("bozuk JSON → None", junk.latest_patch("php", "8.5") is None)
+    boom = ur.Resolver(fetch=_fake_hub({}, down=True))
+    check("istisna → None", boom.latest_patch("php", "8.5") is None and boom.tag_exists("php", "8.5.1") is None)
+    check("eşleşme yok → None", ur.Resolver(fetch=_fake_hub({"php": ["8.4.1"]})).latest_patch("php", "8.5") is None)
+    nc: list = []
+    rn = ur.Resolver(fetch=_fake_hub({}, nc))
+    check("geçersiz etiket → None, fetch çağrılmaz",
+          all(rn.tag_exists("php", t) is None for t in ("", "-x", "a b", "8.5/../x", "8.5?x=1")) and not nc)
+    check("bilinmeyen ad / geçersiz minör → None, fetch çağrılmaz",
+          rn.latest_patch("node", "8.5") is None and rn.latest_patch("php", "8") is None
+          and rn.tag_exists("node", "1.2.3") is None and not nc)
+    check("default() tekil", ur.default() is ur.default())
+
+
+def test_upgrade_patch_sites():
+    """Yama sürümü çözücüsüyle siteler: üç parçalı etiketler ve genel imajlar Hub kanıtıyla yazılır."""
+    print("\n[upgrade: yama sürümlü siteler]")
+    from agile_sdlc_crew.quality import upgrade, upgrade_bump as bump, upgrade_registry as ur
+    hub = {"golang": ["1.27.1", "1.27.3", "1.27.3-bookworm"], "python": ["3.14.2", "3.13-slim"],
+           "php": ["8.5.12", "8.5.12-fpm"]}
+    res = ur.Resolver(fetch=_fake_hub(hub))
+    dead = ur.Resolver(fetch=_fake_hub({}, down=True))
+
+    def dsites(images, lang, to, r, extra=None, doc=None):
+        index = {"svc": [{"src": "anatolia/build/svc", "images": images}]}
+        for i, e in enumerate(extra or []):
+            index.setdefault(f"o{i}", []).append(e)
+        txt = doc or "".join(f"FROM {i}\n" for i in images)
+        return [s for s in upgrade._devops_sites(None, "svc", lang, to, index, lambda d, p: txt, None, resolver=r)
+                if s["where"] == "devops"]
+    s = dsites(["golang:1.24.4"], "go", "1.27", res)
+    check("golang:1.24.4 → golang:1.27.3, engelsiz, pushable",
+          len(s) == 1 and s[0]["new"] == "golang:1.27.3" and s[0]["blocked"] == "" and bump.pushable(s[0]), str(s))
+    s = dsites(["golang:1.24.4-alpine"], "go", "1.27", res)
+    check("Hub'da 1.27.3-alpine yok → CI_HAND, old == new",
+          s[0]["blocked"] == upgrade.CI_HAND and s[0]["old"] == s[0]["new"] == "golang:1.24.4-alpine", str(s))
+    s = dsites(["golang:1.24.4-bookworm"], "go", "1.27", res)
+    check("etiketli varyant Hub'da varsa engelsiz", s[0]["new"] == "golang:1.27.3-bookworm" and s[0]["blocked"] == "", str(s))
+    s = dsites(["eu/prod-ar/python-3-13-7:1.0"], "python", "3.14", res)
+    check("kendi imajımız: yeni etiket + UNPUBLISHED",
+          s[0]["new"] == "eu/prod-ar/python-3-14-2:1.0" and s[0]["blocked"] == upgrade.UNPUBLISHED, str(s))
+    s = dsites(["eu/prod-ar/python-3-13-7:1.0"], "python", "3.14", res,
+               extra=[{"src": "anatolia/build/other", "images": ["eu/prod-ar/python-3-14-2:1.0"]}])
+    check("aynı imaj bölgede kullanılıyorsa engelsiz (üç parçalı da)",
+          s[0]["new"] == "eu/prod-ar/python-3-14-2:1.0" and s[0]["blocked"] == "" and bump.pushable(s[0]), str(s))
+    s = dsites(["python:3.11-slim"], "python", "3.13", res)
+    check("iki parçalı library imajı Hub'da var → engelsiz",
+          s[0]["new"] == "python:3.13-slim" and s[0]["blocked"] == "", str(s))
+    s = dsites(["python:3.11-alpine"], "python", "3.13", res)
+    check("iki parçalı library imajı Hub'da yok → UNPUBLISHED",
+          s[0]["new"] == "python:3.13-alpine" and s[0]["blocked"] == upgrade.UNPUBLISHED, str(s))
+    s = dsites(["python:3.11-slim"], "python", "3.13", dead)
+    check("Hub okunamadı → iki parçalı UNPUBLISHED", s[0]["blocked"] == upgrade.UNPUBLISHED, str(s))
+    s = dsites(["golang:1.24.4"], "go", "1.27", dead)
+    check("latest_patch None → bugünkü CI_HAND", s[0]["blocked"] == upgrade.CI_HAND and s[0]["old"] == s[0]["new"], str(s))
+    s0 = dsites(["golang:1.24.4"], "go", "1.27", None)
+    check("resolver=None → bugünkü davranış", s0[0]["blocked"] == upgrade.CI_HAND and s0[0]["old"] == s0[0]["new"], str(s0))
+    # selectable.published, site yüklemiyle aynı
+    idx = {"svc": [{"src": "anatolia/build/svc", "images": ["golang:1.24.4"]}]}
+    svc = upgrade._devops_services("svc", "go", idx, None)
+    sel = {x["version"]: x["published"] for x in upgrade.selectable("go", "1.24", idx, svc, resolver=res)}
+    sel0 = {x["version"]: x["published"] for x in upgrade.selectable("go", "1.24", idx, svc)}
+    check("selectable.published çözücüyle: 1.27 yayınlı (Hub'da var), 1.26 değil",
+          sel["1.27"] is True and sel["1.26"] is False, str(sel))
+    check("selectable çözücüsüz: üç parçalı hiç yayınlı değil", not any(sel0.values()), str(sel0))
+    # CI: GoTool ve image:
+    src = {"repo": "yml-files", "project": "P", "branch": "main"}
+    gt = "steps:\n  - task: GoTool@0\n    inputs:\n      version: '1.24.4'\n"
+    out, pins = upgrade._parse_ci_file(gt, "T/x.yml", "go", "1.27", src, resolver=res)
+    check("GoTool '1.24.4' → '1.27.3'", len(out) == 1 and out[0]["old"] == "'1.24.4'" and out[0]["new"] == "'1.27.3'"
+          and out[0]["blocked"] == "" and bump.pushable(out[0]), str(out))
+    out, _ = upgrade._parse_ci_file(gt, "T/x.yml", "go", "1.27", src, resolver=dead)
+    check("GoTool: sürüm çözülemedi → CI_HAND", out[0]["blocked"] == upgrade.CI_HAND and out[0]["old"] == out[0]["new"], str(out))
+    out, _ = upgrade._parse_ci_file(gt, "T/x.yml", "go", "1.27", src)
+    check("GoTool: resolver=None → CI_HAND", out[0]["blocked"] == upgrade.CI_HAND, str(out))
+    ci_img = "container:\n  image: golang:1.24.4-bookworm\n"
+    out, _ = upgrade._parse_ci_file(ci_img, "T/x.yml", "go", "1.27", src, resolver=res)
+    check("CI image: library etiketi Hub'da → yazılır",
+          len(out) == 1 and out[0]["new"] == "golang:1.27.3-bookworm" and out[0]["blocked"] == "", str(out))
+    out, _ = upgrade._parse_ci_file("image: golang:1.24.4-alpine\n", "T/x.yml", "go", "1.27", src, resolver=res)
+    check("CI image: Hub'da yok → CI_HAND", out[0]["blocked"] == upgrade.CI_HAND and out[0]["old"] == out[0]["new"], str(out))
+    # kod reposu Dockerfile
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "Dockerfile").write_text("FROM golang:1.24.4-bookworm AS b\n", encoding="utf-8")
+        cs = upgrade._code_sites("svc", root, "go", "1.27", resolver=res)
+        check("kod Dockerfile: library etiketi Hub'da → yazılır",
+              len(cs) == 1 and cs[0]["new"] == "golang:1.27.3-bookworm" and cs[0]["blocked"] == "" and bump.pushable(cs[0]), str(cs))
+        cs = upgrade._code_sites("svc", root, "go", "1.27", resolver=dead)
+        check("kod Dockerfile: Hub okunamadı → CI_HAND", cs[0]["blocked"] == upgrade.CI_HAND and cs[0]["old"] == cs[0]["new"], str(cs))
+        cs = upgrade._code_sites("svc", root, "go", "1.27")
+        check("kod Dockerfile: resolver=None → CI_HAND", cs[0]["blocked"] == upgrade.CI_HAND, str(cs))
+    # yardımcılar
+    check("image_for_full: etiket + varyant", upgrade.image_for_full("golang:1.24.4-alpine", "go", "1.27.3") == "golang:1.27.3-alpine")
+    check("image_for_full: kayıt deposu önekli", upgrade.image_for_full("eu/prod-ar/python-3-13-7:1.0", "python", "3.14.2")
+          == "eu/prod-ar/python-3-14-2:1.0")
+    check("image_for_full: eşleşme yok aynen", upgrade.image_for_full("python:3.11-slim", "python", "3.14.2") == "python:3.11-slim")
+    check("is_library_image",
+          upgrade.is_library_image("golang:1.24.4", "go") and upgrade.is_library_image("docker.io/library/python:3.11", "python")
+          and upgrade.is_library_image("php:8.2-fpm", "php") and not upgrade.is_library_image("eu/prod-ar/php-8-2:1.0", "php")
+          and not upgrade.is_library_image("myreg.io/library/golang:1.24.4", "go"))
+
+
 def test_upgrade_scan_take():
     """Yükseltme taraması ve alımı: mevcut modernleştirme yolunu (build_groups, board dedup,
     _open_tasks, Rector kuyruğu) yeniden kullanır; yalnız yükseltme kuralları + hedef araç
@@ -11676,6 +11818,7 @@ def main():
               test_modern_sp,
               test_upgrade_rules,
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
+              test_upgrade_registry, test_upgrade_patch_sites,
               test_upgrade_scan_take,
               test_upgrade_bump_sites,
               test_upgrade_client_find_pr_and_bytes,

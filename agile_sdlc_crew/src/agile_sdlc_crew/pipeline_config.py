@@ -552,6 +552,13 @@ SCHEMA: list[dict] = [
         "desc": "Kapalıysa sürüm adımı hiç PR açmaz; yapılacak değişiklikler DevOps isteği olarak yazılır.",
     },
     {
+        "key": "CREW_TECHDEBT_UPGRADE_PATCH",
+        "label": "Yükseltme · yama sürümü Docker Hub'dan çözülsün",
+        "type": "bool",
+        "default": False,
+        "desc": "Üç parçalı (yama sürümlü) etiketleri ve genel imajları Docker Hub'dan doğrulayıp otomatik yazar; kapalıyken bu satırlar elle düzenlenir.",
+    },
+    {
         "key": "CREW_TECHDEBT_UPGRADE_POLL_MIN",
         "label": "Yükseltme · izleme sıklığı (dk)",
         "type": "int",

@@ -201,16 +201,62 @@ def _three_part(image: str, lang: str) -> bool:
     return re.search(rf"(?:^|/){name}(?::\d+\.\d+\.\d+|-\d+-\d+-\d+)(?![\d])", image or "") is not None
 
 
-def _image_ok(region_images, img: str, lang: str, to: str) -> bool:
-    """Spec §2 imaj kanıtı: `img`'in hedef sürümlü hâli (aynı önek ve etiket) aynı bölge reposunda başka bir
-    serviste zaten kullanılıyor ve etiket üç parçalı değil. `_devops_sites` ve `selectable` aynı yüklemi kullanır."""
-    if _three_part(img, lang):
-        return False
-    new = image_for(img, lang, to)
-    return new != img and new in (region_images or set())
+def is_library_image(image: str, lang: str) -> bool:
+    """Kayıt deposu öneki olmayan dil imajı (`golang:…`, `python:…`, `php:…`; `docker.io/library/` da sayılır)."""
+    name = _LANG_IMG_NAME.get(lang)
+    return bool(name) and re.match(rf"(?:docker\.io/)?(?:library/)?{name}:", image or "") is not None
 
 
-def selectable(lang: str, current: str, index: dict, services: dict | None = None) -> list[dict]:
+def image_for_full(image: str, lang: str, full: str) -> str:
+    """Üç parçalı etiketi tam sürümle yazar: `golang:1.24.4-alpine` + `1.27.3` → `golang:1.27.3-alpine`;
+    `…/python-3-13-7:1.0` + `3.14.2` → `…/python-3-14-2:1.0`. Eşleşme yoksa aynen."""
+    name = _LANG_IMG_NAME.get(lang)
+    if not name or not re.fullmatch(r"\d+\.\d+\.\d+", full or ""):
+        return image
+    new = re.sub(rf"((?:^|/){name}):\d+\.\d+\.\d+", rf"\g<1>:{full}", image, count=1)
+    if new != image:
+        return new
+    return re.sub(rf"((?:^|/){name})-\d+-\d+-\d+", rf"\g<1>-{full.replace('.', '-')}", image, count=1)
+
+
+def _tag(image: str) -> str:
+    return image.rpartition(":")[2] if ":" in image.rpartition("/")[2] else ""
+
+
+def _library_tag_ok(new: str, lang: str, resolver) -> bool:
+    """Genel imajın yeni etiketi Docker Hub'da var mı (kanıt: `tag_exists is True`)."""
+    name = _LANG_IMG_NAME.get(lang)
+    return bool(resolver and name and is_library_image(new, lang)
+                and resolver.tag_exists(name, _tag(new)) is True)
+
+
+def _prod_image(region_images, img: str, lang: str, to: str, *, resolver=None) -> tuple[str, str]:
+    """(yeni imaj, engel). Spec §2 imaj kanıtı: yeni imaj aynı bölge reposunda başka bir serviste kullanılıyor ya da
+    genel imajsa Docker Hub'da var. Üç parçalı etiket yama sürümüyle (`resolver.latest_patch`) yazılır; çözülemezse
+    ya da genel imajın etiketi yoksa elle (`CI_HAND`, yeni == eski). `_devops_sites` ve `selectable` aynı yüklemi
+    kullanır."""
+    name = _LANG_IMG_NAME.get(lang)
+    three = _three_part(img, lang)
+    if three:
+        full = resolver.latest_patch(name, to) if resolver and name else None
+        new = image_for_full(img, lang, full) if full else img
+        if new == img:
+            return img, CI_HAND
+    else:
+        new = image_for(img, lang, to)
+    if new != img:
+        if new in (region_images or set()) or _library_tag_ok(new, lang, resolver):
+            return new, ""
+        if three and is_library_image(new, lang):
+            return img, CI_HAND
+    return new, UNPUBLISHED
+
+
+def _image_ok(region_images, img: str, lang: str, to: str, *, resolver=None) -> bool:
+    return _prod_image(region_images, img, lang, to, resolver=resolver)[1] == ""
+
+
+def selectable(lang: str, current: str, index: dict, services: dict | None = None, *, resolver=None) -> list[dict]:
     """Seçilebilir sürümler. `services` (`_devops_services`'in bu repo için verdiği src → imajlar) verilirse
     `published` site kuralıyla aynıdır: hedefin altındaki her dil imajının yeni hâli o bölgede kullanılıyor
     (`_image_ok`); reponun FLODevOps servisi yoksa True. Verilmezse eski davranış (imaj sürümü görülmüş mü)."""
@@ -229,7 +275,7 @@ def selectable(lang: str, current: str, index: dict, services: dict | None = Non
                     if name and name in img:      # dil imajı ama sürümü okunamıyor: kanıtlanamaz
                         return False
                     continue
-                if iv < _v(v) and not _image_ok(regions.get(region, set()), img, lang, v):
+                if iv < _v(v) and not _image_ok(regions.get(region, set()), img, lang, v, resolver=resolver):
                     return False
         return True
     out = []
@@ -275,7 +321,7 @@ def _devops_services(repo, lang, index, per_src) -> dict[str, list[str]]:
     return svc
 
 
-def _devops_sites(client, repo, lang, to, index, read, per_src=None) -> list[dict]:
+def _devops_sites(client, repo, lang, to, index, read, per_src=None, *, resolver=None) -> list[dict]:
     from agile_sdlc_crew.quality import app_map as am
     by_devrepo = _region_images(index)
     rd = read or (lambda d, p: am._read(client, d, p))
@@ -296,22 +342,19 @@ def _devops_sites(client, repo, lang, to, index, read, per_src=None) -> list[dic
                 continue
             if text is None:
                 text = rd(devrepo, path) or ""
-            three = _three_part(img, lang)
-            new = img if three else image_for(img, lang, to)   # üç parçalı etiket uydurulmaz
+            new, blocked = _prod_image(by_devrepo.get(devrepo, set()), img, lang, to, resolver=resolver)
             lines = [i for i, ln in enumerate(text.splitlines(), 1)
                      if (m := re.match(r"(?i)\s*FROM\s+(?:--\S+\s+)?(\S+)", ln)) and m.group(1) == img]
             if not lines:
                 out.append(_site("devops", devrepo, am.DEVOPS_PROJECT, am.DEVOPS_BRANCH, path, 0, img, new, NO_LINE))
                 continue
-            blocked = (CI_HAND if three else
-                       "" if _image_ok(by_devrepo.get(devrepo, set()), img, lang, to) else UNPUBLISHED)
             for line in lines:
                 out.append(_site("devops", devrepo, am.DEVOPS_PROJECT, am.DEVOPS_BRANCH, path, line, img, new, blocked))
     return out
 
 
-def _ci_sites(client, repo, lang, to, yml_files) -> list[dict]:
-    return _ci_scan(client, repo, lang, to, yml_files)[0]
+def _ci_sites(client, repo, lang, to, yml_files, *, resolver=None) -> list[dict]:
+    return _ci_scan(client, repo, lang, to, yml_files, resolver=resolver)[0]
 
 
 # Yalnız enjekte edilen `yml_files` yolu (testler): dosyaların hangi repoda durduğu verilmez, bu adla etiketlenir.
@@ -319,29 +362,29 @@ _INJECTED_SRC = {"repo": "yml-files", "project": "EcomBackend", "branch": "main"
 _CI_KEYS = {"php": "phpVersion", "python": "pythonVersion", "go": "goVersion"}
 
 
-def _ci_scan(client, repo, lang, to, yml_files) -> tuple[list[dict], list[dict] | None]:
+def _ci_scan(client, repo, lang, to, yml_files, *, resolver=None) -> tuple[list[dict], list[dict] | None]:
     """(siteler, sabitlemeler). Sabitleme: repoyu checkout eden test hattı dosyasında dilin sürüm satırı, sürümü ne
     olursa olsun — `{repo, project, branch, path, line, version}`; site yalnız hedefin altındakiler. Test hattı
     okunamazsa sabitlemeler None (bilinmiyor): "test hattı sabitlemesi yok" ile karışmasın diye."""
-    r = _ci_read(client, repo, lang, to, yml_files)
+    r = _ci_read(client, repo, lang, to, yml_files, resolver=resolver)
     return r["sites"], r["pins"]
 
 
-def _ci_read(client, repo, lang, to, yml_files) -> dict:
+def _ci_read(client, repo, lang, to, yml_files, *, resolver=None) -> dict:
     """{sites, pins, source, definition, live}. Canlı yol (`yml_files is None`): kaynak `<repo>-test` build
     TANIMIDIR (`client.get_test_pipeline`) — repository + process.yamlFilename; o tek dosya tanımın reposundan /
     dalından / projesinden okunur. Enjekte yol (testler): verilen `Test Pipelines/` dosyalarından repoyu ananlar."""
     if not _CI_KEYS.get(lang):
         return {"sites": [], "pins": [], "source": None, "definition": None, "live": yml_files is None}
     if yml_files is None:
-        return _ci_live(client, repo, lang, to)
+        return _ci_live(client, repo, lang, to, resolver=resolver)
     src = dict(_INJECTED_SRC)
     mention = _mention_re(repo)
     out, pins = [], []
     for path in sorted(yml_files):
         if not path.startswith(CI_DIR + "/") or not mention.search(yml_files[path] or ""):
             continue
-        s_, p_ = _parse_ci_file(yml_files[path] or "", path, lang, to, src)
+        s_, p_ = _parse_ci_file(yml_files[path] or "", path, lang, to, src, resolver=resolver)
         out += s_
         pins += p_
     source = {k: pins[0][k] for k in ("repo", "project", "branch", "path")} if pins else None
@@ -376,7 +419,7 @@ def _legacy_ci_file(client, repo: str) -> tuple[str, str] | None:
     return None
 
 
-def _ci_live(client, repo: str, lang: str, to: str) -> dict:
+def _ci_live(client, repo: str, lang: str, to: str, *, resolver=None) -> dict:
     """Canlı test hattı okuması — her belirsizlik kapıyı kapalı tutar: okunamayan → pins None; tanımlanamayan /
     elle ele alınması gereken → tek okunamayan sabitleme (`version: ""`)."""
     res = {"sites": [], "pins": [], "source": None, "definition": None, "live": True}
@@ -419,7 +462,7 @@ def _ci_live(client, repo: str, lang: str, to: str) -> dict:
         return dict(res, pins=None)
     if not _mention_re(repo).search(text):
         return unread(f"paylaşılan / şablon dosya — {path} {repo} reposunu checkout etmiyor")
-    sites, pins = _parse_ci_file(text, path, lang, to, src)
+    sites, pins = _parse_ci_file(text, path, lang, to, src, resolver=resolver)
     if not pins and _TEMPLATE_RE.search(text):
         return unread(f"{path} template / extends kullanıyor, sürüm satırı bulunamadı — elle doğrulanmalı")
     res["sites"], res["pins"] = sites, pins
@@ -435,7 +478,8 @@ def _indent(ln: str) -> int:
     return len(ln) - len(ln.lstrip(" "))
 
 
-def _parse_ci_file(text: str, path: str, lang: str, to: str, src: dict) -> tuple[list[dict], list[dict]]:
+def _parse_ci_file(text: str, path: str, lang: str, to: str, src: dict, *,
+                   resolver=None) -> tuple[list[dict], list[dict]]:
     """Tek test hattı dosyasının sabitlemeleri ve siteleri. Tanınan biçimler: `<anahtar>: '8.2'`, liste biçimi
     değişken / parametre (`- name: <anahtar>` + `value:` / `default:`), sürüm görevi bloğu (GoTool `version`,
     UsePythonVersion `versionSpec`) ve dil imajı (`image:` / `container:`). Bilinmeyen 'yok' sayılmaz: değeri
@@ -479,19 +523,19 @@ def _parse_ci_file(text: str, path: str, lang: str, to: str, src: dict) -> tuple
             continue
         if task is not None and (m := re.match(rf"^\s*{task_key}\s*:(.*)$", ln)):
             task = None
-            _ci_value_pin(out, pins, m.group(1), path, i, src, to)
+            _ci_value_pin(out, pins, m.group(1), path, i, src, to, lang=lang, resolver=resolver)
             from_key = from_key or bool(key_word.search(ln))
             continue
         if var is not None and (m := re.match(r"^\s*(?:value|default)\s*:(.*)$", ln)):
             var = None
-            _ci_value_pin(out, pins, m.group(1), path, i, src, to)
+            _ci_value_pin(out, pins, m.group(1), path, i, src, to, lang=lang, resolver=resolver)
             continue
         if (m := keyline.match(ln)):
-            _ci_value_pin(out, pins, m.group(1), path, i, src, to)
+            _ci_value_pin(out, pins, m.group(1), path, i, src, to, lang=lang, resolver=resolver)
             from_key = True
             continue
         if (m := _CI_IMAGE_KEY.match(ln)):
-            _ci_image_pin(out, pins, m.group(1), m.group(2), lang, path, i, src, to)
+            _ci_image_pin(out, pins, m.group(1), m.group(2), lang, path, i, src, to, resolver=resolver)
     if task is not None:
         unread(task["line"], f"{task['name']} sürümü okunamadı")
     if var is not None:
@@ -521,12 +565,20 @@ def _unquote(value: str) -> tuple[str, str, str]:
     return raw, "", raw
 
 
+def _library_patch(img: str, lang: str, to: str, resolver) -> str | None:
+    """CI / kod reposu üç parçalı genel imaj: yama sürümü çözülür ve yeni etiket Hub'da varsa yeni imaj, yoksa None."""
+    name = _LANG_IMG_NAME.get(lang)
+    full = resolver.latest_patch(name, to) if resolver and name and is_library_image(img, lang) else None
+    new = image_for_full(img, lang, full) if full else img
+    return new if new != img and _library_tag_ok(new, lang, resolver) else None
+
+
 def _ci_pin(src: dict, path, line, **kw) -> dict:
     """Sabitleme: dosyanın durduğu repo / proje / dal tanımdan (ya da enjeksiyondan) gelir."""
     return {"repo": src["repo"], "project": src["project"], "branch": src["branch"], "path": path, "line": line, **kw}
 
 
-def _ci_value_pin(out, pins, value, path, i, src, to) -> None:
+def _ci_value_pin(out, pins, value, path, i, src, to, *, lang=None, resolver=None) -> None:
     """`phpVersion: '8.2'` / GoTool `version:` / `versionSpec:` değeri."""
     raw, q, inner = _unquote(value)
     mm = re.fullmatch(r"(\d+)\.(\d+)(\.\d+)?", inner)
@@ -537,13 +589,15 @@ def _ci_value_pin(out, pins, value, path, i, src, to) -> None:
     ver = f"{mm.group(1)}.{mm.group(2)}"
     pins.append(_ci_pin(src, path, i, version=ver))
     if _v(ver) < _v(to):
-        if mm.group(3):   # 1.22.5: rakam-dizisi kuralı 1.25.5'e izin verirdi — yanlış; otomatik yazılmaz
-            out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, raw, raw, CI_HAND))
+        if mm.group(3):   # 1.22.5: rakam-dizisi kuralı 1.25.5'e izin verirdi — yanlış; yalnız yama çözücüyle yazılır
+            full = resolver.latest_patch(_LANG_IMG_NAME.get(lang, ""), to) if resolver and lang else None
+            out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, raw,
+                             f"{q}{full}{q}" if full else raw, "" if full else CI_HAND))
         else:
             out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, f"{q}{ver}{q}", f"{q}{to}{q}"))
 
 
-def _ci_image_pin(out, pins, key, value, lang, path, i, src, to) -> None:
+def _ci_image_pin(out, pins, key, value, lang, path, i, src, to, *, resolver=None) -> None:
     """`image:` / `container:` değeri dilin imajıysa sabitlemedir (`golang:1.21.4`, `…/golang:1.21-alpine`,
     `python:3.11-slim`, `…/php-8-2:1.0`). `container:` etiketsizse kaynak takma adıdır (`container: golang`)."""
     _raw, _q, img = _unquote(value)
@@ -570,7 +624,13 @@ def _ci_image_pin(out, pins, key, value, lang, path, i, src, to) -> None:
     pins.append(_ci_pin(src, path, i, version=ver))
     if v < _v(to):
         new = image_for(img, lang, to)
-        if _three_part(img, lang) or new == img:
+        if _three_part(img, lang):
+            new = _library_patch(img, lang, to, resolver)
+            if new:
+                out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, new))
+            else:
+                out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, img, CI_HAND))
+        elif new == img:
             out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, img, CI_HAND))
         else:
             out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, new))
@@ -581,7 +641,7 @@ def _range_hard(constraint: str) -> bool:
     return bool(re.search(r"[<!]|\s-\s", constraint))
 
 
-def _code_sites(repo, root: Path, lang, to) -> list[dict]:
+def _code_sites(repo, root: Path, lang, to, *, resolver=None) -> list[dict]:
     root = Path(root)
     out = []
 
@@ -636,25 +696,30 @@ def _code_sites(repo, root: Path, lang, to) -> list[dict]:
             m = re.match(r"(?i)\s*FROM\s+(?:--\S+\s+)?(\S+)", ln)
             v = _image_version(m.group(1), lang) if m else None
             if v and v < _v(to):
-                if _three_part(m.group(1), lang):   # `golang:1.24.4-alpine`: etiket uydurulmaz, elle
-                    add("Dockerfile", i, m.group(1), m.group(1), CI_HAND)
+                if _three_part(m.group(1), lang):   # `golang:1.24.4-alpine`: etiket uydurulmaz — Hub'da varsa yazılır
+                    new = _library_patch(m.group(1), lang, to, resolver)
+                    add("Dockerfile", i, m.group(1), new or m.group(1), "" if new else CI_HAND)
                 else:
                     add("Dockerfile", i, m.group(1), image_for(m.group(1), lang, to))
     return out
 
 
 def sites(client, repo: str, root: Path, lang: str, current: str, to: str, index: dict, *,
-          read=None, yml_files: dict | None = None, per_src: list | None = None) -> list[dict]:
+          read=None, yml_files: dict | None = None, per_src: list | None = None, resolver=None) -> list[dict]:
     """Sürümün sabitlendiği yerler: FLODevOps Dockerfile'ları, yml-files test hattı, kod reposu.
     per_src: hedef aramasının servis listesi (app_map + build_index birleşimi)."""
-    return (_devops_sites(client, repo, lang, to, index, read, per_src)
-            + _ci_sites(client, repo, lang, to, yml_files)
-            + _code_sites(repo, root, lang, to))
+    return (_devops_sites(client, repo, lang, to, index, read, per_src, resolver=resolver)
+            + _ci_sites(client, repo, lang, to, yml_files, resolver=resolver)
+            + _code_sites(repo, root, lang, to, resolver=resolver))
 
 
 def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, index=None, root=None,
-         read=None, yml_files=None, app_map_cache: dict | None = None) -> dict:
+         read=None, yml_files=None, app_map_cache: dict | None = None, resolver=None) -> dict:
     from agile_sdlc_crew.quality import modern
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import upgrade_registry
+    if resolver is None and pc.get("CREW_TECHDEBT_UPGRADE_PATCH"):
+        resolver = upgrade_registry.default()
     deps = deps or pm.default_deps()
     if root is None:
         root = pm._root(deps.cfg(), repo, deps)
@@ -676,7 +741,7 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
            "up_to_date": False}
     if not current:
         return out
-    sel = selectable(lang, current, index, _devops_services(repo, lang, index, out["per_src"]))
+    sel = selectable(lang, current, index, _devops_services(repo, lang, index, out["per_src"]), resolver=resolver)
     if to is not None:
         if not isinstance(to, str) or not _VER_RE.match(to) or to not in {s["version"] for s in sel}:
             raise ValueError(f"Hedef sürüm seçilemez: {to!r}")
@@ -687,9 +752,9 @@ def plan(client, repo: str, lang: str, to: str | None = None, *, deps=None, inde
     if not target or _v(current) >= _v(target):
         out["up_to_date"] = True
         return out
-    ci = _ci_read(client, repo, lang, target, yml_files)
-    out["sites"] = (_devops_sites(client, repo, lang, target, index, read, out["per_src"]) + ci["sites"]
-                    + _code_sites(repo, Path(root), lang, target))
+    ci = _ci_read(client, repo, lang, target, yml_files, resolver=resolver)
+    out["sites"] = (_devops_sites(client, repo, lang, target, index, read, out["per_src"], resolver=resolver)
+                    + ci["sites"] + _code_sites(repo, Path(root), lang, target, resolver=resolver))
     out["ci_pins"], out["ci_source"] = ci["pins"], ci["source"]
     if ci["live"]:
         # Çözülmüş `<repo>-test` tanımı (ya da None): kanıt aynı tanımla aranır, ikinci ad araması yapılmaz.
@@ -1327,7 +1392,7 @@ def _prepare(repo: str, lang: str, deps, root) -> tuple[dict, Path]:
 
 def scan(client, repo: str, lang: str, *, to: str | None = None, team: str = "", force: bool = False, deps=None,
          index=None, root=None, read=None, yml_files=None, app_map_cache: dict | None = None, scan_fn=None,
-         head_sha_fn=None, probe_fn=None) -> dict:
+         head_sha_fn=None, probe_fn=None, resolver=None) -> dict:
     """Yazma yok: hedef sürüme geçince kırılan / davranışı değişen / kullanımdan kalkan yerler. modern.scan
     ile aynı anahtarlar + şimdiki/hedef sürüm, sürüm yerleri, engeller, probe durumu ve sayımlar."""
     from agile_sdlc_crew.quality import modern
@@ -1337,7 +1402,7 @@ def scan(client, repo: str, lang: str, *, to: str | None = None, team: str = "",
     label = modern.LANGS[lang]["label"]
     fresh = pm.freshen_clone(root, force=force) if cfg.get("freshen", True) and scan_fn is None else {}
     pl = plan(client, repo, lang, to, deps=deps, index=index, root=root, read=read, yml_files=yml_files,
-              app_map_cache=app_map_cache)
+              app_map_cache=app_map_cache, resolver=resolver)
     out = {"repo": repo, "lang": lang, "label": label, "version": pl["current"], "current": pl["current"],
            "target": pl["target"], "target_source": pl["target_source"], "selectable": pl["selectable"],
            "sites": pl["sites"], "ci_pins": pl["ci_pins"], "ci_source": pl.get("ci_source"),
