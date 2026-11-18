@@ -208,6 +208,31 @@ def _touched(client, repo: str, project: str | None, dirs: list[str]) -> str:
 
 # ── Trivy ────────────────────────────────────────────────────────────────
 
+# Sunucuda çalışan üçüncü taraf kod: `:latest` DEĞİL, ölçülen (2026-11-18) özet. Yükseltmek için `config/image_vuln.yaml`
+# `trivy_image` değerini yeni bir `aquasec/trivy:<sürüm>` ya da `aquasec/trivy@sha256:<64 hex>` yapın.
+DEFAULT_TRIVY_IMAGE = "aquasec/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb"
+_TRIVY_IMAGE_RE = re.compile(r"aquasec/trivy(?::[\w.-]+|@sha256:[0-9a-f]{64})", re.ASCII)
+
+
+def trivy_image(path: Path | None = None) -> str:
+    """`config/image_vuln.yaml` `trivy_image` (katı desen: `aquasec/trivy(:[\w.-]+|@sha256:<64 hex>)`); yok / geçersiz →
+    sabitlenmiş varsayılan (+ geçersizse uyarı). Docker'a giden bir ad olduğu için yalnız bu desen geçer."""
+    import yaml
+    p = Path(path) if path else IGNORE_PATH
+    try:
+        doc = yaml.safe_load(p.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return DEFAULT_TRIVY_IMAGE
+    v = doc.get("trivy_image") if isinstance(doc, dict) else None
+    if v is None:
+        return DEFAULT_TRIVY_IMAGE
+    if isinstance(v, str) and len(v) <= 200 and _TRIVY_IMAGE_RE.fullmatch(v):
+        return v
+    log.warning(f"⚠️ image_vuln: {p.name} trivy_image geçersiz (aquasec/trivy:<sürüm> ya da @sha256:<64 hex> olmalı); "
+                "sabitlenmiş varsayılan kullanılıyor")
+    return DEFAULT_TRIVY_IMAGE
+
+
 def trivy_cmd(*, which=shutil.which) -> list[str] | None:
     """`CREW_TRIVY_BIN` (yalnız ortam değişkeni; mutlak yol, dosya adı `trivy…`) → PATH'te `trivy` →
     `docker run aquasec/trivy` → yoksa None."""
@@ -224,7 +249,7 @@ def trivy_cmd(*, which=shutil.which) -> list[str] | None:
     if docker:
         # Dizin burada OLUŞTURULMAZ (yalnız "tarayıcı var mı" sorusu yan etki bırakmasın); tarama çalışırken açılır.
         return [docker, "run", "--rm", "--name", f"tempo-trivy-{uuid.uuid4().hex[:12]}",
-                "-v", f"{TRIVY_CACHE}:/root/.cache/", "aquasec/trivy:latest"]
+                "-v", f"{TRIVY_CACHE}:/root/.cache/", trivy_image()]
     return None
 
 
@@ -696,14 +721,23 @@ _POLLER: threading.Thread | None = None
 _POLLER_LOCK = threading.Lock()
 
 
-def _tick(get_client) -> None:
-    """Günlük tur: `report(force=True)` + `alert`. Ayarlar her turda okunur; başka tarama sürüyorsa atlanır."""
+def _tick(get_client, *, sleep=time.sleep, max_wait_s: int = 1800, step_s: int = 30) -> None:
+    """Günlük tur: `report(force=True)` + `alert`. Ayarlar her turda okunur. Kartın başlattığı bir tarama sürüyorsa
+    onu (en çok `max_wait_s`, `step_s`'lik adımlarla) bekler ve bitince koşar — bitmiş taramanın önbelleği yeniden
+    kullanılır (zorlama yok, dakikalarca yeniden tarama yok); hâlâ sürüyorsa günü atlar ve UYARI yazar."""
     from agile_sdlc_crew import pipeline_config as pc
     if not (pc.get("CREW_TECHDEBT") and pc.get("CREW_TECHDEBT_IMAGE_VULN")):
         return
+    waited = False
     if not _begin():
-        log.info("image_vuln: tarama sürüyor, günlük tur atlandı")
-        return
+        waited = True
+        for _ in range(max(1, int(max_wait_s // step_s))):
+            sleep(step_s)
+            if _begin():
+                break
+        else:
+            log.warning(f"⚠️ image_vuln: tarama {int(max_wait_s // 60)} dk sonra hâlâ sürüyor, günlük tur atlandı")
+            return
     rep = None
     try:
         from agile_sdlc_crew.quality import modern
@@ -711,7 +745,7 @@ def _tick(get_client) -> None:
         # Tek TAZE index (24 sa'lik disk önbelleği değil): rapor da giderme de aynı nesneyi kullanır; giderme yollarını
         # (`via` → dizin, `users` → bölge) bayat veriden türetmesin.
         index = modern.build_index(client, max_age_h=0)
-        rep = report(client, force=True, index=index)
+        rep = report(client, force=not waited, index=index)
     finally:
         _end(rep)       # tarama bitti: alert / giderme `intake._LOCK`'ta dakikalarca bekleyebilir, kart "Taranıyor" demesin
     from agile_sdlc_crew.quality import intake
@@ -724,18 +758,61 @@ def _tick(get_client) -> None:
             log.warning(f"⚠️ image_vuln: giderme turu hata verdi: {str(e)[:300]}")
 
 
+def _default_deps():
+    from agile_sdlc_crew.quality import intake
+    return intake.default_deps()
+
+
+def _fix_err_path(cache_dir: Path) -> Path:
+    return Path(cache_dir) / "fix_errors.json"      # imaj önbellek dosyaları 40 hex + .json, notified.json: çakışmaz
+
+
+def _fix_err_load(cache_dir: Path) -> dict:
+    """İmaj → son yorumlanan hata anahtarı. Dosya güvenilmezdir (bozuk / elle düzenlenmiş olabilir): biçim tutmazsa boş."""
+    try:
+        doc = json.loads(_fix_err_path(cache_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(k, str) and isinstance(v, str) and len(v) <= 64}
+
+
+def _fix_err_save(cache_dir: Path, memo: dict) -> None:
+    try:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        _fix_err_path(cache_dir).write_text(json.dumps(memo, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        log.warning(f"⚠️ image_vuln: giderme hata notu yazılamadı: {e}")
+
+
+def _fix_errors(acts: list[dict]) -> list[tuple[str, str]]:
+    out = [(a["kind"], str(a.get("reason") or "")) for a in acts if a.get("state") == "hata"]
+    out += [(f"{a['kind']}/{u['repo']}", str(u.get("reason") or "")) for a in acts for u in a.get("repos") or []
+            if u.get("state") == "hata"]
+    return sorted(set(out))
+
+
 def _fix_round(client, rep: dict, results: list[dict] | None, *, team: str, index: dict | None = None, resolver=None,
-               apply_fn=None) -> list[dict]:
+               apply_fn=None, deps=None, cache_dir: Path | None = None) -> list[dict]:
     """Uyarının üretildiği turda gidermeyi de başlatır. Tur başına en çok `CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS` imaj
-    (`alert` ile AYNI sıra: destek bitmiş, düzeltmeli kritik sayısı, servis sayısı; yalnız `kritik` / `yüksek`); sınıra
-    YALNIZ gerçekten yazma denenen imaj sayılır (PR açık / izleniyor / durduruldu / güncel olanlar slot yemez, yoksa
-    haftalarca aynı destek bitmiş imajlar sınırı doldurur ve sıradakiler hiç işlenmezdi); `bastırıldı` uyarıya dokunulmaz;
-    tüm tur için TEK izleme-başlatma bütçesi (`CREW_TECHDEBT_UPGRADE_MAX_OPEN`, yalnız başarılı yeni başlatma tüketir);
-    gerisi `sırada`. Yoklayıcı (`auto=True`) durdurulan izlemeyi yeniden açmaz. Yürüyen eylem varsa sonuç imajın
-    uyarı işine yorum olur (iş yoksa log satırı). Bir imajın hatası ötekilerini durdurmaz."""
+    (`alert` ile AYNI sıra: destek bitmiş, düzeltmeli kritik sayısı, servis sayısı; yalnız `kritik` / `yüksek`);
+    sınıra YALNIZ gerçekten bir şey YAZILAN imaj (`ran`) sayılır — PR açık / izleniyor / durduruldu / güncel / yazmadan
+    reddedilenler slot yemez, yoksa her gece aynı imajlar sınırı doldurur ve sıradakiler hiç işlenmezdi. Bastırma
+    kararı `alert` sonuçlarından değil PANODAN okunur (`_TASK` kapalı / pano okunamadı da kapsanır): insanın iptal
+    ettiği uyarıya dokunulmaz, pano okunamazsa tur HİÇBİR şey yapmaz. Tüm tur için TEK izleme-başlatma bütçesi
+    (`CREW_TECHDEBT_UPGRADE_MAX_OPEN`, yalnız başarılı yeni başlatma tüketir). Yoklayıcı (`auto=True`) durdurulan
+    izlemeyi yeniden açmaz. Yazılan sonuç — ya da DEĞİŞEN bir hata nedeni — imajın uyarı işine yorum olur; aynı hata
+    her gece yorumlanmaz. Bir imajın hatası ötekilerini durdurmaz."""
     from agile_sdlc_crew.quality import image_fix, modern, upgrade_registry, upgrade_track
     recs = sorted((r for r in rep.get("images") or [] if r.get("level") in ("kritik", "yüksek")), key=_alert_rank)
     if not recs:
+        return []
+    deps = deps or _default_deps()
+    try:
+        verdicts = _board_verdicts(deps, client, [r["image"] for r in recs])
+    except Exception as e:  # noqa: BLE001 — bastırma bilinmiyor: yazma yok
+        log.warning(f"⚠️ image_vuln: pano okunamadı, giderme turu yapılmadı: {str(e)[:200]}")
         return []
     if index is None:
         index = modern.build_index(client, max_age_h=0)     # yazmadan önce yollar taze index'ten türetilir
@@ -744,12 +821,17 @@ def _fix_round(client, rep: dict, results: list[dict] | None, *, team: str, inde
     cap = max(1, int(_knob("CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS", 3)))
     budget = [image_fix._max_open_default()]
     wi = {r["image"]: r["wi"] for r in results or [] if r.get("wi")}
-    state_of = {r["image"]: r.get("state") for r in results or []}
+    for image, (_v, w) in verdicts.items():
+        if w and image not in wi:
+            wi[image] = w
+    cache_dir = Path(cache_dir) if cache_dir else CACHE_DIR
+    memo = _fix_err_load(cache_dir)
+    memo0 = dict(memo)
     out = []
     ran_images = 0
     for rec in recs:
         image = rec["image"]
-        if state_of.get(image) == "bastırıldı":      # insan uyarıyı kapattı / reddetti: yoklayıcı dokunmaz
+        if verdicts[image][0] == "suppressed":       # insan uyarıyı iptal etti / reddetti: yoklayıcı dokunmaz
             out.append({"image": image, "state": "bastırıldı", "actions": []})
             continue
         if ran_images >= cap:
@@ -767,17 +849,28 @@ def _fix_round(client, rep: dict, results: list[dict] | None, *, team: str, inde
                    if u.get("state") == "belirsiz"]
         if unsure:                                   # nöbetçi için: imaj başına TEK satır, iş yorumu yok
             log.warning(f"⚠️ image_vuln: {image} gidermesi belirsiz (yazılmadı): " + "; ".join(dict.fromkeys(unsure))[:600])
-        if not any(a.get("ran") for a in acts):
-            continue                                 # yazılacak bir şey yoktu: slot yemez, yorum düşmez
-        ran_images += 1
+        wrote = any(a.get("ran") for a in acts)
+        errs = _fix_errors(acts)
+        key = hashlib.sha1(json.dumps(errs, ensure_ascii=False).encode("utf-8")).hexdigest()[:16] if errs else ""
+        new_error = bool(key) and key != memo.get(image)
+        if key:
+            memo[image] = key
+        else:
+            memo.pop(image, None)
+        if not (wrote or new_error):
+            continue                                 # yazılacak bir şey yoktu / aynı red zaten yorumlandı: slot yok, yorum yok
+        if wrote:
+            ran_images += 1
         if wi.get(image):
             try:
                 client.add_comment(int(wi[image]), image_fix.comment_html(acts) + upgrade_track.SIGNATURE)
             except Exception as e:  # noqa: BLE001 — PR'lar zaten açıldı
                 log.warning(f"⚠️ image_vuln: giderme yorumu yazılamadı: {str(e)[:200]}")
         else:
-            log.info(f"image_vuln: {image} gidermesi başlatıldı (uyarı işi yok): "
-                     + "; ".join(f"{a['kind']}={a['state']}" for a in acts if a.get("ran")))
+            log.info(f"image_vuln: {image} gidermesi sonuçlandı (uyarı işi yok): "
+                     + "; ".join(f"{a['kind']}={a['state']}" for a in acts if a.get("ran") or a.get("state") == "hata"))
+    if memo != memo0:
+        _fix_err_save(cache_dir, memo)
     return out
 
 
@@ -973,18 +1066,25 @@ def alert(client, rep: dict, *, team: str, deps, open_fn=None, notify_fn=None, c
     return results
 
 
-def _open_tasks(client, crit: list[dict], *, team: str, deps, open_fn, cap: int) -> list[dict]:
+def _board_verdicts(deps, client, images: list[str]) -> dict:
+    """Panodaki uyarı işi kararı (`dedup.verdict`) imaj başına: {imaj: (karar, iş no)}. `alert` ve giderme turu AYNI
+    aramayı kullanır; pano okunamazsa istisna yükselir (çağıran yazmadan vazgeçer)."""
     from agile_sdlc_crew.quality import dedup
+    board = deps.board(client)
+    grace = int(_knob("CREW_QUALITY_REOPEN_GRACE_DAYS", 3))
+    return {i: dedup.verdict(board.get(_fp(i)), last_seen=0.0, now=deps.now(), grace_days=grace) for i in images}
+
+
+def _open_tasks(client, crit: list[dict], *, team: str, deps, open_fn, cap: int) -> list[dict]:
     try:
-        board = deps.board(client)
+        verdicts = _board_verdicts(deps, client, [r["image"] for r in crit])
     except Exception as e:  # noqa: BLE001 — pano okunamazsa tekilleştirilemez: yazma yok
         log.warning(f"⚠️ image_vuln: pano okunamadı, Task açılmadı: {str(e)[:200]}")
         return []
-    grace = int(_knob("CREW_QUALITY_REOPEN_GRACE_DAYS", 3))
     out: list[dict] = []
     opened = 0
     for rec in sorted(crit, key=_alert_rank):
-        v, wi = dedup.verdict(board.get(_fp(rec["image"])), last_seen=0.0, now=deps.now(), grace_days=grace)
+        v, wi = verdicts[rec["image"]]
         if v in ("blocked", "suppressed"):
             out.append({"image": rec["image"], "state": "açık iş" if v == "blocked" else "bastırıldı", "wi": wi})
             continue

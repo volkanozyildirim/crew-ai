@@ -73,7 +73,7 @@ def _track_rows(client, extra: str = "", *, open_only: bool = True) -> list[dict
         if not m:
             continue
         out.append({"id": int(wi["id"]), "lang": m.group(1), "repo": m.group(2), "to": m.group(3),
-                    "title": f.get("System.Title") or "", "area": f.get("System.AreaPath") or ""})
+                    "title": f.get("System.Title") or "", "area": f.get("System.AreaPath") or "", "open": _is_open(f)})
     return out
 
 
@@ -92,6 +92,30 @@ def find_any(client, lang: str, repo: str, to: str | None = None) -> dict | None
                        open_only=False)
     rows = [r for r in rows if r["lang"] == lang and r["repo"].lower() == repo.lower() and (to is None or r["to"] == to)]
     return min(rows, key=lambda r: r["id"]) if rows else None
+
+
+def find_stopped(client, lang: str, repo: str, to: str | None = None) -> dict | None:
+    """Yoklayıcının sorusu: bu repo × dil için, yeniden açmaması gereken KAPALI bir izleme işi var mı?
+    (a) `to` ile aynı hedef için kapatılmış her iş engeller; (b) bir insanın durdurduğu iş (kapanış yorumunda
+    "Yükseltme tamamlandı" YOK) HER hedef için engeller — "durdur" Task'ı kapatır ve görüntü ertesi gün hâlâ
+    desteği bitmiş olur; (c) otomatik ilerletmenin TAMAMLADIĞI eski hedefli iş yeni hedefi engellemez.
+    Yorumlar okunamaz / eksik okunursa iş durdurulmuş sayılır (güvenli taraf: yeniden açılmaz)."""
+    rows = _track_rows(client, f" AND [System.Description] CONTAINS '{KEY_PREFIX} {_q(lang)}:{_q(repo)}:'",
+                       open_only=False)
+    rows = sorted((r for r in rows if r["lang"] == lang and r["repo"].lower() == repo.lower() and not r["open"]),
+                  key=lambda r: r["id"])
+    same = [r for r in rows if to and r["to"] == to]
+    if same:
+        return same[0]
+    for r in rows:
+        try:
+            c = _Comments(client, r["id"])
+            done = any("Yükseltme tamamlandı" in text for text, _ in c.rows()) and c.complete
+        except Exception:  # noqa: BLE001
+            done = False
+        if not done:
+            return r
+    return None
 
 
 def tracked(client, team: str) -> list[dict]:
@@ -222,6 +246,35 @@ def stop(client, repo: str, lang: str, *, to: str | None = None, team: str, note
 # ── Durum ────────────────────────────────────────────────────────────────
 
 _fp_blocking = upgrade._fp_blocking   # tek yüklem: taramanın atlananları da aynısını kullanır
+
+
+_PUBLIC_OLD = re.compile(r"^[a-z0-9][a-z0-9._/-]*:\d+\.\d+\.\d+[\w.-]*$", re.ASCII)
+
+
+def _patch_pr_block(client, dv: list[dict]) -> str:
+    """Taban imaj gidermesinin (`image_fix`) bölge repolarında AÇIK bir yama PR'ı (`tempo/image-patch-<imaj>-…`) aynı
+    eski imajın `FROM` satırını değiştiriyorsa üretim adımı hazır değildir: ikinci PR aynı satırı değiştirir, ikincisi
+    çakışır. Yalnız `CREW_TECHDEBT_IMAGE_VULN` açıkken (kapalıyken Azure çağrısı YOK, çıktı değişmez); arama hatası =
+    bilinmiyor → hazır değil. Terk / tamamlanmış PR engellemez. Dal adı ve tam eşleşme `image_fix`'ten."""
+    from agile_sdlc_crew import pipeline_config as pc
+    if not pc.get("CREW_TECHDEBT_IMAGE_VULN"):
+        return ""
+    from agile_sdlc_crew.quality import image_fix
+    seen: set = set()
+    for s in dv:
+        old, repo = str(s.get("old") or ""), str(s.get("repo") or "")
+        if s.get("where") != "devops" or not repo or not _PUBLIC_OLD.match(old) or (repo, old) in seen:
+            continue
+        seen.add((repo, old))
+        try:
+            pr = image_fix._older_open_pr(client, repo, s.get("project") or None,
+                                          f"tempo/image-patch-{image_fix._slug(old)}-", "")
+        except Exception as e:  # noqa: BLE001
+            return f"Yama PR'ı durumu okunamadı ({repo}: {_esc(str(e))[:120]}) — üretim adımı açılmaz."
+        if pr:
+            return (f"aynı satırı değiştiren yama PR'ı açık: #{pr.get('id')} ({repo}) — önce o kapanmalı "
+                    "(birleştirilmeli ya da kapatılmalı).")
+    return ""
 
 
 def open_tasks(client, repo: str, lang: str) -> list[dict]:
@@ -623,6 +676,9 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw, image_state_fn=No
                                       "yok — üretim adımı açılmaz.", dv, blocked_by_evidence=True)
         else:
             return nxt("prod", False, f"Test kanıtı okunamadı ({state!r}) — üretim adımı açılmaz.", dv)
+    blk = _patch_pr_block(client, dv)
+    if blk:
+        return nxt("prod", False, blk, dv)
     bad = [s for s in dv if not _pushable(s)]
     if bad:
         return nxt("prod", False, "Üretim imajı satırı otomatik değiştirilemez: "

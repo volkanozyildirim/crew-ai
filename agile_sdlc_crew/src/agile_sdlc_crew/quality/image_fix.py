@@ -94,7 +94,9 @@ def _older_open_pr(client, repo: str, project: str | None, prefix: str, own: str
     """Aynı eski imaj için başka (daha eski bir yamaya giden) dalın AÇIK PR'ı var mı? Yalnız `list_branches` (zaten push
     öncesi okunan hafif çağrı) + öneke uyan her dal için tam ad aramasıyla; terk / tamamlanmış PR engellemez."""
     refs = [str(b.get("name") or "").removeprefix("refs/heads/") for b in client.list_branches(repo, project=project)]
-    for name in sorted(r for r in refs if r.startswith(prefix) and r != own):
+    # TAM eşleşme: `…-golang-1.24.4-` öneki `…-golang-1.24.4-alpine-1.24.13` gibi kardeş imaj dallarına uymasın.
+    pat = re.compile(re.escape(prefix) + r"\d+\.\d+\.\d+", re.ASCII)
+    for name in sorted(r for r in refs if pat.fullmatch(r) and r != own):
         pr = client.find_pull_request(repo, name, project=project)
         if pr and pr.get("status") == "active":
             return pr
@@ -150,6 +152,18 @@ def _on(key: str) -> bool:
         return False
 
 
+def _unknown_regions(regions, cfg: dict) -> list[str]:
+    """`upgrade_image.needed` ile aynı kural: `config/upgrade_image.yaml` `regions`'ta olmayan bölge (RU sessizce
+    bayraksız kalmasın; `?` basılmaz)."""
+    known = cfg.get("regions") or {}
+    return sorted(r for r in regions if r not in known)
+
+
+def _unknown_act(kind: str, regions, cfg: dict):
+    unk = _unknown_regions(regions, cfg)
+    return _act(kind, "elle", f"bilinmeyen bölge: {_clean(', '.join(unk))[:100]}") if unk else None
+
+
 def _guard(kind: str, fn, *a, **kw) -> dict:
     try:
         return fn(*a, **kw)
@@ -183,13 +197,18 @@ def plan(client, entry: dict, *, index: dict, resolver, cfg=None, find_open_fn=N
                 if m and m.group(4):
                     out.append(pr_action("taban-dizin", _plan_dir, client, entry, d, index, resolver, cfg))
                 else:
-                    out.append(pr_action("taban-yama", _plan_own, client, entry, d, resolver, cfg))
+                    out.append(_unknown_act("taban-yama", entry.get("users") or {}, cfg)
+                               or pr_action("taban-yama", _plan_own, client, entry, d, resolver, cfg))
         else:
             out.append(pr_action("imaj-yama", _plan_public, client, entry, index, resolver, cfg))
     if eol:
         out.append(_guard("yükseltme", _plan_upgrade, client, entry, index, find_open_fn, find_any_fn, auto,
                            current_fn))
     if not patch and not eol and sc.get("state") == "tamam" and (sc.get("critical") or sc.get("high")):
+        unk = _unknown_act("yeniden-üret", entry.get("users") or {}, cfg)
+        if unk:
+            out.append(unk)
+            return out
         flags = ", ".join(_flags(entry, cfg)) or "bölge bilinmiyor"
         what = (f"Sürüm değişikliği gidermez: işletim sistemi paketlerinde düzeltmesi yayınlanmış bulgu var "
                 f"({int(sc.get('critical') or 0)} kritik, {int(sc.get('high') or 0)} yüksek). ")
@@ -274,6 +293,9 @@ def _plan_dir(client, entry: dict, d: str, index: dict, resolver, cfg: dict) -> 
     raws = _users(index, {"image": entry["image"], "via": [d]})
     tags = sorted({image_vuln._OWN_RE.match(r[3]).group(2) for r in raws})
     regions = sorted({r[1] for r in raws})
+    unk = _unknown_act(kind, regions, cfg)
+    if unk:
+        return unk
     if not raws:
         return _act(kind, "elle", f"'{d}' dizinini kullanan servis taze index'te bulunamadı.", dir=new_dir)
     ent = {"dir": new_dir, "tag": tags[0], "regions": regions, "sites": [{"repo": r[1], "path": "/" + r[2]} for r in raws],
@@ -415,7 +437,7 @@ def _plan_upgrade(client, entry: dict, index: dict, find_open_fn, find_any_fn=No
     if off:
         return _act(kind, "elle", f"sürüm yükseltme kapalı ({off})")
     find_open = find_open_fn or upgrade_track.find_open
-    find_any = find_any_fn or upgrade_track.find_any
+    find_any = find_any_fn or upgrade_track.find_stopped
     current_fn = current_fn or _repo_current
     ver = str(entry.get("version") or "")
     parts = ver.split(".")
@@ -444,7 +466,7 @@ def _plan_upgrade(client, entry: dict, index: dict, find_open_fn, find_any_fn=No
         else:
             if auto:
                 try:
-                    old = find_any(client, lang, repo)
+                    old = find_any(client, lang, repo, to)
                 except Exception as e:  # noqa: BLE001 — geçmiş okunamazsa yoklayıcı açmaz
                     u["state"], u["reason"] = "belirsiz", f"izleme geçmişi okunamadı: {_why(e)}"
                     continue
@@ -481,14 +503,24 @@ def _max_open_default() -> int:
 
 
 def _from_push(unit: dict, res: dict) -> None:
+    """`wrote`: bu çağrıda GERÇEKTEN bir şey yazıldı mı (yeni PR ya da dal / push). Yeniden kullanılan PR, yetkisiz
+    (fallback) ve yazmadan biten hatalar yazma sayılmaz."""
+    unit["wrote"] = False
     if res.get("prs"):
         p = res["prs"][0]
-        unit.update(state="açıldı", pr={"id": p.get("id"), "url": p.get("url", "")}, reason="")
+        pr = {"id": p.get("id"), "url": p.get("url", "")}
+        if p.get("reused"):
+            unit.update(state="pr açık", pr=pr, reason="")
+        else:
+            unit.update(state="açıldı", pr=pr, reason="")
+            unit["wrote"] = True
     elif res.get("fallback"):
         unit.update(state="elle", reason="yazma yetkisi yok (401/403) — PR açılamadı, değişiklik elle yapılmalı")
+        unit["wrote"] = bool(res["fallback"][0].get("branch_written"))
     else:
-        err = (res.get("errors") or [{}])[0].get("error") or "PR açılamadı (yanıt boş)"
-        unit.update(state="hata", reason=_why(Exception(err)))
+        err = (res.get("errors") or [{}])[0]
+        unit.update(state="hata", reason=_why(Exception(err.get("error") or "PR açılamadı (yanıt boş)")))
+        unit["wrote"] = bool(err.get("branch_written"))
 
 
 def _push(client, unit: dict, sites: list[dict], *, push_fn, branch: str, title: str, body: str) -> None:
@@ -496,7 +528,7 @@ def _push(client, unit: dict, sites: list[dict], *, push_fn, branch: str, title:
         _from_push(unit, push_fn(client, sites, branch=branch, title=title, body=body, wi_id=None))
     except Exception as e:  # noqa: BLE001 — bir bölgenin hatası ötekini durdurmaz
         log.warning(f"⚠️ image_fix: {unit.get('repo', 'base-images')} yazılamadı: {_why(e)}")
-        unit.update(state="hata", reason=_why(e))
+        unit.update(state="hata", reason=_why(e), wrote=False)        # push_sites'ın ön doğrulaması: hiçbir şey yazılmadı
 
 
 def _agg_run(units: list[dict], prior: str) -> str:
@@ -528,7 +560,11 @@ def _body_own(entry: dict, a: dict, cfg: dict) -> str:
     return "\n".join(out)[:BODY_MAX]
 
 
-def _body_public(entry: dict, a: dict) -> str:
+UPGRADE_NOTE = ("Bu imajı kullanan repolar için sürüm yükseltme izlemesi de var; yükseltme PR'ı aynı satırı değiştirir — "
+                "bu PR önce birleştirilmeli ya da kapatılmalı.")
+
+
+def _body_public(entry: dict, a: dict, upgrade_note: bool = False) -> str:
     old, new = entry["image"], a["target"]
     out = [f"Tempo, `{_clean(old)}` imajının yama sürümü geride kaldığı için bu PR'ı açtı (Taban imaj güvenliği "
            "uyarısı).", "",
@@ -538,6 +574,8 @@ def _body_public(entry: dict, a: dict) -> str:
     for u in a["repos"]:
         paths = ", ".join(f"`{_clean(s['path'])}`" for s in u.get("sites") or [])
         out.append(f"- **{_clean(u['repo'])}**" + (f": {paths}" if paths else ""))
+    if upgrade_note:
+        out += ["", UPGRADE_NOTE]
     out += ["", "Derleme / test bu PR'da doğrulanmadı: birleştirmeden önce hattın sonucuna bakın."]
     return "\n".join(out)[:BODY_MAX]
 
@@ -559,19 +597,21 @@ def apply(client, entry: dict, *, team: str, index: dict, resolver, deps=None, p
     with _LOCK:
         acts = plan(client, entry, index=index, resolver=resolver, cfg=cfg, find_open_fn=find_open_fn,
                     find_any_fn=find_any_fn, auto=auto, current_fn=current_fn)
+        # Yama PR'ı ile aynı imajın yükseltme izlemesi birlikte planlıysa PR gövdesi çakışmayı söyler (I3).
+        upgrade_note = any(u["state"] in ("yok", "izleniyor") for a in acts if a["kind"] == "yükseltme"
+                           for u in a.get("repos") or [])
         out = []
         for a in acts:
             if a["state"] != "yok":
                 out.append(a)
                 continue
-            a["ran"] = True
-            try:
+            try:        # `ran` = bu çağrıda bir şey YAZILDI; her _run_* kendisi ayarlar (red / hata yazma sayılmaz)
                 if a["kind"] == "taban-yama":
                     _run_own(client, entry, a, cfg, push_fn)
                 elif a["kind"] == "taban-dizin":
                     _run_dir(client, a, cfg, resolver, open_pr_fn)
                 elif a["kind"] == "imaj-yama":
-                    _run_public(client, entry, a, push_fn)
+                    _run_public(client, entry, a, push_fn, upgrade_note)
                 elif a["kind"] == "yükseltme":
                     _run_upgrade(client, entry, a, team, deps, start_fn, budget, index)
             except Exception as e:  # noqa: BLE001
@@ -586,22 +626,30 @@ def _run_own(client, entry: dict, a: dict, cfg: dict, push_fn) -> None:
     unit: dict = {}
     _push(client, unit, a["sites"], push_fn=push_fn, branch=a["branch"],
           title=f"Taban imaj yaması: {a['dir']} {site['old']} → {site['new']}", body=_body_own(entry, a, cfg))
-    a.update(state=unit["state"], pr=unit.get("pr"), reason=unit.get("reason", ""))
+    a.update(state=unit["state"], pr=unit.get("pr"), reason=unit.get("reason", ""), ran=bool(unit.get("wrote")))
 
 
 def _run_dir(client, a: dict, cfg: dict, resolver, open_pr_fn) -> None:
-    r = open_pr_fn(client, a["lang"], a["to"], a["entry"], cfg=cfg, resolver=resolver, repo="")
+    from agile_sdlc_crew.quality.upgrade_image import ImageTemplateError
+    try:
+        r = open_pr_fn(client, a["lang"], a["to"], a["entry"], cfg=cfg, resolver=resolver, repo="")
+    except ImageTemplateError as e:
+        # Mesaj push durumunu söyler: "Push yapıldı" = içerik dalda (yazma oldu); yoksa yazmadan reddedildi.
+        a.update(state="hata", reason=_why(e), ran="Push yapıldı" in str(e))
+        return
     pr = r.get("pr")
-    a.update(state="açıldı" if r.get("state") == "pr açık" and pr else str(r.get("state") or "belirsiz"), pr=pr,
-             reason=str(r.get("reason") or ""))
+    opened = r.get("state") == "pr açık" and bool(pr)
+    a.update(state="açıldı" if opened else str(r.get("state") or "belirsiz"), pr=pr, reason=str(r.get("reason") or ""),
+             ran=opened)
 
 
-def _run_public(client, entry: dict, a: dict, push_fn) -> None:
-    body = _body_public(entry, a)
+def _run_public(client, entry: dict, a: dict, push_fn, upgrade_note: bool = False) -> None:
+    body = _body_public(entry, a, upgrade_note)
     title = f"Taban imaj yaması: {entry['image']} → {a['target']}"
     for u in a["repos"]:
         if u["state"] == "yok":
             _push(client, u, u["sites"], push_fn=push_fn, branch=a["branch"], title=title, body=body)
+    a["ran"] = any(u.get("wrote") for u in a["repos"])
     a["state"] = _agg_run(a["repos"], a["state"])
     a["reason"] = "; ".join(f"{u['repo']}: {u['reason']}" for u in a["repos"] if u["state"] in ("hata", "elle") and u["reason"])
 
@@ -617,27 +665,23 @@ def _run_upgrade(client, entry: dict, a: dict, team: str, deps, start_fn, budget
         if budget[0] <= 0:
             u.update(state="sırada", reason="CREW_TECHDEBT_UPGRADE_MAX_OPEN sınırı — sonraki turda açılır")
             continue
-        u["attempted"] = True
         try:
             # Aynı taze index start'a da gider: izleme Task gövdesi (sürüm yerleri) yazma kararıyla aynı veriden kurulur.
             r = start_fn(client, u["repo"], lang, to=u["to"], team=team, deps=deps, index=index)
             created = bool(r.get("created", True))
             if created:
                 budget[0] -= 1                  # yalnız başarılı YENİ başlatma sınırı tüketir
-            u.update(state="açıldı" if created else "izleniyor", wi=r.get("id"), reason="")
+            u.update(state="açıldı" if created else "izleniyor", wi=r.get("id"), reason="", wrote=created)
             try:
                 from agile_sdlc_crew.quality import intake
                 u["url"] = intake._wi_url(client, int(r["id"]))
             except Exception:  # noqa: BLE001
                 u["url"] = ""
-        except ValueError as e:
-            if str(e).startswith("Repo hedef sürümde"):          # start'ın kendi okumasında: yazma denenmedi, hata değil
-                u.update(state="güncel", reason="repo zaten hedef sürümde", attempted=False)
-            else:
-                u.update(state="hata", reason=_why(e))
+        except ValueError as e:          # start'ın yazmadan önceki reddi (yerel klon yok, sürüm bilinmiyor, alan…): yazma yok
+            u.update(state="hata", reason=_why(e), wrote=False)
         except Exception as e:  # noqa: BLE001
-            u.update(state="hata", reason=_why(e))
-    a["ran"] = any(u.get("attempted") for u in a["repos"])       # tur sınırı / yorum yalnız gerçekten denenen için
+            u.update(state="hata", reason=_why(e), wrote=False)
+    a["ran"] = any(u.get("wrote") for u in a["repos"])           # tur sınırı / yorum yalnız gerçekten YAZILAN için
     a["state"] = _agg_run(a["repos"], a["state"])
     a["reason"] = "; ".join(f"{u['repo']}: {u['reason']}" for u in a["repos"] if u["state"] in ("hata", "sırada") and u["reason"])
 

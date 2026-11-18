@@ -8,3 +8,9 @@
 # çalışmaz; tarayıcı gürültüsüdür (php 8.2 / 8.4 imajları yalnız bu yüzden "kritik" çıkıyordu).
 ignore_packages:
   - linux-libc-dev
+
+# Trivy'nin `docker run` ile çalıştırılan imajı (CREW_TRIVY_BIN / PATH'teki `trivy` yoksa). Sunucuda çalışan üçüncü taraf
+# koddur, bu yüzden `:latest` DEĞİL, ölçülmüş bir özete sabitlidir. Yükseltmek için: yeni sürümü elle çekip bir taramayı
+# karşılaştırın, sonra bu değeri `aquasec/trivy:<sürüm>` ya da `aquasec/trivy@sha256:<64 hex>` yapın. Geçersiz değer
+# (başka depo, boşluk, kısa özet…) yok sayılır ve aşağıdaki varsayılan kullanılır.
+trivy_image: aquasec/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb

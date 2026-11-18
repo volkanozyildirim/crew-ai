@@ -570,7 +570,7 @@ SCHEMA: list[dict] = [
         "label": "Teknik borç · taban imaj güvenliği",
         "type": "bool",
         "default": False,
-        "desc": "Üretim servislerinin dayandığı taban imajları tarar (düzeltmesi yayınlanmış CRITICAL/HIGH açık, geride kalmış yama sürümü, desteği bitmiş sürüm). Yayınlanmış imaj değil, dayandığı resmî imaj taranır; sonuç alt sınırdır. CREW_TECHDEBT de açık olmalı; tarayıcı için Trivy ya da Docker gerekir — varsayılan kapalı.",
+        "desc": "Üretim servislerinin dayandığı taban imajları tarar (düzeltmesi yayınlanmış CRITICAL/HIGH açık, geride kalmış yama sürümü, desteği bitmiş sürüm). Yayınlanmış imaj değil, dayandığı resmî imaj taranır; sonuç alt sınırdır. CREW_TECHDEBT de açık olmalı; tarayıcı için Trivy ya da Docker gerekir — varsayılan kapalı. DİKKAT: bu ayar açıkken karttaki 'Gidermeyi başlat' düğmesi, CREW_TECHDEBT_IMAGE_VULN_FIX kapalı olsa bile base-images ve bölge repolarında (anatolia / global / russia) taslak PR açabilir ve yükseltme izleme işi başlatabilir (PR'lar CREW_TECHDEBT_UPGRADE_BUMP'a, izleme CREW_TECHDEBT_UPGRADE'e tabidir). taban-dizin şablonu CREW_TECHDEBT_UPGRADE_IMAGE'i, imaj-yama CREW_TECHDEBT_UPGRADE_PATCH'i gerektirmez.",
     },
     {
         "key": "CREW_TECHDEBT_IMAGE_VULN_SCAN_H",
@@ -623,7 +623,7 @@ SCHEMA: list[dict] = [
         "type": "int",
         "default": 3,
         "min": 1,
-        "desc": "Bir repo için eşzamanlı açık yükseltme işi / PR sayısı tavanı.",
+        "desc": "Bir repo için eşzamanlı açık yükseltme işi / PR sayısı tavanı. İkinci kullanımı: taban imaj gidermesinde (CREW_TECHDEBT_IMAGE_VULN) bir çağrıda / yoklayıcı turunda başlatılacak YENİ yükseltme izleme işi sayısı bütçesi; aşan repolar 'sırada' kalır.",
     },
     {
         "key": "CREW_TECHDEBT_UPGRADE_SPRINT",
