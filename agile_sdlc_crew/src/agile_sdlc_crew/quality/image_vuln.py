@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 
@@ -37,6 +38,7 @@ _FROM_RE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)", re.I)
 _LANG = {"php": "php", "python": "python", "golang": "go", "node": "node"}
 _HUB = {"php": "php", "python": "python", "go": "golang", "node": "node"}
 _EOL_PRODUCT = {"php": "php", "python": "python", "go": "go", "node": "nodejs"}
+_BARE_OFFICIAL = frozenset({"debian", "ubuntu", "alpine", "busybox"})   # etiketsiz ama gerçek imaj (scratch değil)
 _SEV_RANK = {"CRITICAL": 2, "HIGH": 1}
 _LEVEL_RANK = {"kritik": 0, "yüksek": 1, "bilgi": 2, "bilinmiyor": 3, "temiz": 4}
 EOL_TTL_S = 24 * 3600
@@ -96,8 +98,27 @@ def _default_read(client, repo: str, project: str | None):
     return read
 
 
+def external_registry(image: str) -> bool:
+    """İmaj bir kayıt deposu sunucusu adlandırıyor mu (ilk yol bileşeni `.` / `:` içerir ya da `localhost`)?
+    Kapsam yalnız herkese açık Docker Hub imajıdır; böyle bir ad taranmaz (sunucudan keyfi adrese çıkış olmasın)."""
+    if "/" not in image:
+        return False
+    first = image.split("/", 1)[0]
+    return "." in first or ":" in first or first == "localhost"
+
+
+def _why_invalid(ref: str) -> str:
+    if "@" in ref:
+        return "özetle sabitlenmiş imaj taranmıyor"
+    if "$" in ref or "{" in ref:
+        return "ARG varsayılanı yok / ${X:-…} desteklenmiyor"
+    return "geçersiz imaj adı"
+
+
 def _lang_version(image: str) -> tuple[str, str]:
     base, _, tag = image.rpartition(":") if ":" in image.rsplit("/", 1)[-1] else (image, "", "")
+    if external_registry(image) or ("/" in base and not base.startswith("library/") or base.count("/") > 1):
+        return "", ""                       # yalnız resmî kitaplık adları (`php`, `library/php`); `evil/php` php değildir
     lang = _LANG.get(base.rsplit("/", 1)[-1], "")
     m = _VER_RE.match(tag)
     return (lang, m.group(1)) if lang and m else (lang, "")
@@ -122,7 +143,7 @@ def inventory(client, index: dict, *, read=None) -> list[dict]:
             ref, err = _resolve_from(txt)
             out = {"image": ref or image, "error": err, "dir": d}
             if ref and not valid_image(ref):
-                out = {"image": image, "error": "geçersiz imaj adı", "dir": d}
+                out = {"image": image, "error": _why_invalid(ref), "dir": d}
         resolved[image] = out
         return out
 
@@ -132,17 +153,20 @@ def inventory(client, index: dict, *, read=None) -> list[dict]:
             for raw in item.get("images") or []:
                 if not isinstance(raw, str) or not raw:
                     continue
+                # `build_index` `FROM --platform=… img` satırında bayrağı imaj sanır; gerçek imaj orada kaybolur
+                # (`build_index` değişmez: yükseltme özelliği çıktısına dayanır). Bayrak bir imaj değildir: atlanır.
+                if raw.startswith("-"):
+                    continue
                 m = _OWN_RE.match(raw)
                 if m:
                     r = own(raw, m.group(1))
                     image, error, via = r["image"], r["error"], r["dir"]
                 else:
-                    # Çok aşamalı derlemenin takma adı / etiketsiz ad (`base`, `builder`) bir imaj değildir.
-                    if ":" not in raw and "/" not in raw and "@" not in raw:
+                    # Çok aşamalı derlemenin takma adı / etiketsiz ad (`base`, `builder`) bir imaj değildir;
+                    # yalnız bilinen resmî tabanlar (`debian`) etiketsiz de imajdır.
+                    if ":" not in raw and "/" not in raw and "@" not in raw and raw not in _BARE_OFFICIAL:
                         continue
-                    image, error, via = raw, "" if valid_image(raw) else "geçersiz imaj adı", ""
-                    if not error and re.search(r"\$", raw):
-                        error = "çözülemeyen ARG"
+                    image, error, via = raw, "" if valid_image(raw) else _why_invalid(raw), ""
                 if error and not m:
                     # Özgün ad kaydı: ARG'lı / geçersiz imajlar `taranamadı` olarak listelenir.
                     image = raw
@@ -195,11 +219,9 @@ def trivy_cmd(*, which=shutil.which) -> list[str] | None:
         return [found]
     docker = which("docker")
     if docker:
-        try:
-            TRIVY_CACHE.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return None
-        return [docker, "run", "--rm", "-v", f"{TRIVY_CACHE}:/root/.cache/", "aquasec/trivy:latest"]
+        # Dizin burada OLUŞTURULMAZ (yalnız "tarayıcı var mı" sorusu yan etki bırakmasın); tarama çalışırken açılır.
+        return [docker, "run", "--rm", "--name", f"tempo-trivy-{uuid.uuid4().hex[:12]}",
+                "-v", f"{TRIVY_CACHE}:/root/.cache/", "aquasec/trivy:latest"]
     return None
 
 
@@ -209,6 +231,21 @@ def _run(cmd: list[str], timeout: int) -> tuple[int, str]:
         r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=verify._env(),
                            shell=False)
     return r.returncode, r.stdout or ""
+
+
+def _docker_rm(base: list[str]) -> None:
+    """Zaman aşımında docker kabı arkada kalmasın: `docker rm -f <ad>` (en iyi çaba, liste argv)."""
+    if "--name" not in base:
+        return
+    name = base[base.index("--name") + 1]
+    if not re.fullmatch(r"tempo-trivy-[0-9a-f]{12}", name):
+        return
+    try:
+        from agile_sdlc_crew import verify
+        subprocess.run([base[0], "rm", "-f", name], capture_output=True, timeout=30, env=verify._env(),
+                       shell=False)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"⚠️ image_vuln: kap silinemedi ({type(e).__name__})")
 
 
 def _empty_scan(state: str) -> dict:
@@ -253,14 +290,22 @@ def scan_image(image: str, *, run=None, timeout: int = 600) -> dict:
     CRITICAL/HIGH sayılır; `critical` / `high` açık (CVE, paket) sayısıdır, `packages` paket başına en yüksek önemdir."""
     if not valid_image(image):
         return _empty_scan("geçersiz imaj")
+    if external_registry(image):
+        return _empty_scan("harici kayıt deposu")
     base = trivy_cmd()
     if not base:
         return _empty_scan("tarayıcı yok")
-    cmd = [*base, "image", "--quiet", "--platform", "linux/amd64", "--scanners", "vuln",
-           "--severity", "HIGH,CRITICAL", "--format", "json", image]
+    if any(a.startswith(f"{TRIVY_CACHE}:") for a in base):
+        try:
+            TRIVY_CACHE.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError:
+            return _empty_scan("tarama başarısız")
+    cmd = [*base, "image", "--quiet", "--timeout", f"{max(timeout - 15, 30)}s", "--platform", "linux/amd64",
+           "--scanners", "vuln", "--severity", "HIGH,CRITICAL", "--format", "json", image]
     try:
         rc, stdout = (run or _run)(cmd, timeout)
     except subprocess.TimeoutExpired:
+        _docker_rm(base)
         return _empty_scan("zaman aşımı")
     except Exception as e:  # noqa: BLE001
         log.warning(f"⚠️ image_vuln: tarama çalıştırılamadı ({type(e).__name__})")
@@ -308,7 +353,11 @@ def _eol_fetch(url: str):
     return r.json() if r.status_code == 200 else None
 
 
-def eol(lang: str, version: str, *, fetch=None, today: date | None = None) -> dict | None:
+_EOL_DOWN: dict[str, float] = {}      # ürün → bu ana kadar (monotonic) yeniden denenmez
+EOL_DOWN_S = 300
+
+
+def eol(lang: str, version: str, *, fetch=None, today: date | None = None, clock=time.monotonic) -> dict | None:
     """endoflife.date'e göre sürümün destek tarihi geçmişse `{"eol": "2025-12-31"}` (tarih bilinmiyorsa `""`).
     Yanıt güvenilmezdir; okunamadı / tanınmadı → None (bilinmiyor, uyarı değil)."""
     product = _EOL_PRODUCT.get(lang)
@@ -317,17 +366,21 @@ def eol(lang: str, version: str, *, fetch=None, today: date | None = None) -> di
         return None
     cycle = str(parts[0]) if lang == "node" else f"{parts[0]}.{parts[1]}"
     hit = _EOL_CACHE.get(product)
-    if hit and time.monotonic() - hit[0] < EOL_TTL_S:
+    if hit and clock() - hit[0] < EOL_TTL_S:
         rows = hit[1]
     else:
+        if clock() < _EOL_DOWN.get(product, 0.0):
+            return None
         try:
             rows = (fetch or _eol_fetch)(f"https://endoflife.date/api/{product}.json")
         except Exception as e:  # noqa: BLE001
             log.warning(f"⚠️ image_vuln: endoflife.date okunamadı ({type(e).__name__})")
+            _EOL_DOWN[product] = clock() + EOL_DOWN_S
             return None
         if not isinstance(rows, list):
+            _EOL_DOWN[product] = clock() + EOL_DOWN_S
             return None
-        _EOL_CACHE[product] = (time.monotonic(), rows)
+        _EOL_CACHE[product] = (clock(), rows)
     row = next((r for r in rows if isinstance(r, dict) and str(r.get("cycle")) == cycle), None)
     if row is None:
         return None
@@ -354,10 +407,19 @@ def _cache_read(cache_dir: Path, image: str, ttl_h: float, now: float) -> dict |
         doc = json.loads(_cache_path(cache_dir, image).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if (isinstance(doc, dict) and doc.get("image") == image and isinstance(doc.get("scan"), dict)
-            and ttl_h > 0 and 0 <= now - float(doc.get("built_at") or 0) < ttl_h * 3600):
-        return doc["scan"]
-    return None
+    # Önbellek dosyası güvenilmezdir (bozuk / elle düzenlenmiş olabilir): biçim tutmazsa yeniden taranır.
+    if not isinstance(doc, dict) or doc.get("image") != image:
+        return None
+    built, scan = doc.get("built_at"), doc.get("scan")
+    if isinstance(built, bool) or not isinstance(built, (int, float)) or not isinstance(scan, dict):
+        return None
+    if (scan.get("state") != "tamam" or not isinstance(scan.get("packages"), list)
+            or not all(isinstance(scan.get(k), int) and not isinstance(scan.get(k), bool) for k in ("critical", "high"))
+            or not all(isinstance(p, dict) for p in scan["packages"])):
+        return None
+    if not (ttl_h > 0 and 0 <= now - built < ttl_h * 3600):
+        return None
+    return {**scan, "os": str(scan.get("os") or ""), "created": str(scan.get("created") or "")}
 
 
 def _cache_write(cache_dir: Path, image: str, scan: dict, now: float) -> None:
@@ -391,7 +453,14 @@ def _judge(rec: dict) -> tuple[str, list[str]]:
         return "kritik", actions
     if high or patch:
         return "yüksek", actions
-    return ("temiz" if scan["state"] == "tamam" else "bilinmiyor"), actions
+    if scan["state"] != "tamam":
+        return "bilinmiyor", actions
+    parts = _ints(rec["version"])
+    if rec["lang"] and parts and len(parts) < 3:
+        # İki parçalı etiket (`python:3.11-slim`): yama sürümü bilinemez; "temiz" denmez.
+        actions.append("yama sürümü belirsiz (etiket iki parçalı; imaj yeniden çekildiğinde güncellenir)")
+        return "bilgi", actions
+    return "temiz", actions
 
 
 def report(client, *, index: dict | None = None, force: bool = False, scan_fn=None, resolver=None, eol_fn=None,
@@ -411,6 +480,9 @@ def report(client, *, index: dict | None = None, force: bool = False, scan_fn=No
         if rec["error"]:
             scan = _empty_scan("dayanak çözülemedi")
             scan["reason"] = rec["error"]
+        elif external_registry(rec["image"]):
+            scan = _empty_scan("harici kayıt deposu")
+            scan["reason"] = "yalnız herkese açık Docker Hub imajı taranır; kayıt deposu adlı imaj taranmaz"
         else:
             scan = None if force else _cache_read(cache_dir, rec["image"], ttl, clock)
             if scan is None:
