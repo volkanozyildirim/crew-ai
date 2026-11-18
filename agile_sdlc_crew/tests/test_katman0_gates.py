@@ -11231,6 +11231,213 @@ def _fake_hub(tags: dict, calls: list | None = None, down: bool = False):
     return fetch
 
 
+class _FakeBaseImages:
+    """FLODevOps/base-images taklidi (kayıt tutan): dal -> {yol: bayt}; yazma çağrıları `calls`ta."""
+    PHP84 = (b"ARG PHP_VERSION=8.4.27\nFROM php:${PHP_VERSION}-fpm-trixie\n\nRUN set -ex && \\\n"
+             b"    apt-get update && \\\n    # Opcache\n    docker-php-ext-install opcache && \\\n"
+             b"    docker-php-ext-enable opcache && \\\n    echo done")
+
+    def __init__(self, files=None, prs=None, fail_list=False):
+        self.files = {"staging": dict(files if files is not None else {
+            "/Jenkinsfile": b"pipeline {}", "/README.md": b"# x",
+            "/php-7-4/Dockerfile": b"FROM php:7.4-fpm", "/php-7-4/tag.txt": b"1.0",
+            "/php-8-2/dockerfile": b"ARG PHP_VERSION=8.2.1\nFROM php:${PHP_VERSION}-fpm-trixie", "/php-8-2/tag.txt": b"1.0",
+            "/php-8-4/Dockerfile": self.PHP84, "/php-8-4/tag.txt": b"1.1", "/php-8-4/extra.ini": b"a=1\r\n",
+            "/python-3-13-18/Dockerfile": b"FROM python:3.13.18-slim-trixie", "/python-3-13-18/tag.txt": b"1.0",
+            "/python-3-13-18/requirements.txt": b"requests==2\n"})}
+        self.prs = dict(prs or {})
+        self.fail_list = fail_list
+        self.calls: list = []
+
+    def list_branches(self, repo, project=None):
+        if self.fail_list:
+            raise OSError("ağ yok")
+        return [{"name": f"refs/heads/{b}", "objectId": f"oid-{b}"} for b in self.files]
+
+    def get_items_in_path(self, repo, path, branch=None, recursion_level="oneLevel", project=None):
+        fs = self.files[branch]
+        path = "/" + path.strip("/")
+        out, dirs = [], set()
+        for p in fs:
+            if path == "/":
+                rel = p.lstrip("/")
+            elif p.startswith(path + "/"):
+                rel = p[len(path) + 1:]
+            else:
+                continue
+            if "/" in rel and recursion_level != "full":
+                dirs.add(path.rstrip("/") + "/" + rel.split("/")[0])
+            else:
+                out.append({"path": p, "isFolder": False})
+        return [{"path": d, "isFolder": True} for d in sorted(dirs)] + out
+
+    def get_file_bytes(self, repo, path, branch=None, project=None, **kw):
+        return self.files[branch or "staging"].get(path)
+
+    def create_branch(self, repo, name, source_branch="main", project=None, source_object_id=None):
+        self.calls.append(("branch", name, source_branch, source_object_id))
+        self.files[name] = dict(self.files[source_branch])
+        return {"value": [{"success": True}]}
+
+    def push_changes(self, repo, branch, changes, msg, project=None, old_object_id=None):
+        import base64 as _b64
+        self.calls.append(("push", branch, changes, old_object_id, project))
+        for c in changes:
+            self.files[branch][c["path"]] = _b64.b64decode(c["content"])
+        return {}
+
+    def create_pull_request(self, repo, src, tgt="main", title="", description="", work_item_ids=None,
+                            draft=False, project=None):
+        self.calls.append(("pr", src, tgt, title, description, draft, project))
+        self.prs[src] = {"id": 77, "status": "active", "url": "http://pr/77"}
+        return {"pullRequestId": 77, "url": "http://pr/77", "repository": {"name": repo}}
+
+    def find_pull_request(self, repo, branch, project=None):
+        return self.prs.get(branch)
+
+
+def test_upgrade_image_template():
+    """Taban imaj şablonu: gruplama, durum, kaynak dizinden türetme, tek taslak PR."""
+    print("\n[upgrade: taban imaj şablonu]")
+    from agile_sdlc_crew.quality import upgrade_image as ui, upgrade_registry as ur
+    cfg = ui.load_cfg()
+    check("cfg: base-images / staging", cfg["repo"] == "base-images" and cfg["branch"] == "staging")
+    hub = {"php": ["8.5.12", "8.5.12-fpm-trixie", "8.3.9", "8.3.9-fpm-trixie"], "python": ["3.14.2", "3.14.2-slim-trixie"]}
+    res = ur.Resolver(fetch=_fake_hub(hub))
+
+    def site(region, new, blocked="imaj yayınlanmamış", where="devops", path="/build/channel/Dockerfile"):
+        return {"where": where, "repo": region, "project": "FLODevOps", "branch": "production", "path": path,
+                "line": 1, "old": "x", "new": new, "blocked": blocked}
+    pre = {"anatolia": "europe-west1-docker.pkg.dev/flo-prod-main/prod-ar/", "russia": "10.131.167.220:5000/prod-ar/"}
+    sites = [site("anatolia", pre["anatolia"] + "php-8-5:1.0", path="/a/Dockerfile"),
+             site("anatolia", pre["anatolia"] + "php-8-5:1.0", path="/b/Dockerfile"),
+             site("russia", pre["russia"] + "php-8-5:1.0", path="/r/Dockerfile"),
+             site("anatolia", "golang:1.27.3"),
+             site("anatolia", pre["anatolia"] + "php-8-5:1.0", where="code"),
+             site("anatolia", pre["anatolia"] + "php-8-5:1.0", blocked="")]
+    need = ui.needed(sites, "php")
+    check("needed: tek dizin, iki bölge, üç site",
+          len(need) == 1 and need[0]["dir"] == "php-8-5" and need[0]["tag"] == "1.0" and need[0]["error"] == ""
+          and sorted(need[0]["regions"]) == ["anatolia", "russia"] and len(need[0]["sites"]) == 3, str(need))
+    check("needed: library imajı hariç", ui.needed([site("anatolia", "golang:1.27.3")], "go") == [])
+    clash = ui.needed([site("anatolia", pre["anatolia"] + "php-8-5:1.0"),
+                       site("russia", pre["russia"] + "php-8-5:1.1")], "php")
+    check("needed: farklı etiket → error",
+          len(clash) == 1 and clash[0]["error"] == "bölgeler farklı etiket istiyor: 1.0, 1.1", str(clash))
+    py = ui.needed([site("anatolia", pre["anatolia"] + "python-3-14-2:1.0")], "python")
+    check("needed: üç parçalı dizin", bool(py) and py[0]["dir"] == "python-3-14-2")
+    check("branch_name", ui.branch_name("php-8-5") == "tempo/base-image-php-8-5")
+    entry = need[0]
+
+    c = _FakeBaseImages()
+    st = ui.state(c, entry)
+    check("state yok", st["state"] == "yok" and st["pr"] is None and st["dir"] == "php-8-5", str(st))
+    c2 = _FakeBaseImages()
+    c2.files["staging"]["/php-8-5/tag.txt"] = b"1.0"
+    st = ui.state(c2, entry)
+    check("state şablon var + bayraklar", st["state"] == "şablon var" and "mainLocation" in st["reason"]
+          and "yandexLocation" in st["reason"], str(st))
+    for status, want in (("active", "pr açık"), ("abandoned", "pr reddedildi")):
+        c3 = _FakeBaseImages(prs={"tempo/base-image-php-8-5": {"id": 5, "status": status, "url": "u"}})
+        st = ui.state(c3, entry)
+        check(f"state {want}", st["state"] == want and st["pr"]["id"] == 5, str(st))
+    c4 = _FakeBaseImages(prs={"tempo/base-image-php-8-5": {"id": 5, "status": "completed", "url": "u"}})
+    st = ui.state(c4, entry)
+    check("state completed ama dizin yok → belirsiz", st["state"] == "belirsiz" and st["reason"], str(st))
+    st = ui.state(c, dict(entry, error="bölgeler farklı etiket istiyor: 1.0, 1.1"))
+    check("state entry.error → belirsiz", st["state"] == "belirsiz" and "farklı etiket" in st["reason"])
+    st = ui.state(_FakeBaseImages(fail_list=True), entry)
+    check("state okuma hatası → belirsiz", st["state"] == "belirsiz" and st["reason"], str(st))
+
+    b = ui.build(c, "php", "8.5", entry, resolver=res)
+    f = b["files"]
+    d = f["/php-8-5/Dockerfile"].decode()
+    check("build php: kaynak php-8-4, tam 8.5.12", b["source"] == "php-8-4" and b["full"] == "8.5.12", str(b["source"]))
+    check("build php: ARG değişti, FROM aynı",
+          d.startswith("ARG PHP_VERSION=8.5.12\nFROM php:${PHP_VERSION}-fpm-trixie\n"))
+    check("build php: opcache satırları yok, öncesi korunur",
+          "docker-php-ext" not in d and "apt-get update && \\\n" in d and d.endswith("echo done"))
+    check("build php: tag.txt satır sonsuz", f["/php-8-5/tag.txt"] == b"1.0")
+    check("build php: diğer dosya bayt eşit", f["/php-8-5/extra.ini"] == b"a=1\r\n")
+    check("build php: not var", any("Opcache" in n for n in b["notes"]), str(b["notes"]))
+    cl = _FakeBaseImages({"/php-8-2/dockerfile": b"ARG PHP_VERSION=8.2.1\nFROM php:${PHP_VERSION}-fpm-trixie",
+                          "/php-8-2/tag.txt": b"1.0"})
+    bl = ui.build(cl, "php", "8.3", dict(entry, dir="php-8-3"), resolver=res)
+    check("build: küçük harfli dockerfile adı korunur",
+          set(bl["files"]) == {"/php-8-3/dockerfile", "/php-8-3/tag.txt"}
+          and bl["files"]["/php-8-3/dockerfile"].startswith(b"ARG PHP_VERSION=8.3.9"), str(set(bl["files"])))
+    check("build php 8.3: düzeltme notu yok", not any("düzeltme uygulanmadı" in n for n in bl["notes"]))
+    cn = _FakeBaseImages({"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm-trixie\nRUN true",
+                          "/php-8-4/tag.txt": b"1.0"})
+    bn = ui.build(cn, "php", "8.5", entry, resolver=res)
+    check("build: drop eşleşmezse 'düzeltme uygulanmadı'",
+          any(n.startswith("düzeltme uygulanmadı") for n in bn["notes"]), str(bn["notes"]))
+
+    pe = py[0]
+    bp = ui.build(c, "python", "3.14", pe, resolver=res)
+    check("build python: dizin, sürüm, sonek, requirements, tag",
+          bp["source"] == "python-3-13-18"
+          and bp["files"]["/python-3-14-2/Dockerfile"] == b"FROM python:3.14.2-slim-trixie"
+          and bp["files"]["/python-3-14-2/requirements.txt"] == b"requests==2\n"
+          and bp["files"]["/python-3-14-2/tag.txt"] == b"1.0", str(bp["files"]))
+
+    def fails(name, cl, lang, to, e, r=res, frag="", cfg_=None):
+        try:
+            ui.build(cl, lang, to, e, resolver=r, cfg=cfg_)
+        except ui.ImageTemplateError as ex:
+            check(name, frag in str(ex), str(ex))
+        else:
+            check(name, False, "hata fırlatılmadı")
+    fails("kaynak yok", _FakeBaseImages({"/php-9-0/tag.txt": b"1.0"}), "php", "8.5", entry, frag="Kaynak dizin bulunamadı")
+    two = _FakeBaseImages({"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nARG PHP_VERSION=8.4.2\nFROM php:${PHP_VERSION}-fpm",
+                           "/php-8-4/tag.txt": b"1.0"})
+    fails("iki sürüm satırı", two, "php", "8.5", entry, frag="sürüm satırı")
+    fails("latest_patch None", c, "php", "8.5", entry, r=ur.Resolver(fetch=_fake_hub({})), frag="yama")
+    fails("tag_exists False", c, "php", "8.5", entry,
+          r=ur.Resolver(fetch=_fake_hub({}), patches={"php": {"8.5": "8.5.12"}}), frag="Docker Hub")
+    fails("tag_exists None", c, "php", "8.5", entry,
+          r=ur.Resolver(fetch=lambda u: (500, None), patches={"php": {"8.5": "8.5.12"}}), frag="doğrulanamadı")
+    bad = dict(cfg, fixes={"php": {"8.5": [{"drop": r"echo done", "note": "x"}]}})
+    fails("drop satırı \\ ile bitmiyor", c, "php", "8.5", entry, frag="\\", cfg_=bad)
+
+    c5 = _FakeBaseImages()
+    r1 = ui.open_pr(c5, "php", "8.5", entry, resolver=res, repo="svc-a")
+    kinds = [x[0] for x in c5.calls]
+    check("open_pr: bir branch, bir push, bir taslak PR", kinds == ["branch", "push", "pr"], str(kinds))
+    br, pu, pr = c5.calls
+    check("open_pr: dal adı + sabit objectId", br[1] == "tempo/base-image-php-8-5" and br[2] == "staging"
+          and br[3] == "oid-staging" and pu[3] == "oid-staging", str(br))
+    check("open_pr: push hepsi add + base64",
+          all(x["changeType"] == "add" and x["contentType"] == "base64encoded" for x in pu[2])
+          and {x["path"] for x in pu[2]} >= {"/php-8-5/Dockerfile", "/php-8-5/tag.txt"}, str(pu[2]))
+    check("open_pr: proje, taslak, hedef", pu[4] == "FLODevOps" and pr[5] is True and pr[2] == "staging"
+          and pr[6] == "FLODevOps")
+    check("open_pr: başlık", pr[3] == "php-8-5 taban imaj şablonu (PHP 8.5.12)", pr[3])
+    desc = pr[4]
+    check("open_pr: açıklama içeriği",
+          "yandexLocation" in desc and "mainLocation" in desc and "/r/Dockerfile" in desc
+          and "baseImage=php-8-5" in desc and "RU registry" in desc and "svc-a" in desc
+          and "doğrulanmadı" in desc and len(desc) <= 4000, desc)
+    check("open_pr: sonuç", r1["state"] == "pr açık" and r1["pr"]["id"] == 77 and isinstance(r1["notes"], list), str(r1))
+    n = len(c5.calls)
+    r2 = ui.open_pr(c5, "php", "8.5", entry, resolver=res, repo="svc-a")
+    check("ikinci çağrı ikinci PR açmaz", len(c5.calls) == n and r2["state"] == "pr açık", str(r2))
+    for name, cl2, want in (
+            ("pr reddedildi", _FakeBaseImages(prs={"tempo/base-image-php-8-5": {"id": 5, "status": "abandoned", "url": "u"}}),
+             "pr reddedildi"),
+            ("şablon var", c2, "şablon var")):
+        k = len(cl2.calls)
+        r = ui.open_pr(cl2, "php", "8.5", entry, resolver=res)
+        check(f"open_pr {name}: yazma yok", r["state"] == want and len(cl2.calls) == k, str(r))
+    many = dict(entry, sites=[site("anatolia", pre["anatolia"] + "php-8-5:1.0", path=f"/s{i}/Dockerfile")
+                              for i in range(40)])
+    cm = _FakeBaseImages()
+    ui.open_pr(cm, "php", "8.5", many, resolver=res)
+    dm = cm.calls[-1][4]
+    check("açıklama sınırlı: ilk 10 + '… ve 30 servis daha'",
+          "/s9/Dockerfile" in dm and "/s10/Dockerfile" not in dm and "… ve 30 servis daha" in dm and len(dm) <= 4000)
+
+
 def test_upgrade_registry():
     """Docker Hub yama çözücüsü: en büyük yama, elle sabitleme, hata → None, etiket kanıtı, önbellek."""
     print("\n[upgrade: yama sürümü çözücü]")
@@ -11912,7 +12119,7 @@ def main():
               test_modern_sp,
               test_upgrade_rules,
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
-              test_upgrade_registry, test_upgrade_patch_sites,
+              test_upgrade_registry, test_upgrade_patch_sites, test_upgrade_image_template,
               test_upgrade_scan_take,
               test_upgrade_bump_sites,
               test_upgrade_client_find_pr_and_bytes,
