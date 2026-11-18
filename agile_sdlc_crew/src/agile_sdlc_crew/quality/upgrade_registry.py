@@ -12,7 +12,7 @@ log = logging.getLogger("pipeline")
 
 HUB = "https://hub.docker.com/v2/repositories/library"
 IMAGE_YAML = Path(__file__).resolve().parent.parent / "config" / "upgrade_image.yaml"
-_NAMES = ("php", "python", "golang")
+_NAMES = ("php", "python", "golang", "node")
 _TAG_RE = re.compile(r"[\w][\w.\-]*", re.ASCII)
 _MINOR_RE = re.compile(r"\d+\.\d+", re.ASCII)
 DOWN_S = 60

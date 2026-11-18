@@ -11961,8 +11961,10 @@ def test_upgrade_registry():
     check("geçersiz etiket → None, fetch çağrılmaz",
           all(rn.tag_exists("php", t) is None for t in ("", "-x", "a b", "8.5/../x", "8.5?x=1")) and not nc)
     check("bilinmeyen ad / geçersiz minör → None, fetch çağrılmaz",
-          rn.latest_patch("node", "8.5") is None and rn.latest_patch("php", "8") is None
-          and rn.tag_exists("node", "1.2.3") is None and not nc)
+          rn.latest_patch("ruby", "8.5") is None and rn.latest_patch("php", "8") is None
+          and rn.tag_exists("ruby", "1.2.3") is None and not nc)
+    nh = ur.Resolver(fetch=_fake_hub({"node": ["20.17.0", "20.17.3", "20.17"]}))
+    check("node adı kabul edilir (taban imaj güvenliği)", nh.latest_patch("node", "20.17") == "20.17.3")
     check("default() tekil", ur.default() is ur.default())
     # User-Agent: varsayılan fetch başlığı gönderir (ağ yok, get enjekte)
     seen: dict = {}
@@ -12552,6 +12554,305 @@ def test_upgrade_scan_take():
           sum((qdir / f).read_text().count("istek başı tavan") for f in ("php_modern.py", "modern.py", "upgrade.py")) == 1)
 
 
+def _iv_client(files: dict, dates: dict | None = None):
+    """base-images@production sahte client'ı: yol → içerik; okunamayan → istisna."""
+    def get_file_content(repo, path, branch=None, project=None):
+        assert repo == "base-images" and branch == "production" and project == "FLODevOps", (repo, branch, project)
+        if path not in files:
+            raise FileNotFoundError(path)
+        return files[path]
+
+    def get_last_commit_date(repo, path, branch, project=None):
+        return (dates or {}).get(path, "")
+    return SimpleNamespace(get_file_content=get_file_content, get_last_commit_date=get_last_commit_date)
+
+
+def test_image_vuln_inventory():
+    """Taban imaj envanteri: kendi imaj → dayanak FROM (ARG çözümü), tekilleştirme, bölge, takma ad, hata."""
+    print("\n[taban imaj güvenliği: envanter]")
+    from agile_sdlc_crew.quality import image_vuln as iv
+    reg = "europe-west1-docker.pkg.dev/flo-prod-main/prod-ar"
+    files = {
+        "/php-8-4/Dockerfile": "ARG PHP_VERSION=8.4.27\nFROM php:${PHP_VERSION}-fpm-bookworm\nRUN x\n",
+        "/php-8-2/dockerfile": "FROM php:8.4.27-fpm-bookworm\n",           # küçük harf; aynı dayanak
+        "/python-3-13-7/Dockerfile": "FROM python:3.13.7-slim-bookworm\n",
+        "/node-20-17/Dockerfile": "FROM node:20.17.0-bookworm\n",
+        "/noarg-1/Dockerfile": "ARG V\nFROM php:${V}-fpm\n",                  # varsayılansız ARG
+        "/evil-1/Dockerfile": "FROM php:8.4;rm\n",
+    }
+    client = _iv_client(files, {"/php-8-4": "2026-10-21T08:00:00Z", "/php-8-2": "2026-09-01T00:00:00Z"})
+    index = {
+        "channel": [{"src": "anatolia/build/channel", "images": [f"{reg}/php-8-4:1.0", "base", "builder"]},
+                    {"src": "global/build/channel", "images": [f"{reg}/php-8-2:1.0"]}],
+        "core": [{"src": "russia/build/core", "images": ["10.131.167.220:5000/prod-ar/php-8-4:1.0"]}],
+        "gocrons": [{"src": "anatolia/build/gocrons", "images": ["golang:1.24.4", "debian:12"]}],
+        "py": [{"src": "anatolia/build/py", "images": [f"{reg}/python-3-13-7:1.0", "python:3.11-slim",
+                                                       "huggingface_hub"]}],
+        "web": [{"src": "anatolia/build/web", "images": [f"{reg}/node-20-17:1.0",
+                                                         "node:${NODE_VERSION}-alpine3.24"]}],
+        "bad": [{"src": "global/build/bad", "images": [f"{reg}/noarg-1:1.0", f"{reg}/missing-9:1.0",
+                                                       f"{reg}/evil-1:1.0"]}],
+    }
+    recs = {r["image"]: r for r in iv.inventory(client, index)}
+    php = recs.get("php:8.4.27-fpm-bookworm")
+    check("ARG çözülür; iki dizin + üç bölge tek kayıt", bool(php) and php["via"] == ["php-8-2", "php-8-4"]
+          and php["lang"] == "php" and php["version"] == "8.4.27" and not php["error"], str(php))
+    check("bölge başına kullanıcılar (registry farklı olsa da)",
+          php["users"] == {"anatolia": ["build/channel"], "global": ["build/channel"], "russia": ["build/core"]},
+          str(php and php["users"]))
+    check("touched: dizinlere son dokunulan en yeni tarih", php["touched"] == "2026-10-21", php["touched"])
+    check("küçük harfli dockerfile okunur (php-8-2 dayanağa katıldı)", "php-8-2" in php["via"])
+    check("takma ad / etiketsiz ad atlanır", "base" not in recs and "builder" not in recs
+          and "huggingface_hub" not in recs)
+    check("python / node / go dil ve sürümü",
+          recs["python:3.13.7-slim-bookworm"]["lang"] == "python" and recs["python:3.13.7-slim-bookworm"]["version"] == "3.13.7"
+          and recs["node:20.17.0-bookworm"]["lang"] == "node" and recs["node:20.17.0-bookworm"]["version"] == "20.17.0"
+          and recs["golang:1.24.4"]["lang"] == "go" and recs["golang:1.24.4"]["version"] == "1.24.4"
+          and recs["python:3.11-slim"]["version"] == "3.11")
+    check("dil olmayan imaj da envanterde (lang boş)", recs["debian:12"]["lang"] == "" and not recs["debian:12"]["error"])
+    check("genel imajda via boş", recs["golang:1.24.4"]["via"] == [])
+    check("ARG'ı kullanıcı Dockerfile'ında olan imaj → error, özgün ad",
+          "node:${NODE_VERSION}-alpine3.24" in recs and recs["node:${NODE_VERSION}-alpine3.24"]["error"] != "")
+    na = recs.get(f"{reg}/noarg-1:1.0")
+    check("varsayılansız ARG → error, özgün ad", bool(na) and "ARG" in na["error"], str(na))
+    check("okunamayan taban dizin → error", recs[f"{reg}/missing-9:1.0"]["error"] != "")
+    check("kötü niyetli FROM → error (alt sürece gidecek ad olmaz)",
+          recs[f"{reg}/evil-1:1.0"]["error"] != "" and "php:8.4;rm" not in recs)
+    check("hatalı kayıtta lang boş", recs[f"{reg}/noarg-1:1.0"]["lang"] == "")
+    good = ["php:8.4.27-fpm-bookworm", "golang:1.24.4", "registry.example/prod-ar/php-8-4:1.0", "debian"]
+    bad = ["", "-php:8", "--flag", "php:8.4; rm -rf /", "php 8", "$(id)", "php:${V}", "PHP:8", "a" * 201,
+           "node:20\nx", "ünicode:1", "a@sha256:abc"]
+    check("valid_image iyi adlar", all(iv.valid_image(x) for x in good), str([x for x in good if not iv.valid_image(x)]))
+    check("valid_image kötü girdiler", not any(iv.valid_image(x) for x in bad), str([x for x in bad if iv.valid_image(x)]))
+    check("valid_image str olmayan", not iv.valid_image(None) and not iv.valid_image(5))
+
+
+def _iv_trivy_json(vulns, *, os_name="12.15"):
+    return json.dumps({"ArtifactName": "x", "Metadata": {"OS": {"Family": "debian", "Name": os_name},
+                                                          "ImageConfig": {"created": "2026-11-05T07:25:52Z"}},
+                       "Results": [{"Target": "t", "Type": "debian", "Vulnerabilities": vulns}]})
+
+
+def test_image_vuln_signals():
+    """Trivy sonucu, yama geride, destek bitmiş, seviye tablosu ve önbellek (run/fetch/resolver enjekte)."""
+    print("\n[taban imaj güvenliği: işaretler ve önbellek]")
+    import os as _os
+    import subprocess as sp
+    from datetime import date
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import image_vuln as iv
+    from agile_sdlc_crew.quality import upgrade_registry as ur
+    saved_cmd = iv.trivy_cmd
+    iv.trivy_cmd = lambda **kw: ["trivy"]
+    try:
+        def v(cve, pkg, sev, fixed="1.2", inst="1.1"):
+            d = {"VulnerabilityID": cve, "PkgName": pkg, "InstalledVersion": inst, "Severity": sev, "Status": "fixed"}
+            if fixed is not None:
+                d["FixedVersion"] = fixed
+            return d
+        calls: list = []
+
+        def run_ok(cmd, timeout):
+            calls.append(cmd)
+            return 0, _iv_trivy_json([
+                v("CVE-1", "curl", "HIGH"), v("CVE-2", "curl", "CRITICAL", "1.3"), v("CVE-3", "zlib", "HIGH"),
+                v("CVE-4", "nofix", "CRITICAL", fixed=None), v("CVE-5", "empty", "HIGH", fixed=""),
+                v("CVE-6", "curl", "HIGH"), v("CVE-7", "curl", "HIGH"), v("CVE-8", "curl", "HIGH"),
+                v("CVE-9", "curl", "HIGH"), v("CVE-10", "curl", "HIGH")])
+        s = iv.scan_image("php:8.4.27-fpm-bookworm", run=run_ok)
+        check("tarama tamam; yalnız düzeltmeli sayılır (düzeltmesiz / boş FixedVersion hariç)",
+              s["state"] == "tamam" and s["critical"] == 1 and s["high"] == 7, str(s))
+        pk = {p["name"]: p for p in s["packages"]}
+        check("paket başına en yüksek önem; düzeltmesizler listede yok",
+              set(pk) == {"curl", "zlib"} and pk["curl"]["severity"] == "CRITICAL" and pk["curl"]["fixed"] == "1.3"
+              and s["packages"][0]["name"] == "curl", str(s["packages"]))
+        check("paket başına CVE ≤ 5", len(pk["curl"]["cves"]) == 5)
+        check("os + imaj tarihi", s["os"] == "debian 12.15" and s["created"] == "2026-11-05")
+        cmd = calls[0]
+        check("komut: liste biçimi, sabit bayraklar, imaj en sonda",
+              cmd[:1] == ["trivy"] and cmd[1:] == ["image", "--quiet", "--platform", "linux/amd64", "--scanners", "vuln",
+                                                   "--severity", "HIGH,CRITICAL", "--format", "json",
+                                                   "php:8.4.27-fpm-bookworm"], str(cmd))
+        n = iv.scan_image("x:1", run=lambda c, t: (0, json.dumps({"Results": [{"Vulnerabilities": None}]})))
+        check("Vulnerabilities: null → 0 bulgu", n["state"] == "tamam" and n["critical"] == n["high"] == 0, str(n))
+        check("Results yok / boş nesne → 0 bulgu, çökme yok",
+              iv.scan_image("x:1", run=lambda c, t: (0, "{}"))["state"] == "tamam"
+              and iv.scan_image("x:1", run=lambda c, t: (0, '{"Results": null}'))["state"] == "tamam")
+        check("dönüş kodu 1 → tarama başarısız", iv.scan_image("x:1", run=lambda c, t: (1, "{}"))["state"] == "tarama başarısız")
+        check("bozuk / boş JSON → tarama başarısız (sessizce temiz değil)",
+              iv.scan_image("x:1", run=lambda c, t: (0, "not json"))["state"] == "tarama başarısız"
+              and iv.scan_image("x:1", run=lambda c, t: (0, ""))["state"] == "tarama başarısız")
+
+        def boom(c, t):
+            raise sp.TimeoutExpired(c, t)
+        check("zaman aşımı", iv.scan_image("x:1", run=boom)["state"] == "zaman aşımı")
+        check("run istisnası → tarama başarısız",
+              iv.scan_image("x:1", run=lambda c, t: (_ for _ in ()).throw(OSError("x")))["state"] == "tarama başarısız")
+        spy: list = []
+        for bad in ("php:8.4; rm -rf /", "--flag", "-v", "a b", "$(id)", ""):
+            r = iv.scan_image(bad, run=lambda c, t: spy.append(c) or (0, "{}"))
+            assert r["state"] == "geçersiz imaj", (bad, r)
+        check("geçersiz imajda run hiç çağrılmaz", not spy)
+        iv.trivy_cmd = lambda **kw: None
+        spy2: list = []
+        check("tarayıcı yok", iv.scan_image("x:1", run=lambda c, t: spy2.append(c))["state"] == "tarayıcı yok" and not spy2)
+        iv.trivy_cmd = saved_cmd
+        saved_env = _os.environ.get("CREW_TRIVY_BIN")
+        with tempfile.TemporaryDirectory() as td:
+            ok = Path(td) / "trivy-0.60"
+            ok.write_text("#!/bin/sh\n"); ok.chmod(0o755)
+            wrong = Path(td) / "evil"
+            wrong.write_text("#!/bin/sh\n"); wrong.chmod(0o755)
+            try:
+                _os.environ["CREW_TRIVY_BIN"] = str(ok)
+                check("CREW_TRIVY_BIN geçerli → [bin]", iv.trivy_cmd(which=lambda n: None) == [str(ok)])
+                _os.environ["CREW_TRIVY_BIN"] = str(wrong)
+                check("CREW_TRIVY_BIN adı trivy… değil → yok sayılır", iv.trivy_cmd(which=lambda n: None) is None)
+                _os.environ["CREW_TRIVY_BIN"] = "trivy"
+                check("CREW_TRIVY_BIN göreli yol → yok sayılır", iv.trivy_cmd(which=lambda n: None) is None)
+                _os.environ.pop("CREW_TRIVY_BIN")
+                check("PATH'te trivy", iv.trivy_cmd(which=lambda n: "/x/trivy" if n == "trivy" else None) == ["/x/trivy"])
+                dk = iv.trivy_cmd(which=lambda n: "/x/docker" if n == "docker" else None)
+                check("docker yedeği: önbellek repo dışı, imaj sabit",
+                      bool(dk) and dk[:4] == ["/x/docker", "run", "--rm", "-v"] and dk[-1] == "aquasec/trivy:latest"
+                      and ".cache/tempo-trivy:/root/.cache/" in dk[4] and "crewai" not in dk[4], str(dk))
+                check("hiçbiri yok → None", iv.trivy_cmd(which=lambda n: None) is None)
+            finally:
+                if saved_env is None:
+                    _os.environ.pop("CREW_TRIVY_BIN", None)
+                else:
+                    _os.environ["CREW_TRIVY_BIN"] = saved_env
+        check("CREW_TRIVY_BIN pipeline_config'e kayıtlı DEĞİL (env-only)",
+              not any(f["key"] == "CREW_TRIVY_BIN" for f in pc.SCHEMA))
+        iv.trivy_cmd = lambda **kw: ["trivy"]
+
+        # patch_lag
+        hub = ur.Resolver(fetch=_fake_hub({"php": ["8.4.27", "8.4.30", "8.4.5"], "golang": ["1.24.4", "1.24.9"],
+                                           "node": ["20.17.0", "20.17.3"], "python": ["3.13.7"]}))
+        check("yama geride: php", iv.patch_lag("php", "8.4.27", resolver=hub) == {"latest": "8.4.30"})
+        check("yama geride: go → golang Hub adı", iv.patch_lag("go", "1.24.4", resolver=hub) == {"latest": "1.24.9"})
+        check("yama geride: node", iv.patch_lag("node", "20.17.0", resolver=hub) == {"latest": "20.17.3"})
+        check("güncel / bilinmeyen / iki parçalı / dilsiz → None",
+              iv.patch_lag("python", "3.13.7", resolver=hub) is None and iv.patch_lag("php", "8.4.30", resolver=hub) is None
+              and iv.patch_lag("php", "8.4", resolver=hub) is None and iv.patch_lag("node", "20", resolver=hub) is None
+              and iv.patch_lag("", "1.2.3", resolver=hub) is None and iv.patch_lag("php", "8.9.1", resolver=hub) is None)
+        check("Hub çökerse None (uyarı değil)",
+              iv.patch_lag("php", "8.4.27", resolver=ur.Resolver(fetch=_fake_hub({}, down=True))) is None)
+
+        # eol
+        rows = {"php": [{"cycle": "8.4", "eol": "2028-12-31", "latest": "8.4.30"},
+                        {"cycle": "7.4", "eol": "2022-11-28"}, {"cycle": "9.0", "eol": False}, {"cycle": "5.6", "eol": True}],
+                "nodejs": [{"cycle": "20", "eol": "2026-04-30"}]}
+        urls: list = []
+
+        def fetch(url):
+            urls.append(url)
+            return rows[url.rsplit("/", 1)[1][:-5]]
+        iv._EOL_CACHE.clear()
+        today = date(2026, 11, 18)
+        check("eol geçmiş → tarih", iv.eol("php", "7.4.33", fetch=fetch, today=today) == {"eol": "2022-11-28"})
+        check("eol gelecek → None", iv.eol("php", "8.4.27", fetch=fetch, today=today) is None)
+        check("eol false → None", iv.eol("php", "9.0.1", fetch=fetch, today=today) is None)
+        check("eol true → destek bitti (tarihsiz)", iv.eol("php", "5.6.1", fetch=fetch, today=today) == {"eol": ""})
+        check("node döngüsü yalnız majör", iv.eol("node", "20.17.0", fetch=fetch, today=today) == {"eol": "2026-04-30"})
+        check("bilinmeyen döngü → None", iv.eol("php", "8.1.2", fetch=fetch, today=today) is None)
+        check("ürün adları ve tek istek (24 sa bellek)",
+              urls == ["https://endoflife.date/api/php.json", "https://endoflife.date/api/nodejs.json"], str(urls))
+        iv._EOL_CACHE.clear()
+
+        def down(url):
+            raise OSError("ağ yok")
+        check("okunamadı → None", iv.eol("php", "7.4.33", fetch=down, today=today) is None)
+        check("beklenmedik biçim → None",
+              iv.eol("php", "7.4.33", fetch=lambda u: {"x": 1}, today=today) is None)
+        iv._EOL_CACHE.clear()
+        check("geçersiz tarih → None",
+              iv.eol("php", "7.4.33", fetch=lambda u: [{"cycle": "7.4", "eol": "yarın"}], today=today) is None)
+        iv._EOL_CACHE.clear()
+
+        # report: seviye tablosu + önbellek
+        reg = "r.example/prod-ar"
+        files = {"/lvl-crit/Dockerfile": "FROM php:8.4.27-fpm\n", "/lvl-high/Dockerfile": "FROM php:8.3.1\n",
+                 "/lvl-eol/Dockerfile": "FROM php:7.4.33\n", "/lvl-clean/Dockerfile": "FROM php:8.4.30\n",
+                 "/lvl-unk/Dockerfile": "FROM debian:12\n"}
+        client = _iv_client(files)
+        index = {"a": [{"src": "anatolia/build/a", "images": [f"{reg}/lvl-crit:1", f"{reg}/lvl-high:1",
+                                                              f"{reg}/lvl-eol:1", f"{reg}/lvl-clean:1",
+                                                              f"{reg}/lvl-unk:1"]},
+                       {"src": "russia/build/a", "images": [f"{reg}/lvl-clean:1"]}]}
+        scans = {"php:8.4.27-fpm": {"critical": 1, "high": 0}, "php:8.3.1": {"critical": 0, "high": 2},
+                 "php:7.4.33": {"critical": 0, "high": 0}, "php:8.4.30": {"critical": 0, "high": 0},
+                 "debian:12": None}
+        ran: list = []
+
+        def scan_fn(image):
+            ran.append(image)
+            s = scans[image]
+            if s is None:
+                return {"state": "tarama başarısız", "critical": 0, "high": 0, "packages": [], "os": "", "created": ""}
+            return {"state": "tamam", "packages": [], "os": "debian 12", "created": "2026-11-05", **s}
+        hub2 = ur.Resolver(fetch=_fake_hub({"php": ["8.4.30", "8.3.9"]}))
+        rows["php"] = [{"cycle": "7.4", "eol": "2022-11-28"}, {"cycle": "8.4", "eol": "2028-12-31"},
+                       {"cycle": "8.3", "eol": "2027-12-31"}]
+        eol_fn = lambda lang, ver, **kw: iv.eol(lang, ver, fetch=fetch, today=today)  # noqa: E731
+        with tempfile.TemporaryDirectory() as td:
+            kw = dict(index=index, scan_fn=scan_fn, resolver=hub2, eol_fn=eol_fn, cache_dir=Path(td), ttl_h=24, now=1000.0)
+            rep = iv.report(client, **kw)
+            lv = {r["image"]: r for r in rep["images"]}
+            check("kritik: düzeltmeli CRITICAL", lv["php:8.4.27-fpm"]["level"] == "kritik"
+                  and "yeniden üret" in lv["php:8.4.27-fpm"]["actions"]
+                  and "yama sürümünü yükselt (8.4.30)" in lv["php:8.4.27-fpm"]["actions"], str(lv["php:8.4.27-fpm"]))
+            check("yüksek: düzeltmeli HIGH (ve yama geride 8.3.1 → 8.3.9)", lv["php:8.3.1"]["level"] == "yüksek")
+            check("kritik: destek bitmiş (taramada bulgu yok)", lv["php:7.4.33"]["level"] == "kritik"
+                  and any("destek 2022-11-28'de bitti" in a for a in lv["php:7.4.33"]["actions"]))
+            check("temiz: tarama tamam, işaret yok", lv["php:8.4.30"]["level"] == "temiz" and lv["php:8.4.30"]["actions"] == [])
+            check("bilinmiyor: tarama yapılamadı, başka işaret yok", lv["debian:12"]["level"] == "bilinmiyor")
+            check("sıralama: kritik → yüksek → bilinmiyor → temiz",
+                  [r["level"] for r in rep["images"]] == ["kritik", "kritik", "yüksek", "bilinmiyor", "temiz"],
+                  str([r["level"] for r in rep["images"]]))
+            check("rapor alanları", rep["scanner"] is True and rep["note"] and rep["scanned_at"])
+            check("her imaj bir kez tarandı", sorted(ran) == sorted(scans), str(ran))
+            n = len(ran)
+            iv.report(client, **kw)
+            check("ikinci çağrı önbellekten; başarısız tarama yeniden denenir", ran[n:] == ["debian:12"], str(ran[n:]))
+            n = len(ran)
+            iv.report(client, force=True, **kw)
+            check("force önbelleği atlar", len(ran) - n == 5)
+            n = len(ran)
+            iv.report(client, **{**kw, "now": 1000.0 + 25 * 3600})
+            check("TTL dolunca yeniden taranır", len(ran) - n == 5)
+            names = sorted(p.name for p in Path(td).iterdir())
+            check("önbellek dosya adı imaj adından türetilmiş hash (ham ad yol olmaz)",
+                  bool(names) and all(re.fullmatch(r"[0-9a-f]{40}\.json", f) for f in names), str(names))
+            p = iv._cache_path(Path(td), "php:8.3.1")
+            doc = json.loads(p.read_text())
+            doc["notified"] = "abc"
+            p.write_text(json.dumps(doc))
+            iv.report(client, force=True, **kw)
+            check("yeniden yazımda notified korunur", json.loads(p.read_text()).get("notified") == "abc")
+            idx2 = {"a": [{"src": "global/build/a", "images": [f"{reg}/nope-1:1"]}]}
+            r2 = iv.report(client, **{**kw, "index": idx2})
+            check("dayanak çözülemedi → bilinmiyor, neden scan'de, tarama yok",
+                  r2["images"][0]["level"] == "bilinmiyor" and r2["images"][0]["scan"]["state"] == "dayanak çözülemedi"
+                  and r2["images"][0]["scan"]["reason"] and f"{reg}/nope-1:1" not in ran,
+                  str(r2["images"][0]))
+    finally:
+        iv.trivy_cmd = saved_cmd
+        iv._EOL_CACHE.clear()
+
+
+def test_image_vuln_settings():
+    """Dört ayar pipeline_config'te, varsayılan değerleriyle."""
+    print("\n[taban imaj güvenliği: ayarlar]")
+    from agile_sdlc_crew import pipeline_config as pc
+    by = {f["key"]: f for f in pc.SCHEMA}
+    check("_IMAGE_VULN / _TASK / _NOTIFY kapalı bool",
+          all(by.get(k, {}).get("type") == "bool" and by[k]["default"] is False
+              for k in ("CREW_TECHDEBT_IMAGE_VULN", "CREW_TECHDEBT_IMAGE_VULN_TASK", "CREW_TECHDEBT_IMAGE_VULN_NOTIFY")))
+    check("_SCAN_H int 24, min 1", by.get("CREW_TECHDEBT_IMAGE_VULN_SCAN_H", {}).get("type") == "int"
+          and by["CREW_TECHDEBT_IMAGE_VULN_SCAN_H"]["default"] == 24 and by["CREW_TECHDEBT_IMAGE_VULN_SCAN_H"].get("min") == 1)
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -12652,6 +12953,7 @@ def main():
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
               test_upgrade_registry, test_upgrade_patch_sites, test_upgrade_image_template,
               test_upgrade_image_wiring,
+              test_image_vuln_inventory, test_image_vuln_signals, test_image_vuln_settings,
               test_upgrade_scan_take,
               test_upgrade_bump_sites,
               test_upgrade_client_find_pr_and_bytes,
