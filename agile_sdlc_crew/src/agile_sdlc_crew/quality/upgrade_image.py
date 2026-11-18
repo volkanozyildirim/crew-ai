@@ -117,7 +117,7 @@ def _folders(client, cfg: dict) -> set[str]:
 
 def state(client, entry: dict, *, cfg=None) -> dict:
     cfg = cfg or load_cfg()
-    out = {"dir": entry["dir"], "tag": entry.get("tag", ""), "regions": list(entry.get("regions") or []),
+    out = {"dir": entry["dir"], "tag": _clean(entry.get("tag", "")), "regions": list(entry.get("regions") or []),
            "state": "belirsiz", "reason": "", "pr": None}
     if entry.get("error"):
         out["reason"] = entry["error"]
@@ -305,10 +305,20 @@ def _branch_matches(client, cfg: dict, branch: str, head: str, built: dict, targ
     yapılır ama ardından iki başın da değişmediği doğrulanır. Büyük ağaç / okunamayan / farklı her şey False."""
     proj = cfg.get("project") or None
     try:
-        def paths(ref):
-            return {str(i.get("path")) for i in client.get_items_in_path(
-                cfg["repo"], "/", branch=ref, recursion_level="full", project=proj) if not i.get("isFolder")}
-        mine, theirs = paths(branch), paths(cfg["branch"])
+        def listing(ref):
+            """yol -> öğe; düz dosya (blob) olmayan herhangi bir öğe (submodule, symlink…) → ValueError.
+            Azure dosyalara `gitObjectType: blob`, klasörlere `tree` verir; alan yoksa blob sayılır."""
+            out = {}
+            for i in client.get_items_in_path(cfg["repo"], "/", branch=ref, recursion_level="full", project=proj):
+                kind = i.get("gitObjectType")
+                if kind not in (None, "", "blob", "tree") or (kind == "tree" and not i.get("isFolder")) \
+                        or (i.get("isFolder") and kind not in (None, "", "tree")):
+                    raise ValueError(f"düz dosya değil: {i.get('path')}")
+                if not i.get("isFolder"):
+                    out[str(i.get("path"))] = i
+            return out
+        mine_items, theirs_items = listing(branch), listing(cfg["branch"])
+        mine, theirs = set(mine_items), set(theirs_items)
         refs = {b.get("name"): b.get("objectId") for b in client.list_branches(cfg["repo"], project=proj)}
         if refs.get(f"refs/heads/{branch}") != head or refs.get(f"refs/heads/{cfg['branch']}") != target_head:
             return False
@@ -316,6 +326,11 @@ def _branch_matches(client, cfg: dict, branch: str, head: str, built: dict, targ
             return False
         total = 0
         for p in sorted(mine):
+            a, b = mine_items[p].get("objectId"), (theirs_items.get(p) or {}).get("objectId")
+            if p not in built["files"] and a and b:
+                if a != b:
+                    return False                 # nesne kimlikleri varsa bayt okumadan kesin karar
+                continue
             got = client.get_file_bytes(cfg["repo"], p, project=proj, version=head, version_type="commit")
             want = built["files"][p] if p in built["files"] else client.get_file_bytes(
                 cfg["repo"], p, project=proj, version=target_head, version_type="commit")
@@ -333,8 +348,9 @@ def open_pr(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None,
         return _open(client, lang, to, entry, cfg=cfg, resolver=resolver, repo=repo)
     except ImageTemplateError:
         raise
-    except Exception as e:  # noqa: BLE001
-        raise ImageTemplateError(f"base-images okunurken/yazılırken hata: {mask_secrets(str(e))[:300]}") from e
+    except Exception as e:  # noqa: BLE001 — yazma aşamasındakiler `_open` içinde zaten dönüştürülür; buraya yazmadan önceki hatalar düşer
+        raise ImageTemplateError(f"'{branch_name(entry.get('dir', ''))}' dalı, hazırlık aşamasında hata: "
+                                 f"{mask_secrets(str(e))[:300]}. Push yapılmadı.") from e
 
 
 def _open(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, repo: str = "") -> dict:
@@ -384,7 +400,10 @@ def _open(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, r
             why = ("yazma yetkisi yok (401/403)" if _denied(e) else mask_secrets(str(e))[:300])
             raise ImageTemplateError(f"'{branch}' dalı, {stage} aşamasında hata: {why}. "
                                      f"Push {'yapıldı' if pushed else 'yapılmadı'}.") from e
-    pid = res.get("pullRequestId")
+    pid = res.get("pullRequestId") if isinstance(res, dict) else None
+    if not pid:
+        raise ImageTemplateError(f"'{branch}' dalında PR büyük olasılıkla açıldı ama Azure yanıtı okunamadı; "
+                                 "PR'ı Azure DevOps'ta kontrol edin (dal ve içerik hazır, push yapıldı).")
     # Web bağlantısı `AzureDevOpsClient.find_pull_request` ile aynı biçimde; yanıtın `url`'si REST adresidir,
     # yalnız org/proje bilinmiyorsa yedek olarak döner.
     base = getattr(client, "org_url", None)

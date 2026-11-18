@@ -11245,6 +11245,8 @@ class _FakeBaseImages:
         self.list_n = 0
         self.fail_list_after = None         # bu kadar list_branches çağrısından sonra OSError
         self.org_url = "https://dev.azure.com/org"
+        self.item_meta: dict = {}           # (dal, yol) -> listeleme öğesine eklenen alanlar (gitObjectType, objectId)
+        self.pr_response = None             # create_pull_request yanıtını ez
         self.oids: dict = {}                # dal -> başın objectId'si (yoksa "oid-<dal>")
         self.files = {"staging": dict(files if files is not None else {
             "/Jenkinsfile": b"pipeline {}", "/README.md": b"# x",
@@ -11280,7 +11282,7 @@ class _FakeBaseImages:
             if "/" in rel and recursion_level != "full":
                 dirs.add(path.rstrip("/") + "/" + rel.split("/")[0])
             else:
-                out.append({"path": p, "isFolder": False})
+                out.append({"path": p, "isFolder": False, **self.item_meta.get((branch, p), {})})
         return [{"path": d, "isFolder": True} for d in sorted(dirs)] + out
 
     def get_file_bytes(self, repo, path, branch=None, project=None, version=None, version_type=None, **kw):
@@ -11321,6 +11323,8 @@ class _FakeBaseImages:
             raise OSError("PR servisi çöktü")
         self.calls.append(("pr", src, tgt, title, description, draft, project))
         self.prs[src] = {"id": 77, "status": "active", "url": "http://pr/77"}
+        if self.pr_response is not None:
+            return self.pr_response
         return {"pullRequestId": 77, "url": "https://dev.azure.com/org/_apis/git/repositories/x/pullRequests/77",
                 "repository": {"name": repo, "project": {"name": "FLODevOps"}}}
 
@@ -11588,10 +11592,66 @@ def test_upgrade_image_template():
     try:
         ui.open_pr(cn2, "php", "8.5", entry, resolver=res)
         check("ağ hatası → ImageTemplateError", False)
-    except ui.ImageTemplateError:
+    except ui.ImageTemplateError as ex:
         check("build sonrası ağ hatası ImageTemplateError, yazma yok", cn2.calls == [])
+        check("hazırlık hatası dalı adlandırır, push yapılmadı der",
+              bname in str(ex) and "Push yapılmadı" in str(ex), str(ex))
     except OSError:
         check("build sonrası ağ hatası ImageTemplateError", False, "ham OSError")
+    # round 3: düz dosya olmayan öğe / nesne kimliği / bozuk PR yanıtı / tag temizliği
+    cs = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cs, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    cs.fail_at = None
+    cs.item_meta[(bname, "/README.md")] = {"gitObjectType": "commit"}      # submodule
+    k = len(cs.calls)
+    try:
+        ui.open_pr(cs, "php", "8.5", entry, resolver=res)
+        check("submodule (commit) öğeli dal reddedilir", False)
+    except ui.ImageTemplateError:
+        check("submodule (commit) öğeli dal reddedilir, yazma yok", len(cs.calls) == k)
+    co = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(co, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    co.fail_at = None
+    co.item_meta[(bname, "/README.md")] = {"gitObjectType": "blob", "objectId": "aaa"}
+    co.item_meta[("staging", "/README.md")] = {"gitObjectType": "blob", "objectId": "bbb"}
+    k = len(co.calls)
+    try:
+        ui.open_pr(co, "php", "8.5", entry, resolver=res)
+        check("aynı bayt, farklı objectId → reddedilir", False)
+    except ui.ImageTemplateError:
+        check("aynı bayt, farklı objectId → reddedilir, yazma yok", len(co.calls) == k)
+    ci = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(ci, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    ci.fail_at = None
+    for br_ in (bname, "staging"):
+        ci.item_meta[(br_, "/README.md")] = {"gitObjectType": "blob", "objectId": "same"}
+    k = len(ci.calls)
+    ui.open_pr(ci, "php", "8.5", entry, resolver=res)
+    check("blob + eşit objectId → yalnız PR", [x[0] for x in ci.calls[k:]] == ["pr"])
+    cp = _FakeBaseImages()
+    cp.pr_response = ["garip"]
+    try:
+        ui.open_pr(cp, "php", "8.5", entry, resolver=res)
+        check("bozuk PR yanıtı → hata", False)
+    except ui.ImageTemplateError as ex:
+        check("bozuk PR yanıtı: dal adı + 'kontrol et'", bname in str(ex) and "kontrol" in str(ex), str(ex))
+    cp2 = _FakeBaseImages()
+    cp2.pr_response = {"url": "x"}
+    try:
+        ui.open_pr(cp2, "php", "8.5", entry, resolver=res)
+        check("id'siz PR yanıtı → hata", False)
+    except ui.ImageTemplateError as ex:
+        check("id'siz PR yanıtı: 'kontrol et'", "kontrol" in str(ex), str(ex))
+    check("state: tag temizlenir", ui.state(_FakeBaseImages(), dict(entry, tag="1.\x070`"))["tag"] == "1.0")
 
     c5 = _FakeBaseImages()
     r1 = ui.open_pr(c5, "php", "8.5", entry, resolver=res, repo="svc-a")
