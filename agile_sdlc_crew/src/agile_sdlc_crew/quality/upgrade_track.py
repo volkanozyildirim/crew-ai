@@ -311,6 +311,15 @@ def _images(client, lang: str, dv_blocked: list[dict], state_fn=None) -> list[di
         except Exception as ex:  # noqa: BLE001
             out.append({"dir": e["dir"], "tag": e.get("tag", ""), "regions": list(e.get("regions") or []),
                         "state": "belirsiz", "reason": f"okunamadı: {mask_secrets(str(ex))[:200]}", "pr": None})
+    # Kart onay metni için: PR'ın nereye / hangi daldan açılacağı ayardan gelir (`state`'in kendi anahtarları aynı kalır).
+    try:
+        cfg = ui.load_cfg()
+        for im in out:
+            if im.get("dir"):
+                im.update(repo=cfg["repo"], project=cfg.get("project") or "", branch=cfg["branch"],
+                          source_branch=ui.branch_name(im["dir"]))
+    except Exception as e:  # noqa: BLE001 — onay metni eksik kalır, durum düşmez
+        log.warning(f"⚠️ upgrade: imaj ayarı okunamadı: {mask_secrets(str(e))[:200]}")
     return out
 
 
@@ -873,7 +882,18 @@ def _error_comment(client, tid: int, msg: str, now) -> None:
 _RETRY_FREE = (None,)
 
 
-def _auto_images(client, tr: dict, st: dict, sc: dict, res: dict, *, image_open_fn=None) -> None:
+def _auto_images(client, tr: dict, st: dict, sc: dict, res: dict, *, image_open_fn=None, now=None) -> None:
+    """Hiçbir hata dışarı çıkmaz (adım akışı sürer); beklenmedik hata nota yazılır."""
+    try:
+        _auto_images_run(client, tr, st, sc, res, image_open_fn=image_open_fn, now=now)
+    except Exception as e:  # noqa: BLE001
+        from agile_sdlc_crew.quality.render import mask_secrets
+        msg = f"Taban imaj şablonu adımı hata verdi: {mask_secrets(str(e) or type(e).__name__)[:300]}"
+        log.warning(f"⚠️ upgrade oto: #{tr.get('id')} {msg}")
+        _note(res, msg)
+
+
+def _auto_images_run(client, tr: dict, st: dict, sc: dict, res: dict, *, image_open_fn=None, now=None) -> None:
     """CREW_TECHDEBT_UPGRADE_IMAGE açıkken durumu `yok` olan her taban imaj için şablon PR'ı bir kez; sonuç nota.
     İdempotentlik PR'ın kendisi (sabit dal): açık / reddedilmiş / var olan dizin için `open_pr` zaten yazmaz, biz de
     çağırmayız. Hata izleme Task'ına gider, adım akışını durdurmaz."""
@@ -899,7 +919,7 @@ def _auto_images(client, tr: dict, st: dict, sc: dict, res: dict, *, image_open_
             msg = f"{im['dir']}: şablon PR'ı açılamadı: {mask_secrets(str(e) or type(e).__name__)[:300]}"
             log.warning(f"⚠️ upgrade oto: #{tid} ({lang}:{repo}) {msg}")
             _note(res, msg)
-            _error_comment(client, tid, msg, datetime.now(timezone.utc))
+            _error_comment(client, tid, msg, now or datetime.now(timezone.utc))
             continue
         pr = r.get("pr") or {}
         _note(res, f"{im['dir']}: şablon PR'ı #{pr.get('id')} açıldı" if r.get("state") == "pr açık"
@@ -921,6 +941,8 @@ def open_image(client, repo: str, lang: str, *, to: str, dir_name: str, deps=Non
     from agile_sdlc_crew.quality import upgrade_image as ui
     from agile_sdlc_crew.quality import upgrade_registry
     from agile_sdlc_crew.quality.render import mask_secrets
+    if to and not re.fullmatch(r"\d+\.\d+", str(to)):
+        raise ValueError("Geçersiz hedef sürüm (örn. 8.5)")
     _check(repo, lang)
     state_fn, open_fn = kw.pop("image_state_fn", None), kw.pop("image_open_fn", None)
     sc = _fresh_scan(client, repo, lang, to, deps or pm.default_deps(), kw)
@@ -952,19 +974,21 @@ def open_image(client, repo: str, lang: str, *, to: str, dir_name: str, deps=Non
 
 
 def _advance_one(client, tr: dict, res: dict, *, team: str, deps, create_job, open_jobs, bump_jobs, status_fn,
-                 take_fn, last_bump_job, kw: dict, image_open_fn=None) -> None:
+                 take_fn, last_bump_job, kw: dict, image_open_fn=None, now=None) -> None:
     from agile_sdlc_crew.quality import upgrade_bump as bump
     repo, lang, to, tid = tr["repo"], tr["lang"], tr["to"], int(tr["id"])
     sc = _fresh_scan(client, repo, lang, to, deps, kw)
     st = status_fn(client, repo, lang, to=to, deps=deps, scan=sc, **_pick(kw, _SCAN_KW))
     nx = st.get("next") or {}
+    # Şablon PR'ı hazırlığın / devrin bitmesini beklemez (imajın yayını süre alır): önce, ve yalıtılmış — bir adımın
+    # hatası ötekini atlatmaz.
+    _auto_images(client, tr, st, sc, res, image_open_fn=image_open_fn, now=now)
     if nx.get("handed_off"):
-        # Adım DevOps'a devredildi: hiçbir şey yazılmaz / kuyruğa girmez (neden kartta görünüyor).
+        # Adım DevOps'a devredildi: sürüm adımı yazılmaz / kuyruğa girmez (neden kartta görünüyor).
         _note(res, f"Sıradaki adım DevOps isteğinde (#{nx['handed_off']}) — bekleniyor")
         return
     _auto_take(client, tr, sc, res, team=team, deps=deps,
                open_jobs=open_jobs or (lambda r: _open_work(client, r, lang)), take_fn=take_fn, kw=kw)
-    _auto_images(client, tr, st, sc, res, image_open_fn=image_open_fn)
     ev = st.get("evidence") or {}
     # Bildirim yalnız kanıt sıradaki adımı (prod) bekletirken: hazırlık / engelli aşamasında reponun herhangi bir
     # PR'ının kırmızı build'i yükseltmeyle ilgisizdir (her yeni build id'si yeni bir Task olurdu).
@@ -1050,7 +1074,8 @@ def advance(client, *, team: str, track_ids=None, deps=None, create_job=None, op
             _check(tr["repo"], tr["lang"])
             _advance_one(client, tr, res, team=team, deps=deps, create_job=create_job, open_jobs=open_jobs,
                          bump_jobs=bump_jobs, status_fn=status_fn or status, take_fn=take_fn or upgrade.take,
-                         last_bump_job=last_bump_job or bump.last_bump_job, kw=kw, image_open_fn=image_open_fn)
+                         last_bump_job=last_bump_job or bump.last_bump_job, kw=kw, image_open_fn=image_open_fn,
+                         now=now)
         except Exception as e:  # noqa: BLE001 — bir izleme işinin hatası diğerlerini durdurmaz
             msg = mask_secrets(str(e) or type(e).__name__)[:500]
             log.warning(f"⚠️ upgrade oto: #{tr['id']} ({tr['lang']}:{tr['repo']}) hata: {msg}")

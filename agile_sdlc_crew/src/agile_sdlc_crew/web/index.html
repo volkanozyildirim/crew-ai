@@ -2019,7 +2019,7 @@ function _upImagesHtml(imgs){
     const dir=String(im.dir||''),stt=String(im.state||'');
     const pr=im.pr&&im.pr.id?` · ${_upLink(im.pr.url,'PR #'+im.pr.id)}`:'';
     const why=im.reason?` <span style="color:var(--text-dim)">${escHtml(String(im.reason))}</span>`:'';
-    const btn=(stt==='yok'&&dir)?` <button class="sm-btn small tdmUpImg" data-dir="${escHtml(dir)}" data-regions="${escHtml((im.regions||[]).join(', '))}" onclick="upgradeImage(this)">Şablon PR'ı aç</button>`:'';
+    const btn=(stt==='yok'&&dir)?` <button class="sm-btn small tdmUpImg" data-dir="${escHtml(dir)}" data-regions="${escHtml((im.regions||[]).join(', '))}" data-repo="${escHtml(String(im.repo||''))}" data-project="${escHtml(String(im.project||''))}" data-branch="${escHtml(String(im.branch||''))}" data-source="${escHtml(String(im.source_branch||''))}" onclick="upgradeImage(this)">Şablon PR'ı aç</button>`:'';
     return `<div style="padding:2px 0"><b>${escHtml(dir||'taban imaj')}</b>`
       +(im.regions&&im.regions.length?` <span style="color:var(--text-dim)">(${escHtml(im.regions.join(', '))})</span>`:'')
       +` <span class="chip dim">${escHtml(stt)}</span>${pr}${why}${btn}</div>`;
@@ -2027,9 +2027,10 @@ function _upImagesHtml(imgs){
   return `<div style="padding:4px 0" title="Yayınlanmamış taban imaj şablonları"><div style="color:var(--text-dim)">Taban imaj</div>${rows.join('')}</div>`;
 }
 async function upgradeImage(btn){
-  const dir=btn.dataset.dir||'',regions=btn.dataset.regions||'';
+  const d=btn.dataset,dir=d.dir||'',regions=d.regions||'';
+  const where=[d.project,d.repo].filter(Boolean).join('/')||'taban imaj reposu';
   return _upPost('/api/techdebt/upgrade/image',
-    `${dir}: base-images reposunda 'tempo/base-image-${dir}' dalından 'staging'e taslak (draft) PR açılacak. Bekleyen bölgeler: ${regions||'-'}. İmaj üretilmez; DevOps yayınlar. Devam edilsin mi?`,{dir});
+    `${dir}: ${where} reposunda '${d.source||'?'}' dalından '${d.branch||'?'}' dalına taslak (draft) PR açılacak. Bekleyen bölgeler: ${regions||'-'}. İmaj üretilmez; DevOps yayınlar. Devam edilsin mi?`,{dir});
 }
 function _upStatusHtml(r,it){
   const tracked=!!(it&&it.tracked)||!!r.watch_target;

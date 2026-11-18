@@ -11644,6 +11644,9 @@ def test_upgrade_image_wiring():
     check("kart: imaj satırları, düğme, uç ve kaçış",
           "function _upImagesHtml(" in html_ and "Şablon PR'ı aç" in html_ and "'/api/techdebt/upgrade/image'" in html_
           and "escHtml(dir" in html_ and "h+=_upImagesHtml(st.images)" in html_)
+    check("kart: onay metni ayardan (kaynak dal / hedef dal / repo)",
+          'data-source="${escHtml(' in html_ and "d.source" in html_ and "d.branch" in html_
+          and "d.repo" in html_ and "'tempo/base-image-${dir}'" not in html_)
     pre = "eu/prod-ar/"
     unp = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
            "path": "/build/core/Dockerfile", "line": 1, "old": pre + "php-8-2:1.0", "new": pre + "php-8-5:1.0",
@@ -11690,6 +11693,11 @@ def test_upgrade_image_wiring():
                   [i["dir"] for i in s["images"]] == ["php-8-5"] and s["images"][0]["state"] == "yok"
                   and calls == ["php-8-5"], str(s["images"]))
             check("engel nedeni yine üretim adımını kapatır", s["next"]["step"] == "prod" and not s["next"]["ready"])
+            icfg = ui.load_cfg()
+            im0 = s["images"][0]
+            check("images girdisi onay metni için repo / proje / hedef dal / kaynak dal taşır",
+                  im0["repo"] == icfg["repo"] and im0["project"] == icfg.get("project") and im0["branch"] == icfg["branch"]
+                  and im0["source_branch"] == "tempo/base-image-php-8-5" and im0["state"] == "yok", str(im0))
             s = st([unp], image_state_fn=lambda c, e, **k: dict(cur_state, state="pr açık", pr={"id": 46551, "url": "u"}))
             check("engel nedenine imaj durumu eklenir",
                   "php-8-5: şablon PR'ı #46551 açık" in s["next"]["reason"]
@@ -11713,19 +11721,20 @@ def test_upgrade_image_wiring():
             def add_comment(self, wid, html_):
                 self.comments.append((wid, html_))
 
-        def adv_one(images, *, open_fn, auto_img=True):
+        def adv_one(images, *, open_fn, auto_img=True, handed=None, take=None, now=None, cf=None):
             flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = auto_img
             tr = {"id": 500, "repo": "core", "lang": "php", "to": "8.5"}
             res = {"id": 500, "note": ""}
-            stt = {"stage": "engelli", "images": images, "next": {"step": "prod", "ready": False}}
-            cf = _CF()
+            stt = {"stage": "engelli", "images": images,
+                   "next": {"step": "prod", "ready": False, "handed_off": handed}}
+            cf = cf or _CF()
             s_scan, s_take = ut._fresh_scan, ut._auto_take
             ut._fresh_scan = lambda *a, **k: mkscan([unp])
-            ut._auto_take = lambda *a, **k: None
+            ut._auto_take = take or (lambda *a, **k: None)
             try:
                 ut._advance_one(cf, tr, res, team="T", deps=None, create_job=None, open_jobs=None, bump_jobs=None,
                                 status_fn=lambda *a, **k: stt, take_fn=None, last_bump_job=None, kw={},
-                                image_open_fn=open_fn)
+                                image_open_fn=open_fn, now=now)
             finally:
                 ut._fresh_scan, ut._auto_take = s_scan, s_take
             return res, cf
@@ -11749,6 +11758,54 @@ def test_upgrade_image_wiring():
         check("_advance_one: hata adımı durdurmaz, nota + izleme Task'ına yorum",
               "dal var ama içeriği farklı" in res["note"] and len(cf.comments) == 1 and cf.comments[0][0] == 500,
               f"{res} {cf.comments}")
+
+        # devredilmiş adım, sıra, yalıtım
+        opened.clear()
+        res, cf = adv_one([cur_state], open_fn=ofn, handed=777)
+        check("_advance_one: adım DevOps'a devredilmişken de open_pr bir kez",
+              len(opened) == 1 and "#777" in res["note"] and "#9" in res["note"], f"{opened} {res}")
+        order = []
+        opened.clear()
+
+        def take_ok(*a, **k):
+            order.append("take")
+        adv_one([cur_state], open_fn=lambda *a, **k: (order.append("image"), ofn(*a, **k))[1], take=take_ok)
+        check("_advance_one: imaj adımı _auto_take'ten önce", order == ["image", "take"], str(order))
+
+        def take_boom(*a, **k):
+            raise RuntimeError("alım çöktü")
+        opened.clear()
+        try:
+            adv_one([cur_state], open_fn=ofn, take=take_boom)
+            check("_advance_one: _auto_take istisnası yükselir", False)
+        except RuntimeError:
+            check("_advance_one: _auto_take çökse de imaj PR'ı açılmış", len(opened) == 1, str(opened))
+        took = []
+        s_needed = ui.needed
+        ui.needed = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("beklenmeyen"))
+        try:
+            adv_one([cur_state], open_fn=ofn, take=lambda *a, **k: took.append(1))
+            check("_advance_one: imaj adımı beklenmedik hata verse de _auto_take çalışır", took == [1], str(took))
+        finally:
+            ui.needed = s_needed
+        # hata yorumu: enjekte `now` ve 24 sa kısma
+        import hashlib
+        from datetime import datetime as _dt2, timezone as _tz2
+        NOW = _dt2(2026, 11, 17, 12, 0, tzinfo=_tz2.utc)
+        msg = "php-8-5: şablon PR'ı açılamadı: dal var ama içeriği farklı"
+        mark = ut.ERR_MARK + hashlib.sha1(msg.encode("utf-8")).hexdigest()[:10]
+
+        class _CM(_CF):
+            def __init__(self, when):
+                super().__init__()
+                self.when = when
+
+            def get_work_item_comments(self, wid):
+                return [{"metin": f"<p>{mark}</p>", "tarih": self.when}]
+        _, cf = adv_one([cur_state], open_fn=bad, now=NOW, cf=_CM("2026-11-17T11:00:00Z"))
+        check("hata yorumu: son 24 saatte aynı işaret varsa ikinci yorum yok", cf.comments == [], str(cf.comments))
+        _, cf = adv_one([cur_state], open_fn=bad, now=NOW, cf=_CM("2026-11-15T11:00:00Z"))
+        check("hata yorumu: işaret 24 saatten eskiyse bir yorum", len(cf.comments) == 1, str(cf.comments))
 
         # ── uç ──
         track = {"id": 500, "to": "8.5", "lang": "php", "repo": "core", "area": "P\\T"}
@@ -11784,6 +11841,13 @@ def test_upgrade_image_wiring():
             r = tc.post("/api/techdebt/upgrade/image", json=body)
             check("uç: pr açık → 409 + neden", r.status_code == 409 and "açık" in r.json().get("error", "")
                   and not got, r.text)
+            cur["st"] = dict(cur_state, state="belirsiz", reason="okunamadı: x")
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: belirsiz → 409, open_pr yok", r.status_code == 409 and not got, r.text)
+            for bad_to in ("8", "8.5.1", "x.y", "8.5; rm"):
+                r = tc.post("/api/techdebt/upgrade/image", json=dict(body, to=bad_to))
+                check(f"uç: geçersiz hedef {bad_to!r} → 400", r.status_code == 400 and r.json().get("error")
+                      and not got, r.text)
             cur["st"] = dict(cur_state)
             r = tc.post("/api/techdebt/upgrade/image", json=body)
             check("uç: başarılı → 200, open_pr sonucu, repo iletilir",
