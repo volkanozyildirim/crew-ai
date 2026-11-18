@@ -12803,7 +12803,7 @@ def test_image_vuln_signals():
             rep = iv.report(client, **kw)
             lv = {r["image"]: r for r in rep["images"]}
             check("kritik: düzeltmeli CRITICAL", lv["php:8.4.27-fpm"]["level"] == "kritik"
-                  and "yeniden üret" in lv["php:8.4.27-fpm"]["actions"]
+                  and "taban imaj yeniden üretilmeli (DevOps, bölge bayrakları)" in lv["php:8.4.27-fpm"]["actions"]
                   and "yama sürümünü yükselt (8.4.30)" in lv["php:8.4.27-fpm"]["actions"], str(lv["php:8.4.27-fpm"]))
             check("yüksek: düzeltmeli HIGH (ve yama geride 8.3.1 → 8.3.9)", lv["php:8.3.1"]["level"] == "yüksek")
             check("kritik: destek bitmiş (taramada bulgu yok)", lv["php:7.4.33"]["level"] == "kritik"
@@ -13001,6 +13001,7 @@ def _iv_rec(image, level="kritik", *, crit=1, eol=None, users=1, patch=None, act
 def test_image_vuln_alerts():
     """Uç, yoklayıcı, uyarı (iş + Telegram özeti, tavan), yok sayılan paketler. Ağ / Docker / Azure / Telegram yok."""
     print("\n[taban imaj güvenliği: uç, yoklayıcı, uyarı]")
+    import inspect
     import threading
     from agile_sdlc_crew import pipeline_config as pc
     from agile_sdlc_crew import daily
@@ -13051,6 +13052,19 @@ def test_image_vuln_alerts():
             out = iv.alert(None, rep, **kw)
             check("üçüncü çağrı: hepsinin işi var → yeni iş yok",
                   len(opened) == n + 2 and all(r["state"] == "açık iş" for r in out))
+            # dedup durumları: Canceled bastırılır; Done + eski (grace dışı) yeniden açılır; Done + yeni açık sayılır
+            b2 = {"image_vuln:golang:1.24.4": {"wi": 7, "state": "Canceled", "closed_at": 0.0},
+                  "image_vuln:php:7.4.33-fpm": {"wi": 8, "state": "Done", "closed_at": 1000.0 - 10 * 86400},
+                  "image_vuln:php:8.4.27": {"wi": 9, "state": "Done", "closed_at": 1000.0 - 86400}}
+            opened.clear()
+            d2 = SimpleNamespace(board=lambda c: b2, now=lambda: 1000.0)
+            out = iv.alert(None, {"images": rep["images"][:3]}, **{**kw, "deps": d2})
+            st = {r["image"]: r["state"] for r in out}
+            check("Canceled (suppressed) → 'bastırıldı', açık iş etiketi değil",
+                  st["golang:1.24.4"] == "bastırıldı" and "golang:1.24.4" not in opened, str(st))
+            check("Done + eski (grace dışı) → yeni iş açılır (recurring)",
+                  st["php:7.4.33-fpm"] == "açıldı" and opened == ["php:7.4.33-fpm"], f"{st} {opened}")
+            check("Done + yeni (grace içi) → iş açılmaz", st["php:8.4.27"] == "açık iş")
             knobs["CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS"] = 1
             board.clear(); opened.clear()
             iv.alert(None, rep, **kw)
@@ -13077,6 +13091,16 @@ def test_image_vuln_alerts():
             iv.alert(None, rep, **fkw)
             iv.alert(None, rep, **fkw)
             check("gönderilemeyen mesaj kaydedilmez (sonraki turda yeniden denenir)", len(fail_msgs) == 2)
+            m2: list = []
+            cdir = Path(td) / "cor"
+            cdir.mkdir()
+            ckw2 = {**nkw, "notify_fn": lambda t: m2.append(t) or True, "cache_dir": cdir}
+            (cdir / "notified.json").write_text("{bozuk json")
+            iv.alert(None, rep, **ckw2)
+            check("bozuk notified.json → 'hiçbir şey gönderilmedi' sayılır, çökmez, özet gider", len(m2) == 1)
+            (cdir / "notified.json").write_text("[1, 2]")
+            iv.alert(None, rep, **ckw2)
+            check("beklenmedik biçimli notified.json de aynı şekilde ele alınır", len(m2) == 2)
             knobs["CREW_TECHDEBT_IMAGE_VULN_NOTIFY"] = False
             iv.alert(None, rep2, **{**nkw, "cache_dir": Path(td) / "off"})
             check("_NOTIFY kapalı → mesaj yok", len(msgs) == 2)
@@ -13110,7 +13134,18 @@ def test_image_vuln_alerts():
           str(tags))
     check("Task: parmak izi image_vuln:<imaj>", g.fingerprints == ["image_vuln:golang:1.24.4"]
           and "tempo-fp: image_vuln:golang:1.24.4" in desc and g.needs_human)
+    check("Task: güvenilmez içerik notu korunur (paket / CVE adı üçüncü taraf metni), gövdeden ÖNCE",
+          render.UNTRUSTED_NOTE in desc and desc.index(render.UNTRUSTED_NOTE) < desc.index("Taban imaj:"))
     check("Task: başlık", "Taban imaj güvenliği: golang:1.24.4" in render.task_title(g))
+    # eylem metni: kendi taban imajı ↔ genel imaj
+    base_rec = {"scan": {"state": "tamam", "critical": 1, "high": 0}, "patch": None, "eol": None, "version": "3.11",
+                "lang": "python"}
+    _l, own_acts = iv._judge({**base_rec, "via": ["php-8-4"]})
+    _l, pub_acts = iv._judge({**base_rec, "via": []})
+    check("eylem: kendi taban imajı → DevOps yeniden üretir (bölge bayrakları)",
+          "taban imaj yeniden üretilmeli (DevOps, bölge bayrakları)" in own_acts, str(own_acts))
+    check("eylem: genel imaj → servis yeniden yayınlanır, DevOps'a yönlendirmez",
+          pub_acts == ["servis imajı yeniden derlendiğinde taze taban çekilir — servisi yeniden yayınla"], str(pub_acts))
     check("Task: kabul/davranış metni kalite (NR) metni değil",
           "New Relic" not in desc and render.acceptance_block(g) and "hata sınıfı" not in render.acceptance_block(g))
     from agile_sdlc_crew.quality import dedup
@@ -13176,63 +13211,147 @@ def test_image_vuln_alerts():
         skw = dict(index=index, scan_fn=scan_fn2, resolver=hub, eol_fn=lambda *a, **k: None,
                    cache_dir=Path(td), ttl_h=24, now=1000.0, ignore_packages=set())
         spawned: list = []
-        iv._RUN.update(running=False, done_at=0.0, report=None)
-        res = iv.serve(client, spawn=spawned.append, **skw)
+        clk = [1000.0]
+        ckw = dict(spawn=spawned.append, clock=lambda: clk[0])
+        iv._reset_state()
+        res = iv.serve(client, **ckw, **skw)
         check("önbellek boş → scanning true + eldeki kısım, tarama bu çağrıda koşmaz",
               res["scanning"] is True and len(spawned) == 1 and ran == [] and len(res["images"]) == 2
               and all(r["scan"]["state"] == "bekliyor" for r in res["images"]), str(res)[:300])
-        res = iv.serve(client, spawn=spawned.append, **skw)
+        res = iv.serve(client, **ckw, **skw)
         check("tarama sürerken ikinci istek ikinci tarama başlatmaz (kilit)", res["scanning"] is True and len(spawned) == 1)
         spawned[0]()
         check("arka plan taraması tüm imajları taradı, kilit bırakıldı", sorted(ran) == ["golang:1.24.4", "php:8.4.27-fpm-bookworm"]
               and iv._RUN["running"] is False)
-        res = iv.serve(client, spawn=spawned.append, **skw)
+        res = iv.serve(client, **ckw, **skw)
         check("önbellek dolu → scanning false, images, yeni tarama yok",
-              res["scanning"] is False and len(res["images"]) == 2 and len(spawned) == 1 and len(ran) == 2)
-        res = iv.serve(client, force=True, spawn=spawned.append, **skw)
-        check("force → yeniden tarama başlatır, eldeki sonuç yine döner",
-              res["scanning"] is True and len(spawned) == 2 and len(res["images"]) == 2)
+              res["scanning"] is False and len(res["images"]) == 2 and len(spawned) == 1 and len(ran) == 2
+              and all(r["scan"]["state"] == "tamam" for r in res["images"]))
+        res = iv.serve(client, force=True, **ckw, **skw)
+        check("GET'te force yok sayılır: tarama başlamaz, çökmez", res["scanning"] is False and len(spawned) == 1
+              and len(ran) == 2)
+        # POST (rescan): bekleme süresi
+        res = iv.rescan(client, **ckw, **skw)
+        check("rescan: son tarama 5 dk içinde bitti → başlamaz, kalan süre + Türkçe neden, eldeki sonuç döner",
+              res["scanning"] is False and len(spawned) == 1 and 0 < res["cooldown"] <= 300
+              and "sonra" in res["message"] and len(res["images"]) == 2, str(res)[:300])
+        clk[0] += 301
+        res = iv.rescan(client, **ckw, **skw)
+        check("rescan: bekleme geçince TAM BİR tarama başlar", res["scanning"] is True and len(spawned) == 2)
+        res = iv.rescan(client, **ckw, **skw)
+        check("rescan: tarama sürerken ikincisi başlamaz", len(spawned) == 2 and res["scanning"] is True)
         spawned[1]()
-        check("force taraması önbelleği atladı", len(ran) == 4)
+        check("rescan taraması önbelleği atladı", len(ran) == 4)
+        res = iv.rescan(client, **ckw, **skw)
+        check("rescan: biter bitmez yeniden istek bekleme süresine takılır", len(spawned) == 2 and res["cooldown"] > 0)
         # tarayıcı yok: sonuç önbelleğe girmez → her GET yeni tarama başlatmasın
         with tempfile.TemporaryDirectory() as td2:
             def noscan(image):
                 return {"state": "tarayıcı yok", "critical": 0, "high": 0, "packages": [], "os": "", "created": ""}
             nkw2 = {**skw, "scan_fn": noscan, "cache_dir": Path(td2)}
-            iv._RUN.update(running=False, done_at=0.0, report=None)
+            iv._reset_state()
+            clk[0] = 1000.0
             sp2: list = []
-            iv.serve(client, spawn=sp2.append, **nkw2)
+            k2 = dict(spawn=sp2.append, clock=lambda: clk[0])
+            iv.serve(client, **k2, **nkw2)
             sp2[0]()
-            res = iv.serve(client, spawn=sp2.append, **nkw2)
+            res = iv.serve(client, **k2, **nkw2)
             check("taranamayan imaj sonsuz yeniden tarama döngüsü kurmaz (son sonuç döner)",
                   len(sp2) == 1 and res["scanning"] is False
                   and {r["scan"]["state"] for r in res["images"]} == {"tarayıcı yok"}, str(res)[:200])
-        iv._RUN.update(running=False, done_at=0.0, report=None)
+            clk[0] += 301
+            iv.serve(client, **k2, **nkw2)
+            check("bekleme süresi dolunca otomatik ilk tarama yeniden denenebilir", len(sp2) == 2)
+        # çöken arka plan taraması: bayrak temizlenir, hata kaydı tutulur, hemen yeniden doğmaz
+        with tempfile.TemporaryDirectory() as td3:
+            def boom(image):
+                raise RuntimeError("docker çöktü")
+            bkw = {**skw, "scan_fn": boom, "cache_dir": Path(td3)}
+            iv._reset_state()
+            clk[0] = 1000.0
+            sp3: list = []
+            k3 = dict(spawn=sp3.append, clock=lambda: clk[0])
+            iv.serve(client, **k3, **bkw)
+            sp3[0]()
+            res = iv.serve(client, **k3, **bkw)
+            check("çöken tarama: bayrak temizlendi, GET 500 vermez, bekleme içinde yeniden doğmaz",
+                  iv._RUN["running"] is False and len(sp3) == 1 and res["scanning"] is False
+                  and len(res["images"]) == 2, str(res)[:200])
+            clk[0] += 301
+            iv.serve(client, **k3, **bkw)
+            check("çöküşten sonra bekleme dolunca yeniden denenir", len(sp3) == 2)
+        # bellek anlık görüntüsü: 60 sn içinde Azure okuması yok
+        with tempfile.TemporaryDirectory() as td4:
+            cnt = {"n": 0, "dec": 0}
+            mc = _iv_client({"/php-9-9/Dockerfile": "FROM php:8.4.27\n"})
+            _gfc = mc.get_file_content
+
+            def counting(*a, **k):
+                cnt["n"] += 1
+                return _gfc(*a, **k)
+            mc.get_file_content = counting
+            midx = {"a": [{"src": "anatolia/build/a", "images": ["r.example/prod-ar/php-9-9:1"]}]}
+            mkw = {**skw, "index": midx, "cache_dir": Path(td4)}
+
+            def dec(rep):
+                cnt["dec"] += 1
+                return rep
+            iv._reset_state()
+            clk[0] = 5000.0
+            m1: list = []
+            km = dict(spawn=m1.append, clock=lambda: clk[0], decorate=dec)
+            iv.serve(mc, **km, **mkw)
+            n1, d1 = cnt["n"], cnt["dec"]
+            clk[0] += 30
+            iv.serve(mc, **km, **mkw)
+            iv.serve(mc, **km, **mkw)
+            check("60 sn içindeki GET'ler bellekten döner: Azure okuması ve giderme planı yeniden kurulmaz",
+                  n1 > 0 and cnt["n"] == n1 and cnt["dec"] == d1 == 1, f"{n1} {cnt}")
+            clk[0] += 40
+            iv.serve(mc, **km, **mkw)
+            check("60 sn geçince anlık görüntü yeniden kurulur", cnt["n"] > n1 and cnt["dec"] == 2, str(cnt))
+            m1[0]()
+            n2 = cnt["n"]
+            iv.serve(mc, **km, **mkw)
+            check("arka plan taraması bitince anlık görüntü hemen yenilenir (60 sn beklenmez)", cnt["n"] > n2, str(cnt))
+        iv._reset_state()
 
     # ── uç: sunucu işleyicisi ───────────────────────────────────────────
     import asyncio
     from agile_sdlc_crew import server
     _get2 = pc.get
-    _serve, _cl = iv.serve, server.AzureDevOpsClient
+    _serve, _resc, _cl = iv.serve, iv.rescan, server.AzureDevOpsClient
     try:
         knobs2 = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": False}
         pc.get = lambda k: knobs2[k] if k in knobs2 else _get2(k)
         server.AzureDevOpsClient = lambda: object()
-        iv.serve = lambda client, force=False, **kw: {"scanning": False, "images": [{"image": "x"}], "force": force}
+        got_kw: list = []
+        iv.serve = lambda client, **kw: got_kw.append(kw) or {"scanning": False, "images": [{"image": "x"}]}
+        iv.rescan = lambda client, **kw: got_kw.append(("rescan", kw)) or {"scanning": True, "images": [{"image": "x"}]}
         r = asyncio.run(server.techdebt_images())
         check("ayar kapalı → 403 Türkçe neden", r.status_code == 403 and "taban imaj" in json.loads(r.body)["error"].lower())
+        check("rescan: ayar kapalı → 403", asyncio.run(server.techdebt_images_rescan()).status_code == 403)
         knobs2["CREW_TECHDEBT"] = False
         knobs2["CREW_TECHDEBT_IMAGE_VULN"] = True
         check("CREW_TECHDEBT kapalı → 403", asyncio.run(server.techdebt_images()).status_code == 403)
         knobs2["CREW_TECHDEBT"] = True
-        r = asyncio.run(server.techdebt_images(force=1))
+        r = asyncio.run(server.techdebt_images())
         body = json.loads(r.body)
-        check("ayar açık → 200 + images, force iletilir", r.status_code == 200 and body["images"] and body["force"] is True)
+        check("ayar açık → 200 + images; GET tarama zorlamaz, giderme planı anlık görüntüyle kurulur",
+              r.status_code == 200 and body["images"] and "force" not in got_kw[-1] and callable(got_kw[-1].get("decorate")))
+        check("GET işleyicisi force parametresi almaz (yan etkili GET yok)",
+              "force" not in inspect.signature(server.techdebt_images).parameters)
+        r = asyncio.run(server.techdebt_images_rescan())
+        check("rescan (POST) → 200, iv.rescan çağrılır",
+              r.status_code == 200 and json.loads(r.body)["scanning"] is True and got_kw[-1][0] == "rescan")
+        check("rescan POST rotası kayıtlı",
+              any(getattr(rt, "path", "") == "/api/techdebt/images/rescan" and "POST" in getattr(rt, "methods", set())
+                  for rt in server.app.routes))
         iv.serve = lambda client, **kw: (_ for _ in ()).throw(ValueError("kötü"))
         check("hata Türkçe JSON'a çevrilir (400)", asyncio.run(server.techdebt_images()).status_code == 400)
     finally:
         pc.get = _get2
-        iv.serve, server.AzureDevOpsClient = _serve, _cl
+        iv.serve, iv.rescan, server.AzureDevOpsClient = _serve, _resc, _cl
 
     # ── yoklayıcı ───────────────────────────────────────────────────────
     iv._POLLER = None
@@ -13268,6 +13387,12 @@ def test_image_vuln_alerts():
         knobs3["CREW_TECHDEBT_IMAGE_VULN"] = True
         iv._tick(lambda: cl)
         check("_tick: force=True rapor sonra uyarı (istemcinin takımıyla)", seen == [("report", True), ("alert", "Ekip")], str(seen))
+        flags: list = []
+        _a2 = iv.alert
+        iv.alert = lambda client, rep, **kw: flags.append(iv._RUN["running"]) or []
+        iv._tick(lambda: cl)
+        iv.alert = _a2
+        check("_tick: alert / giderme çalışırken tarama bayrağı bırakılmıştır (kart 'Taranıyor' demez)", flags == [False], str(flags))
         iv._RUN["running"] = True
         seen.clear()
         iv._tick(lambda: cl)

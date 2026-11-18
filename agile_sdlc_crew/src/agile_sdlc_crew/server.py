@@ -2143,21 +2143,44 @@ def _modern_off():
     return None
 
 
-@app.get("/api/techdebt/images")
-async def techdebt_images(force: int = 0):
-    """Taban imaj güvenliği raporu. Taramada beklemez: önbellekten döner; eksik / `force` ise taramayı arka planda
-    başlatır ve `scanning: true` ile eldekini verir (imaj başına ~20 sn–dakikalar sürebilir)."""
+def _image_vuln_off():
     from agile_sdlc_crew import pipeline_config as _pc
-    from agile_sdlc_crew.quality import image_vuln as _iv
     bad = _techdebt_off()
     if bad:
         return bad
     if not _pc.get("CREW_TECHDEBT_IMAGE_VULN"):
         return JSONResponse({"error": "Taban imaj güvenliği kapalı (CREW_TECHDEBT_IMAGE_VULN)"}, status_code=403)
+    return None
+
+
+@app.get("/api/techdebt/images")
+async def techdebt_images():
+    """Taban imaj güvenliği raporu. Yan etkisiz: taramada ve (60 sn içinde) Azure'da beklemez, bellekteki anlık
+    görüntüyü döner; önbellek eksikse tek otomatik ilk tarama arka planda başlar (`scanning: true`). Yeniden tarama
+    GET ile TETİKLENEMEZ — `POST /api/techdebt/images/rescan`."""
+    from agile_sdlc_crew.quality import image_vuln as _iv
+    bad = _image_vuln_off()
+    if bad:
+        return bad
     try:
         client = AzureDevOpsClient()
-        res = await asyncio.to_thread(_iv.serve, client, force=bool(force))
-        res = await asyncio.to_thread(_iv.attach_fix, client, res)      # her kayda yazmasız giderme planı
+        res = await asyncio.to_thread(_iv.serve, client, decorate=lambda rep: _iv.attach_fix(client, rep))
+        return JSONResponse({"enabled": True, **res})
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.post("/api/techdebt/images/rescan")
+async def techdebt_images_rescan():
+    """Kartın "Yeniden tara"sı: tarama sürmüyorsa ve son tarama 5 dk'dan önce bittiyse tam yeniden tarama başlatır,
+    aksi halde anlık görüntüyü Türkçe nedenle (`cooldown`: kalan sn) döner."""
+    from agile_sdlc_crew.quality import image_vuln as _iv
+    bad = _image_vuln_off()
+    if bad:
+        return bad
+    try:
+        client = AzureDevOpsClient()
+        res = await asyncio.to_thread(_iv.rescan, client, decorate=lambda rep: _iv.attach_fix(client, rep))
         return JSONResponse({"enabled": True, **res})
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)

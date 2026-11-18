@@ -351,7 +351,8 @@ def expected_behavior(g: Group) -> list[str]:
     kalite işlerinde hep aynı cevaba sahip — her seferinde insana sormak
     yerine burada sabitlenir."""
     if g.source == "image_vuln":
-        return ["Taban imaj DevOps tarafından yeniden üretilir ya da desteklenen sürüme alınır; Tempo imajı üretmez "
+        return ["Kendi taban imajımızsa DevOps yeniden üretir; genel imajsa (ör. python:3.11) servis imajı yeniden "
+                "derlenip yayınlanınca taze taban çekilir. Gerekirse desteklenen sürüme alınır; Tempo imaj üretmez "
                 "veya yayınlamaz. Karar ve takvim insanındır.",
                 "Yeniden üretim sonrası tarama tekrarlandığında bu imajda düzeltmesi yayınlanmış kritik açık ve "
                 "destek bitişi kalmaz; kapanış bu kontrolle doğrulanır."]
@@ -462,8 +463,7 @@ def task_description(g: Group, *, sonar_url: str = "", nr_days: int = 7, php_tar
         parts.append(f"<p><b>Tekrarladı</b> — önceki: #{int(g.recurring_of)}</p>")
     if g.needs_human:
         parts.append(f"<p><b>Neden insan:</b> {_e(g.human_reason)}</p>")
-    if not g.body_html:
-        parts.append(UNTRUSTED_NOTE)
+    parts.append(UNTRUSTED_NOTE)
     if g.body_html:
         parts.append(g.body_html)
     elif g.source == "newrelic":

@@ -1183,6 +1183,8 @@ function showTab(name){
 // Sunucu taramada beklemez: önbellek eksikse {scanning:true,…eldeki kısım…} döner; kart bitene kadar yoklar.
 // Seviye / işaret / eylem metinleri Python'dan gelir; UI yalnızca çizer. Her metin escHtml'den geçer.
 let _ivTimer=null;
+document.addEventListener('visibilitychange',()=>{const p=document.getElementById('paneTechdebt'),c=document.getElementById('tdImgCard');
+  if(!document.hidden&&p&&p.classList.contains('on')&&c&&c.style.display==='flex')loadImageVuln(false)});
 const _ivE=s=>escHtml(String(s==null?'':s));
 const _ivLevel={'kritik':['fail','Kritik'],'yüksek':['human','Yüksek'],'bilgi':['dim','Bilgi'],'temiz':['ok','Temiz'],'bilinmiyor':['dim','Bilinmiyor']};
 async function loadImageVuln(force){
@@ -1190,14 +1192,16 @@ async function loadImageVuln(force){
   clearTimeout(_ivTimer);
   const st=document.getElementById('tdImgStatus');
   try{
-    const resp=await fetch('/api/techdebt/images'+(force?'?force=1':''));
+    // GET yan etkisizdir; yeniden tarama yalnız POST (sunucu 5 dk bekleme uygular, nedeni `message` ile döner)
+    const resp=force?await fetch('/api/techdebt/images/rescan',{method:'POST'}):await fetch('/api/techdebt/images');
     if(resp.status===403){card.style.display='none';return}
     const r=await resp.json();
     card.style.display='flex';
     if(!resp.ok){st.innerHTML=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;return}
     renderImageVuln(r);
-    // tarama sürerken (sekme açıkken) 8 sn'de bir yeniden sor; bitince durur
-    if(r.scanning){_ivTimer=setTimeout(()=>{const p=document.getElementById('paneTechdebt');if(p&&p.classList.contains('on'))loadImageVuln(false)},8000)}
+    if(r.message&&!r.scanning)st.innerHTML=_ivE(r.message);
+    // tarama sürerken (sekme açık ve görünürken) 8 sn'de bir yeniden sor; bitince durur
+    if(r.scanning){_ivTimer=setTimeout(()=>{const p=document.getElementById('paneTechdebt');if(p&&p.classList.contains('on')&&!document.hidden)loadImageVuln(false)},8000)}
   }catch(e){card.style.display='flex';st.textContent=String(e)}
 }
 function renderImageVuln(r){
@@ -1221,7 +1225,7 @@ function renderImageVuln(r){
       if(sc.state&&sc.state!=='tamam')sig.push(`<span class="chip dim" title="${_ivE(sc.reason||'')}">${_ivE(sc.state)}</span>`);
       const pk=(sc.packages||[]);
       const det=pk.length?`<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--text-dim)">${pk.length} paket</summary><ul style="margin:4px 0 0 16px">${pk.slice(0,40).map(p=>`<li><code>${_ivE(p.name)}</code> ${_ivE(p.installed)} → ${_ivE(p.fixed)} <span class="chip ${p.severity==='CRITICAL'?'fail':'human'}">${_ivE(p.severity)}</span></li>`).join('')}</ul>${pk.length>40?`<div style="color:var(--text-dim)">… ve ${pk.length-40} paket daha</div>`:''}</details>`:'';
-      const ign=(ig.packages&&ig.packages.length)?`<div style="color:var(--text-dim);font-size:11.5px" title="config/image_vuln.yaml — sayıma girmez, gizlenmez">yok sayılan: ${_ivE(ig.packages.join(', '))} (${ig.critical||0} kritik, ${ig.high||0} yüksek)</div>`:'';
+      const ign=(ig.packages&&ig.packages.length)?`<div style="color:var(--text-dim);font-size:11.5px" title="config/image_vuln.yaml — sayıma girmez, gizlenmez">yok sayılan: ${_ivE(ig.packages.join(', '))} (${_ivE(ig.critical||0)} kritik, ${_ivE(ig.high||0)} yüksek)</div>`:'';
       return `<tr><td><span class="chip ${lv[0]}">${_ivE(lv[1])}</span></td>
         <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}${det}${ign}</td>
         <td>${reg(x.users)}</td><td class="num">${sc.state==='tamam'?(sc.critical||0):'—'}</td><td class="num">${sc.state==='tamam'?(sc.high||0):'—'}</td>

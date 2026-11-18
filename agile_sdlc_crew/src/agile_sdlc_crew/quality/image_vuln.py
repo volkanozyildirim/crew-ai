@@ -427,7 +427,8 @@ def _cache_read(cache_dir: Path, image: str, ttl_h: float, now: float) -> dict |
 
 
 def _cache_write(cache_dir: Path, image: str, scan: dict, now: float) -> None:
-    """Dosyadaki diğer alanlar (ör. `notified`) korunur; yalnız `scan` / `built_at` yenilenir."""
+    """Dosyadaki bilinmeyen diğer alanlar korunur; yalnız `image` / `scan` / `built_at` yenilenir. (Telegram durumu
+    burada değil, `notified.json`'dadır.)"""
     path = _cache_path(cache_dir, image)
     try:
         try:
@@ -448,7 +449,10 @@ def _judge(rec: dict) -> tuple[str, list[str]]:
     high = scan["state"] == "tamam" and scan["high"] > 0
     actions: list[str] = []
     if crit or high:
-        actions.append("yeniden üret")
+        # Kendi taban imajımız (via dolu) DevOps'un işidir; genel etiket (`python:3.11`) servis imajı yeniden
+        # derlenip yayınlanınca taze çekilir — DevOps'a yönlendirmek yanlış olur.
+        actions.append("taban imaj yeniden üretilmeli (DevOps, bölge bayrakları)" if rec.get("via")
+                       else "servis imajı yeniden derlendiğinde taze taban çekilir — servisi yeniden yayınla")
     if patch:
         actions.append(f"yama sürümünü yükselt ({patch['latest']})")
     if end:
@@ -564,10 +568,19 @@ TASK_REPO = "base-images"           # giderme (yeniden üretim) bu repoda yapıl
 TASK_TAG = "tempo-image-vuln"
 LIMIT = ("Yayınlanmış imaj değil, dayandığı resmî imaj tarandı; kendi eklediğimiz katmanlar ve derleme anında "
          "kurulan yamalar görülmez — sonuç alt sınırdır.")
-RETRY_S = 600                       # taranamayan imaj için son sonuç bu süre taze sayılır (GET döngüsü kurulmasın)
+GUARD_S = 300                       # bir tarama (başarılı ya da çöken) bitince 5 dk yenisi başlamaz: GET döngüsü / POST seli yok
+SNAP_S = 60                         # bellekteki anlık görüntü en çok bu kadar eskir; GET Azure'a gitmez
 
 _STATE_LOCK = threading.Lock()
-_RUN: dict = {"running": False, "done_at": 0.0, "report": None}     # aynı anda tek tarama
+_BUILD_LOCK = threading.Lock()      # eşzamanlı GET'ler anlık görüntüyü bir kez kurar
+# running: aynı anda tek tarama · done_at: son taramanın BİTİŞİ (çökmüş olsa da) · report: son tam rapor ·
+# snap / snap_at: bellekteki anlık görüntü (envanter + önbellekteki taramalar)
+_RUN: dict = {"running": False, "done_at": 0.0, "report": None, "snap": None, "snap_at": 0.0}
+
+
+def _reset_state() -> None:
+    with _STATE_LOCK:
+        _RUN.update(running=False, done_at=0.0, report=None, snap=None, snap_at=0.0)
 
 
 def _begin() -> bool:
@@ -578,50 +591,103 @@ def _begin() -> bool:
         return True
 
 
-def _end(rep: dict | None) -> None:
+def _end(rep: dict | None, at: float | None = None) -> None:
+    """Tarama bitti (rapor None = çöktü): bayrak iner, bitiş zamanı HER durumda yazılır (çöken tarama hemen yeniden
+    doğmasın), anlık görüntü geçersiz kılınır (yeni sonuçlar bir sonraki GET'te görünür)."""
     with _STATE_LOCK:
-        _RUN["running"] = False
+        _RUN.update(running=False, done_at=time.time() if at is None else at, snap=None)
         if rep is not None:
-            _RUN.update(done_at=time.time(), report=rep)
+            _RUN["report"] = rep
 
 
 def _spawn_thread(fn) -> None:
     threading.Thread(target=fn, daemon=True, name="image-vuln-scan").start()
 
 
-def serve(client, *, force: bool = False, spawn=None, **kw) -> dict:
-    """Karta dönen rapor. Asla taramada beklemez: önbellekteki kısmı hemen döner; önbellek eksikse (ya da `force`)
-    taramayı arka plan iş parçacığında başlatır ve `scanning: true` ile eldekini verir. Aynı anda tek tarama.
-    `kw` `report`'a gider (enjeksiyon: `scan_fn`, `cache_dir`, `index`, …)."""
-    snap_kw = {k: v for k, v in kw.items() if k != "scan_fn"}
-    snap = report(client, force=False, scan_fn=lambda image: _empty_scan("bekliyor"), **snap_kw)
-    pending = sum(1 for r in snap["images"] if r["scan"]["state"] == "bekliyor")
+def _snapshot(client, clock, decorate, snap_kw: dict) -> dict:
+    """Bellekteki anlık görüntü (envanter + önbellekteki taramalar + `decorate`): en çok `SNAP_S`'de bir kurulur ve bir
+    arka plan taraması bitince; taze görüntü varken Azure'a hiç gidilmez."""
+    now = clock()
     with _STATE_LOCK:
-        running, last = _RUN["running"], _RUN["report"]
-        fresh = last is not None and time.time() - _RUN["done_at"] < RETRY_S
-    if running:
-        return {**snap, "scanning": True}
-    if not force and pending == 0:
-        return {**snap, "scanning": False}
-    if not force and fresh:
-        return {**last, "scanning": False}        # son tarama bitti ama bu imajlar taranamadı: sonuç, döngü değil
+        snap, at = _RUN["snap"], _RUN["snap_at"]
+    if snap is not None and 0 <= now - at < SNAP_S:
+        return snap
+    with _BUILD_LOCK:
+        with _STATE_LOCK:
+            snap, at = _RUN["snap"], _RUN["snap_at"]
+        if snap is not None and 0 <= now - at < SNAP_S:
+            return snap
+        rep = report(client, force=False, scan_fn=lambda image: _empty_scan("bekliyor"), **snap_kw)
+        rep = _decorated(rep, decorate)
+        with _STATE_LOCK:
+            _RUN.update(snap=rep, snap_at=now)
+        return rep
+
+
+def _decorated(rep: dict, decorate) -> dict:
+    if decorate is None:
+        return rep
+    try:
+        return decorate(rep) or rep
+    except Exception as e:  # noqa: BLE001 — giderme planı eksik kalsa da rapor düşmez
+        log.warning(f"⚠️ image_vuln: rapor zenginleştirilemedi: {str(e)[:200]}")
+        return rep
+
+
+def _start_scan(client, base: dict, *, force: bool, spawn, clock, decorate, kw: dict) -> dict:
     if not _begin():
-        return {**snap, "scanning": True}
+        return {**base, "scanning": True}
 
     def job():
         rep = None
         try:
-            rep = report(client, force=force, **kw)
+            rep = _decorated(report(client, force=force, **kw), decorate)
         except Exception as e:  # noqa: BLE001
             log.warning(f"⚠️ image_vuln: arka plan taraması başarısız: {str(e)[:300]}")
         finally:
-            _end(rep)
+            _end(rep, clock())
     try:
         (spawn or _spawn_thread)(job)
     except Exception:
-        _end(None)
+        _end(None, clock())
         raise
-    return {**snap, "scanning": True}
+    return {**base, "scanning": True}
+
+
+def serve(client, *, force: bool = False, spawn=None, clock=None, decorate=None, **kw) -> dict:
+    """GET: karta dönen rapor. Asla taramada ve (taze anlık görüntü varken) Azure'da beklemez; `force` YOK SAYILIR
+    (yan etkili GET çapraz-site tetiklenebilir). Önbellek eksikse tek bir otomatik ilk tarama arka planda başlar
+    (`scanning: true`); bir tarama (çöken dahil) bitince `GUARD_S` boyunca yenisi başlamaz, son sonuç döner.
+    `decorate(rapor)` anlık görüntü kurulurken uygulanır (giderme planı). `kw` `report`'a gider."""
+    clock = clock or time.time
+    base = _snapshot(client, clock, decorate, {k: v for k, v in kw.items() if k != "scan_fn"})
+    pending = sum(1 for r in base["images"] if r["scan"]["state"] == "bekliyor")
+    with _STATE_LOCK:
+        running, last, done_at = _RUN["running"], _RUN["report"], _RUN["done_at"]
+    if running:
+        return {**base, "scanning": True}
+    if pending == 0:
+        return {**base, "scanning": False}
+    if done_at and clock() - done_at < GUARD_S:
+        return {**(last or base), "scanning": False}     # son tarama bitti ama bu imajlar taranamadı: sonuç, döngü değil
+    return _start_scan(client, base, force=False, spawn=spawn, clock=clock, decorate=decorate, kw=kw)
+
+
+def rescan(client, *, spawn=None, clock=None, decorate=None, **kw) -> dict:
+    """POST (kartın "Yeniden tara"sı): yalnız tarama sürmüyorsa VE son tarama `GUARD_S`'den önce bittiyse tam yeniden
+    tarama başlatır; aksi halde anlık görüntüyü Türkçe nedenle (ve `cooldown`: kalan sn) döner."""
+    clock = clock or time.time
+    base = _snapshot(client, clock, decorate, {k: v for k, v in kw.items() if k != "scan_fn"})
+    with _STATE_LOCK:
+        running, done_at = _RUN["running"], _RUN["done_at"]
+    if running:
+        return {**base, "scanning": True, "message": "Tarama zaten sürüyor."}
+    left = GUARD_S - (clock() - done_at) if done_at else 0
+    if left > 0:
+        n = int(left) + (0 if left == int(left) else 1)
+        return {**base, "scanning": False, "cooldown": n,
+                "message": f"Son tarama yeni bitti; yeniden taramak için {n} sn sonra deneyin."}
+    return _start_scan(client, base, force=True, spawn=spawn, clock=clock, decorate=decorate, kw=kw)
 
 
 # ── Yoklayıcı ────────────────────────────────────────────────────────────
@@ -640,18 +706,18 @@ def _tick(get_client) -> None:
         return
     rep = None
     try:
-        from agile_sdlc_crew.quality import intake
         client = get_client()
         rep = report(client, force=True)
-        team = str(getattr(client, "team", "") or "")
-        results = alert(client, rep, team=team, deps=intake.default_deps())
-        if pc.get("CREW_TECHDEBT_IMAGE_VULN_FIX"):
-            try:                         # giderme hatası turu düşürmez; uyarı zaten yapıldı
-                _fix_round(client, rep, results, team=team)
-            except Exception as e:  # noqa: BLE001
-                log.warning(f"⚠️ image_vuln: giderme turu hata verdi: {str(e)[:300]}")
     finally:
-        _end(rep)
+        _end(rep)       # tarama bitti: alert / giderme `intake._LOCK`'ta dakikalarca bekleyebilir, kart "Taranıyor" demesin
+    from agile_sdlc_crew.quality import intake
+    team = str(getattr(client, "team", "") or "")
+    results = alert(client, rep, team=team, deps=intake.default_deps())
+    if pc.get("CREW_TECHDEBT_IMAGE_VULN_FIX"):
+        try:                         # giderme hatası turu düşürmez; uyarı zaten yapıldı
+            _fix_round(client, rep, results, team=team)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"⚠️ image_vuln: giderme turu hata verdi: {str(e)[:300]}")
 
 
 def _fix_round(client, rep: dict, results: list[dict] | None, *, team: str, index: dict | None = None, resolver=None,
@@ -813,7 +879,7 @@ def task_group(rec: dict):
                  fingerprints=[_fp(rec["image"])],
                  findings=[Finding(source=SOURCE, repo=TASK_REPO, count=max(1, crit))],
                  score=float(crit), sp=1, needs_human=True,
-                 human_reason="İmajın yeniden üretilmesi / sürüm yükseltmesi DevOps ve insan kararıdır; Tempo imaj üretmez.",
+                 human_reason="Yeniden üretim / servisin yeniden yayını / sürüm yükseltmesi insan (DevOps) kararıdır; Tempo imaj üretmez.",
                  extra_tags=[TASK_TAG], body_html=task_body(rec))
 
 
@@ -889,7 +955,7 @@ def _open_tasks(client, crit: list[dict], *, team: str, deps, open_fn, cap: int)
     for rec in sorted(crit, key=_alert_rank):
         v, wi = dedup.verdict(board.get(_fp(rec["image"])), last_seen=0.0, now=deps.now(), grace_days=grace)
         if v in ("blocked", "suppressed"):
-            out.append({"image": rec["image"], "state": "açık iş", "wi": wi})
+            out.append({"image": rec["image"], "state": "açık iş" if v == "blocked" else "bastırıldı", "wi": wi})
             continue
         if opened >= cap:
             out.append({"image": rec["image"], "state": "sırada", "wi": None})
