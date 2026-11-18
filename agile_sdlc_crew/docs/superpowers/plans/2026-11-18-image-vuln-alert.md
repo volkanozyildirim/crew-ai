@@ -71,3 +71,33 @@ Commit: `feat(techdebt): taban imaj güvenliği — envanter, Trivy, yama/destek
 **Tests:** `alert` — kritik + `_TASK` açık → bir iş (enjekte `open_fn`), açık iş varken ikinci çağrı açmaz, `_TASK` kapalı → hiç; `_NOTIFY` aynı işaret kümesinde bir kez, işaret değişince yeniden; uç: kapalı 403, önbellek dolu → 200 + images, boş → `scanning: true` (enjekte tarama).
 
 Commit: `feat(techdebt): taban imaj güvenliği kartı, günlük yoklayıcı ve uyarı`
+
+---
+
+### Task 3: Giderme — uyarıyla birlikte sürüm çalışması
+
+**Files:**
+- Create: `src/agile_sdlc_crew/quality/image_fix.py`
+- Modify: `src/agile_sdlc_crew/quality/image_vuln.py` (yoklayıcı + rapora `fix` alanı), `src/agile_sdlc_crew/quality/upgrade_bump.py` (yalnız dal adı doğrulamasına yeni desen), `src/agile_sdlc_crew/server.py`, `src/agile_sdlc_crew/pipeline_config.py`, `src/agile_sdlc_crew/web/index.html`, `CLAUDE.md`
+- Test: `tests/test_katman0_gates.py` → `test_image_fix`
+
+**Interfaces — Consumes:** `image_vuln.report` kayıtları; `upgrade_registry.Resolver`; `upgrade_image` (`load_cfg`, `build`, `state`, `open_pr`, `branch_name`); `upgrade_bump.push_sites(client, sites, branch=, title=, body=, …)`; `upgrade_track.start` / `find_open` / `tracked`; `upgrade.default_target`, `modern.build_index`.
+
+**Interfaces — Produces:**
+- `image_fix.plan(client, entry, *, index, resolver, cfg=None) -> list[dict]` — yazma yok. Her eylem `{"kind", "state", "reason", "target", "sites" | "repos" | "dir", "pr"}`:
+  - `kind="taban-yama"` (kendi iki parçalı dizin, `patch` işareti): `base-images@cfg.branch:/<dizin>/Dockerfile`'daki tek sürüm satırı; `sites=[{repo: cfg.repo, project, branch: cfg.branch, path, line, old: "8.4.27", new: "8.4.30"}]`. `staging` sürümü ≥ en büyük yama → `state="güncel"`, reason "staging'de güncel — DevOps üretip taşımalı". Sürüm satırı tek değil → `state="elle"`.
+  - `kind="taban-dizin"` (kendi üç parçalı dizin): yeni dizin adı `<ad>-A-B-<yama>`; `upgrade_image.state` ile durum (`yok` → açılabilir).
+  - `kind="imaj-yama"` (genel üç parçalı imaj): kullanan her bölge reposu Dockerfile'ında `FROM` satırı sitesi, `new` = aynı minörün en büyük yaması + aynı sonek; `resolver.tag_exists is True` değilse `state="elle"`.
+  - `kind="yükseltme"` (`eol` işareti, dil php/python/go): imajı kullanan repolar (`index`'ten); her biri için `default_target`; hedefi olmayan repo `reason` ile listelenir.
+  - `kind="yeniden-üret"` (yalnız işletim sistemi bulgusu): `state="devops"`, yazma yok; reason bölge bayraklarını taşır.
+  - Dallar sabit: `tempo/image-patch-<dizin|imaj-slug>-<yama>`; açık / terk edilmiş PR varsa `state="pr açık"` / `"pr reddedildi"` (+`pr`).
+- `image_fix.apply(client, entry, *, team, index, resolver, deps=None, push_fn=None, open_pr_fn=None, start_fn=None, max_open=None) -> list[dict]` — modül kilidi altında `plan` yeniden hesaplanır; yalnız açılabilir eylemler yürür: `taban-yama` / `imaj-yama` → `push_sites` (taslak PR; bölge reposu başına bir PR, dal aynı ad); `taban-dizin` → `upgrade_image.open_pr`; `yükseltme` → izlemesi olmayan repo için `upgrade_track.start`, `CREW_TECHDEBT_UPGRADE_MAX_OPEN` aşılırsa kalanlar `state="sırada"`. Bir eylemin hatası diğerlerini durdurmaz (`state="hata"`, Türkçe neden).
+- `upgrade_bump._validate_branch`: `tempo/image-patch-[a-z0-9][a-z0-9.-]*-\d+\.\d+\.\d+` deseni de kabul edilir (başka hiçbir gevşetme yok).
+- `CREW_TECHDEBT_IMAGE_VULN_FIX` (bool, off): "Uyarı üretildiği turda gidermeyi de başlatır (yama PR'ı, taban dizin şablonu, sürüm yükseltme izlemesi). Kapalıyken giderme karttaki düğmeyle elle başlatılır."
+- `POST /api/techdebt/images/fix` gövde `{image, team}` → `apply`; ayar şartı yalnız `CREW_TECHDEBT_IMAGE_VULN` (düğme her zaman elle çalışır); bilinmeyen imaj 404; yürüyecek eylem yoksa 409 + nedenler.
+- Yoklayıcı: `_FIX` açıksa `alert`'ten sonra `level ∈ {kritik, yüksek}` her imaj için `apply`; sonuç uyarı işine yorum olarak eklenir.
+- Rapor kaydına `fix: plan(...)` (yazmasız) eklenir; kartta her eylem satırı (tür, durum, PR / izleme bağlantısı) ve açılabilir eylem varsa **"Gidermeyi başlat"** düğmesi (onay kutusu hangi repolara hangi PR'ların açılacağını bölge başına sayar).
+
+**Tests (sahte client / enjekte fonksiyonlar):** her `kind` için plan; `staging` güncel → `güncel`; etiket yok → `elle`; `apply` — taban-yama tek `push_fn` çağrısı ve site yalnız rakamlarda ayrışıyor; imaj-yama üç bölge → üç çağrı (russia dahil); açık PR varken hiç yazma yok; terk edilmiş PR yeniden açılmaz; `yükseltme` izlemesi olan repoyu atlar, `max_open` aşımı `sırada`; bir eylem istisna verince diğerleri yürür; `_validate_branch` yeni deseni kabul, `tempo/image-patch-x` (yamasız) ve başka önekleri reddeder; uç 404 / 409 / 200.
+
+Commit: `feat(techdebt): taban imaj uyarısı gidermeyi de başlatır — yama PR'ı, dizin şablonu, yükseltme izlemesi`

@@ -531,5 +531,24 @@ imajı taramak — kullanıcı gerek görmedi.
 - **Ayarlar:** `CREW_TECHDEBT_IMAGE_VULN` (kapalı), `_SCAN_H` (24), `_TASK` (kapalı — iş açma),
   `_NOTIFY` (kapalı — Telegram).
 
-**Kapsam dışı.** Yayınlanmış imajın taranması, otomatik düzeltme (yeniden üretim DevOps'ta; sürüm
-yükseltme mevcut akış), uygulama bağımlılıkları (composer / npm — ayrı konu).
+- **Giderme uyarıyla birlikte başlar** (kullanıcı kararı 2026-11-18: "uyarıyı ürettiğimiz anda bunu
+  giderecek versiyona geçme çalışmasını da yapıyor olmalıyız"). `CREW_TECHDEBT_IMAGE_VULN_FIX`
+  (kapalı) açıkken yoklayıcı uyarıyla aynı turda, kapalıyken karttaki **"Gidermeyi başlat"** düğmesi
+  işaretin türüne göre:
+  - **yama geride, kendi iki parçalı taban dizinimiz** (`php-8-4`): `base-images@staging`'deki
+    sürüm satırını (`ARG PHP_VERSION=8.4.27` → en büyük yama) değiştiren taslak PR — tek satır,
+    yalnız rakam dizileri (`push_sites` kuralları). `staging` zaten güncelse PR açılmaz: "staging'de
+    güncel — DevOps üretip taşımalı".
+  - **yama geride, kendi üç parçalı dizinimiz** (`python-3-13-7`): aynı minörün yeni yamasıyla dizin
+    şablonu (şablon adımının yolu); dizin `staging`'de zaten varsa PR açılmaz, yayın beklenir.
+  - **yama geride, genel imaj** (`golang:1.24.4`): kullanan her bölge reposundaki (anatolia / global
+    / russia) `FROM` satırına aynı minörün en büyük yamasını yazan taslak PR (etiket Hub'da varsa).
+  - **destek bitmiş:** imajı kullanan, dili izlenen her repo için sürüm yükseltme izlemesi başlatılır
+    (`upgrade_track.start`, varsayılan hedef; `_MAX_OPEN` sınırı içinde) — gerisi mevcut akış.
+  - **yalnız işletim sistemi paketleri:** sürüm değişikliği gidermez; imajın yeniden üretilmesi
+    gerekir — uyarı işi bunu bölge bayraklarıyla DevOps'tan ister, Tempo PR açmaz.
+  Her giderme sabit dal adı / açık PR / açık izleme işi üzerinden idempotenttir; terk edilen PR
+  yeniden açılmaz. Açılan PR ve izleme bağlantıları uyarı işine ve karta yazılır.
+
+**Kapsam dışı.** Yayınlanmış imajın taranması, imajın üretilmesi / yayınlanması (DevOps), uygulama
+bağımlılıkları (composer / npm — ayrı konu).
