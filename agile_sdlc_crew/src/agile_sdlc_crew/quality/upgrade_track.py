@@ -271,10 +271,47 @@ def _pushable(s: dict) -> bool:
     return bump.pushable(s)
 
 
-def _blocked_dv_reason(dv_blocked: list[dict], tgt: str = "") -> str:
+_IMAGE_TEXT = {"yok": "şablon PR'ı henüz açılmadı", "şablon var": "şablon hazır, DevOps imajı üretip yayınlamalı",
+               "pr reddedildi": "şablon PR'ı reddedildi"}
+
+
+def _image_text(im: dict) -> str:
+    st, pr = im.get("state"), im.get("pr") or {}
+    what = (f"şablon PR'ı #{pr.get('id')} açık" if st == "pr açık"
+            else f"şablon durumu belirsiz ({str(im.get('reason') or '')[:200]})" if st == "belirsiz"
+            else _IMAGE_TEXT.get(st, str(st)))
+    return f"{im.get('dir')}: {what}" if im.get("dir") else what
+
+
+def _blocked_dv_reason(dv_blocked: list[dict], tgt: str = "", images=()) -> str:
     hedef = f" (hedef {tgt})" if tgt else ""
     parts = "; ".join(f"{s.get('repo')} {s.get('path')}:{s.get('line')}: {s.get('blocked')}{hedef}" for s in dv_blocked)
-    return f"Üretim imajı güncellenemiyor ({parts}) — üretim adımı hiçbir bölge için açılmaz."
+    tail = f" Taban imaj — {'; '.join(_image_text(i) for i in images)}." if images else ""
+    return f"Üretim imajı güncellenemiyor ({parts}) — üretim adımı hiçbir bölge için açılmaz.{tail}"
+
+
+def _images(client, lang: str, dv_blocked: list[dict], state_fn=None) -> list[dict]:
+    """Yayınlanmamış kendi taban imajımız için şablon durumu (`upgrade_image.state`). Yalnız CREW_TECHDEBT_UPGRADE_IMAGE
+    açıkken ve UNPUBLISHED devops sitesi varken; okuma hatası durum hesabını düşürmez (`belirsiz`)."""
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import upgrade_image as ui
+    from agile_sdlc_crew.quality.render import mask_secrets
+    if not pc.get("CREW_TECHDEBT_UPGRADE_IMAGE"):
+        return []
+    if not any(s.get("blocked") == upgrade.UNPUBLISHED for s in dv_blocked):
+        return []
+    try:
+        entries = ui.needed(dv_blocked, lang)
+    except Exception as e:  # noqa: BLE001 — okunamayan yapılandırma durumu düşürmez
+        return [{"state": "belirsiz", "reason": f"okunamadı: {mask_secrets(str(e))[:200]}"}]
+    out = []
+    for e in entries:
+        try:
+            out.append((state_fn or ui.state)(client, e))
+        except Exception as ex:  # noqa: BLE001
+            out.append({"dir": e["dir"], "tag": e.get("tag", ""), "regions": list(e.get("regions") or []),
+                        "state": "belirsiz", "reason": f"okunamadı: {mask_secrets(str(ex))[:200]}", "pr": None})
+    return out
 
 
 _PR_KNOWN = ("active", "completed", "abandoned")
@@ -328,17 +365,18 @@ def _handoff(client, out: dict, lang: str) -> dict:
 
 
 def status(client, repo: str, lang: str, *, to: str | None = None, deps=None, scan: dict | None = None,
-           wait_h: int | None = None, **kw) -> dict:
+           wait_h: int | None = None, image_state_fn=None, **kw) -> dict:
     """Aşama + PR'lar + sıradaki adım. `scan` verilirse ikinci tarama yapılmaz.
     -> {stage, current, target, blocking, blockers, open_tasks, ci_pins, prs: {ci, devops, code},
         evidence: {state, build{id,url,queue_time}|None, summary, overdue, since}|None,
         next: {step, ready, reason, sites, manual, test_note, handed_off}}"""
     _check(repo, lang)
-    out = _status(client, repo, lang, to=to, deps=deps or pm.default_deps(), scan=scan, wait_h=wait_h, kw=kw)
+    out = _status(client, repo, lang, to=to, deps=deps or pm.default_deps(), scan=scan, wait_h=wait_h, kw=kw,
+                  image_state_fn=image_state_fn)
     return _handoff(client, out, lang)
 
 
-def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
+def _status(client, repo, lang, *, to, deps, scan, wait_h, kw, image_state_fn=None) -> dict:
     from agile_sdlc_crew import pipeline_config as pc
     from agile_sdlc_crew.quality import upgrade_bump as bump
     sc = scan if scan is not None else _fresh_scan(client, repo, lang, to, deps, kw)
@@ -346,7 +384,7 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
     cur, tgt = sc.get("current"), sc.get("target")
     out = {"repo": repo, "lang": lang, "stage": "hazırlık", "current": cur, "target": tgt,
            "blocking": int(sc.get("blocking") or 0), "blockers": list(sc.get("blockers") or []), "open_tasks": [],
-           "ci_pins": sc.get("ci_pins"), "prs": {"ci": None, "devops": [], "code": None}, "evidence": None,
+           "ci_pins": sc.get("ci_pins"), "images": [], "prs": {"ci": None, "devops": [], "code": None}, "evidence": None,
            "next": {"step": None, "ready": False, "reason": "", "sites": [], "manual": [], "test_note": "",
                     "handed_off": None, "blocked_by_evidence": False}}
 
@@ -413,6 +451,7 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
     ci = [s for s in sites if s.get("where") == "ci"]
     code = [s for s in sites if s.get("where") == "code"]
     dv_blocked = [s for s in dv if s.get("blocked")]
+    out["images"] = _images(client, lang, dv_blocked, image_state_fn)
     ci_blocked = [s for s in ci if s.get("blocked")]
     out["open_tasks"] = open_tasks(client, repo, lang)
     not_pre = [r for k in ("auto", "infra", "human") for r in sc.get(k) or [] if r.get("pre_fixable") is False]
@@ -425,7 +464,7 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
         base = "engelli"
         why = [str(b.get("detail") or b.get("name") or b) for b in out["blockers"]]
         if dv_blocked:
-            why.append(_blocked_dv_reason(dv_blocked, tgt))
+            why.append(_blocked_dv_reason(dv_blocked, tgt, out["images"]))
         why += [f"{s.get('repo')} {s.get('path')}:{s.get('line')}: {s.get('blocked')} — {tgt} yapılmalı"
                 for s in ci_blocked]
         if not_pre:
@@ -530,7 +569,7 @@ def _status(client, repo, lang, *, to, deps, scan, wait_h, kw) -> dict:
                                   "okunduğunda açılır.", [s for s in code if _pushable(s)],
                    [s for s in code if not _pushable(s)])
     if dv_blocked:
-        return nxt("prod", False, _blocked_dv_reason(dv_blocked, tgt), dv)
+        return nxt("prod", False, _blocked_dv_reason(dv_blocked, tgt, out["images"]), dv)
     if not ok:
         return nxt("prod", False, base_reason, dv)
     if pins:
@@ -834,8 +873,86 @@ def _error_comment(client, tid: int, msg: str, now) -> None:
 _RETRY_FREE = (None,)
 
 
+def _auto_images(client, tr: dict, st: dict, sc: dict, res: dict, *, image_open_fn=None) -> None:
+    """CREW_TECHDEBT_UPGRADE_IMAGE açıkken durumu `yok` olan her taban imaj için şablon PR'ı bir kez; sonuç nota.
+    İdempotentlik PR'ın kendisi (sabit dal): açık / reddedilmiş / var olan dizin için `open_pr` zaten yazmaz, biz de
+    çağırmayız. Hata izleme Task'ına gider, adım akışını durdurmaz."""
+    from datetime import datetime, timezone
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import upgrade_image as ui
+    from agile_sdlc_crew.quality import upgrade_registry
+    from agile_sdlc_crew.quality.render import mask_secrets
+    if not pc.get("CREW_TECHDEBT_UPGRADE_IMAGE"):
+        return
+    todo = [i for i in st.get("images") or [] if i.get("state") == "yok"]
+    if not todo:
+        return
+    repo, lang, to, tid = tr["repo"], tr["lang"], tr["to"], int(tr["id"])
+    entries = {e["dir"]: e for e in ui.needed([s for s in sc.get("sites") or [] if s.get("where") == "devops"], lang)}
+    for im in todo:
+        entry = entries.get(im.get("dir"))
+        if entry is None:
+            continue
+        try:
+            r = (image_open_fn or ui.open_pr)(client, lang, to, entry, resolver=upgrade_registry.default(), repo=repo)
+        except Exception as e:  # noqa: BLE001 — ImageTemplateError ve ağ hataları adımı durdurmaz
+            msg = f"{im['dir']}: şablon PR'ı açılamadı: {mask_secrets(str(e) or type(e).__name__)[:300]}"
+            log.warning(f"⚠️ upgrade oto: #{tid} ({lang}:{repo}) {msg}")
+            _note(res, msg)
+            _error_comment(client, tid, msg, datetime.now(timezone.utc))
+            continue
+        pr = r.get("pr") or {}
+        _note(res, f"{im['dir']}: şablon PR'ı #{pr.get('id')} açıldı" if r.get("state") == "pr açık"
+              else f"{im['dir']}: {_image_text(dict(r, dir=im['dir']))}")
+        log.info(f"⬆️ upgrade oto: #{tid} ({lang}:{repo}) {im['dir']} şablon PR'ı: {r.get('state')} {pr.get('id')}")
+
+
+class ImageStateError(ValueError):
+    """Şablon PR'ı açılamaz: dizin imaj gereksinimleri arasında yok (404) ya da durum `yok` değil (409)."""
+    def __init__(self, msg: str, code: int = 409):
+        super().__init__(msg)
+        self.code = code
+
+
+def open_image(client, repo: str, lang: str, *, to: str, dir_name: str, deps=None, **kw) -> dict:
+    """Karttaki "Şablon PR'ı aç": taze taramadan dizini bulur (yoksa 404), durumu `yok` değilse 409; `open_pr`
+    sonucunu döner ve izleme Task'ı varsa PR bağlantısını yorum olarak düşer. Başka her hata
+    `ImageTemplateError` olarak (Türkçe, maskeli) çıkar."""
+    from agile_sdlc_crew.quality import upgrade_image as ui
+    from agile_sdlc_crew.quality import upgrade_registry
+    from agile_sdlc_crew.quality.render import mask_secrets
+    _check(repo, lang)
+    state_fn, open_fn = kw.pop("image_state_fn", None), kw.pop("image_open_fn", None)
+    sc = _fresh_scan(client, repo, lang, to, deps or pm.default_deps(), kw)
+    to = to or sc.get("target") or ""
+    dv = [s for s in sc.get("sites") or [] if s.get("where") == "devops" and s.get("blocked")]
+    entry = next((e for e in ui.needed(dv, lang) if e["dir"] == dir_name), None)
+    if entry is None:
+        raise ImageStateError(f"'{dir_name}' için yayınlanmamış taban imaj gereksinimi bulunamadı.", 404)
+    st = (state_fn or ui.state)(client, entry)
+    if st.get("state") != "yok":
+        raise ImageStateError(f"{dir_name}: şablon PR'ı açılamaz — {_image_text(st)}"
+                              + (f" ({st['reason']})" if st.get("reason") and st.get("state") != "belirsiz" else ""))
+    try:
+        res = (open_fn or ui.open_pr)(client, lang, to, entry, resolver=upgrade_registry.default(), repo=repo)
+    except ui.ImageTemplateError:
+        raise
+    except Exception as e:  # noqa: BLE001 — ağ / Azure hatası (ör. HTTPError) 500 olmasın
+        raise ui.ImageTemplateError(f"Şablon PR'ı açılamadı: {mask_secrets(str(e) or type(e).__name__)[:300]}") from e
+    pr = res.get("pr") or {}
+    try:
+        tr = find_open(client, lang, repo)
+        if tr and pr.get("url"):
+            _Comments(client, int(tr["id"])).add(
+                f"<p><b>Taban imaj şablonu PR'ı:</b> {_esc(dir_name)} — <a href=\"{_esc(pr['url'])}\">"
+                f"#{_esc(pr.get('id'))}</a>. İmaj üretilmedi; DevOps yayınlamalı.</p>")
+    except Exception as e:  # noqa: BLE001 — yorum yazılamazsa PR zaten açıldı
+        log.warning(f"⚠️ upgrade: şablon PR'ı yorumu yazılamadı: {mask_secrets(str(e))[:200]}")
+    return res
+
+
 def _advance_one(client, tr: dict, res: dict, *, team: str, deps, create_job, open_jobs, bump_jobs, status_fn,
-                 take_fn, last_bump_job, kw: dict) -> None:
+                 take_fn, last_bump_job, kw: dict, image_open_fn=None) -> None:
     from agile_sdlc_crew.quality import upgrade_bump as bump
     repo, lang, to, tid = tr["repo"], tr["lang"], tr["to"], int(tr["id"])
     sc = _fresh_scan(client, repo, lang, to, deps, kw)
@@ -847,6 +964,7 @@ def _advance_one(client, tr: dict, res: dict, *, team: str, deps, create_job, op
         return
     _auto_take(client, tr, sc, res, team=team, deps=deps,
                open_jobs=open_jobs or (lambda r: _open_work(client, r, lang)), take_fn=take_fn, kw=kw)
+    _auto_images(client, tr, st, sc, res, image_open_fn=image_open_fn)
     ev = st.get("evidence") or {}
     # Bildirim yalnız kanıt sıradaki adımı (prod) bekletirken: hazırlık / engelli aşamasında reponun herhangi bir
     # PR'ının kırmızı build'i yükseltmeyle ilgisizdir (her yeni build id'si yeni bir Task olurdu).
@@ -898,7 +1016,8 @@ def _advance_one(client, tr: dict, res: dict, *, team: str, deps, create_job, op
 
 def advance(client, *, team: str, track_ids=None, deps=None, create_job=None, open_jobs=None, bump_jobs=None,
             last_bump_job=None, status_fn=None, take_fn=None, now=None, index=None, read=None, yml_files=None,
-            app_map_cache: dict | None = None, scan_fn=None, head_sha_fn=None, probe_fn=None) -> list[dict]:
+            app_map_cache: dict | None = None, scan_fn=None, head_sha_fn=None, probe_fn=None,
+            image_open_fn=None) -> list[dict]:
     """Takımın açık her izleme işi için bir tur (spec §7): otomatik alım (tavanlı, sprint
     CREW_TECHDEBT_UPGRADE_SPRINT), kanıt sıradaki adımı bekletiyorsa kırmızı build / CI bekleme bildirimi (bir
     kez), hazırsa tek sürüm adımı (bu adım için hiç iş açılmamışsa), `tamam`da kapanış. Bir öğenin hatası notuna
@@ -931,7 +1050,7 @@ def advance(client, *, team: str, track_ids=None, deps=None, create_job=None, op
             _check(tr["repo"], tr["lang"])
             _advance_one(client, tr, res, team=team, deps=deps, create_job=create_job, open_jobs=open_jobs,
                          bump_jobs=bump_jobs, status_fn=status_fn or status, take_fn=take_fn or upgrade.take,
-                         last_bump_job=last_bump_job or bump.last_bump_job, kw=kw)
+                         last_bump_job=last_bump_job or bump.last_bump_job, kw=kw, image_open_fn=image_open_fn)
         except Exception as e:  # noqa: BLE001 — bir izleme işinin hatası diğerlerini durdurmaz
             msg = mask_secrets(str(e) or type(e).__name__)[:500]
             log.warning(f"⚠️ upgrade oto: #{tr['id']} ({tr['lang']}:{tr['repo']}) hata: {msg}")

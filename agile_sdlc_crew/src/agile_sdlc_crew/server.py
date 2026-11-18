@@ -177,6 +177,10 @@ class TechdebtUpgradeBumpRequest(TechdebtUpgradeStepRequest):
     step: str = ""  # kullanıcının onayladığı adım (ci|prod|code); farklıysa 409
 
 
+class TechdebtUpgradeImageRequest(TechdebtUpgradeStepRequest):
+    dir: str = ""  # taban imaj dizini (ör. php-8-5)
+
+
 class QualityTakeRequest(BaseModel):
     source: str
     sp: int = 10
@@ -2369,6 +2373,32 @@ async def techdebt_upgrade_bump(req: TechdebtUpgradeBumpRequest):
         return JSONResponse(res, status_code=202)
     except _ub.StepChanged as e:
         return JSONResponse({"error": str(e)}, status_code=409)
+    except Exception as e:  # noqa: BLE001
+        return _techdebt_error(e)
+
+
+@app.post("/api/techdebt/upgrade/image")
+async def techdebt_upgrade_image(req: TechdebtUpgradeImageRequest):
+    """Yayınlanmamış taban imaj için base-images'a şablon taslak PR'ı aç (imajı DevOps üretir / yayınlar)."""
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew.quality import upgrade_image as _ui
+    from agile_sdlc_crew.quality import upgrade_track as _ut
+    bad = _upgrade_step_check(req)
+    if bad:
+        return bad
+    if not _pc.get("CREW_TECHDEBT_UPGRADE_IMAGE"):
+        return JSONResponse({"error": "Taban imaj şablonu kapalı (CREW_TECHDEBT_UPGRADE_IMAGE)"}, status_code=403)
+    if not req.dir.strip():
+        return JSONResponse({"error": "imaj dizini seçin"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(_ut.open_image, AzureDevOpsClient(), req.repo.strip(),
+                                      (req.lang or "php").strip(), to=(req.to or "").strip() or None,
+                                      dir_name=req.dir.strip())
+        return JSONResponse(res)
+    except _ut.ImageStateError as e:
+        return JSONResponse({"error": str(e)}, status_code=e.code)
+    except _ui.ImageTemplateError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
 

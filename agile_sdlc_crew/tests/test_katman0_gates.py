@@ -11589,6 +11589,181 @@ def test_upgrade_image_template():
           "/s9/Dockerfile" in dm and "/s10/Dockerfile" not in dm and "… ve 30 servis daha" in dm and len(dm) <= 4000)
 
 
+def test_upgrade_image_wiring():
+    """Taban imaj şablonu bağlama: ayar kapalıyken bugünkü çıktı, durum `images`, engel nedeni, otomatik
+    ilerletme (yok → bir kez, pr açık → hiç), uç (403 / 404 / 409 / 200 / hata → 502)."""
+    print("\n[upgrade: taban imaj şablonu bağlama]")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_image as ui, upgrade_track as ut
+
+    html_ = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("kart: imaj satırları, düğme, uç ve kaçış",
+          "function _upImagesHtml(" in html_ and "Şablon PR'ı aç" in html_ and "'/api/techdebt/upgrade/image'" in html_
+          and "escHtml(dir" in html_ and "h+=_upImagesHtml(st.images)" in html_)
+    pre = "eu/prod-ar/"
+    unp = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+           "path": "/build/core/Dockerfile", "line": 1, "old": pre + "php-8-2:1.0", "new": pre + "php-8-5:1.0",
+           "blocked": upgrade.UNPUBLISHED}
+    other = dict(unp, blocked="elle düzenlenmeli", path="/build/web/Dockerfile")
+
+    def mkscan(sites):
+        return {"repo": "core", "lang": "php", "current": "8.2", "target": "8.5", "up_to_date": False,
+                "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [],
+                "ci_pins": [], "ci_source": None}
+    cur_state = {"dir": "php-8-5", "tag": "1.0", "regions": ["anatolia"], "state": "yok", "reason": "", "pr": None}
+    flags = {"CREW_TECHDEBT_UPGRADE_IMAGE": True}
+    orig_get = pc.get
+    pc.get = lambda k: flags[k] if k in flags else orig_get(k)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "core"
+            root.mkdir()
+            (root / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+            deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                               record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+
+            def st(sites, **k):
+                return ut.status(_UpFake(), "core", "php", to="8.5", deps=deps, scan=mkscan(sites), wait_h=72,
+                                 root=root, **k)
+            calls = []
+
+            def sfn(c, entry, **k):
+                calls.append(entry["dir"])
+                return dict(cur_state, dir=entry["dir"])
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = False
+            s = st([unp], image_state_fn=sfn)
+            check("ayar kapalı → images == [], durum çağrılmaz", s["images"] == [] and not calls, str(s["images"]))
+            base_reason = s["next"]["reason"]
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = True
+            s = st([other], image_state_fn=sfn)
+            check("UNPUBLISHED site yok → images == []", s["images"] == [] and not calls)
+            s = st([unp], image_state_fn=sfn)
+            check("ayar açık + UNPUBLISHED site → images dolu",
+                  [i["dir"] for i in s["images"]] == ["php-8-5"] and s["images"][0]["state"] == "yok"
+                  and calls == ["php-8-5"], str(s["images"]))
+            check("engel nedeni yine üretim adımını kapatır", s["next"]["step"] == "prod" and not s["next"]["ready"])
+            s = st([unp], image_state_fn=lambda c, e, **k: dict(cur_state, state="pr açık", pr={"id": 46551, "url": "u"}))
+            check("engel nedenine imaj durumu eklenir",
+                  "php-8-5: şablon PR'ı #46551 açık" in s["next"]["reason"]
+                  and s["next"]["reason"].startswith(base_reason.split(" — ")[0]), s["next"]["reason"])
+
+            def boom(c, e, **k):
+                raise RuntimeError("Azure çöktü")
+            s = st([unp], image_state_fn=boom)
+            check("durum istisnası → belirsiz, status düşmez",
+                  s["images"] and s["images"][0]["state"] == "belirsiz" and "Azure çöktü" in s["images"][0]["reason"]
+                  and s["stage"], str(s["images"]))
+
+        # ── otomatik ilerletme ──
+        class _CF:
+            def __init__(self):
+                self.comments = []
+
+            def get_work_item_comments(self, wid):
+                return []
+
+            def add_comment(self, wid, html_):
+                self.comments.append((wid, html_))
+
+        def adv_one(images, *, open_fn, auto_img=True):
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = auto_img
+            tr = {"id": 500, "repo": "core", "lang": "php", "to": "8.5"}
+            res = {"id": 500, "note": ""}
+            stt = {"stage": "engelli", "images": images, "next": {"step": "prod", "ready": False}}
+            cf = _CF()
+            s_scan, s_take = ut._fresh_scan, ut._auto_take
+            ut._fresh_scan = lambda *a, **k: mkscan([unp])
+            ut._auto_take = lambda *a, **k: None
+            try:
+                ut._advance_one(cf, tr, res, team="T", deps=None, create_job=None, open_jobs=None, bump_jobs=None,
+                                status_fn=lambda *a, **k: stt, take_fn=None, last_bump_job=None, kw={},
+                                image_open_fn=open_fn)
+            finally:
+                ut._fresh_scan, ut._auto_take = s_scan, s_take
+            return res, cf
+        opened = []
+
+        def ofn(client, lang, to, entry, **k):
+            opened.append((lang, to, entry["dir"], k.get("repo")))
+            return {"state": "pr açık", "pr": {"id": 9, "url": "https://x/pr/9"}, "notes": []}
+        res, cf = adv_one([cur_state], open_fn=ofn)
+        check("_advance_one: yok → open_pr bir kez, nota PR yazılır",
+              opened == [("php", "8.5", "php-8-5", "core")] and "#9" in res["note"], f"{opened} {res}")
+        opened.clear()
+        adv_one([dict(cur_state, state="pr açık", pr={"id": 5, "url": "u"})], open_fn=ofn)
+        adv_one([dict(cur_state, state="belirsiz")], open_fn=ofn)
+        adv_one([cur_state], open_fn=ofn, auto_img=False)
+        check("_advance_one: pr açık / belirsiz / ayar kapalı → open_pr yok", opened == [])
+
+        def bad(client, lang, to, entry, **k):
+            raise ui.ImageTemplateError("dal var ama içeriği farklı")
+        res, cf = adv_one([cur_state], open_fn=bad)
+        check("_advance_one: hata adımı durdurmaz, nota + izleme Task'ına yorum",
+              "dal var ama içeriği farklı" in res["note"] and len(cf.comments) == 1 and cf.comments[0][0] == 500,
+              f"{res} {cf.comments}")
+
+        # ── uç ──
+        track = {"id": 500, "to": "8.5", "lang": "php", "repo": "core", "area": "P\\T"}
+        cf = _CF()
+        s_get, s_cl, s_scan = pc.get, server.AzureDevOpsClient, ut._fresh_scan
+        s_fo, s_st, s_op = ut.find_open, ui.state, ui.open_pr
+        flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = True
+        for k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE"):
+            flags[k] = True
+        server.AzureDevOpsClient = lambda: cf
+        ut._fresh_scan = lambda *a, **k: mkscan([unp])
+        ut.find_open = lambda c, lang, repo: track
+        cur = {"st": dict(cur_state)}
+        ui.state = lambda c, e, **k: dict(cur["st"], dir=e["dir"])
+        got = []
+
+        def op(c, lang, to, entry, **k):
+            got.append((lang, to, entry["dir"], k.get("repo")))
+            return {"state": "pr açık", "pr": {"id": 12, "url": "https://x/pr/12"}, "notes": []}
+        ui.open_pr = op
+        body = {"repo": "core", "lang": "php", "to": "8.5", "team": "T", "dir": "php-8-5"}
+        try:
+            tc = TestClient(server.app)
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = False
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: ayar kapalı → 403, open_pr yok", r.status_code == 403 and not got, r.text)
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = True
+            r = tc.post("/api/techdebt/upgrade/image", json=dict(body, dir="php-9-9"))
+            check("uç: bilinmeyen dizin → 404", r.status_code == 404 and r.json().get("error") and not got, r.text)
+            r = tc.post("/api/techdebt/upgrade/image", json=dict(body, team=""))
+            check("uç: takım yok → 400", r.status_code == 400, r.text)
+            cur["st"] = dict(cur_state, state="pr açık", pr={"id": 5, "url": "u"}, reason="zaten açık")
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: pr açık → 409 + neden", r.status_code == 409 and "açık" in r.json().get("error", "")
+                  and not got, r.text)
+            cur["st"] = dict(cur_state)
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: başarılı → 200, open_pr sonucu, repo iletilir",
+                  r.status_code == 200 and r.json()["pr"]["id"] == 12 and got == [("php", "8.5", "php-8-5", "core")],
+                  r.text)
+            check("uç: izleme Task'ına PR bağlantısı yorumu",
+                  len(cf.comments) == 1 and "https://x/pr/12" in cf.comments[0][1], str(cf.comments))
+            ui.open_pr = lambda *a, **k: (_ for _ in ()).throw(ui.ImageTemplateError("dal bulunamadı"))
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: ImageTemplateError → Türkçe neden", r.status_code in (409, 502)
+                  and "dal bulunamadı" in r.json().get("error", ""), r.text)
+            ui.open_pr = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("401 Unauthorized"))
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: başka istisna → 500 değil, Türkçe neden",
+                  r.status_code == 502 and "Şablon PR'ı açılamadı" in r.json().get("error", ""), r.text)
+        finally:
+            pc.get, server.AzureDevOpsClient, ut._fresh_scan = s_get, s_cl, s_scan
+            ut.find_open, ui.state, ui.open_pr = s_fo, s_st, s_op
+    finally:
+        pc.get = orig_get
+
+
 def test_upgrade_registry():
     """Docker Hub yama çözücüsü: en büyük yama, elle sabitleme, hata → None, etiket kanıtı, önbellek."""
     print("\n[upgrade: yama sürümü çözücü]")
@@ -12310,6 +12485,7 @@ def main():
               test_upgrade_rules,
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
               test_upgrade_registry, test_upgrade_patch_sites, test_upgrade_image_template,
+              test_upgrade_image_wiring,
               test_upgrade_scan_take,
               test_upgrade_bump_sites,
               test_upgrade_client_find_pr_and_bytes,

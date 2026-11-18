@@ -490,6 +490,13 @@ istemedi, Jenkins anahtarı gerekir.
 **Kapsam dışı.** Node (Tempo Node sürümünü izlemiyor), imajın üretilmesi / yayınlanması, `preprod`
 ve `production` dallarına taşıma (DevOps akışı).
 
+**Uygulandı** (2026-11-18): `feat(techdebt): yama sürümü çözücü — üç parçalı etiketler ve genel imajlar Docker Hub kanıtıyla`,
+`fix(techdebt): yama sürümü çözücü — User-Agent, hata belleği, girdi doğrulama`,
+`feat(techdebt): yayınlanmamış taban imaj için base-images şablon PR'ı`,
+`fix(techdebt): özetle sabitlenmiş imaj hiçbir yolda yeniden yazılmaz`,
+`fix(techdebt): imaj şablonu — dar düzeltme kuralı, push sonrası toparlanma, yazma korumalarının testleri`,
+`feat(techdebt): imaj şablonu adımı karta, uca ve otomatik ilerletmeye bağlandı`.
+
 ## Ek (2026-11-18): taban imaj güvenlik uyarısı
 
 **Neden.** Üretimde kullandığımız taban imajlarda bilinen güvenlik açığı varsa kimse elle taramadan

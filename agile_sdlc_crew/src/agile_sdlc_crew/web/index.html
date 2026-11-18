@@ -2011,6 +2011,26 @@ function _upStripHtml(stage){
   });
   return `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:4px 0" title="Yükseltme aşaması">${cells.join('<span style="color:var(--text-dim)">›</span>')}${done?'<span class="chip dim">Tamam</span>':''}</div>`;
 }
+// Yayınlanmamış taban imaj satırları (dizin, bölgeler, durum, PR); `yok` iken "Şablon PR'ı aç". Dizin / bölge / neden /
+// PR bağlantısı güvenilmez girdidir: hepsi escHtml'den geçer, dizin düğmeye data özniteliğiyle taşınır.
+function _upImagesHtml(imgs){
+  if(!Array.isArray(imgs)||!imgs.length)return '';
+  const rows=imgs.map(im=>{
+    const dir=String(im.dir||''),stt=String(im.state||'');
+    const pr=im.pr&&im.pr.id?` · ${_upLink(im.pr.url,'PR #'+im.pr.id)}`:'';
+    const why=im.reason?` <span style="color:var(--text-dim)">${escHtml(String(im.reason))}</span>`:'';
+    const btn=(stt==='yok'&&dir)?` <button class="sm-btn small tdmUpImg" data-dir="${escHtml(dir)}" data-regions="${escHtml((im.regions||[]).join(', '))}" onclick="upgradeImage(this)">Şablon PR'ı aç</button>`:'';
+    return `<div style="padding:2px 0"><b>${escHtml(dir||'taban imaj')}</b>`
+      +(im.regions&&im.regions.length?` <span style="color:var(--text-dim)">(${escHtml(im.regions.join(', '))})</span>`:'')
+      +` <span class="chip dim">${escHtml(stt)}</span>${pr}${why}${btn}</div>`;
+  });
+  return `<div style="padding:4px 0" title="Yayınlanmamış taban imaj şablonları"><div style="color:var(--text-dim)">Taban imaj</div>${rows.join('')}</div>`;
+}
+async function upgradeImage(btn){
+  const dir=btn.dataset.dir||'',regions=btn.dataset.regions||'';
+  return _upPost('/api/techdebt/upgrade/image',
+    `${dir}: base-images reposunda 'tempo/base-image-${dir}' dalından 'staging'e taslak (draft) PR açılacak. Bekleyen bölgeler: ${regions||'-'}. İmaj üretilmez; DevOps yayınlar. Devam edilsin mi?`,{dir});
+}
 function _upStatusHtml(r,it){
   const tracked=!!(it&&it.tracked)||!!r.watch_target;
   const st=r.status||null;
@@ -2019,6 +2039,7 @@ function _upStatusHtml(r,it){
     h+=`<div style="padding:2px 0;color:var(--danger)">Durum hesaplanamadı: ${escHtml(String(st.error))}</div>`;
   }else if(st){
     h+=_upStripHtml(String(st.stage||''));
+    h+=_upImagesHtml(st.images);
     const nx=st.next||{};
     if(nx.reason)h+=`<div style="padding:2px 0">${escHtml(String(nx.reason))}</div>`;
     if(nx.test_note)h+=`<div style="padding:2px 0;color:var(--warning)">${escHtml(String(nx.test_note))}</div>`;
@@ -2070,8 +2091,8 @@ async function _upPost(path,confirmText,extra){
   if(!team){msg.textContent='Takım seçin.';return}
   if(confirmText&&!confirm(confirmText))return;
   const to=document.getElementById('tdmTo').value||'';
-  const isBump=path.endsWith('/bump');
-  const btns=[...document.querySelectorAll('#tdmUpStart,#tdmUpStop,#tdmUpBump')];
+  const isBump=path.endsWith('/bump'),isImg=path.endsWith('/image');
+  const btns=[...document.querySelectorAll('#tdmUpStart,#tdmUpStop,#tdmUpBump,.tdmUpImg')];
   const pre=btns.map(b=>b.disabled);
   btns.forEach(b=>b.disabled=true);msg.textContent='Gönderiliyor…';
   let refresh=false;
@@ -2080,16 +2101,17 @@ async function _upPost(path,confirmText,extra){
     const r=await resp.json().catch(()=>({}));
     if(!resp.ok){
       msg.innerHTML=`<span style="color:var(--danger)">${escHtml(String(r.error||'HTTP '+resp.status))}</span>`;
-      refresh=isBump||resp.status===409;  // adım işinde durum bilinmiyor: taze tara; 409: panel yeni adımı göstersin
+      refresh=isBump||isImg||resp.status===409;  // adım işinde durum bilinmiyor: taze tara; 409: panel yeni adımı göstersin
       return;
     }
     let t='Tamam.';
     if(path.endsWith('/start'))t=r.created?`İzleme işi açıldı: #${r.id}`:`Açık izleme işi var: #${r.id}`;
     else if(path.endsWith('/stop'))t=`İzleme işi kapatıldı: #${r.id}`;
     else if(isBump)t=`Sürüm adımı kuyruğa alındı (iş #${r.job_id}) — ${_UP_STEP_LABEL[r.step]||r.step}`;
+    if(isImg)t=r.pr&&r.pr.id?`Şablon PR'ı: #${r.pr.id} (${r.state||''})`:`Şablon PR'ı açılmadı: ${r.state||''} ${r.reason||''}`;
     msg.textContent=t;
     refresh=true;
-  }catch(e){msg.textContent=String(e);refresh=isBump}
+  }catch(e){msg.textContent=String(e);refresh=isBump||isImg}
   finally{
     if(refresh)await _upRefresh();
     else btns.forEach((b,i)=>{if(b.isConnected&&b.id!=='tdmUpBump')b.disabled=pre[i]});  // Başlat/Durdur: eylem öncesi hâline; bump kendiliğinden açılmaz

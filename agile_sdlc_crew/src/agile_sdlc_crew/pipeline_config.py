@@ -559,6 +559,13 @@ SCHEMA: list[dict] = [
         "desc": "Üç parçalı (yama sürümlü) etiketleri ve genel imajları Docker Hub'dan doğrulayıp otomatik yazar; kapalıyken bu satırlar elle düzenlenir.",
     },
     {
+        "key": "CREW_TECHDEBT_UPGRADE_IMAGE",
+        "label": "Yükseltme · taban imaj şablonu PR'ı açsın",
+        "type": "bool",
+        "default": False,
+        "desc": "Yayınlanmamış taban imaj için base-images reposuna şablon PR'ı açar (imajı üretmez; DevOps yayınlar).",
+    },
+    {
         "key": "CREW_TECHDEBT_UPGRADE_POLL_MIN",
         "label": "Yükseltme · izleme sıklığı (dk)",
         "type": "int",
