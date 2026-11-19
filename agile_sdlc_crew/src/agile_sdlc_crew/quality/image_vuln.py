@@ -281,6 +281,45 @@ def _docker_rm(base: list[str]) -> None:
         log.warning(f"⚠️ image_vuln: kap silinemedi ({type(e).__name__})")
 
 
+_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}", re.ASCII)
+_GHSA_RE = re.compile(r"GHSA(-[0-9a-z]{4}){3}", re.ASCII)
+
+
+def cve_url(vid: str) -> str:
+    """Açık kimliğinin kayıt sayfası; tanınmayan kimlik için boş (bağlantı yazılmaz). Kimlik güvenilmez metindir:
+    yalnız tam kalıba uyan kimlik bir adrese girer."""
+    vid = str(vid or "")
+    if _CVE_RE.fullmatch(vid):
+        return f"https://nvd.nist.gov/vuln/detail/{vid}"
+    if _GHSA_RE.fullmatch(vid):
+        return f"https://github.com/advisories/{vid}"
+    return ""
+
+
+def cve_age(pub, today: date | None = None) -> int | None:
+    """Duyurudan bugüne gün sayısı; tarih okunamıyorsa / gelecekteyse None."""
+    try:
+        d = date.fromisoformat(str(pub or "")[:10])
+    except ValueError:
+        return None
+    n = ((today or date.today()) - d).days
+    return n if n >= 0 else None
+
+
+def _cve_html(p: dict, today: date | None = None) -> str:
+    pubs = p.get("published") if isinstance(p.get("published"), dict) else {}
+    out = []
+    for c in p.get("cves") or []:
+        url, pub = cve_url(c), pubs.get(c)
+        item = f'<a href="{url}">{_e(c)}</a>' if url else _e(c)
+        age = cve_age(pub, today)
+        if age is not None:
+            item += f" — duyuru {_e(str(pub)[:10])}, {age} gün önce"
+        out.append(item)
+    return "; ".join(out)
+
+
 def _empty_scan(state: str) -> dict:
     return {"state": state, "critical": 0, "high": 0, "packages": [], "os": "", "created": ""}
 
@@ -309,12 +348,15 @@ def _parse_scan(doc: dict) -> dict:
             p = pkgs.get(name)
             if p is None:
                 p = pkgs[name] = {"name": name, "installed": str(v.get("InstalledVersion") or ""), "fixed": fixed,
-                                  "severity": sev, "cves": [], "critical": 0, "high": 0}
+                                  "severity": sev, "cves": [], "published": {}, "critical": 0, "high": 0}
             elif _SEV_RANK[sev] > _SEV_RANK[p["severity"]]:
                 p.update(severity=sev, installed=str(v.get("InstalledVersion") or ""), fixed=fixed)
             p["critical" if sev == "CRITICAL" else "high"] += 1     # yok sayma (ignore_packages) için paket başına sayım
             if cve and len(p["cves"]) < MAX_CVES and cve not in p["cves"]:
                 p["cves"].append(cve)
+                pub = str(v.get("PublishedDate") or "")[:10]      # açığın kamuya duyurulduğu gün (Trivy / NVD)
+                if _DAY_RE.fullmatch(pub):
+                    p["published"][cve] = pub
     out["packages"] = sorted(pkgs.values(), key=lambda p: (-_SEV_RANK[p["severity"]], p["name"]))
     return out
 
@@ -965,7 +1007,7 @@ def _e(s) -> str:
     return html.escape(rank.defang(str(s if s is not None else "")))
 
 
-def task_body(rec: dict) -> str:
+def task_body(rec: dict, *, today: date | None = None) -> str:
     """Task gövdesi: işaretler, ilk 15 paket, kullanan servisler (bölge başına), önerilen eylem, sınır cümlesi.
     İmaj / paket adları güvenilmez metindir: hepsi kaçışlanır."""
     sc = rec.get("scan") or {}
@@ -988,7 +1030,7 @@ def task_body(rec: dict) -> str:
     if pk:
         rows = "".join(
             f"<li><code>{_e(p.get('name'))}</code> {_e(p.get('installed'))} → {_e(p.get('fixed'))} "
-            f"({_e(p.get('severity'))}{', ' + _e(', '.join(p.get('cves') or [])) if p.get('cves') else ''})</li>"
+            f"({_e(p.get('severity'))}{', ' + _cve_html(p, today) if p.get('cves') else ''})</li>"
             for p in pk[:15])
         more = f"<p><small>… ve {len(pk) - 15} paket daha</small></p>" if len(pk) > 15 else ""
         parts.append(f"<p><b>Paketler (ilk 15):</b></p><ul>{rows}</ul>{more}")

@@ -13125,7 +13125,22 @@ def test_image_vuln_alerts():
                   patch={"latest": "1.24.13"}, actions=["yeniden üret", "sürüm yükselt (destek 2026-02-10'da bitti)"])
     rec["users"]["russia"] = ["build/core"]
     rec["repos"] = {"gocrons": {"anatolia": ["build/s0"]}, "<b>core": {"russia": ["build/core"]}}
-    body = iv.task_body(rec)
+    pkgs[1]["published"] = {"CVE-2026-0001": "2026-11-01"}
+    pkgs[2]["cves"] = ['x"><script>', "GHSA-abcd-1234-wxyz"]
+    pkgs[2]["published"] = {"GHSA-abcd-1234-wxyz": "2099-01-01"}
+    from datetime import date as _d
+    body = iv.task_body(rec, today=_d(2026, 11, 19))
+    check("gövde: CVE bağlantısı + duyuru tarihi ve gün sayısı; tanınmayan kimlik bağlantısız ve kaçışlı",
+          '<a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001">CVE-2026-0001</a> — duyuru 2026-11-01, 18 gün önce' in body
+          and '<a href="https://github.com/advisories/GHSA-abcd-1234-wxyz">' in body and "2099-01-01" not in body
+          and "<script>" not in body and iv.cve_url("CVE-2026-1/../x") == "" and iv.cve_url("javascript:x") == ""
+          and iv.cve_age("bozuk") is None and iv.cve_age("2026-11-19", _d(2026, 11, 19)) == 0, body[:900])
+    ps = iv._parse_scan({"Results": [{"Vulnerabilities": [
+        {"Severity": "HIGH", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": "CVE-2026-1111",
+         "PublishedDate": "2026-03-01T10:00:00Z"},
+        {"Severity": "HIGH", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": "CVE-2026-2222", "PublishedDate": "<x>"}]}]})
+    check("tarama: duyuru tarihi CVE başına saklanır, bozuk tarih alınmaz",
+          ps["packages"][0]["published"] == {"CVE-2026-1111": "2026-03-01"}, str(ps["packages"]))
     check("gövde: etkilenen repolar listesi (bölgeleriyle, kaçışlı)",
           "Etkilenen repolar" in body and "<b>gocrons</b>: anatolia" in body and "&lt;b&gt;core" in body
           and "Etkilenen repolar" not in iv.task_body(_iv_rec("golang:1.24.4")), body[:400])
@@ -13470,6 +13485,9 @@ def test_image_vuln_alerts():
           "Güvenlik açığı olan imajlar" in seg and "Diğer imajlar" in seg
           and seg.index("Güvenlik açığı olan imajlar") < seg.index("Diğer imajlar")
           and "(c.critical||0)+(c.high||0))>0" in seg)
+    check("kart: CVE bağlantıları + duyuru tarihi / gün sayısı; adres yalnız tam kalıba uyan kimlikten",
+          "_ivCves(p)" in seg and "nvd.nist.gov/vuln/detail/" in html_src and "_ivOldest(pk)" in seg
+          and "gün önce" in html_src and "/^CVE-\\d{4}-\\d{4,}$/" in html_src)
     check("kart: her aralanan metin escHtml'den geçer (ham ${x.image} / ${p.name} yok)",
           "${x.image}" not in seg and "${p.name}" not in seg and "_ivE=s=>escHtml(" in html_src)
 

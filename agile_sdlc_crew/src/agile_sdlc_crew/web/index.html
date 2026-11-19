@@ -1225,6 +1225,16 @@ async function loadImageVuln(force){
   }catch(e){card.style.display='flex';st.textContent=String(e);btn.disabled=false;
     if(!_ivLoaded)document.getElementById('tdImgList').innerHTML=''}
 }
+// Açık kimliği → kayıt sayfası (yalnız tam kalıba uyan kimlik adrese girer) + duyuru tarihi ve kaç gün olduğu.
+function _ivCveUrl(c){c=String(c||'');return /^CVE-\d{4}-\d{4,}$/.test(c)?'https://nvd.nist.gov/vuln/detail/'+c:(/^GHSA(-[0-9a-z]{4}){3}$/.test(c)?'https://github.com/advisories/'+c:'')}
+function _ivAge(d){if(!/^\d{4}-\d{2}-\d{2}$/.test(String(d||'')))return null;const n=Math.floor((Date.now()-Date.parse(d+'T00:00:00Z'))/864e5);return n>=0?n:null}
+function _ivCves(p){
+  const cs=p.cves||[],pub=p.published||{};if(!cs.length)return '';
+  return '<div style="color:var(--text-dim);font-size:11.5px">'+cs.map(c=>{const a=_ivAge(pub[c]);
+    return _ivLink(_ivCveUrl(c),c)+(a==null?'':` <span title="Açığın duyurulduğu gün">· ${_ivE(pub[c])}, ${a} gün önce</span>`)}).join('<br>')+'</div>';
+}
+function _ivOldest(pk){let m=null;pk.forEach(p=>Object.values(p.published||{}).forEach(d=>{const a=_ivAge(d);if(a!=null&&(m==null||a>m))m=a}));
+  return m==null?'':` · en eski açık ${m} gün önce duyuruldu`}
 function renderImageVuln(r){
   const rows=r.images||[];
   const nrep=new Set();rows.forEach(x=>Object.keys(x.repos||{}).forEach(c=>nrep.add(c)));
@@ -1253,7 +1263,7 @@ function renderImageVuln(r){
       if(x.eol)sig.push(`<span class="chip fail">destek bitti${x.eol.eol?' '+_ivE(x.eol.eol):''}</span>`);
       if(sc.state&&sc.state!=='tamam')sig.push(`<span class="chip dim" title="${_ivE(sc.reason||'')}">${_ivE(sc.state)}</span>`);
       const pk=(sc.packages||[]);
-      const det=pk.length?`<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--text-dim)">${pk.length} paket</summary><ul style="margin:4px 0 0 16px">${pk.slice(0,40).map(p=>`<li><code>${_ivE(p.name)}</code> ${_ivE(p.installed)} → ${_ivE(p.fixed)} <span class="chip ${p.severity==='CRITICAL'?'fail':'human'}">${_ivE(p.severity)}</span></li>`).join('')}</ul>${pk.length>40?`<div style="color:var(--text-dim)">… ve ${pk.length-40} paket daha</div>`:''}</details>`:'';
+      const det=pk.length?`<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--text-dim)">${pk.length} paket${_ivOldest(pk)}</summary><ul style="margin:4px 0 0 16px">${pk.slice(0,40).map(p=>`<li><code>${_ivE(p.name)}</code> ${_ivE(p.installed)} → ${_ivE(p.fixed)} <span class="chip ${p.severity==='CRITICAL'?'fail':'human'}">${_ivE(p.severity)}</span>${_ivCves(p)}</li>`).join('')}</ul>${pk.length>40?`<div style="color:var(--text-dim)">… ve ${pk.length-40} paket daha</div>`:''}</details>`:'';
       const ign=(ig.packages&&ig.packages.length)?`<div style="color:var(--text-dim);font-size:11.5px" title="config/image_vuln.yaml — sayıma girmez, gizlenmez">yok sayılan: ${_ivE(ig.packages.join(', '))} (${_ivE(ig.critical||0)} kritik, ${_ivE(ig.high||0)} yüksek)</div>`:'';
       return `<tr><td><span class="chip ${lv[0]}">${_ivE(lv[1])}</span></td>
         <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}${det}${ign}</td>
