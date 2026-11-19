@@ -433,8 +433,19 @@ header {
 .by-agent td.num { text-align:right; font-family:'Geist Mono',Menlo,monospace; }
 
 /* ── Adım detay modali ── */
-#stepModal { display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.55); backdrop-filter:blur(4px); align-items:center; justify-content:center; }
-#stepModal.open { display:flex; }
+#stepModal, #ivModal { display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.55); backdrop-filter:blur(4px); align-items:center; justify-content:center; }
+#stepModal.open, #ivModal.open { display:flex; }
+#ivModal .modal-box { width:min(1040px,96vw); }
+.perf.iv tr.ivr { cursor:pointer; } .perf.iv tr.ivr:hover td { background:var(--bg-elevated); }
+.perf.iv tr.sec td { padding:10px 14px 6px; font-weight:600; font-size:12px; background:var(--bg-elevated); }
+.perf.ivd { border:1px solid var(--border); border-radius:8px; border-collapse:separate; border-spacing:0; overflow:hidden; }
+.perf.ivd th { background:var(--bg-elevated); border-top:none; } .perf.ivd td { vertical-align:top; }
+.ivh { font-size:12px; font-weight:700; margin:18px 0 8px; color:var(--text); display:inline-block; }
+.ivfacts { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px 18px; font-size:12.5px; }
+.ivfacts > div > span { display:block; font-size:11px; color:var(--text-dim); margin-bottom:2px; }
+.ivnote { font-size:12px; color:var(--text-dim); margin:0 0 8px; }
+.ivpk { margin:0 0 0 18px; font-size:12.5px; line-height:1.7; }
+.ivmore > summary { cursor:pointer; list-style-position:outside; } .ivmore > summary .ivh { margin:18px 0 8px 4px; }
 .modal-box { background:var(--bg-card); border:1px solid var(--border); border-radius:14px; width:min(900px,96vw); max-height:90vh; display:flex; flex-direction:column; box-shadow:var(--shadow); }
 .modal-header { padding:16px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
 .modal-header h2 { font-size:15px; font-weight:700; flex:1; }
@@ -708,6 +719,18 @@ header {
       </div>
     </div>
   </section>
+</div>
+
+<!-- Taban imaj güvenliği: imaj detayı -->
+<div id="ivModal" onclick="if(event.target===this)closeIvDetail()">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="ivModalTitle">
+    <div class="modal-header">
+      <h2 id="ivModalTitle"></h2>
+      <div class="modal-meta" id="ivModalMeta"></div>
+      <button class="modal-close" onclick="closeIvDetail()" title="Kapat (Esc)">✕</button>
+    </div>
+    <div class="modal-body" id="ivModalBody"></div>
+  </div>
 </div>
 
 <!-- Step Detail Modal -->
@@ -1233,8 +1256,6 @@ function _ivCves(p){
   return '<div style="color:var(--text-dim);font-size:11.5px">'+cs.map(c=>{const a=_ivAge(pub[c]);
     return _ivLink(_ivCveUrl(c),c)+(a==null?'':` <span title="Açığın duyurulduğu gün">· ${_ivE(pub[c])}, ${a} gün önce</span>`)}).join('<br>')+'</div>';
 }
-function _ivOldest(pk){let m=null;pk.forEach(p=>Object.values(p.published||{}).forEach(d=>{const a=_ivAge(d);if(a!=null&&(m==null||a>m))m=a}));
-  return m==null?'':` · en eski açık ${m} gün önce duyuruldu`}
 function renderImageVuln(r){
   const rows=r.images||[];
   const nrep=new Set();rows.forEach(x=>Object.keys(x.repos||{}).forEach(c=>nrep.add(c)));
@@ -1250,27 +1271,93 @@ function renderImageVuln(r){
   const reg=u=>Object.keys(u||{}).map(k=>`<span class="chip dim" title="${_ivE((u[k]||[]).join('\n'))}">${_ivE(k)} ${(u[k]||[]).length}</span>`).join(' ');
   // etkilenen kod repoları açıkça listelenir (repo → bölgeler; derleme dizinleri ipucunda). Alan yoksa eski bölge sayaçları.
   const reps=x=>{const m=x.repos||{},ks=Object.keys(m);if(!ks.length)return reg(x.users);
-    return ks.map(c=>{const rg=m[c]||{};return `<div style="white-space:nowrap" title="${_ivE(Object.keys(rg).map(r=>r+': '+(rg[r]||[]).join(', ')).join('\n'))}"><b>${_ivE(c)}</b> <span style="color:var(--text-dim);font-size:11.5px">${_ivE(Object.keys(rg).join(', '))}</span></div>`}).join('')};
+    return ks.map(c=>{const rg=m[c]||{};return `<div style="white-space:nowrap" title="${_ivE(Object.keys(rg).map(r=>r+': '+(rg[r]||[]).join(', ')).join('\n'))}"><b>${_ivE(c)}</b> <span style="color:var(--text-dim);font-size:11.5px">${_ivE(Object.keys(rg).join(', '))}</span></div>`}).slice(0,3).join('')+(ks.length>3?`<div style="color:var(--text-dim);font-size:11.5px">+${ks.length-3} repo daha</div>`:'')};
   // düzeltmesi yayınlanmış açığı (kritik / yüksek) olan imajlar listenin tepesinde ayrı bölümdür; sunucu sırası bölüm içinde korunur
   const vuln=x=>{const c=x.scan||{};return c.state==='tamam'&&((c.critical||0)+(c.high||0))>0};
   const secs=[['Güvenlik açığı olan imajlar',rows.filter(vuln),'fail'],['Diğer imajlar',rows.filter(x=>!vuln(x)),'']];
-  box.innerHTML='<table class="perf"><tr><th>Seviye</th><th>İmaj</th><th>Etkilenen repolar</th><th class="num">Kritik</th><th class="num">Yüksek</th><th>İşaretler</th><th>Önerilen eylem</th></tr>'
-    +secs.map(([title,list,cls])=>!list.length?'':(secs.filter(q=>q[1].length).length>1||cls?`<tr><td colspan="7" style="padding:10px 14px 6px;font-weight:600;font-size:12px;background:var(--bg-elevated);${cls?'color:var(--danger);border-left:3px solid var(--danger)':'color:var(--text-dim);border-left:3px solid var(--border)'}">${_ivE(title)} · ${list.length}</td></tr>`:'')
+  // Satır yalnız özet taşır (seviye, imaj, repolar, sayılar, en eski açık, işaretler, giderme durumu);
+  // açık listesi, eylemler ve giderme planı "Detay" penceresindedir (openIvDetail).
+  const num=(n,cls)=>n>0?`<b style="color:var(--${cls})">${n}</b>`:'0';
+  box.innerHTML='<table class="perf iv"><tr><th>Seviye</th><th>İmaj</th><th>Etkilenen repolar</th><th class="num">Kritik</th><th class="num">Yüksek</th><th class="num" title="En eski açığın duyurulmasından bugüne">En eski açık</th><th>İşaretler</th><th>Giderme</th><th></th></tr>'
+    +secs.map(([title,list,cls])=>!list.length?'':(secs.filter(q=>q[1].length).length>1||cls?`<tr class="sec"><td colspan="9" style="${cls?'color:var(--danger);border-left:3px solid var(--danger)':'color:var(--text-dim);border-left:3px solid var(--border)'}">${_ivE(title)} · ${list.length}</td></tr>`:'')
     +list.map(x=>{
-      const lv=_ivLevel[x.level]||['dim',x.level];const sc=x.scan||{};const ig=sc.ignored||{};
-      const sig=[];
-      if(x.patch)sig.push(`<span class="chip human" title="Aynı minörün Docker Hub'daki son yaması">yama geride → ${_ivE(x.patch.latest)}</span>`);
-      if(x.eol)sig.push(`<span class="chip fail">destek bitti${x.eol.eol?' '+_ivE(x.eol.eol):''}</span>`);
-      if(sc.state&&sc.state!=='tamam')sig.push(`<span class="chip dim" title="${_ivE(sc.reason||'')}">${_ivE(sc.state)}</span>`);
-      const pk=(sc.packages||[]);
-      const det=pk.length?`<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--text-dim)">${pk.length} paket${_ivOldest(pk)}</summary><ul style="margin:4px 0 0 16px">${pk.slice(0,40).map(p=>`<li><code>${_ivE(p.name)}</code> ${_ivE(p.installed)} → ${_ivE(p.fixed)} <span class="chip ${p.severity==='CRITICAL'?'fail':'human'}">${_ivE(p.severity)}</span>${_ivCves(p)}</li>`).join('')}</ul>${pk.length>40?`<div style="color:var(--text-dim)">… ve ${pk.length-40} paket daha</div>`:''}</details>`:'';
-      const ign=(ig.packages&&ig.packages.length)?`<div style="color:var(--text-dim);font-size:11.5px" title="config/image_vuln.yaml — sayıma girmez, gizlenmez">yok sayılan: ${_ivE(ig.packages.join(', '))} (${_ivE(ig.critical||0)} kritik, ${_ivE(ig.high||0)} yüksek)</div>`:'';
-      return `<tr><td><span class="chip ${lv[0]}">${_ivE(lv[1])}</span></td>
-        <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}${det}${ign}</td>
-        <td>${reps(x)}</td><td class="num">${sc.state==='tamam'?(sc.critical||0):'—'}</td><td class="num">${sc.state==='tamam'?(sc.high||0):'—'}</td>
-        <td>${sig.join(' ')||'—'}</td><td>${_ivE((x.actions||[]).join('; ')||'—')}${_ivFixRows(x.fix)}${(x.fix||[]).some(_ivOpenable)?`<div style="margin-top:6px"><button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="fixImageVuln(this)" title="Uyarıyı gideren çalışmayı başlatır: taslak PR'lar ve sürüm yükseltme izlemesi">Gidermeyi başlat</button></div>`:''}</td></tr>`}).join('')).join('')+'</table>';
-  _ivFixAll={};rows.forEach(x=>{_ivFixAll[x.image]=x.fix||[]});
+      const lv=_ivLevel[x.level]||['dim',x.level];const sc=x.scan||{};const ok=sc.state==='tamam';
+      const old=_ivOldestDays(sc.packages||[]);
+      const fx=(x.fix||[]).map(a=>`<span class="chip ${_ivFixState[a.state]||'dim'}" title="${_ivE(a.kind)}">${_ivE(a.kind)}: ${_ivE(a.state)}</span>`).join(' ');
+      return `<tr class="ivr" data-image="${_ivE(x.image)}" onclick="openIvDetail(this.dataset.image)" title="Detay için tıklayın"><td><span class="chip ${lv[0]}">${_ivE(lv[1])}</span></td>
+        <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}</td>
+        <td>${reps(x)}</td><td class="num">${ok?num(sc.critical||0,'danger'):'—'}</td><td class="num">${ok?num(sc.high||0,'warning'):'—'}</td>
+        <td class="num">${old==null?'—':old+' gün'}</td>
+        <td>${_ivSignals(x).join(' ')||'—'}</td><td>${fx||'—'}</td>
+        <td style="text-align:right"><button class="sm-btn ghost small" data-image="${_ivE(x.image)}" onclick="event.stopPropagation();openIvDetail(this.dataset.image)">Detay</button></td></tr>`}).join('')).join('')+'</table>';
+  _ivFixAll={};_ivRows={};rows.forEach(x=>{_ivFixAll[x.image]=x.fix||[];_ivRows[x.image]=x});
+  // açık pencere varsa (yoklama / giderme sonrası) taze veriyle yeniden çizilir
+  const m=document.getElementById('ivModal');if(m&&m.classList.contains('open')&&_ivRows[m.dataset.image])openIvDetail(m.dataset.image);
 }
+let _ivRows={};
+function _ivSignals(x){
+  const sc=x.scan||{},sig=[];
+  if(x.patch)sig.push(`<span class="chip human" title="Aynı minörün Docker Hub'daki son yaması">yama geride → ${_ivE(x.patch.latest)}</span>`);
+  if(x.eol)sig.push(`<span class="chip fail">destek bitti${x.eol.eol?' '+_ivE(x.eol.eol):''}</span>`);
+  if(sc.state&&sc.state!=='tamam')sig.push(`<span class="chip dim" title="${_ivE(sc.reason||'')}">${_ivE(sc.state)}</span>`);
+  return sig;
+}
+function _ivOldestDays(pk){let m=null;pk.forEach(p=>Object.values(p.published||{}).forEach(d=>{const a=_ivAge(d);if(a!=null&&(m==null||a>m))m=a}));return m}
+// Açık başına satır: aynı kimlik birden çok pakette çıkar (openssl / libssl3 …) → tek satırda toplanır. En eski üstte.
+function _ivCveTable(pk,sev){
+  const by={};
+  pk.forEach(p=>(p.cves||[]).forEach(c=>{if(((p.sev||{})[c]||'')!==sev)return;
+    const e=by[c]||(by[c]={cve:c,pub:(p.published||{})[c]||'',pkgs:[]});e.pkgs.push(p)}));
+  const list=Object.values(by).map(e=>({...e,age:_ivAge(e.pub)})).sort((a,b)=>(b.age==null?-1:b.age)-(a.age==null?-1:a.age)||a.cve.localeCompare(b.cve));
+  if(!list.length)return {n:0,html:''};
+  return {n:list.length,html:'<table class="perf ivd"><tr><th>Açık</th><th>Paket</th><th>Kurulu → düzeltme</th><th>Duyuru</th><th class="num">Kaç gün</th></tr>'
+    +list.map(e=>`<tr><td style="white-space:nowrap">${_ivLink(_ivCveUrl(e.cve),e.cve)}</td>
+      <td>${e.pkgs.map(p=>`<div><code>${_ivE(p.name)}</code></div>`).join('')}</td>
+      <td>${e.pkgs.map(p=>`<div style="color:var(--text-dim)">${_ivE(p.installed)} → <span style="color:var(--text)">${_ivE(p.fixed)}</span></div>`).join('')}</td>
+      <td style="white-space:nowrap">${e.age==null?'—':_ivE(e.pub)}</td><td class="num">${e.age==null?'—':e.age}</td></tr>`).join('')+'</table>'};
+}
+function openIvDetail(image){
+  const x=_ivRows[image];if(!x)return;
+  const m=document.getElementById('ivModal');m.dataset.image=image;
+  const sc=x.scan||{},ok=sc.state==='tamam',pk=sc.packages||[],ig=sc.ignored||{},lv=_ivLevel[x.level]||['dim',x.level];
+  const h=t=>`<h3 class="ivh">${t}</h3>`;
+  document.getElementById('ivModalTitle').innerHTML=`<code>${_ivE(x.image)}</code>`;
+  document.getElementById('ivModalMeta').innerHTML=`<span class="chip ${lv[0]}">${_ivE(lv[1])}</span>`
+    +(ok?` <span class="chip fail">${_ivE(sc.critical||0)} kritik</span> <span class="chip human">${_ivE(sc.high||0)} yüksek</span>`:'');
+  const facts=[];
+  if(sc.os)facts.push(['İşletim sistemi',_ivE(sc.os)]);
+  if(x.via&&x.via.length)facts.push(['Taban imaj dizini',_ivE(x.via.join(', '))]);
+  if(sc.created)facts.push(['İmaj üretim tarihi',_ivE(sc.created)]);
+  const sg=_ivSignals(x);if(sg.length)facts.push(['İşaretler',sg.join(' ')]);
+  if(ig.packages&&ig.packages.length)facts.push(['Sayıma girmeyen',`<span title="config/image_vuln.yaml — sayıma girmez, gizlenmez">yok sayılan: ${_ivE(ig.packages.join(', '))} (${_ivE(ig.critical||0)} kritik, ${_ivE(ig.high||0)} yüksek)</span>`]);
+  let html=facts.length?'<div class="ivfacts">'+facts.map(f=>`<div><span>${f[0]}</span><div>${f[1]}</div></div>`).join('')+'</div>':'';
+  // etkilenen repolar
+  const rp=x.repos||{},rk=Object.keys(rp);
+  html+=h(`Etkilenen repolar · ${rk.length}`)+(rk.length?'<table class="perf ivd"><tr><th>Repo</th><th>Bölge</th><th>Derleme dizini</th></tr>'
+    +rk.map(c=>Object.keys(rp[c]||{}).map((r,i,a)=>`<tr>${i?'':`<td rowspan="${a.length}"><b>${_ivE(c)}</b></td>`}<td>${_ivE(r)}</td><td><code>${_ivE((rp[c][r]||[]).join(', '))}</code></td></tr>`).join('')).join('')+'</table>'
+    :'<div class="ivnote">Repo bilgisi yok.</div>');
+  // açıklar
+  if(!ok)html+=h('Açıklar')+`<div class="ivnote">Taranamadı: ${_ivE(sc.state||'bilinmiyor')}${sc.reason?' — '+_ivE(sc.reason):''}</div>`;
+  else if(!pk.length)html+=h('Açıklar')+'<div class="ivnote">Düzeltmesi yayınlanmış kritik / yüksek açık yok.</div>';
+  else if(!pk.some(p=>p.sev)){
+    // eski önbellek: kimlik başına önem yok → paket listesi (yeniden taramayla açık başına tabloya döner)
+    html+=h(`Açığı olan paketler · ${pk.length}`)+'<div class="ivnote">Açık başına önem bu taramada yok; "Yeniden tara" sonrası kritikler ayrı listelenir.</div><ul class="ivpk">'
+      +pk.map(p=>`<li><code>${_ivE(p.name)}</code> ${_ivE(p.installed)} → ${_ivE(p.fixed)} <span class="chip ${p.severity==='CRITICAL'?'fail':'human'}">${_ivE(p.severity)}</span>${_ivCves(p)}</li>`).join('')+'</ul>';
+  }else{
+    const c=_ivCveTable(pk,'CRITICAL'),hi=_ivCveTable(pk,'HIGH');
+    html+=h(`Kritik açıklar · ${c.n} açık, ${_ivE(sc.critical||0)} bulgu`)+(c.n?c.html:'<div class="ivnote">Kritik açık yok.</div>');
+    html+=`<details class="ivmore"><summary>${h(`Yüksek açıklar · ${hi.n} açık gösteriliyor, ${_ivE(sc.high||0)} bulgu`)}</summary>
+      <div class="ivnote">Paket başına en çok 5 kimlik saklanır (kritikler önce); bulgu sayısı tam sayıdır.</div>${hi.html}</details>`;
+  }
+  // eylem + giderme
+  html+=h('Önerilen eylem')+((x.actions||[]).length?'<ul class="ivpk">'+x.actions.map(a=>`<li>${_ivE(a)}</li>`).join('')+'</ul>':'<div class="ivnote">—</div>');
+  if((x.fix||[]).length)html+=h('Giderme')+_ivFixRows(x.fix)
+    +((x.fix||[]).some(_ivOpenable)?`<div style="margin-top:10px"><button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="fixImageVuln(this)" title="Uyarıyı gideren çalışmayı başlatır: taslak PR'lar ve sürüm yükseltme izlemesi">Gidermeyi başlat</button></div>`:'');
+  document.getElementById('ivModalBody').innerHTML=html;
+  m.classList.add('open');
+}
+function closeIvDetail(){const m=document.getElementById('ivModal');if(m)m.classList.remove('open')}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeIvDetail()});
 // Giderme eylemleri (sunucu `fix` alanı): tür, durum, PR / izleme bağlantıları. Bağlantı yalnız https; her metin escHtml'den geçer.
 let _ivFixAll={};
 function _ivLink(url,text){return /^https:\/\//.test(url||'')?`<a href="${_ivE(url)}" target="_blank" rel="noopener">${_ivE(text)}</a>`:_ivE(text)}
@@ -1305,7 +1392,7 @@ async function fixImageVuln(btn){
     if(!resp.ok)msg.innerHTML=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;
     else msg.innerHTML=`Giderme başlatıldı (${_ivE(image)}): `+(r.actions||[]).map(a=>`${_ivE(a.kind)} — ${_ivE(a.state)}${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}`).join('; ');
   }catch(e){msg.textContent=String(e)}
-  finally{btns.forEach(b=>{if(b.isConnected)b.disabled=false});loadImageVuln(false)}
+  finally{btns.forEach(b=>{if(b.isConnected)b.disabled=false});closeIvDetail();loadImageVuln(false)}
 }
 
 // ── Maliyet analizi (salt okunur; /api/costs) ──

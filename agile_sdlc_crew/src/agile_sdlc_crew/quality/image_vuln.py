@@ -46,6 +46,7 @@ _SEV_RANK = {"CRITICAL": 2, "HIGH": 1}
 _LEVEL_RANK = {"kritik": 0, "yüksek": 1, "bilgi": 2, "bilinmiyor": 3, "temiz": 4}
 EOL_TTL_S = 24 * 3600
 MAX_CVES = 5
+MAX_CRIT_CVES = 20
 NOTE = ("Yayınlanmış imaj değil, dayandığı resmî imaj taranır; bizim eklediğimiz katmanlar (nginx, filebeat, "
         "New Relic, PECL) ve derleme anında kurulan yamalar görülmez. Sonuç alt sınırdır; işletim sistemi "
         "bulguları imaj yeniden üretilirse kapanır.")
@@ -348,15 +349,23 @@ def _parse_scan(doc: dict) -> dict:
             p = pkgs.get(name)
             if p is None:
                 p = pkgs[name] = {"name": name, "installed": str(v.get("InstalledVersion") or ""), "fixed": fixed,
-                                  "severity": sev, "cves": [], "published": {}, "critical": 0, "high": 0}
+                                  "severity": sev, "cves": [], "sev": {}, "published": {}, "critical": 0, "high": 0}
             elif _SEV_RANK[sev] > _SEV_RANK[p["severity"]]:
                 p.update(severity=sev, installed=str(v.get("InstalledVersion") or ""), fixed=fixed)
             p["critical" if sev == "CRITICAL" else "high"] += 1     # yok sayma (ignore_packages) için paket başına sayım
-            if cve and len(p["cves"]) < MAX_CVES and cve not in p["cves"]:
-                p["cves"].append(cve)
+            if cve and cve not in p["sev"]:
+                p["sev"][cve] = sev
                 pub = str(v.get("PublishedDate") or "")[:10]      # açığın kamuya duyurulduğu gün (Trivy / NVD)
                 if _DAY_RE.fullmatch(pub):
                     p["published"][cve] = pub
+    for p in pkgs.values():
+        # Saklanan kimlikler: önce kritikler (en çok MAX_CRIT_CVES — kritik açık listeden düşmesin), kalan yer
+        # yükseklerle MAX_CVES'e tamamlanır. `sev` kimlik başına önemdir (kart kritikleri ayrı listeler).
+        crit = [c for c, v in p["sev"].items() if v == "CRITICAL"][:MAX_CRIT_CVES]
+        high = [c for c, v in p["sev"].items() if v != "CRITICAL"][:max(0, MAX_CVES - len(crit))]
+        p["cves"] = crit + high
+        p["sev"] = {c: p["sev"][c] for c in p["cves"]}
+        p["published"] = {c: d for c, d in p["published"].items() if c in p["sev"]}
     out["packages"] = sorted(pkgs.values(), key=lambda p: (-_SEV_RANK[p["severity"]], p["name"]))
     return out
 

@@ -13477,7 +13477,7 @@ def test_image_vuln_alerts():
                    + html_src[html_src.index("function renderImageVuln"):].index("\n}\n")]
     check("kart: uç, 403'te gizlenir, yeniden tara, yok sayılan satırı, bölge sayıları",
           "/api/techdebt/images" in seg and "resp.status===403" in seg and 'id="tdImgCard"' in html_src
-          and "yok sayılan:" in seg and "loadImageVuln(true)" in html_src and "u[k]||[]).length" in seg)
+          and "yok sayılan:" in html_src and "loadImageVuln(true)" in html_src and "u[k]||[]).length" in seg)
     check("kart: etkilenen repolar görünür liste; yüklenirken kart gösterilir; sekmenin son kartı",
           "Etkilenen repolar" in seg and "x.repos" in seg and "_tdLoad(" in seg and "_tdOff('img')" in seg
           and html_src.index('id="tdImgCard"') > html_src.index('id="tdModernCard"'))
@@ -13486,8 +13486,27 @@ def test_image_vuln_alerts():
           and seg.index("Güvenlik açığı olan imajlar") < seg.index("Diğer imajlar")
           and "(c.critical||0)+(c.high||0))>0" in seg)
     check("kart: CVE bağlantıları + duyuru tarihi / gün sayısı; adres yalnız tam kalıba uyan kimlikten",
-          "_ivCves(p)" in seg and "nvd.nist.gov/vuln/detail/" in html_src and "_ivOldest(pk)" in seg
+          "_ivCves(p)" in html_src and "nvd.nist.gov/vuln/detail/" in html_src and "_ivOldestDays(" in seg
           and "gün önce" in html_src and "/^CVE-\\d{4}-\\d{4,}$/" in html_src)
+    det = html_src[html_src.index("function _ivCveTable"):html_src.index("function closeIvDetail")]
+    check("kart: satır özet, ayrıntı pencerede (kritik açıklar tablosu, repolar, eylem, giderme düğmesi)",
+          "openIvDetail(this.dataset.image)" in seg and "ivFixBtn" not in seg and "<details" not in seg
+          and 'id="ivModal"' in html_src and "Kritik açıklar" in det and "Yüksek açıklar" in det
+          and "_ivCveTable(pk,'CRITICAL')" in det and "ivFixBtn" in det and "Etkilenen repolar" in det
+          and "${x.image}" not in det and "${p.name}" not in det and "${e.cve}" not in det)
+    psv = iv._parse_scan({"Results": [{"Vulnerabilities": (
+        [{"Severity": "HIGH", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": f"CVE-2026-10{i:02d}"} for i in range(6)]
+        + [{"Severity": "CRITICAL", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": f"CVE-2026-20{i:02d}",
+            "PublishedDate": "2026-01-02T00:00:00Z"} for i in range(7)])}]})["packages"][0]
+    check("tarama: kimlik başına önem; kritikler sınıra takılmaz ve önce gelir, yüksekler yalnız boş yeri doldurur",
+          psv["cves"] == [f"CVE-2026-20{i:02d}" for i in range(7)] and set(psv["sev"].values()) == {"CRITICAL"}
+          and psv["critical"] == 7 and psv["high"] == 6 and len(psv["published"]) == 7, str(psv))
+    psh = iv._parse_scan({"Results": [{"Vulnerabilities": [
+        {"Severity": "HIGH", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": "CVE-2026-1000"},
+        {"Severity": "CRITICAL", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": "CVE-2026-2000"}]}]})["packages"][0]
+    check("tarama: kritik + yüksek karışık → kritik önce, önem eşlemesi doğru",
+          psh["cves"] == ["CVE-2026-2000", "CVE-2026-1000"]
+          and psh["sev"] == {"CVE-2026-2000": "CRITICAL", "CVE-2026-1000": "HIGH"}, str(psh))
     check("kart: her aralanan metin escHtml'den geçer (ham ${x.image} / ${p.name} yok)",
           "${x.image}" not in seg and "${p.name}" not in seg and "_ivE=s=>escHtml(" in html_src)
 
@@ -14007,7 +14026,10 @@ def _image_fix_body():
     fseg = fseg[:fseg.index("\n}\n")]
     lseg = html_src[html_src.index("function _ivLink"):]
     lseg = lseg[:lseg.index("\n")]
-    check("kart: eylem satırları ve 'Gidermeyi başlat' düğmesi", "Gidermeyi başlat" in seg and "x.fix" in seg and "fixImageVuln(" in seg)
+    dseg = html_src[html_src.index("function openIvDetail"):html_src.index("function closeIvDetail")]
+    check("kart: satırda giderme durumu; eylem satırları ve 'Gidermeyi başlat' düğmesi detay penceresinde",
+          "x.fix" in seg and "Gidermeyi başlat" in dseg and "_ivFixRows(x.fix)" in dseg and "fixImageVuln(" in dseg
+          and "${a.reason}" not in dseg and "${a.state}" not in dseg)
     check("kart: uç, onay kutusu, düğme istek boyunca kapalı, sonra yenile",
           "/api/techdebt/images/fix" in fseg and "confirm(" in fseg and "disabled=true" in fseg and "loadImageVuln(" in fseg)
     check("kart: aralanan metin escHtml'den geçer, yalnız https bağlantı", "${a.reason}" not in seg and "${a.state}" not in seg
