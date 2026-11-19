@@ -12600,6 +12600,11 @@ def test_image_vuln_inventory():
     check("bölge başına kullanıcılar (registry farklı olsa da)",
           php["users"] == {"anatolia": ["build/channel"], "global": ["build/channel"], "russia": ["build/core"]},
           str(php and php["users"]))
+    check("etkilenen kod repoları: repo → bölge → derleme dizinleri",
+          php["repos"] == {"channel": {"anatolia": ["build/channel"], "global": ["build/channel"]},
+                           "core": {"russia": ["build/core"]}}
+          and recs["golang:1.24.4"]["repos"] == {"gocrons": {"anatolia": ["build/gocrons"]}},
+          str(php and php.get("repos")))
     check("touched: dizinlere son dokunulan en yeni tarih", php["touched"] == "2026-10-21", php["touched"])
     check("küçük harfli dockerfile okunur (php-8-2 dayanağa katıldı)", "php-8-2" in php["via"])
     check("takma ad / etiketsiz ad atlanır", "base" not in recs and "builder" not in recs
@@ -13119,7 +13124,11 @@ def test_image_vuln_alerts():
     rec = _iv_rec("golang:1.24.4", crit=23, eol={"eol": "2026-02-10"}, users=2, pkgs=pkgs,
                   patch={"latest": "1.24.13"}, actions=["yeniden üret", "sürüm yükselt (destek 2026-02-10'da bitti)"])
     rec["users"]["russia"] = ["build/core"]
+    rec["repos"] = {"gocrons": {"anatolia": ["build/s0"]}, "<b>core": {"russia": ["build/core"]}}
     body = iv.task_body(rec)
+    check("gövde: etkilenen repolar listesi (bölgeleriyle, kaçışlı)",
+          "Etkilenen repolar" in body and "<b>gocrons</b>: anatolia" in body and "&lt;b&gt;core" in body
+          and "Etkilenen repolar" not in iv.task_body(_iv_rec("golang:1.24.4")), body[:400])
     check("gövde: sınır cümlesi aynen",
           "Yayınlanmış imaj değil, dayandığı resmî imaj tarandı; kendi eklediğimiz katmanlar ve derleme anında "
           "kurulan yamalar görülmez — sonuç alt sınırdır." in body)
@@ -13128,6 +13137,7 @@ def test_image_vuln_alerts():
     check("gövde: bölge başına servisler + eylem", "anatolia" in body and "russia" in body and "build/core" in body
           and "yeniden üret" in body)
     g = iv.task_group(rec)
+    check("Task: güvenlik uyarısı en yüksek öncelik (1)", g.priority == 1, str(g.priority))
     desc = render.task_description(g)
     tags = render.task_tags(g, lane="techdebt").split("; ")
     check("Task: etiketler", all(t in tags for t in ("tempo-quality", "tempo-techdebt", "tech-debt", "tempo-image-vuln", "needs-human")),
@@ -13442,6 +13452,8 @@ def test_image_vuln_alerts():
           and "tempo-image-vuln" in tasks[0][1]["System.Tags"] and queued == []
           and recorded and recorded[0]["fingerprint"] == "image_vuln:golang:1.24.4" and recorded[0]["needs_human"] is True,
           str(tasks)[:300])
+    check("varsayılan yol: Task öncelik alanı 1 yazılır",
+          tasks[0][1].get("Microsoft.VSTS.Common.Priority") == 1, str(sorted(tasks[0][1])))
     check("varsayılan yol: Task açıklamasında kaçışlı gövde + sınır cümlesi",
           "&lt;img" in tasks[0][1]["System.Description"] and "sonuç alt sınırdır" in tasks[0][1]["System.Description"])
 
@@ -13451,6 +13463,9 @@ def test_image_vuln_alerts():
     check("kart: uç, 403'te gizlenir, yeniden tara, yok sayılan satırı, bölge sayıları",
           "/api/techdebt/images" in seg and "resp.status===403" in seg and 'id="tdImgCard"' in html_src
           and "yok sayılan:" in seg and "loadImageVuln(true)" in html_src and "u[k]||[]).length" in seg)
+    check("kart: etkilenen repolar görünür liste; yüklenirken kart gösterilir; sekmenin ilk kartı",
+          "Etkilenen repolar" in seg and "x.repos" in seg and "_tdLoad(" in seg and "_tdOff('img')" in seg
+          and html_src.index('id="tdImgCard"') < html_src.index('id="ovQualityCard"'))
     check("kart: her aralanan metin escHtml'den geçer (ham ${x.image} / ${p.name} yok)",
           "${x.image}" not in seg and "${p.name}" not in seg and "_ivE=s=>escHtml(" in html_src)
 

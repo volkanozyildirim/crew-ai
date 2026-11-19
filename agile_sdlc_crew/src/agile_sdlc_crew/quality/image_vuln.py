@@ -150,7 +150,7 @@ def inventory(client, index: dict, *, read=None) -> list[dict]:
         resolved[image] = out
         return out
 
-    for items in (index or {}).values():
+    for code_repo, items in (index or {}).items():
         for item in items or []:
             region, _, path = str(item.get("src") or "").partition("/")
             for raw in item.get("images") or []:
@@ -174,7 +174,7 @@ def inventory(client, index: dict, *, read=None) -> list[dict]:
                     # Özgün ad kaydı: ARG'lı / geçersiz imajlar `taranamadı` olarak listelenir.
                     image = raw
                 rec = recs.setdefault(image, {"image": image, "lang": "", "version": "", "via": [], "users": {},
-                                              "touched": "", "error": error})
+                                              "repos": {}, "touched": "", "error": error})
                 if not rec["error"] and error:
                     rec["error"] = error
                 if via and via not in rec["via"]:
@@ -182,12 +182,17 @@ def inventory(client, index: dict, *, read=None) -> list[dict]:
                 paths = rec["users"].setdefault(region, [])
                 if path not in paths:
                     paths.append(path)
+                # etkilenen kod reposu (index anahtarı = Jenkinsfile gitOriginApp) → bölge → derleme dizinleri
+                rp = rec["repos"].setdefault(str(code_repo), {}).setdefault(region, [])
+                if path not in rp:
+                    rp.append(path)
     out = []
     for rec in recs.values():
         if not rec["error"]:
             rec["lang"], rec["version"] = _lang_version(rec["image"])
         rec["via"].sort()
         rec["users"] = {r: sorted(p) for r, p in sorted(rec["users"].items())}
+        rec["repos"] = {c: {r: sorted(p) for r, p in sorted(regs.items())} for c, regs in sorted(rec["repos"].items())}
         rec["touched"] = _touched(client, repo, project, rec["via"])
         out.append(rec)
     return out
@@ -987,6 +992,10 @@ def task_body(rec: dict) -> str:
             for p in pk[:15])
         more = f"<p><small>… ve {len(pk) - 15} paket daha</small></p>" if len(pk) > 15 else ""
         parts.append(f"<p><b>Paketler (ilk 15):</b></p><ul>{rows}</ul>{more}")
+    repos = "".join(f"<li><b>{_e(c)}</b>: {_e(', '.join(regs))}</li>" for c, regs in (rec.get("repos") or {}).items()
+                    if isinstance(regs, dict))
+    if repos:
+        parts.append(f"<p><b>Etkilenen repolar:</b></p><ul>{repos}</ul>")
     users = "".join(f"<li><b>{_e(r)}</b>: {_e(', '.join(p))}</li>" for r, p in (rec.get("users") or {}).items())
     if users:
         parts.append(f"<p><b>Kullanan servisler:</b></p><ul>{users}</ul>")
@@ -1004,7 +1013,7 @@ def task_group(rec: dict):
                  findings=[Finding(source=SOURCE, repo=TASK_REPO, count=max(1, crit))],
                  score=float(crit), sp=1, needs_human=True,
                  human_reason="Yeniden üretim / servisin yeniden yayını / sürüm yükseltmesi insan (DevOps) kararıdır; Tempo imaj üretmez.",
-                 extra_tags=[TASK_TAG], body_html=task_body(rec))
+                 extra_tags=[TASK_TAG], body_html=task_body(rec), priority=1)
 
 
 def _open_task(client, rec: dict, *, team: str, deps) -> dict:

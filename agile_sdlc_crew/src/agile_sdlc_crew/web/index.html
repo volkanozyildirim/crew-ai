@@ -321,6 +321,10 @@ header {
 .wi-check:checked { background:var(--accent); border-color:var(--accent); }
 .wi-check:checked::after { content:'\2713'; color:var(--accent-ink); font-size:10px; font-weight:700; }
 .board-loading,.board-empty { text-align:center; padding:50px 20px; color:var(--text-dim); font-size:14px; }
+.td-load { display:flex; align-items:center; gap:10px; padding:14px; color:var(--text-dim); font-size:12.5px; }
+.td-load::before { content:""; flex:none; width:14px; height:14px; border-radius:50%; border:2px solid var(--border); border-top-color:var(--accent); animation:tdspin .8s linear infinite; }
+@keyframes tdspin { to { transform:rotate(360deg) } }
+@media (prefers-reduced-motion:reduce) { .td-load::before { animation-duration:2.4s } }
 
 /* ── Yaşlandırma: iş kaç gündür bu durumda bekliyor ── */
 .wi-age { display:inline-flex; align-items:center; gap:3px; font-size:10px; font-weight:700; padding:1px 6px; border-radius:6px; flex-shrink:0; font-family:'Geist Mono',Menlo,monospace; background:var(--bg-elevated); color:var(--text-dim); }
@@ -605,6 +609,16 @@ header {
   <!-- Maliyet analizi -->
   <section class="pane" id="paneTechdebt">
     <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
+      <!-- güvenlik uyarısı en üst öncelik: sekmenin ilk kartı -->
+      <div class="card" id="tdImgCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Taban imaj güvenliği</span><span id="tdImgCount" class="chip dim"></span><span style="flex:1"></span>
+          <span id="tdImgStatus" style="font-size:12px;color:var(--text-dim)"></span>
+          <button class="sm-btn ghost small" id="tdImgRescan" onclick="loadImageVuln(true)" title="Önbelleği atla, imajları yeniden tara (dakikalar sürebilir)">Yeniden tara</button>
+        </div>
+        <div id="tdImgNote" style="padding:0 14px 8px;font-size:12px;color:var(--text-dim)"></div>
+        <div id="tdImgFixMsg" style="padding:0 14px 8px;font-size:12px"></div>
+        <div id="tdImgList" style="padding:0 0 12px"></div>
+      </div>
       <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:visible;position:relative;z-index:2">
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
           <select class="sprint-select" id="qSource" title="Kaynak" onchange="qProjReset()"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
@@ -640,15 +654,6 @@ header {
         <div id="tdmUpInfo" style="padding:0 14px;font-size:12px"></div>
         <div id="tdmMsg" style="padding:0 14px;font-size:12px"></div>
         <div id="tdmResult" style="padding:0 14px 12px"></div>
-      </div>
-      <div class="card" id="tdImgCard" style="display:none;flex-direction:column;overflow:hidden">
-        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Taban imaj güvenliği</span><span id="tdImgCount" class="chip dim"></span><span style="flex:1"></span>
-          <span id="tdImgStatus" style="font-size:12px;color:var(--text-dim)"></span>
-          <button class="sm-btn ghost small" id="tdImgRescan" onclick="loadImageVuln(true)" title="Önbelleği atla, imajları yeniden tara (dakikalar sürebilir)">Yeniden tara</button>
-        </div>
-        <div id="tdImgNote" style="padding:0 14px 8px;font-size:12px;color:var(--text-dim)"></div>
-        <div id="tdImgFixMsg" style="padding:0 14px 8px;font-size:12px"></div>
-        <div id="tdImgList" style="padding:0 0 12px"></div>
       </div>
     </div>
   </section>
@@ -1182,7 +1187,12 @@ function showTab(name){
 // ── Taban imaj güvenliği (/api/techdebt/images) ──
 // Sunucu taramada beklemez: önbellek eksikse {scanning:true,…eldeki kısım…} döner; kart bitene kadar yoklar.
 // Seviye / işaret / eylem metinleri Python'dan gelir; UI yalnızca çizer. Her metin escHtml'den geçer.
-let _ivTimer=null;
+let _ivTimer=null,_ivLoaded=false;
+// Kart yanıt beklenirken de görünür (yükleniyor satırıyla). Özellik kapalıysa (403) gizlenir ve bu
+// tarayıcıda hatırlanır; sonraki açılışta kart bir görünüp kaybolmaz.
+function _tdOff(k,v){try{if(v===undefined)return localStorage.getItem('tempo_td_off_'+k)==='1';
+  if(v)localStorage.setItem('tempo_td_off_'+k,'1');else localStorage.removeItem('tempo_td_off_'+k)}catch(e){}return false}
+const _tdLoad=t=>`<div class="td-load" role="status">${escHtml(t)}</div>`;
 document.addEventListener('visibilitychange',()=>{const p=document.getElementById('paneTechdebt'),c=document.getElementById('tdImgCard');
   if(!document.hidden&&p&&p.classList.contains('on')&&c&&c.style.display==='flex')loadImageVuln(false)});
 const _ivE=s=>escHtml(String(s==null?'':s));
@@ -1191,22 +1201,35 @@ async function loadImageVuln(force){
   const card=document.getElementById('tdImgCard');if(!card)return;
   clearTimeout(_ivTimer);
   const st=document.getElementById('tdImgStatus');
+  const btn=document.getElementById('tdImgRescan');
+  if(!_ivLoaded){
+    // ilk yanıt gelene kadar: kart görünür, liste yerinde yükleniyor satırı
+    btn.disabled=true;st.textContent='';
+    document.getElementById('tdImgList').innerHTML=_tdLoad('İmaj listesi yükleniyor…');
+    if(!_tdOff('img'))card.style.display='flex';
+  }else if(force){btn.disabled=true;st.innerHTML='<span style="color:var(--run)">Yeniden tarama isteniyor…</span>'}
   try{
     // GET yan etkisizdir; yeniden tarama yalnız POST (sunucu 5 dk bekleme uygular, nedeni `message` ile döner)
     const resp=force?await fetch('/api/techdebt/images/rescan',{method:'POST'}):await fetch('/api/techdebt/images');
-    if(resp.status===403){card.style.display='none';return}
+    if(resp.status===403){card.style.display='none';_tdOff('img',true);return}
     const r=await resp.json();
-    card.style.display='flex';
-    if(!resp.ok){st.innerHTML=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;return}
+    _tdOff('img',false);card.style.display='flex';
+    if(!resp.ok){
+      st.innerHTML=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;btn.disabled=false;
+      if(!_ivLoaded)document.getElementById('tdImgList').innerHTML='';
+      return}
+    _ivLoaded=true;
     renderImageVuln(r);
     if(r.message&&!r.scanning)st.innerHTML=_ivE(r.message);
     // tarama sürerken (sekme açık ve görünürken) 8 sn'de bir yeniden sor; bitince durur
     if(r.scanning){_ivTimer=setTimeout(()=>{const p=document.getElementById('paneTechdebt');if(p&&p.classList.contains('on')&&!document.hidden)loadImageVuln(false)},8000)}
-  }catch(e){card.style.display='flex';st.textContent=String(e)}
+  }catch(e){card.style.display='flex';st.textContent=String(e);btn.disabled=false;
+    if(!_ivLoaded)document.getElementById('tdImgList').innerHTML=''}
 }
 function renderImageVuln(r){
   const rows=r.images||[];
-  document.getElementById('tdImgCount').textContent=rows.length+' imaj';
+  const nrep=new Set();rows.forEach(x=>Object.keys(x.repos||{}).forEach(c=>nrep.add(c)));
+  document.getElementById('tdImgCount').textContent=rows.length+' imaj'+(nrep.size?' · '+nrep.size+' repo':'');
   const crit=rows.filter(x=>x.level==='kritik').length;
   document.getElementById('tdImgStatus').innerHTML=r.scanning
     ?'<span style="color:var(--run)">Taranıyor… (imaj başına dakikalar sürebilir)</span>'
@@ -1216,7 +1239,10 @@ function renderImageVuln(r){
   const box=document.getElementById('tdImgList');
   if(!rows.length){box.innerHTML='<div class="board-empty" style="padding:12px 14px">Üretim imajı bulunamadı.</div>';return}
   const reg=u=>Object.keys(u||{}).map(k=>`<span class="chip dim" title="${_ivE((u[k]||[]).join('\n'))}">${_ivE(k)} ${(u[k]||[]).length}</span>`).join(' ');
-  box.innerHTML='<table class="perf"><tr><th>Seviye</th><th>İmaj</th><th>Kullanan servisler</th><th class="num">Kritik</th><th class="num">Yüksek</th><th>İşaretler</th><th>Önerilen eylem</th></tr>'
+  // etkilenen kod repoları açıkça listelenir (repo → bölgeler; derleme dizinleri ipucunda). Alan yoksa eski bölge sayaçları.
+  const reps=x=>{const m=x.repos||{},ks=Object.keys(m);if(!ks.length)return reg(x.users);
+    return ks.map(c=>{const rg=m[c]||{};return `<div style="white-space:nowrap" title="${_ivE(Object.keys(rg).map(r=>r+': '+(rg[r]||[]).join(', ')).join('\n'))}"><b>${_ivE(c)}</b> <span style="color:var(--text-dim);font-size:11.5px">${_ivE(Object.keys(rg).join(', '))}</span></div>`}).join('')};
+  box.innerHTML='<table class="perf"><tr><th>Seviye</th><th>İmaj</th><th>Etkilenen repolar</th><th class="num">Kritik</th><th class="num">Yüksek</th><th>İşaretler</th><th>Önerilen eylem</th></tr>'
     +rows.map(x=>{
       const lv=_ivLevel[x.level]||['dim',x.level];const sc=x.scan||{};const ig=sc.ignored||{};
       const sig=[];
@@ -1228,7 +1254,7 @@ function renderImageVuln(r){
       const ign=(ig.packages&&ig.packages.length)?`<div style="color:var(--text-dim);font-size:11.5px" title="config/image_vuln.yaml — sayıma girmez, gizlenmez">yok sayılan: ${_ivE(ig.packages.join(', '))} (${_ivE(ig.critical||0)} kritik, ${_ivE(ig.high||0)} yüksek)</div>`:'';
       return `<tr><td><span class="chip ${lv[0]}">${_ivE(lv[1])}</span></td>
         <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}${det}${ign}</td>
-        <td>${reg(x.users)}</td><td class="num">${sc.state==='tamam'?(sc.critical||0):'—'}</td><td class="num">${sc.state==='tamam'?(sc.high||0):'—'}</td>
+        <td>${reps(x)}</td><td class="num">${sc.state==='tamam'?(sc.critical||0):'—'}</td><td class="num">${sc.state==='tamam'?(sc.high||0):'—'}</td>
         <td>${sig.join(' ')||'—'}</td><td>${_ivE((x.actions||[]).join('; ')||'—')}${_ivFixRows(x.fix)}${(x.fix||[]).some(_ivOpenable)?`<div style="margin-top:6px"><button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="fixImageVuln(this)" title="Uyarıyı gideren çalışmayı başlatır: taslak PR'lar ve sürüm yükseltme izlemesi">Gidermeyi başlat</button></div>`:''}</td></tr>`}).join('')+'</table>';
   _ivFixAll={};rows.forEach(x=>{_ivFixAll[x.image]=x.fix||[]});
 }
@@ -1832,13 +1858,24 @@ function _tdmRepoChanged(){
 }
 async function loadModernRepos(){
   const card=document.getElementById('tdModernCard');if(!card)return;
-  if(_tdm.loaded){return}
+  if(_tdm.loaded||_tdm.loading){return}
+  _tdm.loading=true;
+  // yanıt gelene kadar: kart görünür, denetimler kapalı, sonuç yerinde yükleniyor satırı
+  const ctl=['tdmRepo','tdmRescan','tdmTake','tdmSprint'].map(i=>document.getElementById(i));
+  const box=document.getElementById('tdmResult');
+  const done=()=>{_tdm.loading=false;if(box.querySelector('.td-load'))box.innerHTML='';
+    document.getElementById('tdmRepo').disabled=document.getElementById('tdmSprint').disabled=false};
+  ctl.forEach(c=>c.disabled=true);
+  document.getElementById('tdmRepo').innerHTML='<option>Yükleniyor…</option>';
+  document.getElementById('tdmMsg').textContent='';
+  box.innerHTML=_tdLoad('Repolar yükleniyor… (günün ilk açılışında bir dakikayı bulabilir)');
+  if(!_tdOff('modern'))card.style.display='flex';
   try{
     const resp=await fetch('/api/techdebt/modern/repos');
-    if(resp.status===403){card.style.display='none';return}
+    if(resp.status===403){card.style.display='none';_tdOff('modern',true);done();return}
     const r=await resp.json();
-    card.style.display='flex';
-    if(!resp.ok){document.getElementById('tdmMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    _tdOff('modern',false);card.style.display='flex';
+    if(!resp.ok){done();document.getElementById('tdmRepo').innerHTML='<option value="">Yüklenemedi</option>';document.getElementById('tdmMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
     _tdm.repos=r.items||[];_tdm.loaded=true;
     const sel=document.getElementById('tdmRepo');
     const opt=i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'PHP')} ${i.version?esc(i.version):'— hedef sürüm bilinmiyor'}</option>`;
@@ -1860,9 +1897,12 @@ async function loadModernRepos(){
       s2.value='';
     };
     _tdmModRepoHtml=sel.innerHTML;
+    // sürüm yükseltme listesi de gelene kadar yükleniyor satırı kalır (mod düğmeleri onunla belirir)
     _tdmRepoChanged();
-    loadUpgradeRepos();
-  }catch(e){document.getElementById('tdmMsg').textContent=String(e)}
+    box.innerHTML=_tdLoad('Sürüm bilgileri yükleniyor…');
+    await loadUpgradeRepos();
+    done();
+  }catch(e){done();card.style.display='flex';document.getElementById('tdmRepo').innerHTML='<option value="">Yüklenemedi</option>';document.getElementById('tdmMsg').textContent=String(e)}
 }
 let _tdmFillRepoSel=()=>{},_tdmModRepoHtml='';
 function _tdmKindChip(k){
