@@ -13463,9 +13463,13 @@ def test_image_vuln_alerts():
     check("kart: uç, 403'te gizlenir, yeniden tara, yok sayılan satırı, bölge sayıları",
           "/api/techdebt/images" in seg and "resp.status===403" in seg and 'id="tdImgCard"' in html_src
           and "yok sayılan:" in seg and "loadImageVuln(true)" in html_src and "u[k]||[]).length" in seg)
-    check("kart: etkilenen repolar görünür liste; yüklenirken kart gösterilir; sekmenin ilk kartı",
+    check("kart: etkilenen repolar görünür liste; yüklenirken kart gösterilir; sekmenin son kartı",
           "Etkilenen repolar" in seg and "x.repos" in seg and "_tdLoad(" in seg and "_tdOff('img')" in seg
-          and html_src.index('id="tdImgCard"') < html_src.index('id="ovQualityCard"'))
+          and html_src.index('id="tdImgCard"') > html_src.index('id="tdModernCard"'))
+    check("kart: açığı olan imajlar listenin tepesinde ayrı bölüm (kritik + yüksek > 0), kalanı 'Diğer imajlar'",
+          "Güvenlik açığı olan imajlar" in seg and "Diğer imajlar" in seg
+          and seg.index("Güvenlik açığı olan imajlar") < seg.index("Diğer imajlar")
+          and "(c.critical||0)+(c.high||0))>0" in seg)
     check("kart: her aralanan metin escHtml'den geçer (ham ${x.image} / ${p.name} yok)",
           "${x.image}" not in seg and "${p.name}" not in seg and "_ivE=s=>escHtml(" in html_src)
 

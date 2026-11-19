@@ -609,16 +609,6 @@ header {
   <!-- Maliyet analizi -->
   <section class="pane" id="paneTechdebt">
     <div style="padding:20px 24px;display:flex;flex-direction:column;gap:14px">
-      <!-- güvenlik uyarısı en üst öncelik: sekmenin ilk kartı -->
-      <div class="card" id="tdImgCard" style="display:none;flex-direction:column;overflow:hidden">
-        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Taban imaj güvenliği</span><span id="tdImgCount" class="chip dim"></span><span style="flex:1"></span>
-          <span id="tdImgStatus" style="font-size:12px;color:var(--text-dim)"></span>
-          <button class="sm-btn ghost small" id="tdImgRescan" onclick="loadImageVuln(true)" title="Önbelleği atla, imajları yeniden tara (dakikalar sürebilir)">Yeniden tara</button>
-        </div>
-        <div id="tdImgNote" style="padding:0 14px 8px;font-size:12px;color:var(--text-dim)"></div>
-        <div id="tdImgFixMsg" style="padding:0 14px 8px;font-size:12px"></div>
-        <div id="tdImgList" style="padding:0 0 12px"></div>
-      </div>
       <div class="card" id="ovQualityCard" style="display:none;flex-direction:column;overflow:visible;position:relative;z-index:2">
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Kalite işi alımı</span><span style="flex:1"></span>
           <select class="sprint-select" id="qSource" title="Kaynak" onchange="qProjReset()"><option value="newrelic">New Relic</option><option value="sonar">SonarQube</option></select>
@@ -654,6 +644,15 @@ header {
         <div id="tdmUpInfo" style="padding:0 14px;font-size:12px"></div>
         <div id="tdmMsg" style="padding:0 14px;font-size:12px"></div>
         <div id="tdmResult" style="padding:0 14px 12px"></div>
+      </div>
+      <div class="card" id="tdImgCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Taban imaj güvenliği</span><span id="tdImgCount" class="chip dim"></span><span style="flex:1"></span>
+          <span id="tdImgStatus" style="font-size:12px;color:var(--text-dim)"></span>
+          <button class="sm-btn ghost small" id="tdImgRescan" onclick="loadImageVuln(true)" title="Önbelleği atla, imajları yeniden tara (dakikalar sürebilir)">Yeniden tara</button>
+        </div>
+        <div id="tdImgNote" style="padding:0 14px 8px;font-size:12px;color:var(--text-dim)"></div>
+        <div id="tdImgFixMsg" style="padding:0 14px 8px;font-size:12px"></div>
+        <div id="tdImgList" style="padding:0 0 12px"></div>
       </div>
     </div>
   </section>
@@ -1242,8 +1241,12 @@ function renderImageVuln(r){
   // etkilenen kod repoları açıkça listelenir (repo → bölgeler; derleme dizinleri ipucunda). Alan yoksa eski bölge sayaçları.
   const reps=x=>{const m=x.repos||{},ks=Object.keys(m);if(!ks.length)return reg(x.users);
     return ks.map(c=>{const rg=m[c]||{};return `<div style="white-space:nowrap" title="${_ivE(Object.keys(rg).map(r=>r+': '+(rg[r]||[]).join(', ')).join('\n'))}"><b>${_ivE(c)}</b> <span style="color:var(--text-dim);font-size:11.5px">${_ivE(Object.keys(rg).join(', '))}</span></div>`}).join('')};
+  // düzeltmesi yayınlanmış açığı (kritik / yüksek) olan imajlar listenin tepesinde ayrı bölümdür; sunucu sırası bölüm içinde korunur
+  const vuln=x=>{const c=x.scan||{};return c.state==='tamam'&&((c.critical||0)+(c.high||0))>0};
+  const secs=[['Güvenlik açığı olan imajlar',rows.filter(vuln),'fail'],['Diğer imajlar',rows.filter(x=>!vuln(x)),'']];
   box.innerHTML='<table class="perf"><tr><th>Seviye</th><th>İmaj</th><th>Etkilenen repolar</th><th class="num">Kritik</th><th class="num">Yüksek</th><th>İşaretler</th><th>Önerilen eylem</th></tr>'
-    +rows.map(x=>{
+    +secs.map(([title,list,cls])=>!list.length?'':(secs.filter(q=>q[1].length).length>1||cls?`<tr><td colspan="7" style="padding:10px 14px 6px;font-weight:600;font-size:12px;background:var(--bg-elevated);${cls?'color:var(--danger);border-left:3px solid var(--danger)':'color:var(--text-dim);border-left:3px solid var(--border)'}">${_ivE(title)} · ${list.length}</td></tr>`:'')
+    +list.map(x=>{
       const lv=_ivLevel[x.level]||['dim',x.level];const sc=x.scan||{};const ig=sc.ignored||{};
       const sig=[];
       if(x.patch)sig.push(`<span class="chip human" title="Aynı minörün Docker Hub'daki son yaması">yama geride → ${_ivE(x.patch.latest)}</span>`);
@@ -1255,7 +1258,7 @@ function renderImageVuln(r){
       return `<tr><td><span class="chip ${lv[0]}">${_ivE(lv[1])}</span></td>
         <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}${det}${ign}</td>
         <td>${reps(x)}</td><td class="num">${sc.state==='tamam'?(sc.critical||0):'—'}</td><td class="num">${sc.state==='tamam'?(sc.high||0):'—'}</td>
-        <td>${sig.join(' ')||'—'}</td><td>${_ivE((x.actions||[]).join('; ')||'—')}${_ivFixRows(x.fix)}${(x.fix||[]).some(_ivOpenable)?`<div style="margin-top:6px"><button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="fixImageVuln(this)" title="Uyarıyı gideren çalışmayı başlatır: taslak PR'lar ve sürüm yükseltme izlemesi">Gidermeyi başlat</button></div>`:''}</td></tr>`}).join('')+'</table>';
+        <td>${sig.join(' ')||'—'}</td><td>${_ivE((x.actions||[]).join('; ')||'—')}${_ivFixRows(x.fix)}${(x.fix||[]).some(_ivOpenable)?`<div style="margin-top:6px"><button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="fixImageVuln(this)" title="Uyarıyı gideren çalışmayı başlatır: taslak PR'lar ve sürüm yükseltme izlemesi">Gidermeyi başlat</button></div>`:''}</td></tr>`}).join('')).join('')+'</table>';
   _ivFixAll={};rows.forEach(x=>{_ivFixAll[x.image]=x.fix||[]});
 }
 // Giderme eylemleri (sunucu `fix` alanı): tür, durum, PR / izleme bağlantıları. Bağlantı yalnız https; her metin escHtml'den geçer.
