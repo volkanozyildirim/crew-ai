@@ -1278,13 +1278,13 @@ function renderImageVuln(r){
   // Satır yalnız özet taşır (seviye, imaj, repolar, sayılar, en eski açık, işaretler, giderme durumu);
   // açık listesi, eylemler ve giderme planı "Detay" penceresindedir (openIvDetail).
   const num=(n,cls)=>n>0?`<b style="color:var(--${cls})">${n}</b>`:'0';
-  box.innerHTML='<table class="perf iv"><tr><th>Seviye</th><th>İmaj</th><th>Etkilenen repolar</th><th class="num">Kritik</th><th class="num">Yüksek</th><th class="num" title="En eski açığın duyurulmasından bugüne">En eski açık</th><th>İşaretler</th><th>Giderme</th><th></th></tr>'
-    +secs.map(([title,list,cls])=>!list.length?'':(secs.filter(q=>q[1].length).length>1||cls?`<tr class="sec"><td colspan="9" style="${cls?'color:var(--danger);border-left:3px solid var(--danger)':'color:var(--text-dim);border-left:3px solid var(--border)'}">${_ivE(title)} · ${list.length}</td></tr>`:'')
+  box.innerHTML='<table class="perf iv"><tr><th>İmaj</th><th>Etkilenen repolar</th><th class="num">Kritik</th><th class="num">Yüksek</th><th class="num" title="En eski açığın duyurulmasından bugüne">En eski açık</th><th>İşaretler</th><th>Giderme</th><th></th></tr>'
+    +secs.map(([title,list,cls])=>!list.length?'':(secs.filter(q=>q[1].length).length>1||cls?`<tr class="sec"><td colspan="8" style="${cls?'color:var(--danger);border-left:3px solid var(--danger)':'color:var(--text-dim);border-left:3px solid var(--border)'}">${_ivE(title)} · ${list.length}</td></tr>`:'')
     +list.map(x=>{
-      const lv=_ivLevel[x.level]||['dim',x.level];const sc=x.scan||{};const ok=sc.state==='tamam';
+      const sc=x.scan||{};const ok=sc.state==='tamam';
       const old=_ivOldestDays(sc.packages||[]);
       const fx=(x.fix||[]).map(a=>`<span class="chip ${_ivFixState[a.state]||'dim'}" title="${_ivE(a.kind)}">${_ivE(a.kind)}: ${_ivE(a.state)}</span>`).join(' ');
-      return `<tr class="ivr" data-image="${_ivE(x.image)}" onclick="openIvDetail(this.dataset.image)" title="Detay için tıklayın"><td><span class="chip ${lv[0]}">${_ivE(lv[1])}</span></td>
+      return `<tr class="ivr" data-image="${_ivE(x.image)}" onclick="openIvDetail(this.dataset.image)" title="Detay için tıklayın">
         <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}</td>
         <td>${reps(x)}</td><td class="num">${ok?num(sc.critical||0,'danger'):'—'}</td><td class="num">${ok?num(sc.high||0,'warning'):'—'}</td>
         <td class="num">${old==null?'—':old+' gün'}</td>
