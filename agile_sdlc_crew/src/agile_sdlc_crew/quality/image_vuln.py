@@ -138,9 +138,53 @@ def _lang_version(image: str) -> tuple[str, str]:
     return (lang, m.group(1)) if lang and m else (lang, "")
 
 
-def inventory(client, index: dict, *, read=None) -> list[dict]:
-    """Dayanak imaj başına bir kayıt (bölgeler / dizinler birleşir)."""
+_OWN_DIR_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,60}", re.ASCII)
+
+
+def own_dirs(client) -> dict[str, str]:
+    """`base-images` kökündeki taban dizinleri → okunacağı dal. Üretim dalında olan oradan, yalnız daha erken bir
+    dalda olan (ör. `php-8-5` staging / preprod'da) üretime en yakın daldan okunur. Hiçbir servisin kullanmadığı
+    imajlar da buradan envantere girer (kullanılmaya başlamadan güncel tutulsun). Okunamayan dal atlanır."""
+    from agile_sdlc_crew.quality import upgrade_image
+    cfg = upgrade_image.load_cfg()
+    repo, project = cfg["repo"], cfg.get("project") or None
+    flow = [b for b in (cfg.get("flow") or []) if isinstance(b, str)]
+    branches = [PROD_BRANCH] + [b for b in reversed(flow) if b != PROD_BRANCH]
+    out: dict[str, str] = {}
+    for b in branches:
+        try:
+            items = client.get_items_in_path(repo, "/", branch=b, recursion_level="oneLevel", project=project)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"⚠️ image_vuln: base-images@{b} dizinleri okunamadı: {str(e)[:200]}")
+            continue
+        for it in items or []:
+            name = str(it.get("path") or "").strip("/")
+            if it.get("isFolder") and _OWN_DIR_RE.fullmatch(name) and ".." not in name and name not in out:
+                out[name] = b
+    return out
+
+
+def _read_at(client, repo: str, project: str | None):
+    def read(branch: str, path: str) -> str | None:
+        try:
+            return client.get_file_content(repo, path, branch=branch, project=project)
+        except Exception:  # noqa: BLE001  — dosya yok / okunamadı
+            return None
+    return read
+
+
+def inventory(client, index: dict, *, read=None, dirs: dict | None = None, read_at=None) -> list[dict]:
+    """Dayanak imaj başına bir kayıt (bölgeler / dizinler birleşir). `dirs` (dizin → dal; varsayılan `own_dirs`):
+    hiçbir servisin kullanmadığı taban dizinleri de `unused` kaydı olarak eklenir. `read` enjekte edilmişse (test)
+    ve `dirs` verilmemişse kullanılmayan dizinler aranmaz."""
     repo, project = _base_cfg()
+    if dirs is None and read is None:
+        try:
+            dirs = own_dirs(client)
+        except Exception as e:  # noqa: BLE001 — kullanılmayanlar listelenemedi: kullanılanlar yine raporlanır
+            log.warning(f"⚠️ image_vuln: kullanılmayan taban dizinleri okunamadı: {str(e)[:200]}")
+            dirs = {}
+    read_at = read_at or _read_at(client, repo, project)
     read = read or _default_read(client, repo, project)
     resolved: dict[str, dict] = {}       # kendi imaj adı → {"image", "error", "dir"}
     recs: dict[str, dict] = {}
@@ -205,6 +249,23 @@ def inventory(client, index: dict, *, read=None) -> list[dict]:
                 rp = rec["repos"].setdefault(str(code_repo), {}).setdefault(region, [])
                 if path not in rp:
                     rp.append(path)
+    # Hiçbir servisin kullanmadığı taban dizinleri: dayanağı çözülebilen ve dili bilinenler kayda girer.
+    used = {d for r in recs.values() for d in r["via"]}
+    for d, b in sorted((dirs or {}).items()):
+        if d in used or not isinstance(b, str):
+            continue
+        txt = read_at(b, f"/{d}/Dockerfile")
+        if txt is None:
+            txt = read_at(b, f"/{d}/dockerfile")
+        ref, err = _resolve_from(txt) if txt else ("", "okunamadı")
+        if err or not ref or not valid_image(ref) or external_registry(ref) or not _lang_version(ref)[0]:
+            continue                        # taban imaj dizini değil / çözülemedi: gürültü eklenmez
+        rec = recs.get(ref)
+        if rec is None:
+            rec = recs[ref] = {"image": ref, "lang": "", "version": "", "via": [], "users": {}, "repos": {},
+                               "tag_lag": {}, "touched": "", "error": "", "unused": True}
+        rec["via"].append(d)
+        rec.setdefault("unused_dirs", {})[d] = b
     out = []
     for rec in recs.values():
         if not rec["error"]:
@@ -568,6 +629,9 @@ def _judge(rec: dict) -> tuple[str, list[str]]:
         actions.append(f"bölge repolarında imaj etiketini yükselt ({d}:{lag[d]['latest']})")
     if end:
         actions.append(f"sürüm yükselt (destek {end['eol']}'de bitti)" if end["eol"] else "sürüm yükselt (destek bitti)")
+    if rec.get("unused"):
+        # Hiçbir servis kullanmıyor: güncel tutulur (yama / taşıma eylemleri planlanır) ama kritik uyarı üretmez.
+        return ("yüksek" if (crit or high or patch or end) else "temiz" if scan["state"] == "tamam" else "bilinmiyor"), actions
     if crit or end:
         return "kritik", actions
     if high or patch or lag:

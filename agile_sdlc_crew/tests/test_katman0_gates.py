@@ -13745,6 +13745,41 @@ def test_image_fix_promote_tag():
         p0 = {r["image"]: r for r in iv.inventory(_iv_client({}), index, read=files.get)}["php:8.4.28-fpm-trixie"]
         check("envanter: etiket aynıyken işaret yok", p0["tag_lag"] == {}, str(p0["tag_lag"]))
 
+        # ── kullanılmayan taban dizinleri (php-8-5): envantere girer, güncel tutulur ──
+        P85 = {"/php-8-5/Dockerfile": b"ARG PHP_VERSION=8.5.12\nFROM php:${PHP_VERSION}-fpm-trixie\n", "/php-8-5/tag.txt": b"1.0"}
+        c = _PromoClient(DF, {"staging": {**NEW, **P85, "/docs/README.md": b"x", "/misc/Dockerfile": b"FROM evil.example/x:1\n"},
+                              "preprod": {**NEW, **P85}, "production": OLD})
+        dirs = iv.own_dirs(c)
+        check("own_dirs: üretimde olan üretimden, yalnız erken dalda olan üretime en yakın daldan",
+              dirs.get("php-8-4") == "production" and dirs.get("php-8-5") == "preprod" and dirs.get("misc") == "staging", str(dirs))
+        inv = {r["image"]: r for r in iv.inventory(c, index, dirs=dirs,
+                                                   read=lambda p: (c.files["production"].get(p) or b"").decode() or None)}
+        u85 = inv.get("php:8.5.12-fpm-trixie")
+        check("envanter: kullanılmayan php-8-5 kayda girer (unused, kullanan yok, okunan dal)",
+              bool(u85) and u85["unused"] is True and u85["via"] == ["php-8-5"] and u85["users"] == {} and u85["repos"] == {}
+              and u85["unused_dirs"] == {"php-8-5": "preprod"} and u85["lang"] == "php" and u85["version"] == "8.5.12", str(u85))
+        check("envanter: taban imaj olmayan / harici kayıt deposlu dizin eklenmez; kullanılan kayıt unused değil",
+              not any("evil" in k for k in inv) and len([r for r in inv.values() if r.get("unused")]) == 1
+              and not inv["php:8.4.27-fpm-bookworm"].get("unused"), str(sorted(inv)))
+        check("envanter: read enjekte + dirs yok → kullanılmayan aranmaz (eski davranış)",
+              not any(r.get("unused") for r in iv.inventory(_iv_client({}), index, read={}.get)))
+        u85.update(scan={"state": "tamam", "critical": 3, "high": 1, "packages": []}, patch={"latest": "8.5.14"}, eol=None)
+        lvl, _acts = iv._judge(u85)
+        check("kullanılmayan imaj kritik uyarı üretmez (en çok 'yüksek'), temizse 'temiz'", lvl == "yüksek"
+              and iv._judge({**u85, "scan": {"state": "tamam", "critical": 0, "high": 0, "packages": []}, "patch": None})[0] == "temiz", lvl)
+        res85 = ur.Resolver(fetch=_fake_hub({"php": ["8.5.14", "8.5.14-fpm-trixie"]}))
+        acts = fx.plan(c, u85, index=index, resolver=res85)
+        a = kind(acts, "taban-yama")
+        check("kullanılmayan imaj: staging'de yama PR'ı planlanır (8.5.12 → 8.5.14), bölge bilinmiyor diye reddedilmez",
+              a and a["state"] == "yok" and a["sites"][0]["path"] == "/php-8-5/Dockerfile"
+              and (a["sites"][0]["old"], a["sites"][0]["new"]) == ("8.5.12", "8.5.14"), str(acts))
+        body = fx._body_own(u85, a, ui.load_cfg())
+        check("kullanılmayan imaj: PR gövdesi kullanan servis olmadığını söyler", "kullanan servis yok" in body, body)
+        u85b = {**u85, "patch": {"latest": "8.5.12"}}
+        a = kind(fx.plan(c, u85b, index=index, resolver=res85), "taban-taşıma")
+        check("kullanılmayan imaj: staging güncelse taşıma da önerilir (üretimde dizin yok → preprod → production)",
+              a and a["state"] == "yok" and (a["src"], a["dst"]) == ("preprod", "production"), str(a))
+
         # ── etiket: plan ──────────────────────────────────────────────────
         lagrec = rec(image="php:8.4.28-fpm-trixie", version="8.4.28", patch=None, tag_lag={"php-8-4": {"have": ["1.0"], "latest": "1.1"}})
         c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": NEW})
@@ -14636,6 +14671,7 @@ def _image_fix_round1_body(knobs):
             skw = dict(index=idx5, resolver=res, eol_fn=lambda *a, **k: None, cache_dir=Path(td), ttl_h=24, now=1000.0,
                        ignore_packages=set())
             fc = _FixClient(DF)
+            fc.get_items_in_path = lambda *a, **k: []      # kullanılmayan taban dizini yok: yalnız üç kullanılan imaj sayılır
             dec = lambda rep: iv.attach_fix(fc, rep, index=idx5, resolver=res)
             iv._reset_state()
             s1 = iv._snapshot(fc, lambda: clk[0], dec, skw)

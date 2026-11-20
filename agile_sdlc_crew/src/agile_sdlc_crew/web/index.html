@@ -1270,7 +1270,7 @@ function renderImageVuln(r){
   if(!rows.length){box.innerHTML='<div class="board-empty" style="padding:12px 14px">Üretim imajı bulunamadı.</div>';return}
   const reg=u=>Object.keys(u||{}).map(k=>`<span class="chip dim" title="${_ivE((u[k]||[]).join('\n'))}">${_ivE(k)} ${(u[k]||[]).length}</span>`).join(' ');
   // etkilenen kod repoları açıkça listelenir (repo → bölgeler; derleme dizinleri ipucunda). Alan yoksa eski bölge sayaçları.
-  const reps=x=>{const m=x.repos||{},ks=Object.keys(m);if(!ks.length)return reg(x.users);
+  const reps=x=>{const m=x.repos||{},ks=Object.keys(m);if(!ks.length)return x.unused?'<span style="color:var(--text-dim)">kullanan servis yok</span>':reg(x.users);
     return ks.map(c=>{const rg=m[c]||{};return `<div style="white-space:nowrap" title="${_ivE(Object.keys(rg).map(r=>r+': '+(rg[r]||[]).join(', ')).join('\n'))}"><b>${_ivE(c)}</b> <span style="color:var(--text-dim);font-size:11.5px">${_ivE(Object.keys(rg).join(', '))}</span></div>`}).slice(0,3).join('')+(ks.length>3?`<div style="color:var(--text-dim);font-size:11.5px">+${ks.length-3} repo daha</div>`:'')};
   // düzeltmesi yayınlanmış açığı (kritik / yüksek) olan imajlar listenin tepesinde ayrı bölümdür; sunucu sırası bölüm içinde korunur
   const vuln=x=>{const c=x.scan||{};return c.state==='tamam'&&((c.critical||0)+(c.high||0))>0};
@@ -1301,6 +1301,7 @@ function _ivSignals(x){
   const sc=x.scan||{},sig=[];
   if(x.patch)sig.push(`<span class="chip human" title="Aynı minörün Docker Hub'daki son yaması">yama geride → ${_ivE(x.patch.latest)}</span>`);
   Object.keys(x.tag_lag||{}).forEach(d=>sig.push(`<span class="chip human" title="base-images üretim dalında daha yeni etiket var; bölge repoları eskisini çekiyor. Tarama yeni etiketin dayanağını gösterir.">etiket geride → ${_ivE(d)}:${_ivE((x.tag_lag[d]||{}).latest)}</span>`));
+  if(x.unused)sig.push(`<span class="chip dim" title="base-images'ta var ama hiçbir servis kullanmıyor; kullanılmaya başlamadan güncel tutulur. Okunan dal: ${_ivE(Object.values(x.unused_dirs||{}).join(', '))}">kullanılmıyor</span>`);
   if(x.eol)sig.push(`<span class="chip fail">destek bitti${x.eol.eol?' '+_ivE(x.eol.eol):''}</span>`);
   if(sc.state&&sc.state!=='tamam')sig.push(`<span class="chip dim" title="${_ivE(sc.reason||'')}">${_ivE(sc.state)}</span>`);
   return sig;

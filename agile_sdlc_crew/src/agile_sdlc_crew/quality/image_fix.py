@@ -576,7 +576,7 @@ def _body_own(entry: dict, a: dict, cfg: dict) -> str:
            "başka dosya değişmez.", "",
            "Tempo imajı üretmez / yayınlamaz: birleştirdikten sonra DevOps imajı üretip yayınlamalı. Bu imajı kullanan "
            "bölgeler ve Jenkins bayrakları:"]
-    out += [f"- {_clean(f)}" for f in flags]
+    out += [f"- {_clean(f)}" for f in flags] or ["- (şu an bu imajı kullanan servis yok; kullanılmaya başlamadan güncel tutuluyor)"]
     if any(f.startswith("russia") for f in flags):
         out += ["", "RU registry'sine itilmezse russia servisleri geçemez."]
     return "\n".join(out)[:BODY_MAX]
@@ -828,7 +828,7 @@ def _body_promote(entry: dict, a: dict, cfg: dict, paths) -> str:
             out.append(f"- … ve {len(paths) - 30} dosya daha")
     out += ["", f"Tempo imajı üretmez / yayınlamaz: birleştirdikten sonra DevOps imajı `{a['dst']}` ortamı için üretip "
                 "yayınlamalı. Bu imajı kullanan bölgeler ve Jenkins bayrakları:"]
-    out += [f"- {_clean(f)}" for f in flags]
+    out += [f"- {_clean(f)}" for f in flags] or ["- (şu an bu imajı kullanan servis yok; kullanılmaya başlamadan güncel tutuluyor)"]
     if any(f.startswith("russia") for f in flags):
         out += ["", "RU registry'sine itilmezse russia servisleri geçemez."]
     return "\n".join(out)[:BODY_MAX]
