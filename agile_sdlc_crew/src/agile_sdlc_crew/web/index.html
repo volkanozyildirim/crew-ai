@@ -1283,13 +1283,15 @@ function renderImageVuln(r){
     +list.map(x=>{
       const sc=x.scan||{};const ok=sc.state==='tamam';
       const old=_ivOldestDays(sc.packages||[]);
-      const fx=(x.fix||[]).map(a=>`<span class="chip ${_ivFixState[a.state]||'dim'}" title="${_ivE(a.kind)}">${_ivE(a.kind)}: ${_ivE(a.state)}</span>`).join(' ');
+      const fx=(x.fix||[]).map(a=>`<div style="white-space:nowrap;font-size:11.5px">${_ivE(_ivKindLabel(a))} <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(_ivStateLabel(a.state))}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}</div>`).join('');
+      // başlatılabilir eylem varsa düğme satırda da durur: giderme panelden, pencereyi açmadan başlatılır
+      const go=(x.fix||[]).some(_ivOpenable)?`<button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="event.stopPropagation();fixImageVuln(this)" title="Başlatılmamış eylemleri yürütür: taslak PR'lar ve izleme işleri. Önce ne açılacağını gösterir.">Gidermeyi başlat</button> `:'';
       return `<tr class="ivr" data-image="${_ivE(x.image)}" onclick="openIvDetail(this.dataset.image)" title="Detay için tıklayın">
         <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}</td>
         <td>${reps(x)}</td><td class="num">${ok?num(sc.critical||0,'danger'):'—'}</td><td class="num">${ok?num(sc.high||0,'warning'):'—'}</td>
         <td class="num">${old==null?'—':old+' gün'}</td>
         <td>${_ivSignals(x).join(' ')||'—'}</td><td>${fx||'—'}</td>
-        <td style="text-align:right"><button class="sm-btn ghost small" data-image="${_ivE(x.image)}" onclick="event.stopPropagation();openIvDetail(this.dataset.image)">Detay</button></td></tr>`}).join('')).join('')+'</table>';
+        <td style="text-align:right;white-space:nowrap">${go}<button class="sm-btn ghost small" data-image="${_ivE(x.image)}" onclick="event.stopPropagation();openIvDetail(this.dataset.image)">Detay</button></td></tr>`}).join('')).join('')+'</table>';
   _ivFixAll={};_ivRows={};rows.forEach(x=>{_ivFixAll[x.image]=x.fix||[];_ivRows[x.image]=x});
   // açık pencere varsa (yoklama / giderme sonrası) taze veriyle yeniden çizilir
   const m=document.getElementById('ivModal');if(m&&m.classList.contains('open')&&_ivRows[m.dataset.image])openIvDetail(m.dataset.image);
@@ -1364,11 +1366,16 @@ let _ivFixAll={};
 function _ivLink(url,text){return /^https:\/\//.test(url||'')?`<a href="${_ivE(url)}" target="_blank" rel="noopener">${_ivE(text)}</a>`:_ivE(text)}
 const _ivOpenable=a=>a&&a.state==='yok';
 const _ivFixState={'yok':'dim','açıldı':'ok','pr açık':'run','izleniyor':'run','şablon var':'run','güncel':'ok','devops':'human','elle':'human','hata':'fail','belirsiz':'human','sırada':'dim','durduruldu':'dim','pr reddedildi':'dim','pr kapandı':'dim','hedef yok':'dim'};
+// Eylem ve durum adları panelde okunur yazılır (sunucu anahtarları: taban-taşıma, yok …).
+const _ivKindName={'taban-yama':'Taban imaj yaması (base-images)','taban-dizin':'Yeni taban dizini (base-images)','taban-taşıma':'Taşıma PR\'ı (base-images)','taban-etiket':'Etiket PR\'ı (bölge repoları)','imaj-yama':'Yama PR\'ı (bölge repoları)','yükseltme':'Sürüm yükseltme izlemesi','yeniden-üret':'Yeniden üretim'};
+const _ivStateName={'yok':'başlatılmadı','güncel':'hazır','devops':'DevOps\'ta','elle':'elle gerekli'};
+function _ivKindLabel(a){return (_ivKindName[a.kind]||a.kind)+(a.kind==='taban-taşıma'&&a.src?`: ${a.src} → ${a.dst}`:'')+(a.kind==='taban-etiket'&&a.target?`: ${a.target}`:'')}
+const _ivStateLabel=s=>_ivStateName[s]||s;
 function _ivFixRows(fix){
   if(!fix||!fix.length)return '';
   return '<div style="margin-top:6px;font-size:11.5px">'+fix.map(a=>{
-    const units=(a.repos||[]).map(u=>`<div style="margin-left:10px;color:var(--text-dim)">${_ivE(u.repo)}: ${_ivE(u.state)}${u.pr?' '+_ivLink(u.pr.url,'PR #'+u.pr.id):''}${u.wi?' '+_ivLink(u.url,'izleme #'+u.wi):''}${u.reason?' — '+_ivE(u.reason):''}</div>`).join('');
-    return `<div style="margin-bottom:4px"><span class="chip dim">${_ivE(a.kind)}</span> <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(a.state)}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${a.reason?`<div style="color:var(--text-dim)">${_ivE(a.reason)}</div>`:''}${units}</div>`}).join('')+'</div>';
+    const units=(a.repos||[]).map(u=>`<div style="margin-left:10px;color:var(--text-dim)">${_ivE(u.repo)}: ${_ivE(_ivStateLabel(u.state))}${u.pr?' '+_ivLink(u.pr.url,'PR #'+u.pr.id):''}${u.wi?' '+_ivLink(u.url,'izleme #'+u.wi):''}${u.reason?' — '+_ivE(u.reason):''}</div>`).join('');
+    return `<div style="margin-bottom:4px"><b>${_ivE(_ivKindLabel(a))}</b> <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(_ivStateLabel(a.state))}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${a.reason?`<div style="color:var(--text-dim)">${_ivE(a.reason)}</div>`:''}${units}</div>`}).join('')+'</div>';
 }
 // Onay metni: hangi repolara hangi PR'ların / izleme işlerinin açılacağı, bölge başına.
 function _ivFixConfirm(image,fix){

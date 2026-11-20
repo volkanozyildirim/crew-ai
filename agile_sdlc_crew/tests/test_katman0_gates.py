@@ -13503,7 +13503,9 @@ def test_image_vuln_alerts():
           and "gün önce" in html_src and "/^CVE-\\d{4}-\\d{4,}$/" in html_src)
     det = html_src[html_src.index("function _ivCveTable"):html_src.index("function closeIvDetail")]
     check("kart: satır özet, ayrıntı pencerede (kritik açıklar tablosu, repolar, eylem, giderme düğmesi)",
-          "openIvDetail(this.dataset.image)" in seg and "ivFixBtn" not in seg and "<details" not in seg
+          "openIvDetail(this.dataset.image)" in seg and "<details" not in seg
+          and "event.stopPropagation();fixImageVuln(this)" in seg and "_ivKindLabel(a)" in seg
+          and "'taban-taşıma':'Taşıma PR" in html_src and "'yok':'başlatılmadı'" in html_src
           and 'id="ivModal"' in html_src and "Kritik açıklar" in det and "Yüksek açıklar" in det
           and "_ivCveTable(pk,'CRITICAL')" in det and "ivFixBtn" in det and "Etkilenen repolar" in det
           and "${x.image}" not in det and "${p.name}" not in det and "${e.cve}" not in det)
