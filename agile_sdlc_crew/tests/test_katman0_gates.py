@@ -11461,6 +11461,19 @@ def test_upgrade_image_template():
         check("PR hatası → ImageTemplateError", False)
     except ui.ImageTemplateError as ex:
         check("PR hatası dalı adlandırır, push yapıldı der", bname in str(ex) and "Push yapıldı" in str(ex), str(ex))
+        check("PR hatası: bu çağrı dal + push yazdı → wrote True", ex.wrote is True)
+    cf2 = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cf2, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    n_before = len(cf2.calls)
+    try:
+        ui.open_pr(cf2, "php", "8.5", entry, resolver=res)
+        check("ikinci deneme de PR'da düşer", False)
+    except ui.ImageTemplateError as ex:
+        check("dal hazır, yalnız PR yine açılamadı → wrote False, yeni dal / push yok",
+              ex.wrote is False and pr_calls(cf2)[n_before:] == [], f"{ex.wrote} {pr_calls(cf2)[n_before:]}")
     check("PR hatasından sonra dal + push yazılmış", pr_calls(cf) == ["branch", "push"], str(pr_calls(cf)))
     cf.fail_at = None
     k = len(cf.calls)
@@ -14742,12 +14755,19 @@ def _image_fix_final_body(knobs):
         raise ui.ImageTemplateError("Hub'da etiket yok. Push yapılmadı.")
 
     def tmpl_partial(client, lang, to, entry, **kw):
+        raise ui.ImageTemplateError("'tempo/base-image-x' dalı, PR oluşturma aşamasında hata: x. Push yapıldı.", wrote=True)
+
+    def tmpl_ready_no_pr(client, lang, to, entry, **kw):
+        # dal önceki denemeden hazır, bu çağrı yalnız PR açmayı denedi: metin "Push yapıldı" der ama yazma yok
         raise ui.ImageTemplateError("'tempo/base-image-x' dalı, PR oluşturma aşamasında hata: x. Push yapıldı.")
     o1 = fx.apply(_FixClient(DF, files=stg), py, team="T", index=ipy, resolver=res, push_fn=never, open_pr_fn=tmpl_refuse, start_fn=never)
     o2 = fx.apply(_FixClient(DF, files=stg), py, team="T", index=ipy, resolver=res, push_fn=never, open_pr_fn=tmpl_partial, start_fn=never)
     check("open_pr yazmadan reddederse ran False; push yapıldıktan sonra hata verirse ran True",
           kind(o1, "taban-dizin")["ran"] is False and kind(o1, "taban-dizin")["state"] == "hata"
           and kind(o2, "taban-dizin")["ran"] is True, f"{kind(o1, 'taban-dizin')} {kind(o2, 'taban-dizin')}")
+    o3 = fx.apply(_FixClient(DF, files=stg), py, team="T", index=ipy, resolver=res, push_fn=never, open_pr_fn=tmpl_ready_no_pr, start_fn=never)
+    check("dal hazırken yalnız PR açılamıyorsa ran False (metne değil hatanın wrote alanına bakılır; her gece sıra yanmaz)",
+          kind(o3, "taban-dizin")["ran"] is False and kind(o3, "taban-dizin")["state"] == "hata", str(kind(o3, "taban-dizin")))
 
     def push_res(res_):
         return lambda client, sites, **kw: res_

@@ -41,7 +41,12 @@ def _clean(text) -> str:
 
 
 class ImageTemplateError(Exception):
-    """Şablon hazırlanamadı; mesaj Türkçe ve kullanıcıya gösterilir."""
+    """Şablon hazırlanamadı; mesaj Türkçe ve kullanıcıya gösterilir. `wrote`: BU çağrı Azure'a bir şey yazdı mı
+    (dal oluşturdu / push etti / PR büyük olasılıkla açıldı) — çağıran metne değil bu alana bakar."""
+
+    def __init__(self, msg: str = "", *, wrote: bool = False):
+        super().__init__(msg)
+        self.wrote = bool(wrote)
 
 
 def load_cfg(path=CFG_PATH) -> dict:
@@ -384,17 +389,18 @@ def _open(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, r
         title = f"{_clean(entry['dir'])} taban imaj şablonu ({_LABEL[lang]} {_clean(built['full'])})"
         changes = [{"changeType": "add", "path": p, "contentType": "base64encoded",
                     "content": base64.b64encode(b).decode("ascii")} for p, b in sorted(built["files"].items())]
-        stage, pushed = "dal oluşturma", not push
+        stage, pushed, wrote = "dal oluşturma", not push, False
         try:
             if create:
                 res = client.create_branch(cfg["repo"], branch, cfg["branch"], project=proj, source_object_id=oid)
                 vals = res.get("value") if isinstance(res, dict) else None
                 if not (vals and vals[0].get("success")):
                     raise ImageTemplateError(f"dal oluşturulamadı ({(vals or [{}])[0].get('updateStatus') or 'yanıt okunamadı'})")
+                wrote = True
             if push:
                 stage = "push"
                 client.push_changes(cfg["repo"], branch, changes, title, project=proj, old_object_id=oid)
-                pushed = True
+                pushed = wrote = True
             stage = "PR oluşturma"
             res = client.create_pull_request(cfg["repo"], branch, cfg["branch"], title=title,
                                              description=mask_secrets(_description(entry, built, cfg, repo)),
@@ -402,11 +408,11 @@ def _open(client, lang: str, to: str, entry: dict, *, cfg=None, resolver=None, r
         except Exception as e:  # noqa: BLE001 — her hata dal adını ve push durumunu söyler
             why = ("yazma yetkisi yok (401/403)" if _denied(e) else mask_secrets(str(e))[:300])
             raise ImageTemplateError(f"'{branch}' dalı, {stage} aşamasında hata: {why}. "
-                                     f"Push {'yapıldı' if pushed else 'yapılmadı'}.") from e
+                                     f"Push {'yapıldı' if pushed else 'yapılmadı'}.", wrote=wrote) from e
     pid = res.get("pullRequestId") if isinstance(res, dict) else None
     if not pid:
         raise ImageTemplateError(f"'{branch}' dalında PR büyük olasılıkla açıldı ama Azure yanıtı okunamadı; "
-                                 "PR'ı Azure DevOps'ta kontrol edin (dal ve içerik hazır, push yapıldı).")
+                                 "PR'ı Azure DevOps'ta kontrol edin (dal ve içerik hazır, push yapıldı).", wrote=True)
     # Web bağlantısı `AzureDevOpsClient.find_pull_request` ile aynı biçimde; yanıtın `url`'si REST adresidir,
     # yalnız org/proje bilinmiyorsa yedek olarak döner.
     base = getattr(client, "org_url", None)

@@ -532,8 +532,15 @@ def _judge(rec: dict) -> tuple[str, list[str]]:
     if crit or high:
         # Kendi taban imajımız (via dolu) DevOps'un işidir; genel etiket (`python:3.11`) servis imajı yeniden
         # derlenip yayınlanınca taze çekilir — DevOps'a yönlendirmek yanlış olur.
-        actions.append("taban imaj yeniden üretilmeli (DevOps, bölge bayrakları)" if rec.get("via")
-                       else "servis imajı yeniden derlendiğinde taze taban çekilir — servisi yeniden yayınla")
+        # Üç parçalı sabit etiket (`golang:1.24.4`) yeniden derlemede aynı eski imajı çeker: "taze taban" denmez;
+        # yama geride / destek bitti eylemleri zaten aşağıda yazılır, ikisi de yoksa çare sürüm yükseltmektir.
+        pinned = not rec.get("via") and len(_ints(rec.get("version") or "") or ()) >= 3
+        if rec.get("via"):
+            actions.append("taban imaj yeniden üretilmeli (DevOps, bölge bayrakları)")
+        elif not pinned:
+            actions.append("servis imajı yeniden derlendiğinde taze taban çekilir — servisi yeniden yayınla")
+        elif not patch and not end:
+            actions.append("sabit etiket: yeniden derleme gidermez — daha yeni sürüme geç")
     if patch:
         actions.append(f"yama sürümünü yükselt ({patch['latest']})")
     if end:

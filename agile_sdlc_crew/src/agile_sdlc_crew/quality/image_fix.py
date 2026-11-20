@@ -634,8 +634,9 @@ def _run_dir(client, a: dict, cfg: dict, resolver, open_pr_fn) -> None:
     try:
         r = open_pr_fn(client, a["lang"], a["to"], a["entry"], cfg=cfg, resolver=resolver, repo="")
     except ImageTemplateError as e:
-        # Mesaj push durumunu söyler: "Push yapıldı" = içerik dalda (yazma oldu); yoksa yazmadan reddedildi.
-        a.update(state="hata", reason=_why(e), ran="Push yapıldı" in str(e))
+        # Sıra yalnız bu denemede gerçekten yazıldıysa harcanır: hatanın `wrote` alanı (metin aranmaz). Dal zaten
+        # hazırken yalnız PR açılamıyorsa `wrote` False'tur — aynı imaj her gece sıra tüketmez.
+        a.update(state="hata", reason=_why(e), ran=bool(getattr(e, "wrote", False)))
         return
     pr = r.get("pr")
     opened = r.get("state") == "pr açık" and bool(pr)
