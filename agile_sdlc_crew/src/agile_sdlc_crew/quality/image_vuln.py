@@ -116,7 +116,9 @@ def tag_newer(have: str, latest: str) -> bool:
     """Kendi imaj etiketi sayısal olarak geride mi (`1.0` < `1.1`, `1.9` < `1.10`). Sayısal olmayan etiket karşılaştırılmaz."""
     if not (_TAGV_RE.fullmatch(str(have or "")) and _TAGV_RE.fullmatch(str(latest or ""))):
         return False
-    return tuple(int(x) for x in have.split(".")) < tuple(int(x) for x in latest.split("."))
+    a, b = have.split("."), latest.split(".")
+    # Parça sayısı farklıysa (`1.0` ile `1.0.0`) karşılaştırılmaz: yalnız rakam değişimiyle yazılamaz, kalıcı uyarı olurdu.
+    return len(a) == len(b) and tuple(int(x) for x in a) < tuple(int(x) for x in b)
 
 
 def _why_invalid(ref: str) -> str:

@@ -18,6 +18,7 @@ Her yazma yolu kapalı kalır: bilinmeyen / belirsiz / elle olan hiçbir şey ya
 açık / terk edilmiş PR ve açık izleme işi üzerinden her çağrıda yeniden türetilir. Terk edilen PR yeniden açılmaz."""
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
 import re
@@ -190,6 +191,8 @@ def plan(client, entry: dict, *, index: dict, resolver, cfg=None, find_open_fn=N
     patch, eol = entry.get("patch"), entry.get("eol")
     sc = entry.get("scan") or {}
     bump_on = _on("CREW_TECHDEBT_UPGRADE_BUMP")
+    # Taşıma PR'ı ve bölge etiket PR'ı ayrı anahtarla açılır (varsayılan kapalı): kapalıyken hiç planlanmaz.
+    promote_on = _on("CREW_TECHDEBT_IMAGE_VULN_PROMOTE")
 
     def pr_action(kind: str, fn, *a):
         # Tempo'nun bütün sürüm PR'ları gibi `_BUMP` kapalıyken PR açılmaz (yazma yolu kapalı).
@@ -207,13 +210,15 @@ def plan(client, entry: dict, *, index: dict, resolver, cfg=None, find_open_fn=N
                                or pr_action("taban-yama", _plan_own, client, entry, d, resolver, cfg))
                 # Düzeltme ilk dalda hazırsa (yama güncel / yeni dizin şablonu var) sıradaki dala taşıma PR'ı.
                 last = out[-1]
-                if {"taban-yama": "güncel", "taban-dizin": "şablon var"}.get(last["kind"]) == last["state"]:
+                if promote_on and {"taban-yama": "güncel", "taban-dizin": "şablon var"}.get(last["kind"]) == last["state"]:
                     mv = pr_action("taban-taşıma", _plan_promote, client, entry, last.get("dir") or d, cfg)
-                    if mv:
+                    # aynı dal çifti için tek PR olur: ikinci dizin aynı çifti isterse ayrıca planlanmaz
+                    if mv and (mv.get("src"), mv.get("dst")) not in {(x.get("src"), x.get("dst")) for x in out
+                                                                    if x["kind"] == "taban-taşıma" and x.get("src")}:
                         out.append(mv)
         else:
             out.append(pr_action("imaj-yama", _plan_public, client, entry, index, resolver, cfg))
-    for d in sorted(entry.get("tag_lag") or {}):
+    for d in sorted((entry.get("tag_lag") or {}) if promote_on else ()):
         # Üretim dalında etiket yükselmiş, bölge repoları eskisini çekiyor (rapordaki işaret; etiket planda taze okunur).
         tg = pr_action("taban-etiket", _plan_tag, client, entry, d, index, cfg)
         if tg:
@@ -724,12 +729,40 @@ def _flow(cfg: dict) -> list[str]:
     return flow
 
 
+def _norm(text) -> str | None:
+    """Karşılaştırma için: satır sonu / sondaki boşluk farkı içerik farkı sayılmaz."""
+    return None if text is None else "\n".join(ln.rstrip() for ln in str(text).replace("\r\n", "\n").split("\n")).strip()
+
+
 def _dir_snap(client, repo: str, proj, d: str, branch: str) -> tuple:
-    """Dizinin o daldaki içeriği: (Dockerfile, tag.txt). İkisi de yoksa (None, None)."""
+    """Dizinin o daldaki içeriği: (Dockerfile, tag.txt), normalize. İkisi de yoksa (None, None)."""
     df = _read(client, repo, f"/{d}/Dockerfile", branch, proj)
     if df is None:
         df = _read(client, repo, f"/{d}/dockerfile", branch, proj)
-    return df, _read(client, repo, f"/{d}/tag.txt", branch, proj)
+    return _norm(df), _norm(_read(client, repo, f"/{d}/tag.txt", branch, proj))
+
+
+def _dir_snap_at(client, repo: str, proj, d: str, commit: str) -> tuple:
+    """Aynı içerik, dal adından değil sabit commit'ten (eski bir PR'ın taşıdığı içerik)."""
+    def get(name: str):
+        raw = client.get_file_bytes(repo, f"/{d}/{name}", project=proj, version=commit, version_type="commit")
+        return None if raw is None else raw.decode("utf-8", "replace")
+    df = get("Dockerfile")
+    if df is None:
+        df = get("dockerfile")
+    return _norm(df), _norm(get("tag.txt"))
+
+
+_SNAP_VER = re.compile(r"^(?:ARG PHP_VERSION=|FROM\s+python:)(\d+\.\d+\.\d+)", re.M | re.ASCII)
+
+
+def _snap_rank(snap: tuple):
+    """Dizin içeriğinin sırası: (sürüm, etiket). Okunamayan sürüm / etiket → None (yön bilinmez, yazılmaz)."""
+    df, tag = snap
+    m = _SNAP_VER.search(df or "")
+    if not m or not image_vuln._TAGV_RE.fullmatch(tag or ""):
+        return None
+    return _ver(m.group(1)), tuple(int(x) for x in tag.split("."))
 
 
 def _plan_promote(client, entry: dict, d: str, cfg: dict) -> dict | None:
@@ -746,10 +779,17 @@ def _plan_promote(client, entry: dict, d: str, cfg: dict) -> dict | None:
     snaps = [_dir_snap(client, repo, proj, d, b) for b in flow]
     if snaps[0][0] is None:
         return _act(kind, "elle", f"{repo}@{flow[0]}'de {d}/Dockerfile yok.", dir=d)
-    pair = next(((flow[i], flow[i + 1]) for i in range(len(flow) - 1) if snaps[i] != snaps[i + 1]), None)
-    if pair is None:
+    i = next((i for i in range(len(flow) - 1) if snaps[i] != snaps[i + 1]), None)
+    if i is None:
         return None
-    src, dst = pair
+    src, dst = flow[i], flow[i + 1]
+    # Yön: hedef dal düzeltmeden GERİDE olmalı (dizin hiç yok ya da sürüm / etiket daha küçük). Hedef ileride ya da
+    # ayrışmışsa (kendi düzeltmesi var) taşıma dalın tamamını geri yazar — önerilmez.
+    if snaps[i + 1] != (None, None):
+        a_rank, b_rank = _snap_rank(snaps[i]), _snap_rank(snaps[i + 1])
+        if a_rank is None or b_rank is None or not (a_rank > b_rank):
+            return _act(kind, "elle", f"'{dst}' dalı '{src}' dalından geride değil (ileride ya da ayrışmış); taşıma "
+                                      "elle değerlendirilmeli.", dir=d, src=src, dst=dst, target=dst)
     refs = {str(b.get("name") or ""): b.get("objectId") for b in client.list_branches(repo, project=proj)}
     src_oid, dst_oid = refs.get(f"refs/heads/{src}"), refs.get(f"refs/heads/{dst}")
     base = dict(dir=d, src=src, dst=dst, target=dst, src_oid=src_oid or "", dst_oid=dst_oid or "")
@@ -758,9 +798,18 @@ def _plan_promote(client, entry: dict, d: str, cfg: dict) -> dict | None:
     pr = client.find_pull_request_between(repo, src, dst, project=proj)
     if pr and pr.get("status") == "active":
         return _act(kind, "pr açık", "", pr=_pr_view(pr), **base)
-    if pr and pr.get("status") == "abandoned" and pr.get("source_commit") == src_oid:
-        # aynı içerik reddedilmiş: kendiliğinden yeniden açılmaz (kaynak dal ilerleyince yeniden önerilir)
-        return _act(kind, "pr reddedildi", f"aynı içerikle açılan PR #{pr.get('id')} reddedilmiş", pr=_pr_view(pr), **base)
+    if pr and pr.get("status") in ("abandoned", "completed"):
+        # Önceki PR bu dizinin AYNI içeriğini mi taşıyordu? Dal başı değil dizin içeriği karşılaştırılır: paylaşılan
+        # dala başka bir commit gelmesi reddedilen / tamamlanan öneriyi yeniden açtırmaz. İçerik okunamazsa belirsiz.
+        old_commit = str(pr.get("source_commit") or "")
+        if not re.fullmatch(r"[0-9a-f]{7,64}", old_commit):
+            return _act(kind, "belirsiz", f"önceki PR #{pr.get('id')} hangi içeriği taşıdığı okunamadı", pr=_pr_view(pr), **base)
+        if _dir_snap_at(client, repo, proj, d, old_commit) == snaps[i]:
+            if pr["status"] == "abandoned":
+                return _act(kind, "pr reddedildi", f"aynı içerikle açılan PR #{pr.get('id')} reddedilmiş",
+                            pr=_pr_view(pr), **base)
+            return _act(kind, "pr kapandı", f"aynı içerik PR #{pr.get('id')} ile taşınmış ama '{dst}' hâlâ farklı — "
+                                              "elle bakılmalı", pr=_pr_view(pr), **base)
     return _act(kind, "yok", "", **base)
 
 
@@ -834,11 +883,7 @@ def _plan_tag(client, entry: dict, d: str, index: dict, cfg: dict) -> dict | Non
     lag = {r: v for r, v in lag.items() if v}
     if not lag:
         return None
-    branch = f"tempo/image-tag-{d}-{new}"
-    base = dict(dir=d, target=f"{d}:{new}", branch=branch, tag=new)
-    bad = _branch_ok(branch, app_map.DEVOPS_BRANCH)
-    if bad:
-        return _act(kind, "elle", bad, **base)
+    base = dict(dir=d, target=f"{d}:{new}", tag=new)
     dproj, dbranch = app_map.DEVOPS_PROJECT, app_map.DEVOPS_BRANCH
     units = []
     for region in sorted(lag):
@@ -862,8 +907,16 @@ def _plan_tag(client, entry: dict, d: str, index: dict, cfg: dict) -> dict | Non
                 u["reason"] = "FROM satırı yalnız rakam değişimiyle yazılamıyor."
                 continue
             u["sites"] = sites
-            u["state"], u["pr"], u["reason"] = _pr_or_older(client, region, dproj, branch, f"tempo/image-tag-{d}-",
-                                                            tail=r"\d+(?:\.\d+){0,3}")
+            # Dal adı yazılacak satır kümesini taşır: tamamlanan bir PR'dan sonra eski etikette yeni bir servis
+            # çıkarsa yeni dal → yeni PR (kapanmış PR onu engellemez); açık PR varken küme değişirse önce o kapanmalı.
+            key = hashlib.sha1("\n".join(sorted(f"{s['path']}:{s['line']}:{s['old']}" for s in sites)).encode()).hexdigest()[:8]
+            u["branch"] = f"tempo/image-tag-{d}-{new}-{key}"
+            bad = _branch_ok(u["branch"], dbranch)
+            if bad:
+                u["reason"] = bad
+                continue
+            u["state"], u["pr"], u["reason"] = _pr_or_older(client, region, dproj, u["branch"], f"tempo/image-tag-{d}-",
+                                                            tail=r"\d+(?:\.\d+){0,3}-[0-9a-f]{8}")
         except Exception as e:  # noqa: BLE001
             u["state"], u["reason"] = "belirsiz", f"okunamadı: {_why(e)}"
     return _act(kind, _agg_plan(units), _bad_reason(units), repos=units, **base)
@@ -882,7 +935,9 @@ def _body_tag(entry: dict, a: dict) -> str:
         out.append(f"- **{_clean(u['repo'])}**" + (f": {paths}" if paths else ""))
     if any(u["repo"] == "russia" for u in a["repos"]):
         out += ["", "RU (VK) kayıt deposu ayrıdır: imaj oraya da basılmış olmalı."]
-    out += ["", "Derleme / test bu PR'da doğrulanmadı: birleştirmeden önce hattın sonucuna bakın."]
+    out += ["", "Bu repoda aynı `FROM` satırını değiştiren başka bir Tempo PR'ı (sürüm yükseltme) açıksa ikisi çakışır: "
+                "biri önce birleştirilmeli ya da kapatılmalı.",
+            "", "Derleme / test bu PR'da doğrulanmadı: birleştirmeden önce hattın sonucuna bakın."]
     return "\n".join(out)[:BODY_MAX]
 
 
@@ -891,7 +946,7 @@ def _run_tag(client, entry: dict, a: dict, push_fn) -> None:
     title = f"Taban imaj etiketi: {a['dir']} → {a['tag']}"
     for u in a["repos"]:
         if u["state"] == "yok":
-            _push(client, u, u["sites"], push_fn=push_fn, branch=a["branch"], title=title, body=body)
+            _push(client, u, u["sites"], push_fn=push_fn, branch=u["branch"], title=title, body=body)
     a["ran"] = any(u.get("wrote") for u in a["repos"])
     a["state"] = _agg_run(a["repos"], a["state"])
     a["reason"] = "; ".join(f"{u['repo']}: {u['reason']}" for u in a["repos"] if u["state"] in ("hata", "elle") and u["reason"])

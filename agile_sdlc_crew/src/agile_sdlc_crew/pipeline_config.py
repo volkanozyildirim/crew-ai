@@ -602,6 +602,13 @@ SCHEMA: list[dict] = [
         "desc": "Uyarı üretildiği turda gidermeyi de başlatır (yama PR'ı, taban dizin şablonu, sürüm yükseltme izlemesi). Başka ekiplerin repolarına taslak PR yazar — varsayılan kapalı. Kapalıyken giderme karttaki düğmeyle elle başlatılır.",
     },
     {
+        "key": "CREW_TECHDEBT_IMAGE_VULN_PROMOTE",
+        "label": "Taban imaj güvenliği · taşıma ve etiket PR'ları",
+        "type": "bool",
+        "default": False,
+        "desc": "Düzeltme base-images'ın ilk dalında hazırsa sıradaki dala taslak taşıma PR'ı açar (staging → preprod → production; dalın tamamını taşır) ve üretim dalında imaj etiketi yükselince bölge repolarındaki FROM satırlarına taslak etiket PR'ı açar. DevOps repolarına yazar — varsayılan kapalı; CREW_TECHDEBT_UPGRADE_BUMP de açık olmalı. Kapalıyken bu iki eylem hiç planlanmaz.",
+    },
+    {
         "key": "CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS",
         "label": "Taban imaj güvenliği · tur başına en çok yeni iş",
         "type": "int",
