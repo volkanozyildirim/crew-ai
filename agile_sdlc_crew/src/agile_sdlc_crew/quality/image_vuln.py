@@ -35,6 +35,7 @@ OWN_REGISTRY = "prod-ar"                                # kendi imajımız: `…
 
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*(:[\w][\w.-]*)?$", re.ASCII)
 _OWN_RE = re.compile(rf"^(?:[^/\s]+/)+{OWN_REGISTRY}/([a-z0-9][a-z0-9._-]*):([\w][\w.-]*)$", re.ASCII)
+_TAGV_RE = re.compile(r"\d+(?:\.\d+){0,3}", re.ASCII)       # kendi imaj etiketi (tag.txt): 1.0, 1.1
 _VER_RE = re.compile(r"^(\d+(?:\.\d+){0,2})", re.ASCII)
 _ARG_RE = re.compile(r"""^\s*ARG\s+(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S*))\s*$""", re.I)
 _FROM_RE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)", re.I)
@@ -111,6 +112,13 @@ def external_registry(image: str) -> bool:
     return "." in first or ":" in first or first == "localhost"
 
 
+def tag_newer(have: str, latest: str) -> bool:
+    """Kendi imaj etiketi sayısal olarak geride mi (`1.0` < `1.1`, `1.9` < `1.10`). Sayısal olmayan etiket karşılaştırılmaz."""
+    if not (_TAGV_RE.fullmatch(str(have or "")) and _TAGV_RE.fullmatch(str(latest or ""))):
+        return False
+    return tuple(int(x) for x in have.split(".")) < tuple(int(x) for x in latest.split("."))
+
+
 def _why_invalid(ref: str) -> str:
     if "@" in ref:
         return "özetle sabitlenmiş imaj taranmıyor"
@@ -134,6 +142,7 @@ def inventory(client, index: dict, *, read=None) -> list[dict]:
     read = read or _default_read(client, repo, project)
     resolved: dict[str, dict] = {}       # kendi imaj adı → {"image", "error", "dir"}
     recs: dict[str, dict] = {}
+    prod_tags: dict[str, str] = {}       # dizin → üretim dalındaki tag.txt
 
     def own(image: str, d: str) -> dict:
         if image in resolved:
@@ -148,6 +157,9 @@ def inventory(client, index: dict, *, read=None) -> list[dict]:
             out = {"image": ref or image, "error": err, "dir": d}
             if ref and not valid_image(ref):
                 out = {"image": image, "error": _why_invalid(ref), "dir": d}
+        if d not in prod_tags:
+            # Dizinin üretim dalındaki etiketi: bölge repoları daha eski etiketi çekiyorsa `tag_lag` (etiket geride).
+            prod_tags[d] = str(read(f"/{d}/tag.txt") or "").strip()
         resolved[image] = out
         return out
 
@@ -175,11 +187,15 @@ def inventory(client, index: dict, *, read=None) -> list[dict]:
                     # Özgün ad kaydı: ARG'lı / geçersiz imajlar `taranamadı` olarak listelenir.
                     image = raw
                 rec = recs.setdefault(image, {"image": image, "lang": "", "version": "", "via": [], "users": {},
-                                              "repos": {}, "touched": "", "error": error})
+                                              "repos": {}, "tag_lag": {}, "touched": "", "error": error})
                 if not rec["error"] and error:
                     rec["error"] = error
                 if via and via not in rec["via"]:
                     rec["via"].append(via)
+                if m and via and tag_newer(m.group(2), prod_tags.get(via, "")):
+                    lag = rec["tag_lag"].setdefault(via, {"have": [], "latest": prod_tags[via]})
+                    if m.group(2) not in lag["have"]:
+                        lag["have"].append(m.group(2))
                 paths = rec["users"].setdefault(region, [])
                 if path not in paths:
                     paths.append(path)
@@ -543,11 +559,16 @@ def _judge(rec: dict) -> tuple[str, list[str]]:
             actions.append("sabit etiket: yeniden derleme gidermez — daha yeni sürüme geç")
     if patch:
         actions.append(f"yama sürümünü yükselt ({patch['latest']})")
+    lag = rec.get("tag_lag") or {}
+    for d in sorted(lag):
+        # Üretim dalında daha yeni etiket var ama servisler eskisini çekiyor: tarama YENİ etiketin dayanağını gösterir,
+        # çalışan servisler ondan eski olabilir.
+        actions.append(f"bölge repolarında imaj etiketini yükselt ({d}:{lag[d]['latest']})")
     if end:
         actions.append(f"sürüm yükselt (destek {end['eol']}'de bitti)" if end["eol"] else "sürüm yükselt (destek bitti)")
     if crit or end:
         return "kritik", actions
-    if high or patch:
+    if high or patch or lag:
         return "yüksek", actions
     if scan["state"] != "tamam":
         return "bilinmiyor", actions

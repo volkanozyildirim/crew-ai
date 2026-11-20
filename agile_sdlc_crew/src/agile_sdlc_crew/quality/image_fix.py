@@ -7,6 +7,10 @@ uyarısı", "Giderme uyarıyla birlikte başlar").
 - `taban-dizin`: kendi üç parçalı dizinimiz (`python-3-13-7`) → aynı minörün yeni yamasıyla dizin şablonu
   (`upgrade_image.open_pr`).
 - `imaj-yama`: genel üç parçalı imaj (`golang:1.24.4`) → kullanan her bölge reposunda `FROM` satırı, bölge başına PR.
+- `taban-taşıma`: düzeltme `base-images`'ın ilk dalında hazır ama sonraki dala taşınmamış → `flow` sırasındaki ilk
+  farklı komşu dal çiftine taslak taşıma PR'ı (dal oluşturulmaz; dalın tamamını taşır, gövde bunu söyler).
+- `taban-etiket`: üretim dalında `tag.txt` yükselmiş, bölge repoları eski etiketi çekiyor → bölge başına `FROM`
+  etiketi PR'ı.
 - `yükseltme`: desteği biten dil → `upgrade_track.start` ile sürüm yükseltme izlemesi.
 - `yeniden-üret`: yalnız işletim sistemi bulgusu → yazma yok, DevOps'tan ister.
 
@@ -90,12 +94,13 @@ def _branch_ok(branch: str, target: str) -> str:
     return ""
 
 
-def _older_open_pr(client, repo: str, project: str | None, prefix: str, own: str) -> dict | None:
+def _older_open_pr(client, repo: str, project: str | None, prefix: str, own: str,
+                   tail: str = r"\d+\.\d+\.\d+") -> dict | None:
     """Aynı eski imaj için başka (daha eski bir yamaya giden) dalın AÇIK PR'ı var mı? Yalnız `list_branches` (zaten push
     öncesi okunan hafif çağrı) + öneke uyan her dal için tam ad aramasıyla; terk / tamamlanmış PR engellemez."""
     refs = [str(b.get("name") or "").removeprefix("refs/heads/") for b in client.list_branches(repo, project=project)]
     # TAM eşleşme: `…-golang-1.24.4-` öneki `…-golang-1.24.4-alpine-1.24.13` gibi kardeş imaj dallarına uymasın.
-    pat = re.compile(re.escape(prefix) + r"\d+\.\d+\.\d+", re.ASCII)
+    pat = re.compile(re.escape(prefix) + tail, re.ASCII)
     for name in sorted(r for r in refs if pat.fullmatch(r) and r != own):
         pr = client.find_pull_request(repo, name, project=project)
         if pr and pr.get("status") == "active":
@@ -103,10 +108,11 @@ def _older_open_pr(client, repo: str, project: str | None, prefix: str, own: str
     return None
 
 
-def _pr_or_older(client, repo: str, project: str | None, branch: str, prefix: str):
+def _pr_or_older(client, repo: str, project: str | None, branch: str, prefix: str,
+                 tail: str = r"\d+\.\d+\.\d+"):
     state, pr, why = _pr_state(client, repo, branch, project)
     if state == "yok":
-        older = _older_open_pr(client, repo, project, prefix, branch)
+        older = _older_open_pr(client, repo, project, prefix, branch, tail)
         if older:
             return "pr açık", _pr_view(older), f"önceki yama PR'ı açık: #{older.get('id')} — önce o kapanmalı"
     return state, pr, why
@@ -199,8 +205,19 @@ def plan(client, entry: dict, *, index: dict, resolver, cfg=None, find_open_fn=N
                 else:
                     out.append(_unknown_act("taban-yama", entry.get("users") or {}, cfg)
                                or pr_action("taban-yama", _plan_own, client, entry, d, resolver, cfg))
+                # Düzeltme ilk dalda hazırsa (yama güncel / yeni dizin şablonu var) sıradaki dala taşıma PR'ı.
+                last = out[-1]
+                if {"taban-yama": "güncel", "taban-dizin": "şablon var"}.get(last["kind"]) == last["state"]:
+                    mv = pr_action("taban-taşıma", _plan_promote, client, entry, last.get("dir") or d, cfg)
+                    if mv:
+                        out.append(mv)
         else:
             out.append(pr_action("imaj-yama", _plan_public, client, entry, index, resolver, cfg))
+    for d in sorted(entry.get("tag_lag") or {}):
+        # Üretim dalında etiket yükselmiş, bölge repoları eskisini çekiyor (rapordaki işaret; etiket planda taze okunur).
+        tg = pr_action("taban-etiket", _plan_tag, client, entry, d, index, cfg)
+        if tg:
+            out.append(tg)
     if eol:
         out.append(_guard("yükseltme", _plan_upgrade, client, entry, index, find_open_fn, find_any_fn, auto,
                            current_fn))
@@ -612,6 +629,10 @@ def apply(client, entry: dict, *, team: str, index: dict, resolver, deps=None, p
                     _run_dir(client, a, cfg, resolver, open_pr_fn)
                 elif a["kind"] == "imaj-yama":
                     _run_public(client, entry, a, push_fn, upgrade_note)
+                elif a["kind"] == "taban-taşıma":
+                    _run_promote(client, entry, a, cfg)
+                elif a["kind"] == "taban-etiket":
+                    _run_tag(client, entry, a, push_fn)
                 elif a["kind"] == "yükseltme":
                     _run_upgrade(client, entry, a, team, deps, start_fn, budget, index)
             except Exception as e:  # noqa: BLE001
@@ -685,6 +706,195 @@ def _run_upgrade(client, entry: dict, a: dict, team: str, deps, start_fn, budget
     a["ran"] = any(u.get("wrote") for u in a["repos"])           # tur sınırı / yorum yalnız gerçekten YAZILAN için
     a["state"] = _agg_run(a["repos"], a["state"])
     a["reason"] = "; ".join(f"{u['repo']}: {u['reason']}" for u in a["repos"] if u["state"] in ("hata", "sırada") and u["reason"])
+
+
+# ── Taşıma (base-images dalları arası) ve bölge repolarında etiket ───────
+
+_FLOW_BR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}", re.ASCII)
+_TAG_DIR = re.compile(r"[a-z0-9][a-z0-9.-]*", re.ASCII)      # dal adına girebilen dizin adı (`_` yok)
+
+
+def _flow(cfg: dict) -> list[str]:
+    """`config/upgrade_image.yaml` `flow`: taşıma sırası. Geçersizse boş (yazılmaz)."""
+    flow = cfg.get("flow")
+    if (not isinstance(flow, list) or len(flow) < 2 or len(set(map(str, flow))) != len(flow)
+            or not all(isinstance(b, str) and _FLOW_BR.fullmatch(b) and ".." not in b for b in flow)
+            or flow[0] != cfg.get("branch")):
+        return []
+    return flow
+
+
+def _dir_snap(client, repo: str, proj, d: str, branch: str) -> tuple:
+    """Dizinin o daldaki içeriği: (Dockerfile, tag.txt). İkisi de yoksa (None, None)."""
+    df = _read(client, repo, f"/{d}/Dockerfile", branch, proj)
+    if df is None:
+        df = _read(client, repo, f"/{d}/dockerfile", branch, proj)
+    return df, _read(client, repo, f"/{d}/tag.txt", branch, proj)
+
+
+def _plan_promote(client, entry: dict, d: str, cfg: dict) -> dict | None:
+    """Düzeltme ilk dalda hazır ama sonraki dallara taşınmamışsa: içeriği farklı olan İLK komşu dal çiftine taslak
+    taşıma PR'ı (ör. staging → preprod, sonra preprod → production). Hepsi aynıysa None (eylem yok). Dal oluşturulmaz,
+    push edilmez: yalnız var olan iki dal arasında PR açılır."""
+    kind = "taban-taşıma"
+    repo, proj = cfg["repo"], cfg.get("project") or None
+    flow = _flow(cfg)
+    if not flow:
+        return _act(kind, "elle", "config/upgrade_image.yaml `flow` geçersiz (ilk dal `branch` olmalı, en az iki dal).", dir=d)
+    if not _TAG_DIR.fullmatch(d or "") or ".." in d:
+        return _act(kind, "elle", f"'{_clean(d)[:60]}' dizin adı beklenen biçimde değil; taşınmaz.")
+    snaps = [_dir_snap(client, repo, proj, d, b) for b in flow]
+    if snaps[0][0] is None:
+        return _act(kind, "elle", f"{repo}@{flow[0]}'de {d}/Dockerfile yok.", dir=d)
+    pair = next(((flow[i], flow[i + 1]) for i in range(len(flow) - 1) if snaps[i] != snaps[i + 1]), None)
+    if pair is None:
+        return None
+    src, dst = pair
+    refs = {str(b.get("name") or ""): b.get("objectId") for b in client.list_branches(repo, project=proj)}
+    src_oid, dst_oid = refs.get(f"refs/heads/{src}"), refs.get(f"refs/heads/{dst}")
+    base = dict(dir=d, src=src, dst=dst, target=dst, src_oid=src_oid or "", dst_oid=dst_oid or "")
+    if not src_oid or not dst_oid:
+        return _act(kind, "elle", f"{repo}: '{src if not src_oid else dst}' dalı bulunamadı.", **base)
+    pr = client.find_pull_request_between(repo, src, dst, project=proj)
+    if pr and pr.get("status") == "active":
+        return _act(kind, "pr açık", "", pr=_pr_view(pr), **base)
+    if pr and pr.get("status") == "abandoned" and pr.get("source_commit") == src_oid:
+        # aynı içerik reddedilmiş: kendiliğinden yeniden açılmaz (kaynak dal ilerleyince yeniden önerilir)
+        return _act(kind, "pr reddedildi", f"aynı içerikle açılan PR #{pr.get('id')} reddedilmiş", pr=_pr_view(pr), **base)
+    return _act(kind, "yok", "", **base)
+
+
+def _body_promote(entry: dict, a: dict, cfg: dict, paths) -> str:
+    flags = _flags(entry, cfg)
+    out = [f"Tempo, `{_clean(entry['image'])}` taban imajının düzeltmesi `{a['src']}` dalında hazır olduğu için bu taşıma "
+           "PR'ını açtı (Taban imaj güvenliği uyarısı).", "",
+           f"Tetikleyen dizin: `{_clean(a['dir'])}` — `{a['dst']}` dalında eski içerik duruyor.{_scan_text(entry)}", "",
+           f"DİKKAT: bu PR `{a['src']}` dalının TAMAMINI `{a['dst']}` dalına taşır, yalnız bu dizini değil. "
+           "Birleştirmeden önce bütün farkı inceleyin."]
+    if paths is None:
+        out += ["", "Değişen dosyalar okunamadı; PR'ın dosya sekmesine bakın."]
+    else:
+        out += ["", f"Değişen dosyalar ({len(paths)}):"] + [f"- `{_clean(p)[:120]}`" for p in paths[:30]]
+        if len(paths) > 30:
+            out.append(f"- … ve {len(paths) - 30} dosya daha")
+    out += ["", f"Tempo imajı üretmez / yayınlamaz: birleştirdikten sonra DevOps imajı `{a['dst']}` ortamı için üretip "
+                "yayınlamalı. Bu imajı kullanan bölgeler ve Jenkins bayrakları:"]
+    out += [f"- {_clean(f)}" for f in flags]
+    if any(f.startswith("russia") for f in flags):
+        out += ["", "RU registry'sine itilmezse russia servisleri geçemez."]
+    return "\n".join(out)[:BODY_MAX]
+
+
+def _run_promote(client, entry: dict, a: dict, cfg: dict) -> None:
+    repo, proj = cfg["repo"], cfg.get("project") or None
+    try:
+        paths = client.get_commit_diff_paths(repo, a["dst_oid"], a["src_oid"])
+    except Exception:  # noqa: BLE001 — liste yalnız bilgi; okunamazsa PR yine açılır, gövde bunu söyler
+        paths = None
+    title = f"Taban imaj taşıma: {a['src']} → {a['dst']} ({_clean(a['dir'])})"
+    try:
+        res = client.create_pull_request(repo, a["src"], a["dst"], title=title,
+                                         description=mask_secrets(_body_promote(entry, a, cfg, paths)),
+                                         draft=True, project=proj)
+    except Exception as e:  # noqa: BLE001
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        if code in (401, 403):
+            a.update(state="elle", reason="yazma yetkisi yok (401/403) — taşıma PR'ı elle açılmalı", ran=False)
+        else:
+            a.update(state="hata", reason=_why(e), ran=False)
+        return
+    pid = res.get("pullRequestId") if isinstance(res, dict) else None
+    if not pid:
+        a.update(state="belirsiz", reason="PR büyük olasılıkla açıldı ama Azure yanıtı okunamadı; Azure DevOps'ta kontrol edin",
+                 ran=True)
+        return
+    base = getattr(client, "org_url", None)
+    proj_name = ((res.get("repository") or {}).get("project") or {}).get("name") or cfg.get("project")
+    url = f"{base}/{proj_name}/_git/{repo}/pullrequest/{pid}" if base and proj_name else ""
+    a.update(state="açıldı", pr={"id": pid, "url": _https(url)}, reason="", ran=True)
+
+
+def _plan_tag(client, entry: dict, d: str, index: dict, cfg: dict) -> dict | None:
+    """Kendi taban imajımızın etiketi üretim dalında yükselmiş (`tag.txt`) ama bölge repoları eskisini çekiyor: kullanan
+    her bölge reposunda `FROM …/<dizin>:<eski>` → `:<yeni>`, bölge başına taslak PR. Etiket üretim dalından TAZE okunur;
+    bir bölge bile belirsizse hiçbiri yazılmaz. Geride servis yoksa None."""
+    from agile_sdlc_crew.quality import upgrade_bump
+    kind = "taban-etiket"
+    repo, proj = cfg["repo"], cfg.get("project") or None
+    if not _TAG_DIR.fullmatch(d or "") or ".." in d:
+        return _act(kind, "elle", f"'{_clean(d)[:60]}' dizin adı dal adına çevrilemiyor; yazılmaz.")
+    new = str(_read(client, repo, f"/{d}/tag.txt", image_vuln.PROD_BRANCH, proj) or "").strip()
+    if not image_vuln._TAGV_RE.fullmatch(new):
+        return _act(kind, "elle", f"{repo}@{image_vuln.PROD_BRANCH} {d}/tag.txt okunamadı ya da sayısal değil.", dir=d)
+    lag: dict[str, list[tuple[str, str]]] = {}       # bölge → [(yol, ham FROM)]
+    for _repo, region, path, raw in _users(index, {"image": entry["image"], "via": [d]}):
+        m = image_vuln._OWN_RE.match(raw)
+        if m and m.group(1) == d and image_vuln.tag_newer(m.group(2), new) and (path, raw) not in lag.setdefault(region, []):
+            lag[region].append((path, raw))
+    lag = {r: v for r, v in lag.items() if v}
+    if not lag:
+        return None
+    branch = f"tempo/image-tag-{d}-{new}"
+    base = dict(dir=d, target=f"{d}:{new}", branch=branch, tag=new)
+    bad = _branch_ok(branch, app_map.DEVOPS_BRANCH)
+    if bad:
+        return _act(kind, "elle", bad, **base)
+    dproj, dbranch = app_map.DEVOPS_PROJECT, app_map.DEVOPS_BRANCH
+    units = []
+    for region in sorted(lag):
+        u = {"repo": region, "state": "elle", "reason": "", "sites": [], "pr": None}
+        units.append(u)
+        if region not in app_map.DEVOPS_REPOS:
+            u["reason"] = f"'{_clean(region)[:40]}' bir bölge reposu değil; yazılmaz."
+            continue
+        try:
+            sites: list[dict] = []
+            why = ""
+            for path, raw in sorted(lag[region]):
+                got, why = _region_sites(client, region, [path], raw, raw[:raw.rindex(":") + 1] + new, dproj, dbranch)
+                if why:
+                    break
+                sites += got
+            if why:
+                u["reason"] = why
+                continue
+            if not sites or not all(upgrade_bump.pushable(s) for s in sites):
+                u["reason"] = "FROM satırı yalnız rakam değişimiyle yazılamıyor."
+                continue
+            u["sites"] = sites
+            u["state"], u["pr"], u["reason"] = _pr_or_older(client, region, dproj, branch, f"tempo/image-tag-{d}-",
+                                                            tail=r"\d+(?:\.\d+){0,3}")
+        except Exception as e:  # noqa: BLE001
+            u["state"], u["reason"] = "belirsiz", f"okunamadı: {_why(e)}"
+    return _act(kind, _agg_plan(units), _bad_reason(units), repos=units, **base)
+
+
+def _body_tag(entry: dict, a: dict) -> str:
+    out = [f"Tempo, `{_clean(a['dir'])}` taban imajının yeni etiketi (`{a['tag']}`) base-images "
+           f"`{image_vuln.PROD_BRANCH}` dalında olduğu için bu PR'ı açtı (Taban imaj güvenliği uyarısı).", "",
+           f"Değişiklik: `FROM …/{_clean(a['dir'])}:<eski>` satırlarında etiket `{a['tag']}` olur; başka satır değişmez."
+           f"{_scan_text(entry)}", "",
+           f"ÖNEMLİ: `{_clean(a['dir'])}:{a['tag']}` imajı bu bölgenin kayıt deposuna basılmadan birleştirmeyin — derleme "
+           "imajı bulamaz. Tempo kayıt deposunu göremez; imajın varlığını DevOps doğrulamalı.", "",
+           "Bu giderme şu bölge repolarını kapsar (her biri için ayrı PR):"]
+    for u in a["repos"]:
+        paths = ", ".join(f"`{_clean(s['path'])}`" for s in u.get("sites") or [])
+        out.append(f"- **{_clean(u['repo'])}**" + (f": {paths}" if paths else ""))
+    if any(u["repo"] == "russia" for u in a["repos"]):
+        out += ["", "RU (VK) kayıt deposu ayrıdır: imaj oraya da basılmış olmalı."]
+    out += ["", "Derleme / test bu PR'da doğrulanmadı: birleştirmeden önce hattın sonucuna bakın."]
+    return "\n".join(out)[:BODY_MAX]
+
+
+def _run_tag(client, entry: dict, a: dict, push_fn) -> None:
+    body = _body_tag(entry, a)
+    title = f"Taban imaj etiketi: {a['dir']} → {a['tag']}"
+    for u in a["repos"]:
+        if u["state"] == "yok":
+            _push(client, u, u["sites"], push_fn=push_fn, branch=a["branch"], title=title, body=body)
+    a["ran"] = any(u.get("wrote") for u in a["repos"])
+    a["state"] = _agg_run(a["repos"], a["state"])
+    a["reason"] = "; ".join(f"{u['repo']}: {u['reason']}" for u in a["repos"] if u["state"] in ("hata", "elle") and u["reason"])
 
 
 # ── Çıktı ────────────────────────────────────────────────────────────────

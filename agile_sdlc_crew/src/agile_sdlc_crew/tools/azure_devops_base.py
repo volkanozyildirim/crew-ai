@@ -684,6 +684,36 @@ class AzureDevOpsClient:
             "created_by": (pr.get("createdBy") or {}).get("id") or "",
         }
 
+    def find_pull_request_between(self, repo_id_or_name: str, source_branch: str, target_branch: str, *,
+                                  project: str | None = None) -> dict | None:
+        """`source_branch` → `target_branch` arasındaki en yeni PR (her durumda); yoksa None. Uzun ömürlü dallar
+        arası taşıma PR'ları (staging → preprod) için: `find_pull_request` yalnız kaynağa bakar, aynı kaynaktan başka
+        hedefe açılmış PR'ı döndürebilir. {"id","status","url","source_commit","created_by"}."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pullrequests"
+        params = {
+            "searchCriteria.sourceRefName": f"refs/heads/{source_branch}",
+            "searchCriteria.targetRefName": f"refs/heads/{target_branch}",
+            "searchCriteria.status": "all",
+            "api-version": self.API_VERSION,
+        }
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        vals = resp.json().get("value", [])
+        if not vals:
+            return None
+        pr = max(vals, key=lambda v: int(v.get("pullRequestId") or 0))
+        repo = pr.get("repository") or {}
+        proj = (repo.get("project") or {}).get("name") \
+            or project or self._find_repo_project(repo_id_or_name)
+        repo_name = repo.get("name") or repo_id_or_name
+        return {
+            "id": pr.get("pullRequestId"),
+            "status": pr.get("status") or "",
+            "url": f"{self.org_url}/{proj}/_git/{repo_name}/pullrequest/{pr.get('pullRequestId')}",
+            "source_commit": (pr.get("lastMergeSourceCommit") or {}).get("commitId") or "",
+            "created_by": (pr.get("createdBy") or {}).get("id") or "",
+        }
+
     def delete_branch(self, repo_id_or_name: str, branch_name: str) -> bool:
         """Remote branch'i siler. Branch yoksa False doner (hata firlatmaz).
 

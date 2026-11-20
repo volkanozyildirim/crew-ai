@@ -13552,6 +13552,221 @@ class _FixClient(_FakeBaseImages):
         return self.region_prs.get((repo, branch))
 
 
+class _PromoClient(_FixClient):
+    """base-images'ta üç dal (staging / preprod / production) + dallar arası PR araması."""
+
+    def __init__(self, dockerfiles=None, branches=None, between=None, **kw):
+        super().__init__(dockerfiles, **kw)
+        self.files = {b: dict(f) for b, f in (branches or {}).items()}
+        self.between = dict(between or {})
+        self.diff_fail = False
+
+    def find_pull_request_between(self, repo, src, dst, project=None):
+        assert repo == "base-images" and project == "FLODevOps", (repo, project)
+        return self.between.get((src, dst))
+
+    def get_commit_diff_paths(self, repo, base, target):
+        if self.diff_fail:
+            raise OSError("diff okunamadı")
+        return ["/php-8-4/Dockerfile", "/php-8-4/tag.txt", "/x`y/Dockerfile"]
+
+
+def test_image_fix_promote_tag():
+    """Taşıma PR'ı (base-images dalları arası) ve bölge repolarında etiket yükseltme. Ağ / Azure / MySQL yok."""
+    print("\n[taban imaj güvenliği: taşıma ve etiket]")
+    from agile_sdlc_crew.quality import image_fix as fx, image_vuln as iv
+    from agile_sdlc_crew.quality import upgrade_bump as bump, upgrade_image as ui, upgrade_registry as ur
+    knobs = {"CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE_BUMP": True}
+    reg, ru = "europe-west1-docker.pkg.dev/flo-prod-main/prod-ar", "10.131.167.220:5000/prod-ar"
+    res = ur.Resolver(fetch=_fake_hub({"php": ["8.4.28", "8.4.28-fpm-trixie", "8.4.28-fpm-bookworm"]}))
+    NEW = {"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.28\nFROM php:${PHP_VERSION}-fpm-trixie\n", "/php-8-4/tag.txt": b"1.1"}
+    OLD = {"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.27\nFROM php:${PHP_VERSION}-fpm-bookworm\n", "/php-8-4/tag.txt": b"1.0"}
+    index = {"channel": [{"src": "anatolia/build/channel", "images": [f"{reg}/php-8-4:1.0", "builder"]}],
+             "core": [{"src": "russia/build/core", "images": [f"{ru}/php-8-4:1.0"]}],
+             "fresh": [{"src": "global/build/fresh", "images": [f"{reg}/php-8-4:1.1"]}]}
+    DF = {("anatolia", "/build/channel/Dockerfile"): f"FROM {reg}/php-8-4:1.0 AS base\nRUN x\nFROM builder\n",
+          ("russia", "/build/core/Dockerfile"): f"FROM {ru}/php-8-4:1.0\n"}
+
+    def rec(**kw):
+        r = {"image": "php:8.4.27-fpm-bookworm", "lang": "php", "version": "8.4.27", "via": ["php-8-4"], "touched": "",
+             "error": "", "users": {"anatolia": ["build/channel"], "russia": ["build/core"]}, "tag_lag": {},
+             "scan": {"state": "tamam", "critical": 0, "high": 0, "packages": [], "os": "", "created": "",
+                      "ignored": {"critical": 0, "high": 0, "packages": []}},
+             "patch": {"latest": "8.4.28"}, "eol": None, "level": "yüksek", "actions": []}
+        r.update(kw)
+        return r
+
+    def kind(acts, k):
+        return next((a for a in acts if a["kind"] == k), None)
+
+    def never(*a, **k):
+        raise AssertionError("yazma çağrılmamalıydı")
+
+    with _fix_env(knobs):
+        # ── taşıma: plan ──────────────────────────────────────────────────
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        acts = fx.plan(c, rec(), index=index, resolver=res)
+        a = kind(acts, "taban-taşıma")
+        check("taşıma: staging = preprod, production eski → preprod → production önerilir",
+              kind(acts, "taban-yama")["state"] == "güncel" and a and a["state"] == "yok"
+              and (a["src"], a["dst"]) == ("preprod", "production") and a["dir"] == "php-8-4", str(a))
+        check("taşıma: plan yazmaz", c.calls == [], str(c.calls))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": OLD, "production": OLD})
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: preprod da eski → önce staging → preprod", a["state"] == "yok" and (a["src"], a["dst"]) == ("staging", "preprod"), str(a))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": NEW})
+        check("taşıma: üç dal aynı → eylem yok", kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma") is None)
+        c = _PromoClient(DF, {"staging": OLD, "preprod": OLD, "production": OLD})
+        acts = fx.plan(c, rec(), index=index, resolver=res)
+        check("taşıma: düzeltme staging'de değilken önerilmez (önce yama PR'ı)",
+              kind(acts, "taban-yama")["state"] == "yok" and kind(acts, "taban-taşıma") is None, str(acts))
+        pr = {"id": 9, "status": "active", "url": "https://dev.azure.com/org/FLODevOps/_git/base-images/pullrequest/9",
+              "source_commit": "oid-preprod"}
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD}, between={("preprod", "production"): pr})
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: açık PR varsa (kim açmış olursa olsun) 'pr açık'", a["state"] == "pr açık" and a["pr"]["id"] == 9, str(a))
+        c.between[("preprod", "production")] = dict(pr, status="abandoned")
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: aynı içerik reddedilmişse yeniden açılmaz", a["state"] == "pr reddedildi", str(a))
+        c.between[("preprod", "production")] = dict(pr, status="abandoned", source_commit="oid-eski")
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: reddedilenden sonra kaynak dal ilerlemişse yeniden önerilir", a["state"] == "yok", str(a))
+        c.between[("preprod", "production")] = dict(pr, status="completed")
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: tamamlanmış eski PR engel değil", a["state"] == "yok", str(a))
+        for bad in (["staging"], ["preprod", "production"], ["staging", "pre prod"], ["staging", "staging"], "staging"):
+            cfg = dict(ui.load_cfg(), flow=bad)
+            c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+            a = kind(fx.plan(c, rec(), index=index, resolver=res, cfg=cfg), "taban-taşıma")
+            check(f"taşıma: geçersiz flow {bad!r} → elle, yazılmaz", a and a["state"] == "elle", str(a))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW})
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: hedef dal okunamıyorsa belirsiz (yazılmaz)", a and a["state"] == "belirsiz", str(a))
+        knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = False
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        acts = fx.plan(c, rec(), index=index, resolver=res)
+        check("PR anahtarı kapalıyken taşıma planlanmaz / yazılmaz",
+              all(x["state"] == "elle" for x in acts) and c.calls == [], str(acts))
+        knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = True
+
+        # ── taşıma: uygula ────────────────────────────────────────────────
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        out = fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+        a = kind(out, "taban-taşıma")
+        prs = [x for x in c.calls if x[0] == "pr"]
+        check("taşıma uygula: tek taslak PR preprod → production; dal / push yok",
+              a["state"] == "açıldı" and a["ran"] is True and len(c.calls) == 1 and len(prs) == 1
+              and prs[0][1:3] == ("preprod", "production") and prs[0][5] is True and prs[0][6] == "FLODevOps", str(c.calls)[:400])
+        body = prs[0][4]
+        check("taşıma gövdesi: dalın tamamını taşıdığını, değişen dosyaları ve RU bayrağını söyler",
+              "TAMAMINI" in body and "/php-8-4/tag.txt" in body and "yandexLocation" in body and "russia" in body
+              and "x`y" not in body and len(body) <= 4000, body)
+        check("taşıma: web PR bağlantısı", a["pr"] == {"id": 77, "url": "https://dev.azure.com/org/FLODevOps/_git/base-images/pullrequest/77"}, str(a["pr"]))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        c.diff_fail = True
+        out = fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+        check("taşıma: dosya listesi okunamazsa PR yine açılır, gövde söyler",
+              kind(out, "taban-taşıma")["state"] == "açıldı" and "okunamadı" in [x for x in c.calls if x[0] == "pr"][0][4])
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD}, fail_at="pr")
+        a = kind(fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never), "taban-taşıma")
+        check("taşıma: PR açılamazsa hata, ran False (sıra harcanmaz)", a["state"] == "hata" and a["ran"] is False, str(a))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        c.create_pull_request = lambda *a_, **k: c._deny()
+        a = kind(fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never), "taban-taşıma")
+        check("taşıma: 401/403 → elle, ran False", a["state"] == "elle" and a["ran"] is False, str(a))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        c.pr_response = {}
+        a = kind(fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never), "taban-taşıma")
+        check("taşıma: yanıt okunamazsa belirsiz ama ran True (PR açılmış olabilir)", a["state"] == "belirsiz" and a["ran"] is True, str(a))
+
+        # ── etiket: envanter işareti ──────────────────────────────────────
+        check("etiket karşılaştırması sayısal", iv.tag_newer("1.0", "1.1") and iv.tag_newer("1.9", "1.10")
+              and not iv.tag_newer("1.1", "1.1") and not iv.tag_newer("1.2", "1.1") and not iv.tag_newer("latest", "1.1")
+              and not iv.tag_newer("1.0", "1.1;rm"))
+        files = {"/php-8-4/Dockerfile": NEW["/php-8-4/Dockerfile"].decode(), "/php-8-4/tag.txt": "1.1\n"}
+        recs = {r["image"]: r for r in iv.inventory(_iv_client({}), index, read=files.get)}
+        p = recs["php:8.4.28-fpm-trixie"]
+        check("envanter: üretim etiketi 1.1, bölgeler 1.0 çekiyor → tag_lag (güncel bölge sayılmaz)",
+              p["tag_lag"] == {"php-8-4": {"have": ["1.0"], "latest": "1.1"}}, str(p["tag_lag"]))
+        p.update(scan={"state": "tamam", "critical": 0, "high": 0, "packages": []}, patch=None, eol=None)
+        lvl, actions = iv._judge(p)
+        check("etiket geride → en az 'yüksek' + eylem metni", lvl == "yüksek"
+              and "bölge repolarında imaj etiketini yükselt (php-8-4:1.1)" in actions, f"{lvl} {actions}")
+        files["/php-8-4/tag.txt"] = "1.0"
+        p0 = {r["image"]: r for r in iv.inventory(_iv_client({}), index, read=files.get)}["php:8.4.28-fpm-trixie"]
+        check("envanter: etiket aynıyken işaret yok", p0["tag_lag"] == {}, str(p0["tag_lag"]))
+
+        # ── etiket: plan ──────────────────────────────────────────────────
+        lagrec = rec(image="php:8.4.28-fpm-trixie", version="8.4.28", patch=None, tag_lag={"php-8-4": {"have": ["1.0"], "latest": "1.1"}})
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": NEW})
+        acts = fx.plan(c, lagrec, index=index, resolver=res)
+        a = kind(acts, "taban-etiket")
+        check("etiket plan: yalnız etiket eylemi, bölge başına birim, sabit dal adı",
+              [x["kind"] for x in acts] == ["taban-etiket"] and a["state"] == "yok" and a["branch"] == "tempo/image-tag-php-8-4-1.1"
+              and [u["repo"] for u in a["repos"]] == ["anatolia", "russia"] and a["target"] == "php-8-4:1.1", str(a))
+        sa, sr = a["repos"][0]["sites"], a["repos"][1]["sites"]
+        check("etiket plan: her bölgede kendi kayıt deposu adıyla yalnız etiket değişir (güncel bölgeye dokunulmaz)",
+              len(sa) == 1 and sa[0]["old"] == f"{reg}/php-8-4:1.0" and sa[0]["new"] == f"{reg}/php-8-4:1.1" and sa[0]["line"] == 1
+              and sa[0]["branch"] == "production" and sr[0]["old"] == f"{ru}/php-8-4:1.0" and sr[0]["new"] == f"{ru}/php-8-4:1.1"
+              and all(bump.pushable(s) for s in sa + sr), f"{sa} {sr}")
+        try:
+            bump._validate(sa + sr, a["branch"])
+            check("etiket: siteler ve dal adı push_sites doğrulamasından geçer", True)
+        except ValueError as e:
+            check("etiket: siteler ve dal adı push_sites doğrulamasından geçer", False, str(e))
+        for bad in ("tempo/image-tag-php-8-4-", "tempo/image-tag-php-8-4-1.1/x", "tempo/image-tag-../x-1.1", "tempo/image-tag-PHP-1.1",
+                    "production", "tempo/image-tag-php-8-4-1.1.1.1.1"):
+            try:
+                bump._validate_branch(bad, {"production"})
+                check(f"dal adı reddedilir: {bad}", False)
+            except ValueError:
+                check(f"dal adı reddedilir: {bad}", True)
+        check("etiket plan yazmaz", c.calls == [])
+        c = _PromoClient(DF, {"production": dict(NEW, **{"/php-8-4/tag.txt": b"1.1;rm"})})
+        a = kind(fx.plan(c, lagrec, index=index, resolver=res), "taban-etiket")
+        check("etiket plan: üretim etiketi sayısal değilse elle", a["state"] == "elle", str(a))
+        c = _PromoClient(DF, {"production": OLD})
+        check("etiket plan: taze okunan üretim etiketi geride değilse eylem yok (rapor bayatmış)",
+              kind(fx.plan(c, lagrec, index=index, resolver=res), "taban-etiket") is None)
+        DF2 = dict(DF)
+        DF2[("russia", "/build/core/Dockerfile")] = f"FROM {ru}/php-8-4:1.0@sha256:{'a' * 64}\n"
+        c = _PromoClient(DF2, {"production": NEW})
+        a = kind(fx.plan(c, lagrec, index=index, resolver=res), "taban-etiket")
+        check("etiket plan: bir bölgede satır bulunamıyorsa / özetle sabitse hiçbiri yazılmaz (elle)", a["state"] == "elle" and "russia" in a["reason"], str(a))
+        c = _PromoClient(DF, {"production": NEW}, region_prs={("anatolia", "tempo/image-tag-php-8-4-1.1"): {"id": 4, "status": "active", "url": "https://x/4"}})
+        a = kind(fx.plan(c, lagrec, index=index, resolver=res), "taban-etiket")
+        check("etiket plan: bir bölgede PR açık, ötekinde yok → açılabilir (yok); açık olan yeniden açılmaz",
+              a["state"] == "yok" and a["repos"][0]["state"] == "pr açık" and a["repos"][1]["state"] == "yok", str(a))
+        evil = rec(image="php:8.4.28-fpm-trixie", patch=None, via=["php_8"], tag_lag={"php_8": {"have": ["1.0"], "latest": "1.1"}})
+        a = kind(fx.plan(_PromoClient(DF, {"production": NEW}), evil, index=index, resolver=res), "taban-etiket")
+        check("etiket plan: dal adına çevrilemeyen dizin → elle", a["state"] == "elle", str(a))
+
+        # ── etiket: uygula ────────────────────────────────────────────────
+        pushed = []
+
+        def push_ok(client, sites, **kw):
+            pushed.append((sites[0]["repo"], kw["branch"], kw["title"], kw["body"], [(s["old"], s["new"]) for s in sites]))
+            return {"prs": [{"repo": sites[0]["repo"], "id": 5, "url": "https://x/5"}], "fallback": [], "errors": []}
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": NEW})
+        out = fx.apply(c, lagrec, team="T", index=index, resolver=res, push_fn=push_ok, open_pr_fn=never, start_fn=never)
+        a = kind(out, "taban-etiket")
+        check("etiket uygula: bölge başına bir PR (anatolia + russia), ran True",
+              a["state"] == "açıldı" and a["ran"] is True and [x[0] for x in pushed] == ["anatolia", "russia"]
+              and all(x[1] == "tempo/image-tag-php-8-4-1.1" for x in pushed), str(pushed)[:300])
+        check("etiket gövdesi: imaj kayıt deposuna basılmadan birleştirilmemeli + RU notu",
+              "basılmadan birleştirmeyin" in pushed[0][3] and "RU (VK)" in pushed[0][3] and len(pushed[0][3]) <= 4000, pushed[0][3])
+        knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = False
+        out = fx.apply(_PromoClient(DF, {"production": NEW}), lagrec, team="T", index=index, resolver=res, push_fn=never,
+                       open_pr_fn=never, start_fn=never)
+        check("PR anahtarı kapalıyken etiket PR'ı açılmaz", kind(out, "taban-etiket")["state"] == "elle")
+        knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = True
+
+    html_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    cseg = html_src[html_src.index("function _ivFixConfirm"):html_src.index("async function fixImageVuln")]
+    check("kart: onay metni taşıma ve etiket eylemlerini de sayar; etiket geride işareti",
+          "taban-taşıma" in cseg and "taban-etiket" in cseg and "etiket geride" in html_src and "x.tag_lag" in html_src)
+
+
 def test_image_fix():
     from agile_sdlc_crew import pipeline_config as pc
     knobs = {"CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE_BUMP": True}
@@ -15096,7 +15311,7 @@ def main():
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
               test_upgrade_registry, test_upgrade_patch_sites, test_upgrade_image_template,
               test_upgrade_image_wiring,
-              test_image_vuln_inventory, test_image_vuln_signals, test_image_vuln_hardening, test_image_vuln_settings, test_image_vuln_alerts, test_image_fix, test_image_fix_round1, test_image_fix_round2, test_image_fix_final,
+              test_image_vuln_inventory, test_image_vuln_signals, test_image_vuln_hardening, test_image_vuln_settings, test_image_vuln_alerts, test_image_fix, test_image_fix_round1, test_image_fix_round2, test_image_fix_final, test_image_fix_promote_tag,
               test_upgrade_scan_take,
               test_upgrade_bump_sites,
               test_upgrade_client_find_pr_and_bytes,

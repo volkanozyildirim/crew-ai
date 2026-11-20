@@ -1298,6 +1298,7 @@ let _ivRows={};
 function _ivSignals(x){
   const sc=x.scan||{},sig=[];
   if(x.patch)sig.push(`<span class="chip human" title="Aynı minörün Docker Hub'daki son yaması">yama geride → ${_ivE(x.patch.latest)}</span>`);
+  Object.keys(x.tag_lag||{}).forEach(d=>sig.push(`<span class="chip human" title="base-images üretim dalında daha yeni etiket var; bölge repoları eskisini çekiyor. Tarama yeni etiketin dayanağını gösterir.">etiket geride → ${_ivE(d)}:${_ivE((x.tag_lag[d]||{}).latest)}</span>`));
   if(x.eol)sig.push(`<span class="chip fail">destek bitti${x.eol.eol?' '+_ivE(x.eol.eol):''}</span>`);
   if(sc.state&&sc.state!=='tamam')sig.push(`<span class="chip dim" title="${_ivE(sc.reason||'')}">${_ivE(sc.state)}</span>`);
   return sig;
@@ -1375,6 +1376,8 @@ function _ivFixConfirm(image,fix){
   (fix||[]).filter(_ivOpenable).forEach(a=>{
     if(a.kind==='taban-yama'){const s=(a.sites||[])[0]||{};lines.push(`${s.repo||'base-images'} (${s.branch||'staging'}): 1 taslak PR — ${a.dir} ${s.old} → ${s.new}`)}
     else if(a.kind==='taban-dizin')lines.push(`base-images: ${a.dir} dizin şablonu için 1 taslak PR (imajı DevOps üretir)`);
+    else if(a.kind==='taban-taşıma')lines.push(`base-images: ${a.src} → ${a.dst} taslak taşıma PR'ı (${a.dir} için; dalın TAMAMINI taşır)`);
+    else if(a.kind==='taban-etiket')(a.repos||[]).filter(u=>u.state==='yok').forEach(u=>lines.push(`${u.repo} (production): 1 taslak PR — ${(u.sites||[]).length} FROM satırında etiket → ${a.target} (imaj o bölgenin kayıt deposuna basılmadan birleştirilmemeli)`));
     else if(a.kind==='imaj-yama')(a.repos||[]).filter(u=>u.state==='yok').forEach(u=>lines.push(`${u.repo} (production): 1 taslak PR — ${(u.sites||[]).length} FROM satırı → ${a.target}`));
     else if(a.kind==='yükseltme'){const n=(a.repos||[]).filter(u=>u.state==='yok');const k=Math.min(n.length,a.cap==null?n.length:a.cap);lines.push(`en çok ${k} sürüm yükseltme izleme işi başlatılır (${n.length} aday repo, sınır ${a.cap==null?'yok':a.cap}; kalanı sonraki başlatmada): ${n.map(u=>u.repo+' → '+u.to).join(', ')}`)}
   });

@@ -2,6 +2,8 @@
 repo: base-images
 project: FLODevOps
 branch: staging
+# Taşıma sırası: ilk dal `branch` olmalı. Düzeltme ilk dalda hazırsa Tempo bir sonraki dala taslak taşıma PR'ı açar.
+flow: [staging, preprod, production]
 regions: {anatolia: mainLocation, global: globalLocation, russia: yandexLocation}
 patch: {}            # elle sabitleme, ör. {php: {"8.5": "8.5.12"}}
 fixes:

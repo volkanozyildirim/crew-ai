@@ -55,6 +55,7 @@ def load_cfg(path=CFG_PATH) -> dict:
     cfg.setdefault("repo", "base-images")
     cfg.setdefault("branch", "staging")
     cfg.setdefault("regions", {})
+    cfg.setdefault("flow", [cfg["branch"], "preprod", "production"])     # taşıma sırası (image_fix taban-taşıma)
     cfg.setdefault("fixes", {})
     return cfg
 

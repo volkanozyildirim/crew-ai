@@ -33,6 +33,8 @@ _SAFE_NEW = re.compile(r"[\w.\-:/'\">=^~|, ]+", re.ASCII)
 _BRANCH = re.compile(r"tempo/upgrade-[a-z]+-[A-Za-z0-9][\w.-]*-\d+\.\d+", re.ASCII)
 # Taban imaj yama giderme dalı (image_fix): tempo/image-patch-<dizin | imaj-slug>-<A>.<B>.<yama>
 _BRANCH_IMAGE = re.compile(r"tempo/image-patch-[a-z0-9][a-z0-9.-]*-\d+\.\d+\.\d+", re.ASCII)
+# Bölge repolarında kendi taban imajımızın etiket yükseltmesi (image_fix): tempo/image-tag-<dizin>-<etiket>
+_BRANCH_TAG = re.compile(r"tempo/image-tag-[a-z0-9][a-z0-9.-]*-\d+(?:\.\d+){0,3}", re.ASCII)
 _NOT_PUSHED_MSG = "kısıt elle düzenlenmeli"
 
 
@@ -88,10 +90,11 @@ def _norm_path(path: str) -> str:
 
 
 def _validate_branch(branch: str, targets: set[str]) -> None:
-    if (not isinstance(branch, str) or not (_BRANCH.fullmatch(branch) or _BRANCH_IMAGE.fullmatch(branch))
+    if (not isinstance(branch, str) or not (_BRANCH.fullmatch(branch) or _BRANCH_IMAGE.fullmatch(branch) or _BRANCH_TAG.fullmatch(branch))
             or ".." in branch or "refs/" in branch):
         raise ValueError(f"Geçersiz dal adı: {str(branch)[:80]!r} "
-                         "(tempo/upgrade-<dil>-<repo>-<sürüm> ya da tempo/image-patch-<ad>-<yama> olmalı).")
+                         "(tempo/upgrade-<dil>-<repo>-<sürüm>, tempo/image-patch-<ad>-<yama> ya da "
+                         "tempo/image-tag-<dizin>-<etiket> olmalı).")
     if branch in targets:
         raise ValueError(f"'{branch}' bir hedef dal; hedef dala doğrudan yazılmaz.")
 
