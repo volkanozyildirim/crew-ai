@@ -221,3 +221,45 @@ rules:
     before: "//go:build linux\n// +build linux"
     after: "//go:build linux"
     ref: "https://go.dev/doc/go1.17#build-lines"
+  # ── Sürüm yükseltme: yalnız rapor (iş açmaz, kartta sayı) ─────────────────
+  # Go geri uyumlu; asıl tespit hedef sürümle `go build` + `go vet` (upgrade.probe). Aşağıdakiler go.mod'daki
+  # `go` satırı hedefe çekilince varsayılanı değişen davranışlardır; bulgu go.mod'un `go` satırına düşer.
+  - key: go122_loopvar
+    upgrade_catalog: true
+    since: "1.22"
+    kind: report
+    breaks: behavior
+    sp_unit: 0
+    title: "for döngü değişkeni her turda yeni (Go 1.22)"
+    summary: "go.mod `go 1.22` ve sonrasında for döngüsünün değişkeni her turda yeniden oluşturulur. Değişkeni goroutine/closure'da paylaşan kod farklı (çoğunlukla doğru) sonuç verir; paylaşılan değişkene güvenen kod değişir."
+    advantages: ["Döngü değişkenini closure'da yakalama hataları kendiliğinden düzelir."]
+    risks: ["Döngü değişkeninin adresine ya da paylaşılan değerine güvenen kod farklı davranır; `go vet` loopclosure uyarıları gözden geçirilmeli."]
+    before: "for _, v := range list {\n    go func() { use(v) }()\n}"
+    after: "// Go 1.22+: her tur kendi v'sini görür"
+    ref: "https://go.dev/blog/loopvar-preview"
+  - key: go122_httpmux
+    upgrade_catalog: true
+    since: "1.22"
+    kind: report
+    breaks: behavior
+    sp_unit: 0
+    title: "net/http ServeMux desen sözdizimi (GODEBUG httpmuxgo121)"
+    summary: "Go 1.22'de http.ServeMux yöntem ve joker içeren desenleri kabul eder; `{` ve `}` içeren eski yollar artık farklı eşleşir. Eski davranış GODEBUG=httpmuxgo121=1 ile geri alınabilir."
+    advantages: ["Yönlendirme için harici router gereksinimi azalır."]
+    risks: ["Süslü parantez ya da boşluk içeren kayıtlı yollar farklı eşleşir veya kayıt panikler."]
+    before: "mux.HandleFunc(\"/items/{id}\", h)  // Go 1.21: düz metin"
+    after: "mux.HandleFunc(\"GET /items/{id}\", h)  // Go 1.22: desen"
+    ref: "https://go.dev/doc/godebug#go-122"
+  - key: go123_timerchan
+    upgrade_catalog: true
+    since: "1.23"
+    kind: report
+    breaks: behavior
+    sp_unit: 0
+    title: "time.Timer/Ticker kanalları tamponsuz (GODEBUG asynctimerchan)"
+    summary: "Go 1.23'te Timer/Ticker kanalı tamponsuz olur: Stop/Reset sonrası eski değer okunmaz, durdurulmayan zamanlayıcı da çöp toplanır. Eski davranış GODEBUG=asynctimerchan=1 ile geri alınabilir."
+    advantages: ["Stop/Reset sonrası bayat değer yarışları ortadan kalkar."]
+    risks: ["len(timer.C) ya da Stop sonrası kanalı boşaltan koda güvenen yerler farklı davranır."]
+    before: "if !t.Stop() { <-t.C }"
+    after: "t.Stop()  // Go 1.23+: boşaltma gerekmez"
+    ref: "https://go.dev/doc/godebug#go-123"

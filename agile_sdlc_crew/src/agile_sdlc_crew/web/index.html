@@ -321,6 +321,10 @@ header {
 .wi-check:checked { background:var(--accent); border-color:var(--accent); }
 .wi-check:checked::after { content:'\2713'; color:var(--accent-ink); font-size:10px; font-weight:700; }
 .board-loading,.board-empty { text-align:center; padding:50px 20px; color:var(--text-dim); font-size:14px; }
+.td-load { display:flex; align-items:center; gap:10px; padding:14px; color:var(--text-dim); font-size:12.5px; }
+.td-load::before { content:""; flex:none; width:14px; height:14px; border-radius:50%; border:2px solid var(--border); border-top-color:var(--accent); animation:tdspin .8s linear infinite; }
+@keyframes tdspin { to { transform:rotate(360deg) } }
+@media (prefers-reduced-motion:reduce) { .td-load::before { animation-duration:2.4s } }
 
 /* ── Yaşlandırma: iş kaç gündür bu durumda bekliyor ── */
 .wi-age { display:inline-flex; align-items:center; gap:3px; font-size:10px; font-weight:700; padding:1px 6px; border-radius:6px; flex-shrink:0; font-family:'Geist Mono',Menlo,monospace; background:var(--bg-elevated); color:var(--text-dim); }
@@ -429,8 +433,19 @@ header {
 .by-agent td.num { text-align:right; font-family:'Geist Mono',Menlo,monospace; }
 
 /* ── Adım detay modali ── */
-#stepModal { display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.55); backdrop-filter:blur(4px); align-items:center; justify-content:center; }
-#stepModal.open { display:flex; }
+#stepModal, #ivModal { display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.55); backdrop-filter:blur(4px); align-items:center; justify-content:center; }
+#stepModal.open, #ivModal.open { display:flex; }
+#ivModal .modal-box { width:min(1040px,96vw); }
+.perf.iv tr.ivr { cursor:pointer; } .perf.iv tr.ivr:hover td { background:var(--bg-elevated); }
+.perf.iv tr.sec td { padding:10px 14px 6px; font-weight:600; font-size:12px; background:var(--bg-elevated); }
+.perf.ivd { border:1px solid var(--border); border-radius:8px; border-collapse:separate; border-spacing:0; overflow:hidden; }
+.perf.ivd th { background:var(--bg-elevated); border-top:none; } .perf.ivd td { vertical-align:top; }
+.ivh { font-size:12px; font-weight:700; margin:18px 0 8px; color:var(--text); display:inline-block; }
+.ivfacts { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px 18px; font-size:12.5px; }
+.ivfacts > div > span { display:block; font-size:11px; color:var(--text-dim); margin-bottom:2px; }
+.ivnote { font-size:12px; color:var(--text-dim); margin:0 0 8px; }
+.ivpk { margin:0 0 0 18px; font-size:12.5px; line-height:1.7; }
+.ivmore > summary { cursor:pointer; list-style-position:outside; } .ivmore > summary .ivh { margin:18px 0 8px 4px; }
 .modal-box { background:var(--bg-card); border:1px solid var(--border); border-radius:14px; width:min(900px,96vw); max-height:90vh; display:flex; flex-direction:column; box-shadow:var(--shadow); }
 .modal-header { padding:16px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
 .modal-header h2 { font-size:15px; font-weight:700; flex:1; }
@@ -628,15 +643,27 @@ header {
       </div>
       <div class="card" id="tdModernCard" style="display:none;flex-direction:column;overflow:hidden">
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Modernleştirme</span>
+          <span id="tdmModeSw" style="display:none;gap:4px"><button class="sm-btn small" id="tdmModeMod" onclick="_tdmSetMode('mod')">Modernleştirme</button><button class="sm-btn ghost small" id="tdmModeUp" onclick="_tdmSetMode('up')">Sürüm yükseltme</button></span>
           <span class="chip dim" id="tdmTarget" title="Hedef sürüm: repo dilinin üretimdeki sürümü"></span><span style="flex:1"></span>
           <select class="sprint-select" id="tdmRepo" title="Yerel repolar (PHP, Go, Python, Next.js)" onchange="_tdmRepoChanged()"><option>Yükleniyor…</option></select>
+          <select class="sprint-select" id="tdmTo" style="display:none" title="Yükseltme hedef sürümü" onchange="_upToChanged()"></select>
           <button class="sm-btn ghost small" id="tdmRescan" onclick="modernScan(true)" title="Önbelleği atla, yeniden tara">Yeniden tara</button>
           <select class="sprint-select" id="tdmSprint" title="İşlerin açılacağı sprint (varsayılan: aktif sprint)"><option value="">Aktif sprint</option></select>
           <button class="sm-btn small" id="tdmTake" onclick="modernTake()">Seçilenleri iş olarak aç</button>
         </div>
         <div id="tdmAdoption" style="padding:0 14px;font-size:12px;color:var(--text-dim)"></div>
+        <div id="tdmUpInfo" style="padding:0 14px;font-size:12px"></div>
         <div id="tdmMsg" style="padding:0 14px;font-size:12px"></div>
         <div id="tdmResult" style="padding:0 14px 12px"></div>
+      </div>
+      <div class="card" id="tdImgCard" style="display:none;flex-direction:column;overflow:hidden">
+        <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Taban imaj güvenliği</span><span id="tdImgCount" class="chip dim"></span><span style="flex:1"></span>
+          <span id="tdImgStatus" style="font-size:12px;color:var(--text-dim)"></span>
+          <button class="sm-btn ghost small" id="tdImgRescan" onclick="loadImageVuln(true)" title="Önbelleği atla, imajları yeniden tara (dakikalar sürebilir)">Yeniden tara</button>
+        </div>
+        <div id="tdImgNote" style="padding:0 14px 8px;font-size:12px;color:var(--text-dim)"></div>
+        <div id="tdImgFixMsg" style="padding:0 14px 8px;font-size:12px"></div>
+        <div id="tdImgList" style="padding:0 0 12px"></div>
       </div>
     </div>
   </section>
@@ -692,6 +719,18 @@ header {
       </div>
     </div>
   </section>
+</div>
+
+<!-- Taban imaj güvenliği: imaj detayı -->
+<div id="ivModal" onclick="if(event.target===this)closeIvDetail()">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="ivModalTitle">
+    <div class="modal-header">
+      <h2 id="ivModalTitle"></h2>
+      <div class="modal-meta" id="ivModalMeta"></div>
+      <button class="modal-close" onclick="closeIvDetail()" title="Kapat (Esc)">✕</button>
+    </div>
+    <div class="modal-body" id="ivModalBody"></div>
+  </div>
 </div>
 
 <!-- Step Detail Modal -->
@@ -1164,6 +1203,224 @@ function showTab(name){
   if(name==='cost'&&typeof loadCosts==='function'&&!_cost)loadCosts();
   if(name==='techdebt'&&typeof loadTechdebt==='function')loadTechdebt();
   if(name==='techdebt'&&typeof loadModernRepos==='function')loadModernRepos();
+  if(name==='techdebt'&&typeof loadImageVuln==='function')loadImageVuln(false);
+}
+
+// ── Taban imaj güvenliği (/api/techdebt/images) ──
+// Sunucu taramada beklemez: önbellek eksikse {scanning:true,…eldeki kısım…} döner; kart bitene kadar yoklar.
+// Seviye / işaret / eylem metinleri Python'dan gelir; UI yalnızca çizer. Her metin escHtml'den geçer.
+let _ivTimer=null,_ivLoaded=false;
+// Kart yanıt beklenirken de görünür (yükleniyor satırıyla). Özellik kapalıysa (403) gizlenir ve bu
+// tarayıcıda hatırlanır; sonraki açılışta kart bir görünüp kaybolmaz.
+function _tdOff(k,v){try{if(v===undefined)return localStorage.getItem('tempo_td_off_'+k)==='1';
+  if(v)localStorage.setItem('tempo_td_off_'+k,'1');else localStorage.removeItem('tempo_td_off_'+k)}catch(e){}return false}
+const _tdLoad=t=>`<div class="td-load" role="status">${escHtml(t)}</div>`;
+document.addEventListener('visibilitychange',()=>{const p=document.getElementById('paneTechdebt'),c=document.getElementById('tdImgCard');
+  if(!document.hidden&&p&&p.classList.contains('on')&&c&&c.style.display==='flex')loadImageVuln(false)});
+const _ivE=s=>escHtml(String(s==null?'':s));
+const _ivLevel={'kritik':['fail','Kritik'],'yüksek':['human','Yüksek'],'bilgi':['dim','Bilgi'],'temiz':['ok','Temiz'],'bilinmiyor':['dim','Bilinmiyor']};
+async function loadImageVuln(force){
+  const card=document.getElementById('tdImgCard');if(!card)return;
+  clearTimeout(_ivTimer);
+  const st=document.getElementById('tdImgStatus');
+  const btn=document.getElementById('tdImgRescan');
+  if(!_ivLoaded){
+    // ilk yanıt gelene kadar: kart görünür, liste yerinde yükleniyor satırı
+    btn.disabled=true;st.textContent='';
+    document.getElementById('tdImgList').innerHTML=_tdLoad('İmaj listesi yükleniyor…');
+    if(!_tdOff('img'))card.style.display='flex';
+  }else if(force){btn.disabled=true;st.innerHTML='<span style="color:var(--run)">Yeniden tarama isteniyor…</span>'}
+  try{
+    // GET yan etkisizdir; yeniden tarama yalnız POST (sunucu 5 dk bekleme uygular, nedeni `message` ile döner)
+    const resp=force?await fetch('/api/techdebt/images/rescan',{method:'POST'}):await fetch('/api/techdebt/images');
+    if(resp.status===403){card.style.display='none';_tdOff('img',true);return}
+    const r=await resp.json();
+    _tdOff('img',false);card.style.display='flex';
+    if(!resp.ok){
+      st.innerHTML=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;btn.disabled=false;
+      if(!_ivLoaded)document.getElementById('tdImgList').innerHTML='';
+      return}
+    _ivLoaded=true;
+    renderImageVuln(r);
+    if(r.message&&!r.scanning)st.innerHTML=_ivE(r.message);
+    // tarama sürerken (sekme açık ve görünürken) 8 sn'de bir yeniden sor; bitince durur
+    if(r.scanning){_ivTimer=setTimeout(()=>{const p=document.getElementById('paneTechdebt');if(p&&p.classList.contains('on')&&!document.hidden)loadImageVuln(false)},8000)}
+  }catch(e){card.style.display='flex';st.textContent=String(e);btn.disabled=false;
+    if(!_ivLoaded)document.getElementById('tdImgList').innerHTML=''}
+}
+// Açık kimliği → kayıt sayfası (yalnız tam kalıba uyan kimlik adrese girer) + duyuru tarihi ve kaç gün olduğu.
+function _ivCveUrl(c){c=String(c||'');return /^CVE-\d{4}-\d{4,}$/.test(c)?'https://nvd.nist.gov/vuln/detail/'+c:(/^GHSA(-[0-9a-z]{4}){3}$/.test(c)?'https://github.com/advisories/'+c:'')}
+function _ivAge(d){if(!/^\d{4}-\d{2}-\d{2}$/.test(String(d||'')))return null;const n=Math.floor((Date.now()-Date.parse(d+'T00:00:00Z'))/864e5);return n>=0?n:null}
+function _ivCves(p){
+  const cs=p.cves||[],pub=p.published||{};if(!cs.length)return '';
+  return '<div style="color:var(--text-dim);font-size:11.5px">'+cs.map(c=>{const a=_ivAge(pub[c]);
+    return _ivLink(_ivCveUrl(c),c)+(a==null?'':` <span title="Açığın duyurulduğu gün">· ${_ivE(pub[c])}, ${a} gün önce</span>`)}).join('<br>')+'</div>';
+}
+function renderImageVuln(r){
+  const rows=r.images||[];
+  const nrep=new Set();rows.forEach(x=>Object.keys(x.repos||{}).forEach(c=>nrep.add(c)));
+  document.getElementById('tdImgCount').textContent=rows.length+' imaj'+(nrep.size?' · '+nrep.size+' repo':'');
+  const crit=rows.filter(x=>x.level==='kritik').length;
+  document.getElementById('tdImgStatus').innerHTML=r.scanning
+    ?'<span style="color:var(--run)">Taranıyor… (imaj başına dakikalar sürebilir)</span>'
+    :(r.scanner===false?'<span style="color:var(--warning)">Tarayıcı yok — yalnız sürüm işaretleri</span>':`${crit} kritik · son tarama ${_ivE((r.scanned_at||'').replace('T',' '))}`);
+  document.getElementById('tdImgRescan').disabled=!!r.scanning;
+  document.getElementById('tdImgNote').textContent=r.note||'Yayınlanmış imaj değil, dayandığı resmî imaj taranır; sonuç alt sınırdır.';
+  const box=document.getElementById('tdImgList');
+  if(!rows.length){box.innerHTML='<div class="board-empty" style="padding:12px 14px">Üretim imajı bulunamadı.</div>';return}
+  const reg=u=>Object.keys(u||{}).map(k=>`<span class="chip dim" title="${_ivE((u[k]||[]).join('\n'))}">${_ivE(k)} ${(u[k]||[]).length}</span>`).join(' ');
+  // etkilenen kod repoları açıkça listelenir (repo → bölgeler; derleme dizinleri ipucunda). Alan yoksa eski bölge sayaçları.
+  const reps=x=>{const m=x.repos||{},ks=Object.keys(m);if(!ks.length)return x.unused?'<span style="color:var(--text-dim)">kullanan servis yok</span>':reg(x.users);
+    return ks.map(c=>{const rg=m[c]||{};return `<div style="white-space:nowrap" title="${_ivE(Object.keys(rg).map(r=>r+': '+(rg[r]||[]).join(', ')).join('\n'))}"><b>${_ivE(c)}</b> <span style="color:var(--text-dim);font-size:11.5px">${_ivE(Object.keys(rg).join(', '))}</span></div>`}).slice(0,3).join('')+(ks.length>3?`<div style="color:var(--text-dim);font-size:11.5px">+${ks.length-3} repo daha</div>`:'')};
+  // düzeltmesi yayınlanmış açığı (kritik / yüksek) olan imajlar listenin tepesinde ayrı bölümdür; sunucu sırası bölüm içinde korunur
+  const vuln=x=>{const c=x.scan||{};return c.state==='tamam'&&((c.critical||0)+(c.high||0))>0};
+  const secs=[['Güvenlik açığı olan imajlar',rows.filter(vuln),'fail'],['Diğer imajlar',rows.filter(x=>!vuln(x)),'']];
+  // Satır yalnız özet taşır (seviye, imaj, repolar, sayılar, en eski açık, işaretler, giderme durumu);
+  // açık listesi, eylemler ve giderme planı "Detay" penceresindedir (openIvDetail).
+  const num=(n,cls)=>n>0?`<b style="color:var(--${cls})">${n}</b>`:'0';
+  box.innerHTML='<table class="perf iv"><tr><th>İmaj</th><th>Etkilenen repolar</th><th class="num">Kritik</th><th class="num">Yüksek</th><th class="num" title="En eski açığın duyurulmasından bugüne">En eski açık</th><th>İşaretler</th><th>Giderme</th><th></th></tr>'
+    +secs.map(([title,list,cls])=>!list.length?'':(secs.filter(q=>q[1].length).length>1||cls?`<tr class="sec"><td colspan="8" style="${cls?'color:var(--danger);border-left:3px solid var(--danger)':'color:var(--text-dim);border-left:3px solid var(--border)'}">${_ivE(title)} · ${list.length}</td></tr>`:'')
+    +list.map(x=>{
+      const sc=x.scan||{};const ok=sc.state==='tamam';
+      const old=_ivOldestDays(sc.packages||[]);
+      const fx=(x.fix||[]).map(a=>`<div style="white-space:nowrap;font-size:11.5px">${_ivE(_ivKindLabel(a))} <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(_ivStateLabel(a.state))}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}</div>`).join('');
+      // başlatılabilir eylem varsa düğme satırda da durur: giderme panelden, pencereyi açmadan başlatılır
+      const go=(x.fix||[]).some(_ivOpenable)?`<button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="event.stopPropagation();fixImageVuln(this)" title="Başlatılmamış eylemleri yürütür: taslak PR'lar ve izleme işleri. Önce ne açılacağını gösterir.">Gidermeyi başlat</button> `:'';
+      return `<tr class="ivr" data-image="${_ivE(x.image)}" onclick="openIvDetail(this.dataset.image)" title="Detay için tıklayın">
+        <td><code>${_ivE(x.image)}</code>${x.via&&x.via.length?`<div style="color:var(--text-dim);font-size:11.5px">${_ivE(x.via.join(', '))}</div>`:''}</td>
+        <td>${reps(x)}</td><td class="num">${ok?num(sc.critical||0,'danger'):'—'}</td><td class="num">${ok?num(sc.high||0,'warning'):'—'}</td>
+        <td class="num">${old==null?'—':old+' gün'}</td>
+        <td>${_ivSignals(x).join(' ')||'—'}</td><td>${fx||'—'}</td>
+        <td style="text-align:right;white-space:nowrap">${go}<button class="sm-btn ghost small" data-image="${_ivE(x.image)}" onclick="event.stopPropagation();openIvDetail(this.dataset.image)">Detay</button></td></tr>`}).join('')).join('')+'</table>';
+  _ivFixAll={};_ivRows={};rows.forEach(x=>{_ivFixAll[x.image]=x.fix||[];_ivRows[x.image]=x});
+  // açık pencere varsa (yoklama / giderme sonrası) taze veriyle yeniden çizilir
+  const m=document.getElementById('ivModal');if(m&&m.classList.contains('open')&&m.dataset.mode!=='fix'&&_ivRows[m.dataset.image])openIvDetail(m.dataset.image);
+}
+let _ivRows={};
+function _ivSignals(x){
+  const sc=x.scan||{},sig=[];
+  if(x.patch)sig.push(`<span class="chip human" title="Aynı minörün Docker Hub'daki son yaması">yama geride → ${_ivE(x.patch.latest)}</span>`);
+  Object.keys(x.tag_lag||{}).forEach(d=>sig.push(`<span class="chip human" title="base-images üretim dalında daha yeni etiket var; bölge repoları eskisini çekiyor. Tarama yeni etiketin dayanağını gösterir.">etiket geride → ${_ivE(d)}:${_ivE((x.tag_lag[d]||{}).latest)}</span>`));
+  if(x.unused)sig.push(`<span class="chip dim" title="base-images'ta var ama hiçbir servis kullanmıyor; kullanılmaya başlamadan güncel tutulur. Okunan dal: ${_ivE(Object.values(x.unused_dirs||{}).join(', '))}">kullanılmıyor</span>`);
+  if(x.eol)sig.push(`<span class="chip fail">destek bitti${x.eol.eol?' '+_ivE(x.eol.eol):''}</span>`);
+  if(sc.state&&sc.state!=='tamam')sig.push(`<span class="chip dim" title="${_ivE(sc.reason||'')}">${_ivE(sc.state)}</span>`);
+  return sig;
+}
+function _ivOldestDays(pk){let m=null;pk.forEach(p=>Object.values(p.published||{}).forEach(d=>{const a=_ivAge(d);if(a!=null&&(m==null||a>m))m=a}));return m}
+// Açık başına satır: aynı kimlik birden çok pakette çıkar (openssl / libssl3 …) → tek satırda toplanır. En eski üstte.
+function _ivCveTable(pk,sev){
+  const by={};
+  pk.forEach(p=>(p.cves||[]).forEach(c=>{if(((p.sev||{})[c]||'')!==sev)return;
+    const e=by[c]||(by[c]={cve:c,pub:(p.published||{})[c]||'',pkgs:[]});e.pkgs.push(p)}));
+  const list=Object.values(by).map(e=>({...e,age:_ivAge(e.pub)})).sort((a,b)=>(b.age==null?-1:b.age)-(a.age==null?-1:a.age)||a.cve.localeCompare(b.cve));
+  if(!list.length)return {n:0,html:''};
+  return {n:list.length,html:'<table class="perf ivd"><tr><th>Açık</th><th>Paket</th><th>Kurulu → düzeltme</th><th>Duyuru</th><th class="num">Kaç gün</th></tr>'
+    +list.map(e=>`<tr><td style="white-space:nowrap">${_ivLink(_ivCveUrl(e.cve),e.cve)}</td>
+      <td>${e.pkgs.map(p=>`<div><code>${_ivE(p.name)}</code></div>`).join('')}</td>
+      <td>${e.pkgs.map(p=>`<div style="color:var(--text-dim)">${_ivE(p.installed)} → <span style="color:var(--text)">${_ivE(p.fixed)}</span></div>`).join('')}</td>
+      <td style="white-space:nowrap">${e.age==null?'—':_ivE(e.pub)}</td><td class="num">${e.age==null?'—':e.age}</td></tr>`).join('')+'</table>'};
+}
+function openIvDetail(image){
+  const x=_ivRows[image];if(!x)return;
+  const m=document.getElementById('ivModal');m.dataset.image=image;m.dataset.mode='';
+  const sc=x.scan||{},ok=sc.state==='tamam',pk=sc.packages||[],ig=sc.ignored||{},lv=_ivLevel[x.level]||['dim',x.level];
+  const h=t=>`<h3 class="ivh">${t}</h3>`;
+  document.getElementById('ivModalTitle').innerHTML=`<code>${_ivE(x.image)}</code>`;
+  document.getElementById('ivModalMeta').innerHTML=`<span class="chip ${lv[0]}">${_ivE(lv[1])}</span>`
+    +(ok?` <span class="chip fail">${_ivE(sc.critical||0)} kritik</span> <span class="chip human">${_ivE(sc.high||0)} yüksek</span>`:'');
+  const facts=[];
+  if(sc.os)facts.push(['İşletim sistemi',_ivE(sc.os)]);
+  if(x.via&&x.via.length)facts.push(['Taban imaj dizini',_ivE(x.via.join(', '))]);
+  if(sc.created)facts.push(['İmaj üretim tarihi',_ivE(sc.created)]);
+  const sg=_ivSignals(x);if(sg.length)facts.push(['İşaretler',sg.join(' ')]);
+  if(ig.packages&&ig.packages.length)facts.push(['Sayıma girmeyen',`<span title="config/image_vuln.yaml — sayıma girmez, gizlenmez">yok sayılan: ${_ivE(ig.packages.join(', '))} (${_ivE(ig.critical||0)} kritik, ${_ivE(ig.high||0)} yüksek)</span>`]);
+  let html=facts.length?'<div class="ivfacts">'+facts.map(f=>`<div><span>${f[0]}</span><div>${f[1]}</div></div>`).join('')+'</div>':'';
+  // etkilenen repolar
+  const rp=x.repos||{},rk=Object.keys(rp);
+  html+=h(`Etkilenen repolar · ${rk.length}`)+(rk.length?'<table class="perf ivd"><tr><th>Repo</th><th>Bölge</th><th>Derleme dizini</th></tr>'
+    +rk.map(c=>Object.keys(rp[c]||{}).map((r,i,a)=>`<tr>${i?'':`<td rowspan="${a.length}"><b>${_ivE(c)}</b></td>`}<td>${_ivE(r)}</td><td><code>${_ivE((rp[c][r]||[]).join(', '))}</code></td></tr>`).join('')).join('')+'</table>'
+    :'<div class="ivnote">Repo bilgisi yok.</div>');
+  // açıklar
+  if(!ok)html+=h('Açıklar')+`<div class="ivnote">Taranamadı: ${_ivE(sc.state||'bilinmiyor')}${sc.reason?' — '+_ivE(sc.reason):''}</div>`;
+  else if(!pk.length)html+=h('Açıklar')+'<div class="ivnote">Düzeltmesi yayınlanmış kritik / yüksek açık yok.</div>';
+  else if(!pk.some(p=>p.sev)){
+    // eski önbellek: kimlik başına önem yok → paket listesi (yeniden taramayla açık başına tabloya döner)
+    html+=h(`Açığı olan paketler · ${pk.length}`)+'<div class="ivnote">Açık başına önem bu taramada yok; "Yeniden tara" sonrası kritikler ayrı listelenir.</div><ul class="ivpk">'
+      +pk.map(p=>`<li><code>${_ivE(p.name)}</code> ${_ivE(p.installed)} → ${_ivE(p.fixed)} <span class="chip ${p.severity==='CRITICAL'?'fail':'human'}">${_ivE(p.severity)}</span>${_ivCves(p)}</li>`).join('')+'</ul>';
+  }else{
+    const c=_ivCveTable(pk,'CRITICAL'),hi=_ivCveTable(pk,'HIGH');
+    html+=h(`Kritik açıklar · ${c.n} açık, ${_ivE(sc.critical||0)} bulgu`)+(c.n?c.html:'<div class="ivnote">Kritik açık yok.</div>');
+    html+=`<details class="ivmore"><summary>${h(`Yüksek açıklar · ${hi.n} açık gösteriliyor, ${_ivE(sc.high||0)} bulgu`)}</summary>
+      <div class="ivnote">Paket başına en çok 5 kimlik saklanır (kritikler önce); bulgu sayısı tam sayıdır.</div>${hi.html}</details>`;
+  }
+  // eylem + giderme
+  html+=h('Önerilen eylem')+((x.actions||[]).length?'<ul class="ivpk">'+x.actions.map(a=>`<li>${_ivE(a)}</li>`).join('')+'</ul>':'<div class="ivnote">—</div>');
+  if((x.fix||[]).length)html+=h('Giderme')+_ivFixRows(x.fix)
+    +((x.fix||[]).some(_ivOpenable)?`<div style="margin-top:10px"><button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="fixImageVuln(this)" title="Uyarıyı gideren çalışmayı başlatır: taslak PR'lar ve sürüm yükseltme izlemesi">Gidermeyi başlat</button></div>`:'');
+  document.getElementById('ivModalBody').innerHTML=html;
+  m.classList.add('open');
+}
+function closeIvDetail(){const m=document.getElementById('ivModal');if(m)m.classList.remove('open')}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeIvDetail()});
+// Giderme eylemleri (sunucu `fix` alanı): tür, durum, PR / izleme bağlantıları. Bağlantı yalnız https; her metin escHtml'den geçer.
+let _ivFixAll={};
+function _ivLink(url,text){return /^https:\/\//.test(url||'')?`<a href="${_ivE(url)}" target="_blank" rel="noopener">${_ivE(text)}</a>`:_ivE(text)}
+const _ivOpenable=a=>a&&a.state==='yok';
+const _ivFixState={'yok':'dim','açıldı':'ok','pr açık':'run','izleniyor':'run','şablon var':'run','güncel':'ok','devops':'human','elle':'human','hata':'fail','belirsiz':'human','sırada':'dim','durduruldu':'dim','pr reddedildi':'dim','pr kapandı':'dim','hedef yok':'dim'};
+// Eylem ve durum adları panelde okunur yazılır (sunucu anahtarları: taban-taşıma, yok …).
+const _ivKindName={'taban-yama':'Taban imaj yaması (base-images)','taban-dizin':'Yeni taban dizini (base-images)','taban-taşıma':'Taşıma PR\'ı (base-images)','taban-etiket':'Etiket PR\'ı (bölge repoları)','imaj-yama':'Yama PR\'ı (bölge repoları)','yükseltme':'Sürüm yükseltme izlemesi','yeniden-üret':'Yeniden üretim'};
+const _ivStateName={'yok':'başlatılmadı','güncel':'hazır','devops':'DevOps\'ta','elle':'elle gerekli'};
+function _ivKindLabel(a){return (_ivKindName[a.kind]||a.kind)+(a.kind==='taban-taşıma'&&a.src?`: ${a.src} → ${a.dst}`:'')+(a.kind==='taban-etiket'&&a.target?`: ${a.target}`:'')}
+const _ivStateLabel=s=>_ivStateName[s]||s;
+function _ivFixRows(fix){
+  if(!fix||!fix.length)return '';
+  return '<div style="margin-top:6px;font-size:11.5px">'+fix.map(a=>{
+    const units=(a.repos||[]).map(u=>`<div style="margin-left:10px;color:var(--text-dim)">${_ivE(u.repo)}: ${_ivE(_ivStateLabel(u.state))}${u.pr?' '+_ivLink(u.pr.url,'PR #'+u.pr.id):''}${u.wi?' '+_ivLink(u.url,'izleme #'+u.wi):''}${u.reason?' — '+_ivE(u.reason):''}</div>`).join('');
+    return `<div style="margin-bottom:4px"><b>${_ivE(_ivKindLabel(a))}</b> <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(_ivStateLabel(a.state))}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${a.reason?`<div style="color:var(--text-dim)">${_ivE(a.reason)}</div>`:''}${units}</div>`}).join('')+'</div>';
+}
+// Onay metni: hangi repolara hangi PR'ların / izleme işlerinin açılacağı, bölge başına.
+function _ivFixConfirm(image,fix){
+  const lines=[];
+  (fix||[]).filter(_ivOpenable).forEach(a=>{
+    if(a.kind==='taban-yama'){const s=(a.sites||[])[0]||{};lines.push(`${s.repo||'base-images'} (${s.branch||'staging'}): 1 taslak PR — ${a.dir} ${s.old} → ${s.new}`)}
+    else if(a.kind==='taban-dizin')lines.push(`base-images: ${a.dir} dizin şablonu için 1 taslak PR (imajı DevOps üretir)`);
+    else if(a.kind==='taban-taşıma')lines.push(`base-images: ${a.src} → ${a.dst} taslak taşıma PR'ı (${a.dir} için; dalın TAMAMINI taşır)`);
+    else if(a.kind==='taban-etiket')(a.repos||[]).filter(u=>u.state==='yok').forEach(u=>lines.push(`${u.repo} (production): 1 taslak PR — ${(u.sites||[]).length} FROM satırında etiket → ${a.target} (imaj o bölgenin kayıt deposuna basılmadan birleştirilmemeli)`));
+    else if(a.kind==='imaj-yama')(a.repos||[]).filter(u=>u.state==='yok').forEach(u=>lines.push(`${u.repo} (production): 1 taslak PR — ${(u.sites||[]).length} FROM satırı → ${a.target}`));
+    else if(a.kind==='yükseltme'){const n=(a.repos||[]).filter(u=>u.state==='yok');const k=Math.min(n.length,a.cap==null?n.length:a.cap);lines.push(`en çok ${k} sürüm yükseltme izleme işi başlatılır (${n.length} aday repo, sınır ${a.cap==null?'yok':a.cap}; kalanı sonraki başlatmada): ${n.map(u=>u.repo+' → '+u.to).join(', ')}`)}
+  });
+  return `${image} için giderme başlatılacak:\n\n- ${lines.join('\n- ')}\n\nDosya yolları ve satırlar uygulama anında yeniden okunur; kart verisinden yazılmaz.\n\nDevam?`;
+}
+// Onay ve sonuç sayfa içi pencerede gösterilir: tarayıcının confirm() kutusu bastırılabilir (o zaman tıklama sessizce
+// hiçbir şey yapmaz) ve kartın altındaki mesaj satırı ekran dışında kalabilir.
+function fixImageVuln(btn){
+  const image=btn.dataset.image||'';
+  if(!image)return;
+  const m=document.getElementById('ivModal');m.dataset.image=image;m.dataset.mode='fix';
+  document.getElementById('ivModalTitle').innerHTML=`Gidermeyi başlat: <code>${_ivE(image)}</code>`;
+  document.getElementById('ivModalMeta').innerHTML='';
+  document.getElementById('ivModalBody').innerHTML=`<div style="white-space:pre-wrap;font-size:13px;line-height:1.55">${_ivE(_ivFixConfirm(image,_ivFixAll[image]))}</div>`
+    +`<div id="ivFixRun" style="margin-top:14px"><button class="sm-btn small" id="ivFixGo">Başlat</button> <button class="sm-btn ghost small" onclick="closeIvDetail()">Vazgeç</button></div>`;
+  document.getElementById('ivFixGo').onclick=()=>runImageFix(image);
+  m.classList.add('open');
+}
+async function runImageFix(image){
+  const box=document.getElementById('ivFixRun'),msg=document.getElementById('tdImgFixMsg');
+  const btns=[...document.querySelectorAll('.ivFixBtn')];
+  btns.forEach(b=>b.disabled=true);
+  const wait=_tdLoad('Giderme başlatılıyor… Repolar yeniden okunuyor, 1 dakikayı bulabilir.');
+  if(box)box.innerHTML=wait;msg.innerHTML=wait;
+  let html;
+  try{
+    const resp=await fetch('/api/techdebt/images/fix',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image,team:_tdTeam()})});
+    const r=await resp.json().catch(()=>({}));
+    if(!resp.ok)html=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;
+    else html=`Giderme başlatıldı (${_ivE(image)}): `+(r.actions||[]).map(a=>`${_ivE(_ivKindLabel(a))} — ${_ivE(_ivStateLabel(a.state))}${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${a.reason?' ('+_ivE(a.reason)+')':''}`).join('; ');
+  }catch(e){html=`<span style="color:var(--danger)">${_ivE(String(e))}</span>`}
+  finally{btns.forEach(b=>{if(b.isConnected)b.disabled=false})}
+  msg.innerHTML=html;
+  if(box&&box.isConnected)box.innerHTML=`<div style="font-size:13px;line-height:1.55">${html}</div><div style="margin-top:12px"><button class="sm-btn small" onclick="closeIvDetail()">Kapat</button></div>`;
+  loadImageVuln(false);
 }
 
 // ── Maliyet analizi (salt okunur; /api/costs) ──
@@ -1708,9 +1965,10 @@ async function techdebtQueue(ids){
 // taranır (LLM yok); hedefin sunduğu ama kodun kullanmadığı yapılar katalogdan
 // ayrıntı / avantaj / risk / önce-sonra ile listelenir. Seçilenler "Teknik borç —
 // <sprint>" story'si altında Task olur; mekanik → kuyruk, yapısal → needs-human.
-let _tdm={repos:[],scan:null,loaded:false,seq:0};
+let _tdm={repos:[],scan:null,loaded:false,seq:0,userTo:false,mode:'mod',upRepos:[],upOn:false};
 function _tdmSel(){const v=document.getElementById('tdmRepo').value;const i=v.indexOf(':');return i<0?{lang:'',repo:''}:{lang:v.slice(0,i),repo:v.slice(i+1)}}
 function _tdmRepoChanged(){
+  if(_tdm.mode==='up')return _upRepoChanged();
   const k=_tdmSel();const r=_tdm.repos.find(x=>x.repo===k.repo&&(x.lang||'php')===k.lang);
   const chip=document.getElementById('tdmTarget');
   const ps=(r&&r.per_src)||[];const mixed=new Set(ps.map(x=>x.version)).size>1;
@@ -1728,13 +1986,24 @@ function _tdmRepoChanged(){
 }
 async function loadModernRepos(){
   const card=document.getElementById('tdModernCard');if(!card)return;
-  if(_tdm.loaded){return}
+  if(_tdm.loaded||_tdm.loading){return}
+  _tdm.loading=true;
+  // yanıt gelene kadar: kart görünür, denetimler kapalı, sonuç yerinde yükleniyor satırı
+  const ctl=['tdmRepo','tdmRescan','tdmTake','tdmSprint'].map(i=>document.getElementById(i));
+  const box=document.getElementById('tdmResult');
+  const done=()=>{_tdm.loading=false;if(box.querySelector('.td-load'))box.innerHTML='';
+    document.getElementById('tdmRepo').disabled=document.getElementById('tdmSprint').disabled=false};
+  ctl.forEach(c=>c.disabled=true);
+  document.getElementById('tdmRepo').innerHTML='<option>Yükleniyor…</option>';
+  document.getElementById('tdmMsg').textContent='';
+  box.innerHTML=_tdLoad('Repolar yükleniyor… (günün ilk açılışında bir dakikayı bulabilir)');
+  if(!_tdOff('modern'))card.style.display='flex';
   try{
     const resp=await fetch('/api/techdebt/modern/repos');
-    if(resp.status===403){card.style.display='none';return}
+    if(resp.status===403){card.style.display='none';_tdOff('modern',true);done();return}
     const r=await resp.json();
-    card.style.display='flex';
-    if(!resp.ok){document.getElementById('tdmMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    _tdOff('modern',false);card.style.display='flex';
+    if(!resp.ok){done();document.getElementById('tdmRepo').innerHTML='<option value="">Yüklenemedi</option>';document.getElementById('tdmMsg').innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
     _tdm.repos=r.items||[];_tdm.loaded=true;
     const sel=document.getElementById('tdmRepo');
     const opt=i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.version?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'PHP')} ${i.version?esc(i.version):'— hedef sürüm bilinmiyor'}</option>`;
@@ -1745,14 +2014,31 @@ async function loadModernRepos(){
       +(pas.length?`<optgroup label="Hedef sürümü bilinmeyen (${pas.length})">${pas.map(opt).join('')}</optgroup>`:'')
       :'<option value="">Yerel repo yok</option>';
     sel.value='';
+    _tdmFillRepoSel=()=>{
+      const s2=document.getElementById('tdmRepo');
+      if(_tdm.mode==='up'){
+        const up=_tdm.upRepos;
+        s2.innerHTML=up.length?'<option value="" selected>Repo seçiniz…</option>'+up.map(i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.current?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'')} ${i.current?esc(i.current)+(i.up_to_date?' (güncel)':(i.target?' → '+esc(i.target):'')):'— sürüm bilinmiyor'}</option>`).join(''):'<option value="">Yerel repo yok</option>';
+      }else{
+        s2.innerHTML=_tdmModRepoHtml;
+      }
+      s2.value='';
+    };
+    _tdmModRepoHtml=sel.innerHTML;
+    // sürüm yükseltme listesi de gelene kadar yükleniyor satırı kalır (mod düğmeleri onunla belirir)
     _tdmRepoChanged();
-  }catch(e){document.getElementById('tdmMsg').textContent=String(e)}
+    box.innerHTML=_tdLoad('Sürüm bilgileri yükleniyor…');
+    await loadUpgradeRepos();
+    done();
+  }catch(e){done();card.style.display='flex';document.getElementById('tdmRepo').innerHTML='<option value="">Yüklenemedi</option>';document.getElementById('tdmMsg').textContent=String(e)}
 }
+let _tdmFillRepoSel=()=>{},_tdmModRepoHtml='';
 function _tdmKindChip(k){
   const m={deprecation:['Deprecation','var(--warning)','var(--human-soft)'],mechanical:['Mekanik','var(--accent)','var(--accent-soft)'],structural:['Yapısal','var(--warning)','var(--human-soft)'],report:['Rapor','var(--text-dim)','var(--bg)']}[k]||[k,'var(--text-dim)','var(--bg)'];
   return `<span class="chip" style="background:${m[2]};color:${m[1]}">${m[0]}</span>`;
 }
 async function modernScan(force,keepMsg){
+  if(_tdm.mode==='up')return upgradeScan(force,keepMsg);
   const {repo,lang}=_tdmSel();const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
   if(!repo){msg.textContent='Repo seçin.';return}
   const team=_tdTeam();const seq=++_tdm.seq;
@@ -1775,7 +2061,8 @@ function renderModern(){
   const fr=r.freshen||{};
   const frNote=fr.updated?` · yerel klon ${fr.updated} commit güncellendi`
     :(fr.skipped&&!fr.recent?` · <span style="color:var(--warning)" title="${esc(fr.skipped)}">klon güncellenemedi — sonuçlar eski olabilir</span>`:'');
-  document.getElementById('tdmAdoption').innerHTML=((r.lang&&r.lang!=='php')
+  const isUp=_tdm.mode==='up'&&!!r.selectable;
+  document.getElementById('tdmAdoption').innerHTML=isUp?`${r.files} dosyada bulgu${r.cached?' · önbellek':''}`+frNote:((r.lang&&r.lang!=='php')
     ?`${r.files} dosyada bulgu · hedef ${esc(r.label||'')} ${esc(r.version||'?')} (${esc(r.version_source||'')})`+(r.tool_fix?` · otomatik işleri <b>araç uygular</b> (${r.lang==='go'?'Go modernize':'ruff'}), LLM yalnız inceler`:' · otomatik işleri pipeline developer\'ı uygular')
     :`${r.files} dosya · hedef PHP ${esc(r.version||'?')}${r.cached?' · önbellek':''} · <b>benimseme:</b> enum ${ad.enum||0} · readonly ${ad.readonly||0} · match ${ad.match||0} · ?-&gt; ${ad.nullsafe||0} · attribute ${ad.attribute||0}${pct!==null?` · tipli property %${pct}`:''} · strict_types ${ad.strict_types_files||0} dosya${r.rector?' · mekanik kuralları <b>Rector uygular</b>, LLM yalnız inceler':''}`)+frNote;
   const rules=Object.entries(r.rules||{}).sort((a,b)=>b[1].count-a[1].count);
@@ -1807,7 +2094,7 @@ function renderModern(){
         <div style="font-size:12px;color:var(--text);margin-top:6px"><b>İşler (${items.length}):</b> <span style="color:var(--text-dim)">her biri ayrı Task; tek tek de seçilebilir</span><ul style="margin:2px 0 4px 0;padding:0">${items.map(x=>unitRow(x,human)).join('')}</ul></div>
       </details></td>
       <td>${files} dosya · ${items.length} iş</td><td class="num">${total}</td><td class="num">${sp}</td>
-      <td>${_tdmKindChip(t.kind)} ${statusChip(t,human)}</td></tr>`;
+      <td>${_tdmKindChip(t.kind)} ${statusChip(t,human)}${items.some(x=>x.blocking)?' <span class="chip" style="background:var(--human-soft);color:var(--danger)" title="Bu bulgu çözülmeden sürüm adımı açılmaz">engelleyen</span>':''}${t.breaks?` <span class="chip dim">${esc(({error:'Kırılır',behavior:'Davranış değişir',deprecation:'Kullanımdan kalkar'})[t.breaks]||String(t.breaks))}</span>`:''}</td></tr>`;
   };
   const tbl=(list,human)=>{
     const by=new Map();
@@ -1834,6 +2121,7 @@ function _tdmChildToggle(el){
   document.querySelectorAll(`.tdmRule[data-rule="${CSS.escape(el.dataset.rule)}"]`).forEach(p=>{p.checked=on===kids.length;p.indeterminate=on>0&&on<kids.length});
 }
 async function modernTake(){
+  if(_tdm.mode==='up')return upgradeTake();
   const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');
   const ids=[...document.querySelectorAll('.tdmSel:checked')].map(x=>x.value);
   if(!ids.length){msg.textContent='Seçili öneri yok.';return}
@@ -1852,6 +2140,285 @@ async function modernTake(){
       +((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>esc(s.reason)).join(', '):'');
     if(typeof loadTechdebt==='function')loadTechdebt();
     await modernScan(false,true);  // sonuç satırı korunur; butonlar yeniden tarama bitince açılır
+  }catch(e){msg.textContent=String(e)}
+  finally{btns.forEach(b=>b.disabled=false)}
+}
+// Sürüm yükseltme görünümü: aynı kartta, aynı repo seçici / sprint seçici / liste çizimi (renderModern).
+// Eşik hesaplamaz: sayılar, engeller, aşama ve metinler sunucudan gelir.
+function _upSaved(){try{return JSON.parse(localStorage.getItem('tempo_upgrade_to')||'{}')||{}}catch(e){return {}}}
+// Kayıtlı hedef artık seçilemiyorsa (repo yükseltildi, sürüm listesi değişti) sunucu 400 döner: bir kez, kayıtsız yeniden tara.
+function _upShouldRetry(status,sentTo,savedTo,userPicked){return status===400&&!!sentTo&&sentTo===savedTo&&!userPicked}
+function _upDropSaved(){try{localStorage.removeItem('tempo_upgrade_to')}catch(e){}}
+function _tdmSetMode(m){
+  if(m==='up'&&!_tdm.upOn)m='mod';
+  _tdm.mode=m;_tdm.seq++;_tdm.scan=null;
+  try{localStorage.setItem('tempo_modern_mode',m)}catch(e){}
+  const up=m==='up';
+  document.getElementById('tdmModeMod').className='sm-btn small'+(up?' ghost':'');
+  document.getElementById('tdmModeUp').className='sm-btn small'+(up?'':' ghost');
+  document.getElementById('tdmTo').style.display=up?'':'none';
+  document.getElementById('tdmTake').textContent=up?'İşleri aç':'Seçilenleri iş olarak aç';
+  document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';
+  document.getElementById('tdmUpInfo').innerHTML='';document.getElementById('tdmMsg').textContent='';
+  _tdmFillRepoSel();
+  document.getElementById('tdmTarget').textContent='';
+  document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=true;
+}
+async function loadUpgradeRepos(keep){
+  try{
+    const team=_tdTeam();
+    const resp=await fetch('/api/techdebt/upgrade/repos'+(team?'?team='+encodeURIComponent(team):''));
+    if(resp.status===403){_tdm.upOn=false;document.getElementById('tdmModeSw').style.display='none';_tdm.mode='mod';return false}
+    const r=await resp.json();
+    if(!resp.ok)return false;
+    _tdm.upRepos=r.items||[];_tdm.upOn=true;
+    document.getElementById('tdmModeSw').style.display='inline-flex';
+    if(keep)return true;  // eylem sonrası yenileme: yalnız tracked / watch_target tazelenir, seçim ve sonuç korunur
+    let m='mod';try{m=localStorage.getItem('tempo_modern_mode')||'mod'}catch(e){}
+    _tdmSetMode(m==='up'?'up':'mod');
+    return true;
+  }catch(e){return false}
+}
+function _upRepoChanged(){
+  const k=_tdmSel();const r=_tdm.upRepos.find(x=>x.repo===k.repo&&x.lang===k.lang);
+  _tdm.seq++;_tdm.scan=null;_tdm.userTo=false;
+  document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';document.getElementById('tdmUpInfo').innerHTML='';
+  document.getElementById('tdmTo').innerHTML='';
+  document.getElementById('tdmTarget').textContent=r&&r.current?`${r.label||''} ${r.current}`:'';
+  document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=!(r&&r.current);
+  document.getElementById('tdmMsg').textContent=r&&!r.current?'Şimdiki sürüm bulunamadı — yükseltme taranamaz.':'';
+  if(r&&r.current)upgradeScan(false);
+}
+function _upToChanged(){
+  const {repo,lang}=_tdmSel();const v=document.getElementById('tdmTo').value;
+  _tdm.userTo=true;
+  try{if(repo&&v){const m=_upSaved();m[lang+':'+repo]=v;localStorage.setItem('tempo_upgrade_to',JSON.stringify(m))}}catch(e){}
+  upgradeScan(false);
+}
+function _upOptText(o){
+  if(!o.published&&o.tool)return `${o.version} — imaj yok · yalnız araç doğrulaması`+(o.catalog?'':' · katalog yok');
+  const st=[];
+  if(!o.published)st.push('imaj yok');
+  if(!o.tool)st.push('araç yok');
+  if(!o.catalog)st.push('katalog yok');
+  return st.length?`${o.version} — ${st.join(' · ')}`:o.version;
+}
+function _upWatchTarget(repo,lang){const it=_tdm.upRepos.find(x=>x.repo===repo&&x.lang===lang)||{};return it.watch_target||''}
+function _upFillTo(r){
+  const sel=document.getElementById('tdmTo');
+  const watch=_upWatchTarget(r.repo,r.lang);
+  const opts=(r.selectable||[]).map(o=>`<option value="${esc(o.version)}">${esc(_upOptText(o))}</option>`).join('');
+  sel.innerHTML=opts||'<option value="">seçilebilir sürüm yok</option>';
+  const want=watch||r.target;
+  if(want)sel.value=want;
+  sel.title=watch?'Aktif izleme işi var — hedefi değiştirmek için önce durdurun':'Yükseltme hedef sürümü';
+}
+async function upgradeScan(force,keepMsg,retried){
+  const {repo,lang}=_tdmSel();const box=document.getElementById('tdmResult');const msg=document.getElementById('tdmMsg');
+  if(!repo){msg.textContent='Repo seçin.';return false}
+  const team=_tdTeam();const seq=++_tdm.seq;
+  const sel=document.getElementById('tdmTo');
+  const watch=_upWatchTarget(repo,lang);
+  const saved=_upSaved()[lang+':'+repo]||'';
+  const to=watch||(_tdm.userTo?sel.value:saved)||'';
+  box.innerHTML=`<div class="board-empty" style="padding:12px 0">${esc(repo)} taranıyor…</div>`;if(!keepMsg)msg.textContent='';
+  const btns=[document.getElementById('tdmRescan'),document.getElementById('tdmTake'),sel];
+  btns.forEach(b=>b.disabled=true);
+  try{
+    const resp=await fetch(`/api/techdebt/upgrade/scan?repo=${encodeURIComponent(repo)}&lang=${encodeURIComponent(lang)}&team=${encodeURIComponent(team)}${to?'&to='+encodeURIComponent(to):''}${force?'&force=1':''}`);
+    const r=await resp.json();
+    if(seq!==_tdm.seq)return null;
+    if(!resp.ok){
+      if(!retried&&!watch&&_upShouldRetry(resp.status,to,saved,_tdm.userTo)){_upDropSaved();return upgradeScan(force,keepMsg,true)}
+      box.innerHTML='';msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return false}
+    _tdm.scan=r;_upFillTo(r);
+    renderUpgrade();renderModern();
+    return true;
+  }catch(e){if(seq===_tdm.seq){box.innerHTML='';msg.textContent=String(e);return false}return null}
+  finally{if(seq===_tdm.seq){btns.forEach(b=>b.disabled=false);sel.disabled=!!watch}}
+}
+function renderUpgrade(){
+  const r=_tdm.scan;const box=document.getElementById('tdmUpInfo');if(!r||!box)return;
+  const it=_tdm.upRepos.find(x=>x.repo===r.repo&&x.lang===r.lang)||{};
+  const c=r.counts||{};const pr=r.probe||{};
+  const probeTxt=pr.ran?`hedef araç: ${esc(String(pr.tool||''))} ✓`:`<span style="color:var(--warning)">${esc(String(pr.reason||'hedef araç çalışmadı'))}</span>`;
+  const bl=(r.blockers||[]).map(b=>`<span class="chip dim" title="${esc(String(b.detail||''))}">${esc(String(b.name||''))} ${esc(String(b.constraint||''))}</span>`).join(' ');
+  const sites=(r.sites||[]).map(s=>`<li><code>${esc(String(s.where||''))}</code> ${esc(String(s.path||''))}${s.line?':'+esc(String(s.line)):''} <span style="color:var(--text-dim)">${esc(String(s.old||''))} → ${esc(String(s.new||''))}</span>${s.blocked?` <span class="chip" style="background:var(--human-soft);color:var(--danger)">engelli: ${esc(String(s.blocked))}</span>`:''}</li>`).join('');
+  box.innerHTML=`<div style="padding:6px 0"><b>${esc(String(r.repo))} · ${esc(String(r.label||''))}</b> ${esc(String(r.current||'?'))} → ${esc(String(r.target||'?'))}`
+    +(r.up_to_date?' <span class="chip dim">güncel</span>':'')+'</div>'
+    +_upStatusHtml(r,it)
+    +`<div style="padding:2px 0">Kırılır <b>${c.error||0}</b> · Davranış değişir <b>${c.behavior||0}</b> · Kullanımdan kalkar <b>${c.deprecation||0}</b>`
+    +(r.blocking?` · <span style="color:var(--danger)">${r.blocking} engelleyen iş</span>`:'')+` · ${probeTxt}</div>`
+    +(bl?`<div style="padding:2px 0"><b>Engeller:</b> ${bl}</div>`:'')
+    +(sites?`<details style="padding:2px 0"><summary style="cursor:pointer"><b>Sürüm yerleri</b> (${(r.sites||[]).length})</summary><ul style="margin:2px 0 4px 18px">${sites}</ul></details>`:'');
+}
+// ── Aşama şeridi ve sürüm adımı düğmeleri: yalnız sunucunun döndürdüğü `status` gösterilir, UI hiçbir şey hesaplamaz ──
+const _UP_STAGES=['Hazırlık','Hazır','Test hattı','Üretim'];
+const _UP_STAGE_IDX={'hazırlık':0,'engelli':0,'hazır':1,'test hattı':2,'üretim':3,'tamam':4};
+const _UP_STEP_LABEL={ci:"Test hattı PR'ını aç",prod:"Üretim PR'larını aç",code:"Kod PR'ını aç"};
+const _UP_EVID={green:'yeşil',red:'kırmızı',none:'build bekleniyor',no_pipeline:'test hattı yok'};
+// Bağlantı yalnız https:// ile başlıyorsa <a> olur; aksi halde düz (kaçışlı) metin.
+function _upLink(url,text){
+  const u=String(url||'');
+  if(u.indexOf('https://')===0)return `<a href="${escHtml(u)}" target="_blank" rel="noopener">${escHtml(text)}</a>`;
+  return escHtml(text);
+}
+function _upPrLine(label,p){
+  if(!p)return '';
+  const t=`PR #${p.id}`+(p.repo?` (${p.repo})`:'');
+  return `<span style="margin-right:10px"><b>${escHtml(label)}:</b> ${_upLink(p.url,t)}${p.status?` <span class="chip dim">${escHtml(String(p.status))}</span>`:''}</span>`;
+}
+function _upStripHtml(stage){
+  const idx=_UP_STAGE_IDX[stage];
+  const blocked=stage==='engelli',done=stage==='tamam';
+  const cells=_UP_STAGES.map((lb,i)=>{
+    let st='color:var(--text-dim);border:1px solid var(--border)';
+    if(done||(idx!==undefined&&i<idx))st='color:var(--accent);border:1px solid var(--accent)';
+    if(!done&&i===idx)st=blocked?'color:var(--warning);border:1px solid var(--warning);font-weight:600':'color:var(--accent);border:1px solid var(--accent);font-weight:600;background:var(--accent-soft)';
+    return `<span style="padding:3px 10px;border-radius:12px;${st}">${escHtml(lb)}${blocked&&i===0?' · Engelli':''}</span>`;
+  });
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:4px 0" title="Yükseltme aşaması">${cells.join('<span style="color:var(--text-dim)">›</span>')}${done?'<span class="chip dim">Tamam</span>':''}</div>`;
+}
+// Yayınlanmamış taban imaj satırları (dizin, bölgeler, durum, PR); `yok` iken "Şablon PR'ı aç". Dizin / bölge / neden /
+// PR bağlantısı güvenilmez girdidir: hepsi escHtml'den geçer, dizin düğmeye data özniteliğiyle taşınır.
+function _upImagesHtml(imgs){
+  if(!Array.isArray(imgs)||!imgs.length)return '';
+  const rows=imgs.map(im=>{
+    const dir=String(im.dir||''),stt=String(im.state||'');
+    const pr=im.pr&&im.pr.id?` · ${_upLink(im.pr.url,'PR #'+im.pr.id)}`:'';
+    const why=im.reason?` <span style="color:var(--text-dim)">${escHtml(String(im.reason))}</span>`:'';
+    const btn=(stt==='yok'&&dir)?` <button class="sm-btn small tdmUpImg" data-dir="${escHtml(dir)}" data-regions="${escHtml((im.regions||[]).join(', '))}" data-repo="${escHtml(String(im.repo||''))}" data-project="${escHtml(String(im.project||''))}" data-branch="${escHtml(String(im.branch||''))}" data-source="${escHtml(String(im.source_branch||''))}" onclick="upgradeImage(this)">Şablon PR'ı aç</button>`:'';
+    return `<div style="padding:2px 0"><b>${escHtml(dir||'taban imaj')}</b>`
+      +(im.regions&&im.regions.length?` <span style="color:var(--text-dim)">(${escHtml(im.regions.join(', '))})</span>`:'')
+      +` <span class="chip dim">${escHtml(stt)}</span>${pr}${why}${btn}</div>`;
+  });
+  return `<div style="padding:4px 0" title="Yayınlanmamış taban imaj şablonları"><div style="color:var(--text-dim)">Taban imaj</div>${rows.join('')}</div>`;
+}
+async function upgradeImage(btn){
+  const d=btn.dataset,dir=d.dir||'',regions=d.regions||'';
+  const where=[d.project,d.repo].filter(Boolean).join('/')||'taban imaj reposu';
+  return _upPost('/api/techdebt/upgrade/image',
+    `${dir}: ${where} reposunda '${d.source||'?'}' dalından '${d.branch||'?'}' dalına taslak (draft) PR açılacak. Bekleyen bölgeler: ${regions||'-'}. İmaj üretilmez; DevOps yayınlar. Devam edilsin mi?`,{dir});
+}
+function _upStatusHtml(r,it){
+  const tracked=!!(it&&it.tracked)||!!r.watch_target;
+  const st=r.status||null;
+  let h='';
+  if(st&&st.error){
+    h+=`<div style="padding:2px 0;color:var(--danger)">Durum hesaplanamadı: ${escHtml(String(st.error))}</div>`;
+  }else if(st){
+    h+=_upStripHtml(String(st.stage||''));
+    h+=_upImagesHtml(st.images);
+    const nx=st.next||{};
+    if(nx.reason)h+=`<div style="padding:2px 0">${escHtml(String(nx.reason))}</div>`;
+    if(nx.test_note)h+=`<div style="padding:2px 0;color:var(--warning)">${escHtml(String(nx.test_note))}</div>`;
+    if(nx.handed_off)h+=`<div style="padding:2px 0">DevOps isteği ${typeof wiLink==='function'?wiLink(nx.handed_off):'#'+escHtml(String(nx.handed_off))}</div>`;
+    const ev=st.evidence;
+    if(ev){
+      const word=_UP_EVID[ev.state]||String(ev.state||'');
+      const b=ev.build;
+      h+=`<div style="padding:2px 0">Test hattı kanıtı: <b>${escHtml(word)}</b>`
+        +(b&&b.url?` · ${_upLink(b.url,'build'+(b.id?' #'+b.id:''))}`:'')+'</div>';
+      if(ev.state==='red'&&ev.summary)h+=`<details style="padding:2px 0"><summary style="cursor:pointer">Hata özeti</summary><pre style="white-space:pre-wrap;margin:4px 0">${escHtml(String(ev.summary))}</pre></details>`;
+    }
+    const prs=st.prs||{};
+    const pl=_upPrLine('Test hattı',prs.ci)+(prs.devops||[]).map(p=>_upPrLine('Üretim',p)).join('')+_upPrLine('Kod',prs.code);
+    if(pl)h+=`<div style="padding:2px 0">${pl}</div>`;
+  }
+  const nx=(st&&st.next)||{};
+  const canBump=tracked&&nx.ready===true&&!!_UP_STEP_LABEL[nx.step];
+  h+='<div style="display:flex;gap:8px;flex-wrap:wrap;padding:6px 0">'
+    +(tracked?'<button class="sm-btn ghost small" id="tdmUpStop" onclick="upgradeStop()">Yükseltmeyi durdur</button>'
+             :'<button class="sm-btn small" id="tdmUpStart" onclick="upgradeStart()">Yükseltmeyi başlat</button>')
+    +`<button class="sm-btn small" id="tdmUpBump" onclick="upgradeBump()"${canBump?'':' disabled'}>${escHtml(_UP_STEP_LABEL[nx.step]||'Sürüm adımını başlat')}</button>`
+    +'</div>';
+  return h;
+}
+function _upBumpConfirm(r,step){
+  const where={ci:'test hattı repolarında (yml-files)',prod:'FLODevOps repolarında',code:`${r.repo} reposunda`}[step]||'ilgili repolarda';
+  return `${_UP_STEP_LABEL[step]||'Sürüm adımı'}: ${where} taslak (draft) PR'lar açılacak. Devam edilsin mi?`;
+}
+// Eylem sonrası panel her zaman sunucudan taze durumla yeniden çizilir; taze durum alınamazsa düğmesiz "bayat" satırı kalır.
+async function _upRefresh(){
+  const info=document.getElementById('tdmUpInfo'),msg=document.getElementById('tdmMsg');
+  const prev=msg.innerHTML;
+  _tdm.scan=null;
+  info.innerHTML='<div style="padding:6px 0;color:var(--text-dim)">Durum yenileniyor…</div>';
+  const repoOk=await loadUpgradeRepos(true);
+  const ok=repoOk?await upgradeScan(false,true):false;
+  if(ok===null)return;  // bu arada başka repo seçildi: o taramanın sonucu geçerli
+  if(ok===false){
+    _tdm.scan=null;
+    info.innerHTML='<div style="padding:6px 0;color:var(--warning)">Durum yenilenemedi — yeniden tarayın.</div>';
+    msg.innerHTML=prev+(repoOk?'':' <span style="color:var(--danger)">İzleme durumu okunamadı; hedef seçici eski durumda kalmış olabilir.</span>');
+  }
+}
+async function _upPost(path,confirmText,extra){
+  const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');
+  const team=_tdTeam();
+  if(!repo){msg.textContent='Repo seçin.';return}
+  if(!team){msg.textContent='Takım seçin.';return}
+  if(confirmText&&!confirm(confirmText))return;
+  const to=document.getElementById('tdmTo').value||'';
+  const isBump=path.endsWith('/bump'),isImg=path.endsWith('/image');
+  const btns=[...document.querySelectorAll('#tdmUpStart,#tdmUpStop,#tdmUpBump,.tdmUpImg')];
+  const pre=btns.map(b=>b.disabled);
+  btns.forEach(b=>b.disabled=true);msg.textContent='Gönderiliyor…';
+  let refresh=false;
+  try{
+    const resp=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({repo,lang,to,team},extra||{}))});
+    const r=await resp.json().catch(()=>({}));
+    if(!resp.ok){
+      msg.innerHTML=`<span style="color:var(--danger)">${escHtml(String(r.error||'HTTP '+resp.status))}</span>`;
+      refresh=isBump||isImg||resp.status===409;  // adım işinde durum bilinmiyor: taze tara; 409: panel yeni adımı göstersin
+      return;
+    }
+    let t='Tamam.';
+    if(path.endsWith('/start'))t=r.created?`İzleme işi açıldı: #${r.id}`:`Açık izleme işi var: #${r.id}`;
+    else if(path.endsWith('/stop'))t=`İzleme işi kapatıldı: #${r.id}`;
+    else if(isBump)t=`Sürüm adımı kuyruğa alındı (iş #${r.job_id}) — ${_UP_STEP_LABEL[r.step]||r.step}`;
+    if(isImg)t=r.pr&&r.pr.id?`Şablon PR'ı: #${r.pr.id} (${r.state||''})`:`Şablon PR'ı açılmadı: ${r.state||''} ${r.reason||''}`;
+    msg.textContent=t;
+    refresh=true;
+  }catch(e){msg.textContent=String(e);refresh=isBump||isImg}
+  finally{
+    if(refresh)await _upRefresh();
+    else btns.forEach((b,i)=>{if(b.isConnected&&b.id!=='tdmUpBump')b.disabled=pre[i]});  // Başlat/Durdur: eylem öncesi hâline; bump kendiliğinden açılmaz
+  }
+}
+async function upgradeStart(){
+  return _upPost('/api/techdebt/upgrade/start','');
+}
+async function upgradeStop(){
+  return _upPost('/api/techdebt/upgrade/stop','Yükseltme izlemesi durdurulsun mu? Açık PR\'lar ve hazırlık işleri olduğu gibi kalır.');
+}
+async function upgradeBump(){
+  const r=_tdm.scan||{};const nx=((r.status||{}).next)||{};
+  const {repo,lang}=_tdmSel();
+  const it=_tdm.upRepos.find(x=>x.repo===repo&&x.lang===lang)||{};
+  if(!(nx.ready===true&&(it.tracked||r.watch_target))){document.getElementById('tdmMsg').textContent=nx.reason||'Sürüm adımı şu an başlatılamaz.';return}
+  return _upPost('/api/techdebt/upgrade/bump',_upBumpConfirm(r,nx.step),{step:nx.step});
+}
+async function upgradeTake(){
+  const {repo,lang}=_tdmSel();const msg=document.getElementById('tdmMsg');
+  const ids=[...document.querySelectorAll('.tdmSel:checked')].map(x=>x.value);
+  if(!ids.length){msg.textContent='Seçili öneri yok.';return}
+  const team=_tdTeam(),sprint=(document.getElementById('tdmSprint')||{}).value||'';
+  const to=document.getElementById('tdmTo').value||'';
+  const btns=[document.getElementById('tdmRescan'),document.getElementById('tdmTake')];
+  btns.forEach(b=>b.disabled=true);msg.textContent='İşler açılıyor…';
+  try{
+    const resp=await fetch('/api/techdebt/upgrade/take',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,lang,to,group_ids:ids,team,sprint})});
+    const r=await resp.json();
+    if(!resp.ok){msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return}
+    const t=(r.tasks||[]),h=(r.human_tasks||[]);
+    msg.innerHTML=(r.story?`Story <a href="${esc(r.story.url)}" target="_blank">#${r.story.id}</a>${r.story.created?' (yeni)':''} · `:'')
+      +`${t.length} iş ${r.tool_fix?'araç düzeltmesine':'kuyruğa'} alındı (${r.total_sp||0} SP) · ${h.length} Task insan bekliyor (${r.human_sp||0} SP)`
+      +((r.devops||[]).filter(d=>d.devops).length?' · DevOps isteği: '+[...new Set((r.devops||[]).filter(d=>d.devops).map(d=>d.devops))].map(id=>wiLink(id)).join(', '):'')
+      +(t.concat(h).filter(x=>x.id).length?' — '+t.concat(h).filter(x=>x.id).map(x=>wiLink(x.id)).join(', '):'')
+      +((r.skipped||[]).length?' · atlanan: '+r.skipped.map(s=>esc(s.reason)).join(', '):'');
+    if(typeof loadTechdebt==='function')loadTechdebt();
+    await upgradeScan(false,true);
   }catch(e){msg.textContent=String(e)}
   finally{btns.forEach(b=>b.disabled=false)}
 }

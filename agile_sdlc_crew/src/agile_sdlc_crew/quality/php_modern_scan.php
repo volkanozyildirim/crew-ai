@@ -48,7 +48,21 @@ final class Scanner
 
     private const CALLBACK_FUNCS = ['array_map', 'array_filter', 'usort', 'uasort', 'uksort', 'array_walk',
         'call_user_func', 'call_user_func_array', 'array_reduce', 'iterator_apply'];
-    private const REMOVED_FUNCS = ['each', 'create_function', 'money_format'];
+    private const REMOVED_FUNCS = ['each', 'create_function', 'money_format',
+        'get_magic_quotes_gpc', 'get_magic_quotes_runtime', 'ezmlm_hash', 'restore_include_path', 'hebrevc',
+        'convert_cyr_string', 'fgetss', 'gzgetss', 'image2wbmp', 'png2wbmp', 'jpeg2wbmp', 'ldap_sort', 'read_exif_data'];
+    // 8.1'de kullanımdan kalkan fonksiyonlar (removed_81)
+    private const REMOVED_81_FUNCS = ['strftime', 'gmstrftime', 'date_sunrise', 'date_sunset', 'mhash', 'mhash_count',
+        'mhash_get_block_size', 'mhash_get_hash_name', 'mhash_keygen_s2k', 'odbc_result_all'];
+    // 8.4'te PECL'e taşınan eklentiler: çağrı öneki
+    private const PECL_84_PREFIXES = ['imap_', 'pspell_', 'oci_'];
+    // 8.5 migration85.deprecated: kullanımdan kalkan fonksiyonlar (yalnız çağrı) ve sabit önekleri
+    private const DEPRECATED_85_FUNCS = ['curl_close', 'curl_share_close', 'finfo_close', 'imagedestroy', 'mysqli_execute',
+        'socket_set_timeout', 'xml_parser_free', 'ldap_connect_wallet'];
+    private const DEPRECATED_85_CONST_PREFIXES = ['MHASH_'];
+    // null verilince 8.1'de deprecated olan iç fonksiyonlar → null'ın verilemeyeceği (string) argüman konumları
+    private const NULL_INTERNAL = ['strlen' => [0], 'strpos' => [0, 1], 'str_replace' => [0, 1, 2], 'trim' => [0, 1],
+        'explode' => [0, 1], 'htmlspecialchars' => [0], 'strtolower' => [0], 'strtoupper' => [0], 'substr' => [0]];
     // 8.3 / 8.4'te kullanımdan kalkan fonksiyon ve sabitler (yalnız çağrı / sabit kullanımı)
     private const DEPRECATED_83_FUNCS = ['assert_options'];
     private const DEPRECATED_83_CONSTS = ['MT_RAND_PHP'];
@@ -96,6 +110,11 @@ final class Scanner
             }
         }
         $this->n = count($this->t);
+        $this->hasNamespace = false;
+        for ($q = 0; $q < $this->n; $q++) {
+            if ($this->id($q) === T_NAMESPACE && $this->id($q + 1) !== T_NS_SEPARATOR) { $this->hasNamespace = true; break; }
+        }
+        $this->backtickOpen = false;
         if ($hasStrict) {
             $this->adoption['strict_types_files']++;
         }
@@ -265,6 +284,8 @@ final class Scanner
 
     // ── ana döngü ──
     private int $depth = 0;
+    private bool $hasNamespace = false;
+    private bool $backtickOpen = false;
 
     private function walk(): void
     {
@@ -285,7 +306,9 @@ final class Scanner
                     if (!in_array($this->id($i - 1), [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION, T_CONST], true)) $this->hit('array_destructuring', $this->ln($i)); // const LIST = … sabit adı
                     break;
                 case T_ISSET: $this->checkIssetTernary($i); break;
-                case T_SWITCH: $this->checkSwitch($i); break;
+                case T_SWITCH: $this->checkSwitch($i); $this->checkCaseSemicolon($i); break;
+                case T_DOUBLE_CAST: case T_UNSET_CAST: case T_BOOL_CAST: case T_INT_CAST: case T_STRING_CAST: $this->checkCast($i); break;
+                case T_IS_EQUAL: case T_IS_NOT_EQUAL: $this->checkLooseCompare($i); break;
                 case T_CLASS: $this->checkClass($i); break;
                 case T_VARIABLE: $this->checkNullsafe($i); break;
                 case T_PUBLIC: case T_PROTECTED: case T_PRIVATE: case T_VAR: $this->checkPropertyDecl($i); break;
@@ -298,6 +321,12 @@ final class Scanner
                 case 0:
                     if ($this->tx($i) === '!' && $this->isWord($i + 1, 'is_null')) $this->checkIsNullTernary($i);
                     elseif ($this->tx($i) === '(' && $this->id($i + 1) === T_NEW) $this->checkNewParens($i);
+                    elseif ($this->tx($i) === '{') $this->checkCurlyOffset($i);
+                    elseif ($this->tx($i) === '`') {
+                        // 8.5: backtick operatörü (shell_exec takma adı); açılışta bir kez bildirilir
+                        if (!$this->backtickOpen) $this->hit('backtick_exec_85', $this->ln($i));
+                        $this->backtickOpen = !$this->backtickOpen;
+                    }
                     break;
             }
         }
@@ -317,11 +346,23 @@ final class Scanner
             if (!$this->is($i + 1, '(') && !in_array($p, [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON, T_CONST, T_FUNCTION], true)) {
                 if (in_array($up, self::DEPRECATED_83_CONSTS, true)) $this->hit('deprecated_83', $this->ln($i));
                 elseif (in_array($up, self::DEPRECATED_84_CONSTS, true)) $this->hit('deprecated_84', $this->ln($i));
+                else foreach (self::DEPRECATED_85_CONST_PREFIXES as $pre) if (str_starts_with($up, $pre)) { $this->hit('deprecated_85', $this->ln($i)); break; }
             }
             return;
         }
         $close = $this->closeOf($i + 1);
         if ($close < 0) return;
+        if (isset(self::NULL_INTERNAL[$w])) {
+            // 8.1: iç fonksiyonun string parametresine literal null → deprecated (null → '' dönüşümü)
+            foreach ($this->args($i + 1, $close) as $pos => [$a, $b]) {
+                if ($a === $b && $this->isNullTok($a) && in_array($pos, self::NULL_INTERNAL[$w], true)) { $this->hit('null_to_internal', $this->ln($i)); break; }
+            }
+        }
+        if (in_array($w, self::REMOVED_81_FUNCS, true)) { $this->hit('removed_81', $this->ln($i)); return; }
+        foreach (self::PECL_84_PREFIXES as $pre) {
+            if (str_starts_with($w, $pre)) { $this->hit('moved_to_pecl_84', $this->ln($i)); return; }
+        }
+        if (in_array($w, self::DEPRECATED_85_FUNCS, true)) { $this->hit('deprecated_85', $this->ln($i)); return; }
         if (($w === 'get_class' || $w === 'get_parent_class') && $close === $i + 2) { $this->hit('get_class_noarg', $this->ln($i)); return; }
         if (in_array($w, self::DEPRECATED_83_FUNCS, true)) { $this->hit('deprecated_83', $this->ln($i)); return; }
         if (in_array($w, self::DEPRECATED_84_FUNCS, true)) { $this->hit('deprecated_84', $this->ln($i)); return; }
@@ -348,6 +389,111 @@ final class Scanner
     {
         $id = $this->id($i);
         return $id === T_IS_IDENTICAL || $id === T_IS_NOT_IDENTICAL || (!$identicalOnly && ($id === T_IS_EQUAL || $id === T_IS_NOT_EQUAL));
+    }
+
+    /** (real)/(unset): 8.0'da kaldırıldı. (boolean)/(integer)/(double)/(binary): 8.5'te kullanımdan kalktı. */
+    private function checkCast(int $i): void
+    {
+        $c = strtolower(preg_replace('/\s+/', '', $this->tx($i)) ?? '');
+        if ($c === '(real)' || $c === '(unset)') { $this->hit('removed_casts', $this->ln($i)); return; }
+        if (in_array($c, ['(boolean)', '(integer)', '(double)', '(binary)'], true)) $this->hit('noncanonical_casts_85', $this->ln($i));
+    }
+
+    /** 8.0: `$s{0}` string/dizi ofset erişimi kaldırıldı. Değişken, `]` ya da çağrı kapanışından sonra `{…}`. */
+    private function checkCurlyOffset(int $i): void
+    {
+        $p = $i - 1;
+        $ok = false;
+        if ($this->id($p) === T_VARIABLE) {
+            $ok = true;
+        } elseif ($this->is($p, ']')) {
+            $ok = true;
+        } elseif ($this->is($p, ')')) {
+            // yalnız `ad(...) {…}` çağrısı: kontrol yapısı / fonksiyon bildirimi / closure gövdesi değil
+            $o = $p;
+            $d = 0;
+            for (; $o >= 0; $o--) {
+                if ($this->is($o, ')')) $d++;
+                elseif ($this->is($o, '(') && --$d === 0) break;
+            }
+            if ($o > 0 && $this->id($o - 1) === T_STRING) {
+                $q = $o - 2;
+                if ($this->isAmp($q)) $q--;
+                $ok = $this->id($q) !== T_FUNCTION && !in_array($this->id($q), [T_NEW, T_USE], true);
+            }
+        }
+        if (!$ok) return;
+        $e = $this->closeOf($i);
+        if ($e < 0 || $e === $i + 1) return;
+        $f = $i + 1;
+        // property hook / asimetrik gövde (`public string $x { get => … }`) ofset değildir
+        if ($this->id($f) === T_ATTRIBUTE || $this->isAmp($f) || in_array(strtolower($this->tx($f)), ['get', 'set', 'final'], true)) return;
+        $this->hit('curly_offset', $this->ln($p));
+    }
+
+    /** 8.0: `0 == 'abc'` artık false (sayı–sayısal olmayan string karşılaştırması string olarak yapılır). */
+    private function checkLooseCompare(int $i): void
+    {
+        $num = [T_LNUMBER, T_DNUMBER];
+        $l = $i - 1;
+        $r = $i + 1;
+        $bin = ['.', '+', '-', '*', '/', '%', '?', ':'];
+        foreach ([[$l, $r], [$r, $l]] as [$n, $s]) {
+            if (!in_array($this->id($n), $num, true) || $this->id($s) !== T_CONSTANT_ENCAPSED_STRING) continue;
+            if (is_numeric(substr($this->tx($s), 1, -1))) continue; // sayısal string: davranış aynı
+            // ifadenin parçası değil: yanda başka işleç yok
+            $before = min($n, $s) - 1;
+            $after = max($n, $s) + 1;
+            if ($this->id($before) === 0 && in_array($this->tx($before), $bin, true)) continue;
+            if ($this->id($after) === 0 && in_array($this->tx($after), ['.', '+', '-', '*', '/', '%', '['], true)) continue;
+            $this->hit('loose_compare_numeric', $this->ln($i));
+            return;
+        }
+    }
+
+    /** 8.5: `case 1;` (iki nokta yerine noktalı virgül) kullanımdan kalktı. Yalnız switch gövdesinin kendi case'leri. */
+    private function checkCaseSemicolon(int $i): void
+    {
+        if (!$this->is($i + 1, '(')) return;
+        $pc = $this->closeOf($i + 1);
+        if ($pc < 0 || !$this->is($pc + 1, '{')) return;
+        $end = $this->closeOf($pc + 1);
+        if ($end < 0) return;
+        $d = 0;
+        for ($j = $pc + 2; $j < $end; $j++) {
+            $id = $this->id($j);
+            if ($id === 0) {
+                $c = $this->tx($j);
+                if ($c === '(' || $c === '[' || $c === '{') $d++;
+                elseif ($c === ')' || $c === ']' || $c === '}') $d--;
+            } elseif ($id === T_CURLY_OPEN || $id === T_DOLLAR_OPEN_CURLY_BRACES || $id === T_ATTRIBUTE) {
+                $d++;
+            } elseif ($id === T_CASE && $d === 0) {
+                $e = $this->caseLabelEnd($j + 1, $end);
+                if ($e > 0 && $this->is($e, ';')) $this->hit('deprecated_85', $this->ln($j));
+            }
+        }
+    }
+
+    /** case etiketinin sonlandırıcısı: derinlik-0 ':' (üçlü ?: çiftleri hariç) ya da ';'; yoksa -1. */
+    private function caseLabelEnd(int $a, int $end): int
+    {
+        $d = 0;
+        $q = 0;
+        for ($j = $a; $j < $end; $j++) {
+            $id = $this->id($j);
+            if ($id === 0) {
+                $c = $this->tx($j);
+                if ($c === '(' || $c === '[' || $c === '{') $d++;
+                elseif ($c === ')' || $c === ']' || $c === '}') $d--;
+                elseif ($d === 0 && $c === '?') $q++;
+                elseif ($d === 0 && $c === ':') { if ($q > 0) $q--; else return $j; }
+                elseif ($d === 0 && $c === ';') return $j;
+            } elseif ($id === T_CURLY_OPEN || $id === T_DOLLAR_OPEN_CURLY_BRACES || $id === T_ATTRIBUTE) {
+                $d++;
+            }
+        }
+        return -1;
     }
 
     private function checkStrpos(int $i, int $close): void
@@ -468,6 +614,11 @@ final class Scanner
 
     private function checkFunction(int $i): void
     {
+        // 8.0: __autoload() kaldırıldı (spl_autoload_register kullanılmalı); yalnız üst düzey fonksiyon
+        if ($this->depth === 0 && $this->id($i) === T_FUNCTION && $this->id($i + 1) === T_STRING
+            && strcasecmp($this->tx($i + 1), '__autoload') === 0 && $this->is($i + 2, '(')) {
+            $this->hit('legacy_autoload', $this->ln($i));
+        }
         $p = $i + 1;
         if ($this->isAmp($p)) $p++;
         $isCtor = false;
@@ -476,6 +627,8 @@ final class Scanner
         $close = $this->closeOf($p);
         if ($close < 0) return;
         $params = [];
+        $optLine = 0;      // varsayılanlı (istisna dışı) ilk parametrenin satırı
+        $reported = false;
         foreach ($this->args($p, $close) as [$a, $b]) {
             $v = -1;
             for ($j = $a; $j <= $b; $j++) if ($this->id($j) === T_VARIABLE) { $v = $j; break; }
@@ -505,6 +658,15 @@ final class Scanner
             }
             $params[] = ['var' => $this->tx($v), 'promoted' => $promoted, 'line' => $this->ln($v),
                 'promotable' => !$promoted && !$variadic && !$isCallable];
+            // 8.0: varsayılanlı parametreden sonra gelen varsayılansız parametre (variadic hariç).
+            // İstisna: tipli parametre + `= null` (örtük nullable) — PHP bunu bu kurala saymaz.
+            if ($this->is($v + 1, '=')) {
+                $isNullDef = $this->isNullTok($v + 2) && $v + 2 === $b;
+                if (!($typeToks && $isNullDef) && $optLine === 0) $optLine = $this->ln($v);
+            } elseif (!$variadic && $optLine > 0 && !$reported) {
+                $this->hit('required_after_optional', $optLine);
+                $reported = true;
+            }
             // 8.2: parola/token parametresi #[\SensitiveParameter] taşımıyorsa stack trace'te açık görünür
             if (preg_match(self::SENSITIVE_PARAM, $this->tx($v))) {
                 $marked = false;
@@ -665,7 +827,14 @@ final class Scanner
         $allowDynamic = stripos($this->text(max(0, $i - 20), $i), 'AllowDynamicProperties') !== false;
         $j = $i + 2;
         $extends = false;
-        while ($j < $this->n && !$this->is($j, '{')) { if ($this->id($j) === T_EXTENDS) $extends = true; $j++; }
+        $serializable = false;
+        $inImpl = false;
+        while ($j < $this->n && !$this->is($j, '{')) {
+            if ($this->id($j) === T_EXTENDS) $extends = true;
+            if ($this->id($j) === T_IMPLEMENTS) $inImpl = true;
+            elseif ($inImpl && strcasecmp(ltrim($this->tx($j), '\\'), 'Serializable') === 0) $serializable = true;
+            $j++;
+        }
         $end = $this->closeOf($j);
         if ($end < 0) return;
         $consts = [];
@@ -714,7 +883,7 @@ final class Scanner
                 $q = $pc + 1;
                 while ($q < $end && !$this->is($q, '{') && !$this->is($q, ';')) $q++;
                 if ($this->is($q, '{')) { $body = $q; $bodyEnd = $this->closeOf($q); }
-                $methods[$fname] = ['params' => $pc > 0 ? count($this->args($k + 2, $pc)) : 0, 'body' => $body, 'end' => $bodyEnd];
+                $methods[$fname] = ['params' => $pc > 0 ? count($this->args($k + 2, $pc)) : 0, 'body' => $body, 'end' => $bodyEnd, 'line' => $this->ln($k + 1)];
                 $k = $bodyEnd > 0 ? $bodyEnd + 1 : $q + 1;
                 continue;
             }
@@ -734,6 +903,16 @@ final class Scanner
                 }
             }
             $k++;
+        }
+        // 8.0: PHP 4 tarzı yapıcı (sınıfla aynı adlı metot) artık yapıcı değil — namespace'li dosyada zaten hiç olmamıştı
+        if (!$this->hasNamespace && !isset($methods['__construct'])) {
+            foreach ($methods as $mn => $mm) {
+                if (strcasecmp((string) $mn, $name) === 0) { $this->hit('php4_constructor', $mm['line']); break; }
+            }
+        }
+        // 8.1: Serializable tek başına deprecated — __serialize()/__unserialize() ikilisi gerekir
+        if ($serializable && (!isset($methods['__serialize']) || !isset($methods['__unserialize']))) {
+            $this->hit('serializable_only', $this->ln($i));
         }
         // 8.2: tüm property'leri readonly olan sınıf → readonly class (kalıtım bilinmiyorsa önerilmez)
         $all = count($props) + count($promoted);

@@ -99,6 +99,7 @@ rules:
   - key: sync_request_api
     since: "15.0"
     kind: structural
+    breaks: behavior
     auto: false
     sp_unit: 3
     pattern: "(?<!await )\\b(cookies|headers|draftMode)\\(\\)"
@@ -109,6 +110,52 @@ rules:
     before: "const c = cookies()"
     after: "const c = await cookies()"
     ref: "https://nextjs.org/docs/app/building-your-application/upgrading/version-15#async-request-apis-breaking-change"
+  - key: sync_route_params
+    upgrade_catalog: true
+    since: "15.0"
+    kind: structural
+    breaks: behavior
+    auto: false
+    sp_unit: 3
+    pattern: "\\bparams\\.(?!then\\b)[A-Za-z_$][\\w$]*"
+    file_pattern: "(^|/)app/(.*/)?(page|layout|route|default|template)\\.(js|jsx|ts|tsx)$"
+    title: "Senkron params erişimi → await params (Next 15)"
+    summary: "Next 15'te sayfa/layout/route bileşenlerine gelen params bir Promise oldu; params.slug gibi senkron erişim uyarı verir ve ileride kalkacak."
+    advantages: ["Next 15+ ile uyumlu; render optimizasyonları açılır."]
+    risks: ["Bileşen async olmalı; params'ı alt bileşenlere geçiren yerler de değişir — kapsamı insan belirler. Resmî codemod: npx @next/codemod@canary next-async-request-api ."]
+    before: "export default function Page({ params }) { return params.slug }"
+    after: "export default async function Page({ params }) { const { slug } = await params; return slug }"
+    ref: "https://nextjs.org/docs/app/building-your-application/upgrading/version-15#params--searchparams"
+  - key: next_legacy_image
+    upgrade_catalog: true
+    since: "13.0"
+    kind: deprecation
+    breaks: deprecation
+    auto: true
+    sp_unit: 1
+    pattern: "from\\s+['\"]next/legacy/image['\"]"
+    title: "next/legacy/image → next/image"
+    summary: "Next 13'te eski Image bileşeni next/legacy/image adına taşındı ve kullanımdan kalktı; yeni next/image farklı props alır (layout/objectFit yerine style/fill)."
+    advantages: ["Yerel lazy-load ve daha az istemci JS; ileride kaldırılacak bileşenden kurtulunur."]
+    risks: ["layout='fill' / objectFit gibi props yeni karşılıklarına çevrilmeli; görsel yerleşimi gözle kontrol edilmeli. Resmî codemod: npx @next/codemod next-image-experimental ."]
+    before: "import Image from 'next/legacy/image'\n<Image src={s} layout=\"fill\" objectFit=\"cover\" />"
+    after: "import Image from 'next/image'\n<Image src={s} fill style={{ objectFit: 'cover' }} />"
+    ref: "https://nextjs.org/docs/app/building-your-application/upgrading/codemods#next-image-experimental"
+  - key: next_lint
+    upgrade_catalog: true
+    since: "15.0"
+    kind: report
+    breaks: deprecation
+    sp_unit: 0
+    pattern: "\"[^\"]*\"\\s*:\\s*\"[^\"]*\\bnext\\s+lint\\b"
+    file_pattern: "^package\\.json$"
+    title: "`next lint` betiği kullanımdan kalkıyor"
+    summary: "Next 15 sonrasında `next lint` kullanımdan kalktı ve Next 16'da kaldırıldı; package.json betiği doğrudan ESLint CLI'a çevrilmeli."
+    advantages: ["Lint yapılandırması Next sürümünden bağımsızlaşır."]
+    risks: ["ESLint yapılandırmasının (flat config) ayrıca taşınması gerekebilir. Resmî codemod: npx @next/codemod@canary next-lint-to-eslint-cli ."]
+    before: "\"lint\": \"next lint\""
+    after: "\"lint\": \"eslint .\""
+    ref: "https://nextjs.org/docs/app/api-reference/cli/next#next-lint-options"
   - key: pages_data_fetching
     since: "13.4"
     kind: structural

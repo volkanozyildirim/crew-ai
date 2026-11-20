@@ -35,6 +35,7 @@ TARGETS_CACHE_PATH = _CONFIG_DIR / "quality_php_targets.yaml"
 
 SOURCE = "php_modern"
 KINDS = ("deprecation", "mechanical", "structural", "report")
+BREAKS = ("error", "behavior", "deprecation")
 WEIGHT = {"deprecation": 20, "structural": 10, "mechanical": 8, "report": 0}
 
 
@@ -60,8 +61,14 @@ class Rule:
     # Bulgu satırına dar bir pencerede (±birkaç satır) çözülebilir mi — araç kaçırırsa kalan yeri
     # LLM pencereyle düzeltir. switch→match, promotion, dinamik property: sınıf/blok düzeyinde → hayır.
     line_local: bool = True
+    # Yükseltmeyi etkiler mi: ""|error (hedefte çalışmaz)|behavior (sessiz davranış değişir)|deprecation (uyarı)
+    breaks: str = ""
+    fix_min: tuple[int, int] = (7, 0)  # düzeltmenin çalıştığı en düşük PHP sürümü
     requires: list[str] = field(default_factory=list)            # PHP eklentileri
     requires_if: dict[str, list[str]] = field(default_factory=dict)  # bulunan yerde geçen ad → eklentiler
+    # Sürüm yükseltme dalının (katalog v4) EKLEDİĞİ kural: modernleştirme hattında yalnız CREW_TECHDEBT_UPGRADE
+    # açıkken görünür (yeni davranış varsayılan kapalı); yükseltme hattı her zaman görür.
+    upgrade_catalog: bool = False
 
     @property
     def since_str(self) -> str:
@@ -86,6 +93,9 @@ def load_rules(path: Path = RULES_PATH) -> list[Rule]:
         kind = str(r.get("kind") or "")
         if kind not in KINDS:
             raise ValueError(f"php_modern kuralı {r.get('key')}: kind geçersiz ({kind})")
+        breaks = str(r.get("breaks") or "")
+        if breaks and breaks not in BREAKS:
+            raise ValueError(f"php_modern kuralı {r.get('key')}: breaks geçersiz ({breaks})")
         out.append(Rule(
             key=str(r["key"]), since=_ver(r["since"]), kind=kind, title=str(r.get("title") or ""),
             summary=str(r.get("summary") or ""), advantages=[str(x) for x in r.get("advantages") or []],
@@ -95,9 +105,11 @@ def load_rules(path: Path = RULES_PATH) -> list[Rule]:
             # structural / report asla otonom değil — YAML ne derse desin
             auto=bool(r.get("auto")) and kind in ("deprecation", "mechanical"),
             sp_unit=int(r.get("sp_unit") or 0), rector=str(r.get("rector") or ""),
+            breaks=breaks, fix_min=_ver(r.get("fix_min") or "7.0"),
             fixer=str(r.get("fixer") or ""), line_local=bool(r.get("line_local", True)),
             requires=[str(x) for x in r.get("requires") or []],
             requires_if={str(k): [str(x) for x in v or []] for k, v in (r.get("requires_if") or {}).items()},
+            upgrade_catalog=bool(r.get("upgrade_catalog")),
         ))
     return out
 
@@ -109,12 +121,28 @@ def rules_version(path: Path = RULES_PATH) -> str:
         return "0"
 
 
-def applicable(rules: list[Rule], version: str | None) -> list[Rule]:
-    """Yalnız hedef sürümün sunduğu kurallar (since ≤ hedef)."""
+def _upgrade_on() -> bool:
+    from agile_sdlc_crew import pipeline_config as pc
+    try:
+        return bool(pc.get("CREW_TECHDEBT_UPGRADE"))
+    except Exception:  # noqa: BLE001 — ayar okunamazsa yeni davranış kapalı
+        return False
+
+
+def lane_rules(rules, *, upgrade_lane: bool = False) -> list[Rule]:
+    """Hattın görebileceği kurallar — TEK yüklem: modernleştirme hattı (tarama, alım, Teknik borç listesinden Rector
+    kapsamı) CREW_TECHDEBT_UPGRADE kapalıyken `upgrade_catalog` kurallarını görmez; yükseltme hattı hep görür."""
+    if upgrade_lane or _upgrade_on():
+        return list(rules)
+    return [r for r in rules if not getattr(r, "upgrade_catalog", False)]
+
+
+def applicable(rules: list[Rule], version: str | None, *, upgrade_lane: bool = False) -> list[Rule]:
+    """Yalnız hedef sürümün sunduğu kurallar (since ≤ hedef), hattın görebildikleri arasından (lane_rules)."""
     if not version:
         return []
     v = _ver(version)
-    return [r for r in rules if r.since <= v]
+    return [r for r in lane_rules(rules, upgrade_lane=upgrade_lane) if r.since <= v]
 
 
 # ── Hedef sürüm ──────────────────────────────────────────────────────────
@@ -497,11 +525,15 @@ def pack_modern(units: list, *, source: str, tool_fix: bool = False, tool_rules:
 
 def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: str, board_index: dict, now: float,
                  cfg: dict, ext_ok=None, source: str = SOURCE, tool_fix: bool = False,
-                 tool_rules: set | frozenset = frozenset()) -> tuple[list, list[dict], dict]:
+                 tool_rules: set | frozenset = frozenset(), keep_closed=None,
+                 upgrade_lane: bool = False) -> tuple[list, list[dict], dict]:
     """(gruplar, atlananlar, kural özeti). Yalnız hedef sürümün sunduğu kurallar; dedup board'dan;
-    dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez."""
+    dosya birimleri Sonar gibi paketlenir, modül birimleri paketlenmez.
+    `keep_closed(rule_key) -> str | None`: kapanmış (Done) işi olan birim — dedup 'recurring' dediğinde —
+    yeniden açılmasın mı; dönen metin atlama nedenidir (`<neden> #<wi>`). Paketlemeden ÖNCE birim
+    düzeyinde: aynı kuralın yeni dosyası yine yalnız kendi parmak iziyle gruba girer."""
     from agile_sdlc_crew.quality import dedup, rank
-    rules_by_key = {r.key: r for r in applicable(rules, version)}
+    rules_by_key = {r.key: r for r in applicable(rules, version, upgrade_lane=upgrade_lane)}
     units, summary = _units(scan.get("hits") or [], rules_by_key, repo, source)
     skipped: list[dict] = []
     live = []
@@ -515,6 +547,10 @@ def build_groups(scan: dict, rules: list[Rule], version: str | None, *, repo: st
             skipped.append({"fingerprint": fp, "reason": f"iptal edilmiş WI #{prev}"})
             continue
         if v == "recurring":
+            why = keep_closed(u.findings[0].rule) if keep_closed is not None else None
+            if why:
+                skipped.append({"fingerprint": fp, "reason": f"{why} #{prev}"})
+                continue
             u.recurring_of = prev
         # "Otomatik" yalnız KOD düzenlemesiyle çözülen iş: eklenti gibi kod dışı ön koşul
         # repoda kanıtlanamıyorsa iş insana + DevOps'a gider (kullanıcı kararı 2026-10-30).
@@ -953,6 +989,53 @@ def _rector_queue(deps, repo: str, tool_groups: list):
     return deps._replace(queue=_queue)
 
 
+def _pick(by_gid: dict, group_ids, max_take) -> tuple[list, list[dict]]:
+    """Seçilen gid'ler taze taramaya karşı: yoksa (tarama değişti / board'da açık) ya da istek başına
+    `max_take` dolduysa atlanır; tekrar eden gid tekilleşir. Üç alımın (php_modern, modern, upgrade) ortak kuralı."""
+    picked, skipped = [], []
+    max_take = max(1, int(max_take))
+    for gid in dict.fromkeys(str(x) for x in (group_ids or [])):
+        g = by_gid.get(gid)
+        if g is None:
+            skipped.append({"gid": gid, "reason": "tarama değişti ya da board'da açık — yeniden tarayın"})
+        elif len(picked) >= max_take:
+            skipped.append({"gid": gid, "reason": f"istek başı tavan ({max_take})"})
+        else:
+            picked.append(g)
+    return picked, skipped
+
+
+def _nothing_picked(head: dict, skipped: list[dict], *, strict: bool) -> dict:
+    """Seçimden iş çıkmadı. strict: yalnız 'tarama değişti' atlamaları varsa ValueError (kart yeniden tarar)."""
+    if strict and skipped and all("tarama" in s["reason"] for s in skipped):
+        raise ValueError("Seçim güncel taramada yok — tarama değişti, yeniden tarayın")
+    return {**head, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
+
+
+def _open_and_report(client, picked: list, skipped: list[dict], *, repo: str, source: str, team: str, sprint: str,
+                     task_cfg: dict, deps, head: dict, log_line: str, tail: dict | None = None,
+                     devops_cfg: dict | None = None) -> dict:
+    """'Teknik borç — <sprint>' story'sini bul/aç, seçilenleri Task olarak aç (insan olmayanı kuyruğa al),
+    story SP'sini yaz, yanıtı kur. `deps` kuyruk yönlendirmesi (araç / pipeline) çağıranda hazırlanır;
+    `devops_cfg` verilirse altyapı Task'ları için DevOps isteği açılır."""
+    from agile_sdlc_crew import estimation
+    from agile_sdlc_crew.quality import intake
+    story = intake.resolve_story(client, source, None, team, "current_or_next", lane="techdebt", iteration=sprint)
+    rows, added = intake._open_tasks(client, picked, story, task_cfg, deps, source=source, lane="techdebt", queue=True)
+    if added:
+        estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
+    tasks = [r for r in rows if not r["needs_human"]]
+    human = [r for r in rows if r["needs_human"]]
+    devops = _devops_requests(client, repo, picked, rows, devops_cfg) if devops_cfg is not None else []
+    log.info(f"{log_line}: story #{story['id']} · {len(rows)} Task · {added} SP")
+    return {**head,
+            "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"],
+                      "iteration": story["iteration"]},
+            "tasks": tasks, "human_tasks": human, "devops": devops, "skipped": skipped,
+            "total_sp": sum(r["sp"] for r in tasks if r.get("id")),
+            "human_sp": sum(r["sp"] for r in human if r.get("id")), **(tail or {})}
+
+
 def rector_scope_for(repo_root: Path, fingerprints: list[str], *, cfg: dict | None = None) -> dict | None:
     """Board'da zaten açık bir teknik borç Task'ı için Rector kapsamı: Task'ın parmak
     izlerinden (repo, kural) okunur, DOSYALAR ise taze taramadan alınır — parmak izi
@@ -964,7 +1047,7 @@ def rector_scope_for(repo_root: Path, fingerprints: list[str], *, cfg: dict | No
     if not parsed or len({(p[1], p[2]) for p in parsed}) != 1:
         return None
     repo, rule = parsed[0][1], parsed[0][2]
-    rules = {r.key: r for r in load_rules()}
+    rules = {r.key: r for r in lane_rules(load_rules())}
     if repo.lower() != repo_root.name.lower() or rule not in tool_rules(rules.values()):
         return None
     cfg = cfg or load_cfg()
@@ -983,7 +1066,6 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", sprint: str
     """Seçilen grupları 'Teknik borç — <sprint>' story'si altında Task olarak aç; mekanik olanları
     kuyruğa al, yapısal olanlar needs-human. Seçim kilit altında taze taramaya (aynı sha) ve board'a
     karşı yeniden doğrulanır. `sprint`: kullanıcının seçtiği sprint yolu; boşsa aktif sprint."""
-    from agile_sdlc_crew import estimation
     from agile_sdlc_crew.quality import intake
     deps = deps or default_deps()
     if not intake._LOCK.acquire(blocking=False):
@@ -1004,35 +1086,13 @@ def take(client, repo: str, group_ids: list[str], *, team: str = "", sprint: str
         tools = tool_rules(rules)
         groups, _skipped, _summary = build_groups(res, rules, tv["version"], repo=repo, board_index=deps.board(client),
                                                   now=deps.now(), cfg=cfg, ext_ok=_ext_checker(root), tool_rules=tools)
-        by_gid = {gid_of(g): g for g in groups}
-        picked, skipped = [], []
-        max_take = max(1, int(cfg.get("max_take", 8)))
-        for gid in dict.fromkeys(str(x) for x in (group_ids or [])):
-            g = by_gid.get(gid)
-            if g is None:
-                skipped.append({"gid": gid, "reason": "tarama değişti ya da board'da açık — yeniden tarayın"})
-            elif len(picked) >= max_take:
-                skipped.append({"gid": gid, "reason": f"istek başı tavan ({max_take})"})
-            else:
-                picked.append(g)
+        picked, skipped = _pick({gid_of(g): g for g in groups}, group_ids, cfg.get("max_take", 8))
         if not picked:
-            if skipped and all("tarama" in s["reason"] for s in skipped):
-                raise ValueError("Seçim güncel taramada yok — tarama değişti, yeniden tarayın")
-            return {"repo": repo, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
-        story = intake.resolve_story(client, SOURCE, None, team, "current_or_next", lane="techdebt", iteration=sprint)
-        cfg2 = {**cfg, "php_target": tv["version"]}
+            return _nothing_picked({"repo": repo}, skipped, strict=True)
         deps = _rector_queue(deps, repo, [g for g in picked if g.findings[0].rule in tools and not g.needs_human])
-        rows, added = intake._open_tasks(client, picked, story, cfg2, deps, source=SOURCE, lane="techdebt", queue=True)
-        if added:
-            estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
-        tasks = [r for r in rows if not r["needs_human"]]
-        human = [r for r in rows if r["needs_human"]]
-        devops = _devops_requests(client, repo, picked, rows, cfg)
-        log.info(f"🧹 PHP modernleştirme ({repo}): story #{story['id']} · {len(rows)} Task · {added} SP")
-        return {"repo": repo, "version": tv["version"],
-                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"],
-                          "iteration": story["iteration"]},
-                "tasks": tasks, "human_tasks": human, "devops": devops, "skipped": skipped,
-                "total_sp": sum(r["sp"] for r in tasks if r.get("id")), "human_sp": sum(r["sp"] for r in human if r.get("id"))}
+        return _open_and_report(client, picked, skipped, repo=repo, source=SOURCE, team=team, sprint=sprint,
+                                task_cfg={**cfg, "php_target": tv["version"]}, deps=deps,
+                                head={"repo": repo, "version": tv["version"]},
+                                log_line=f"🧹 PHP modernleştirme ({repo})", devops_cfg=cfg)
     finally:
         intake._LOCK.release()

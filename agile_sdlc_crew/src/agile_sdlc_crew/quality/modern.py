@@ -438,7 +438,7 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", 
     yolu; boşsa aktif sprint."""
     if lang == "php":
         return {**php_modern.take(client, repo, group_ids, team=team, sprint=sprint, deps=deps), "lang": "php"}
-    from agile_sdlc_crew import db, estimation
+    from agile_sdlc_crew import db
     from agile_sdlc_crew.quality import intake
     deps = deps or php_modern.default_deps()
     if not intake._LOCK.acquire(blocking=False):
@@ -456,21 +456,10 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", 
         groups, _s, _sum = php_modern.build_groups({"hits": hits}, rules, version, repo=repo,
                                                    board_index=deps.board(client), now=deps.now(), cfg=cfg,
                                                    source=LANGS[lang]["source"], tool_fix=LANGS[lang]["tool_fix"])
-        by_gid = {php_modern.gid_of(g): g for g in groups}
-        picked, skipped = [], []
-        max_take = max(1, int(cfg.get("max_take", 8)))
-        for gid in dict.fromkeys(str(x) for x in group_ids or []):
-            g = by_gid.get(gid)
-            if g is None:
-                skipped.append({"gid": gid, "reason": "tarama değişti ya da board'da açık — yeniden tarayın"})
-            elif len(picked) >= max_take:
-                skipped.append({"gid": gid, "reason": f"istek başı tavan ({max_take})"})
-            else:
-                picked.append(g)
+        picked, skipped = php_modern._pick({php_modern.gid_of(g): g for g in groups}, group_ids,
+                                           cfg.get("max_take", 8))
         if not picked:
-            return {"repo": repo, "lang": lang, "tasks": [], "human_tasks": [], "skipped": skipped, "story": None}
-        story = intake.resolve_story(client, LANGS[lang]["source"], None, team, "current_or_next",
-                                     lane="techdebt", iteration=sprint)
+            return php_modern._nothing_picked({"repo": repo, "lang": lang}, skipped, strict=False)
         cfg2 = {**cfg, "php_target": f"{tv['version']} ({tv['source']})"}
         if LANGS[lang]["tool_fix"]:
             # Onaylanan kapsam (dil, repo, kural × dosya) işin kaydına INSERT'te yazılır; çalışırken
@@ -482,18 +471,10 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", 
                 return db.create_job(str(wid), False, wi_title=title[:200], job_kind="modern_fix",
                                      job_payload=payloads.get(title, ""))
             deps = deps._replace(queue=_queue)
-        rows, added = intake._open_tasks(client, picked, story, cfg2, deps, source=LANGS[lang]["source"],
-                                         lane="techdebt", queue=True)
-        if added:
-            estimation.write_story_points(client, str(story["id"]), int(story["sp"] + added), logger=log.info)
-        tasks = [r for r in rows if not r["needs_human"]]
-        human = [r for r in rows if r["needs_human"]]
-        log.info(f"🧹 {LANGS[lang]['label']} modernleştirme ({repo}): story #{story['id']} · {len(rows)} Task · {added} SP")
-        return {"repo": repo, "lang": lang, "version": tv["version"],
-                "story": {"id": story["id"], "url": intake._wi_url(client, story["id"]), "created": story["created"],
-                          "iteration": story["iteration"]},
-                "tasks": tasks, "human_tasks": human, "devops": [], "skipped": skipped,
-                "total_sp": sum(r["sp"] for r in tasks if r.get("id")),
-                "human_sp": sum(r["sp"] for r in human if r.get("id")), "tool_fix": bool(LANGS[lang]["tool_fix"])}
+        return php_modern._open_and_report(
+            client, picked, skipped, repo=repo, source=LANGS[lang]["source"], team=team, sprint=sprint, task_cfg=cfg2,
+            deps=deps, head={"repo": repo, "lang": lang, "version": tv["version"]},
+            log_line=f"🧹 {LANGS[lang]['label']} modernleştirme ({repo})",
+            tail={"tool_fix": bool(LANGS[lang]["tool_fix"])})
     finally:
         intake._LOCK.release()

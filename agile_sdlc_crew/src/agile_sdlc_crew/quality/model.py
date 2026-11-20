@@ -48,6 +48,9 @@ class Group:
     human_reason: str = ""
     recurring_of: int | None = None
     infra: list[str] = field(default_factory=list)   # kod dışı ön koşul (ör. "ext:mbstring") → DevOps
+    extra_tags: list[str] = field(default_factory=list)  # Task etiketlerinin sonuna (ör. "tempo-upgrade")
+    body_html: str = ""             # hazır (kaçışlı) Task gövdesi — kaynağın kendi biçimi varsa (ör. image_vuln)
+    priority: int | None = None     # Azure önceliği (1 = en yüksek); None = alan yazılmaz (ör. güvenlik uyarısı 1)
 
     @property
     def last_seen(self) -> float:

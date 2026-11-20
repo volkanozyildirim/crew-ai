@@ -164,6 +164,30 @@ class AzureDevOpsClient:
             for c in comments
         ]
 
+    def get_work_item_comments_all(self, work_item_id: int, max_items: int = 1000) -> tuple[list[dict], bool]:
+        """Bütün yorum sayfaları (continuationToken ile), get_work_item_comments ile aynı satır biçimi.
+        Döner: (yorumlar, tamam). max_items aşılırsa okuma durur ve tamam=False — işaret arayan çağıran
+        'bilinmiyor' sayar (yorumu tekrar yazmaz)."""
+        url = f"{self._base_api_url}/wit/workitems/{work_item_id}/comments"
+        out: list[dict] = []
+        token = None
+        while True:
+            params = {"api-version": "7.1-preview.4", "$top": 200}
+            if token:
+                params["continuationToken"] = token
+            resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            page = data.get("comments", []) or []
+            out += [{"id": c.get("id"), "yazar": c.get("createdBy", {}).get("displayName", ""),
+                     "tarih": c.get("createdDate", ""), "metin": c.get("text", "")}
+                    for c in page]
+            token = data.get("continuationToken")
+            if not token:
+                return out, True
+            if not page or len(out) >= max_items:   # boş sayfa + belirteç: döngüye girme
+                return out[:max_items], False
+
     def add_comment(self, work_item_id: int, text: str) -> dict:
         url = f"{self._base_api_url}/wit/workitems/{work_item_id}/comments"
         params = {"api-version": "7.1-preview.4"}
@@ -301,6 +325,43 @@ class AzureDevOpsClient:
         self._repo_project_cache[repo_id_or_name] = fallback
         return fallback
 
+    def _repo_project_strict(self, repo_id_or_name: str) -> str:
+        """Reponun projesi — yalnız KESİN ve TEKİL bulunursa. _find_repo_project'in aksine hata yutmaz, yedek
+        projeye düşmez ve onun önbelleğini ne okur ne yazar (o önbellekte yedek değer olabilir): bir kapının
+        kanıtı yanlış projede aranıp "yok" okunmasın. Her yapılandırılmış proje sorulur: yalnız HTTP 200 + repo
+        `id`'si olan JSON olumludur; 404 olumsuz; başka her yanıt (203 oturum sayfası, 401, 5xx, JSON değil)
+        ve bağlantı hatası yükselir. Tek olumlu → o proje; birden çok → ValueError (aynı adlı repo iki projede
+        — hangisi olduğu bilinmeden aranmaz); hiç yok → ValueError. Olumlu sonuç ayrı önbellekte tutulur."""
+        found = getattr(self, "_repo_project_found", None)
+        if found is None:
+            found = self._repo_project_found = {}
+        if repo_id_or_name in found:
+            return found[repo_id_or_name]
+        hits = []
+        for proj in self.repo_projects:
+            url = f"{self._project_api_url(proj)}/git/repositories/{repo_id_or_name}"
+            resp = requests.get(url, headers=self._headers, params={"api-version": self.API_VERSION}, timeout=10)
+            if resp.status_code == 404:
+                continue
+            if resp.status_code != 200:
+                raise ValueError(f"'{repo_id_or_name}' reposu {proj} projesinde sorgulanamadı "
+                                 f"(HTTP {resp.status_code}).")
+            try:
+                body = resp.json()
+            except ValueError:
+                body = None
+            if not isinstance(body, dict) or not body.get("id"):
+                raise ValueError(f"'{repo_id_or_name}' reposu {proj} projesinde sorgulanamadı (yanıt repo değil).")
+            hits.append(proj)
+        if len(hits) > 1:
+            raise ValueError(f"'{repo_id_or_name}' adlı repo birden çok projede var ({', '.join(hits)}) — test "
+                             "hattı tanımının hangi projede aranacağı belirsiz.")
+        if not hits:
+            raise ValueError(f"'{repo_id_or_name}' reposu Azure projelerinde bulunamadı "
+                             f"({', '.join(self.repo_projects)})")
+        found[repo_id_or_name] = hits[0]
+        return hits[0]
+
     def _repo_api_url(self, repo_id_or_name: str, project: str | None = None) -> str:
         proj = project or self._find_repo_project(repo_id_or_name)
         return f"{self._project_api_url(proj)}/git/repositories/{repo_id_or_name}"
@@ -313,13 +374,40 @@ class AzureDevOpsClient:
         resp.raise_for_status()
         return resp.json()
 
-    def list_branches(self, repo_id_or_name: str) -> list[dict]:
+    def list_branches(self, repo_id_or_name: str, project: str | None = None) -> list[dict]:
         """Bir repodaki branch'leri listeler."""
-        url = f"{self._repo_api_url(repo_id_or_name)}/refs"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/refs"
         params = {"filter": "heads/", "api-version": self.API_VERSION}
         resp = requests.get(url, headers=self._headers, params=params, timeout=30)
         resp.raise_for_status()
         return resp.json().get("value", [])
+
+    def get_file_bytes(self, repo_id_or_name: str, file_path: str, branch: str | None = None,
+                       project: str | None = None, *, version: str | None = None,
+                       version_type: str | None = None) -> bytes | None:
+        """Dosyanın HAM baytları (karakter kümesi tahmini / JSON çözümü yok); dosya yoksa None.
+        Yazma yolundaki tek-satır denetimi çözülmüş metne değil bayta dayanır. `version` verilirse dal adı
+        yerine o sürümden okunur (`version_type`, varsayılan "commit") — push edilecek dosya, üstüne push
+        yapılacak commit'ten okunsun."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/items"
+        params: dict = {
+            "path": file_path,
+            "$format": "octetStream",
+            "download": "true",
+            "api-version": self.API_VERSION,
+        }
+        if version:
+            params["versionDescriptor.version"] = version
+            params["versionDescriptor.versionType"] = version_type or "commit"
+        elif branch:
+            params["versionDescriptor.version"] = branch
+            params["versionDescriptor.versionType"] = "branch"
+        headers = {**self._headers, "Accept": "application/octet-stream"}
+        resp = requests.get(url, headers=headers, params=params, timeout=60)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.content
 
     def get_items_in_path(
         self,
@@ -431,20 +519,24 @@ class AzureDevOpsClient:
         repo_id_or_name: str,
         branch_name: str,
         source_branch: str = "main",
+        project: str | None = None,
+        source_object_id: str | None = None,
     ) -> dict:
-        """Yeni bir branch olusturur."""
-        # Kaynak branch'in objectId'sini al
-        branches = self.list_branches(repo_id_or_name)
-        source_ref = None
-        for b in branches:
-            ref_name = b.get("name", "")
-            if ref_name == f"refs/heads/{source_branch}":
-                source_ref = b.get("objectId")
-                break
+        """Yeni bir branch olusturur. `source_object_id` verilirse dal TAM o commit'te açılır
+        (kaynak dal adı yeniden aranmaz) — çağıranın doğruladığı commit sabitlenir."""
+        source_ref = source_object_id
+        if not source_ref:
+            # Kaynak branch'in objectId'sini al
+            branches = self.list_branches(repo_id_or_name, project=project)
+            for b in branches:
+                ref_name = b.get("name", "")
+                if ref_name == f"refs/heads/{source_branch}":
+                    source_ref = b.get("objectId")
+                    break
         if not source_ref:
             raise ValueError(f"Kaynak branch '{source_branch}' bulunamadi.")
 
-        url = f"{self._repo_api_url(repo_id_or_name)}/refs"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/refs"
         params = {"api-version": self.API_VERSION}
         body = [
             {
@@ -465,23 +557,30 @@ class AzureDevOpsClient:
         branch: str,
         changes: list[dict],
         commit_message: str,
+        project: str | None = None,
+        old_object_id: str | None = None,
     ) -> dict:
         """Branch'e dosya degisiklikleri push eder.
 
         changes formati:
         [
             {"changeType": "add"|"edit", "path": "/src/file.py", "content": "..."},
+            {"changeType": "add"|"edit", "path": "/a", "content": "<base64>",
+             "contentType": "base64encoded"},                    # opsiyonel; varsayılan rawtext
             {"changeType": "delete", "path": "/src/old.py"},   # icerik yok
             ...
         ]
+        `old_object_id` verilirse push o commit üzerine kurulur (dal başı yeniden okunmaz): dal
+        o arada ilerlediyse Azure push'u reddeder.
         """
-        # Branch'in son commit objectId'sini al
-        branches = self.list_branches(repo_id_or_name)
-        branch_ref = None
-        for b in branches:
-            if b.get("name") == f"refs/heads/{branch}":
-                branch_ref = b.get("objectId")
-                break
+        branch_ref = old_object_id
+        if not branch_ref:
+            # Branch'in son commit objectId'sini al
+            branches = self.list_branches(repo_id_or_name, project=project)
+            for b in branches:
+                if b.get("name") == f"refs/heads/{branch}":
+                    branch_ref = b.get("objectId")
+                    break
         if not branch_ref:
             raise ValueError(f"Branch '{branch}' bulunamadi.")
 
@@ -494,11 +593,11 @@ class AzureDevOpsClient:
             if change["changeType"] != "delete":
                 item["newContent"] = {
                     "content": change["content"],
-                    "contentType": "rawtext",
+                    "contentType": change.get("contentType", "rawtext"),
                 }
             formatted_changes.append(item)
 
-        url = f"{self._repo_api_url(repo_id_or_name)}/pushes"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pushes"
         params = {"api-version": self.API_VERSION}
         body = {
             "refUpdates": [
@@ -523,6 +622,7 @@ class AzureDevOpsClient:
         description: str = "",
         work_item_ids: list[int] | None = None,
         draft: bool = False,
+        project: str | None = None,
     ) -> dict:
         """Pull request olusturur (`draft` → taslak: incelemeciye düşmez, build politikası koşar).
 
@@ -532,7 +632,7 @@ class AzureDevOpsClient:
         if len(description or "") > PR_DESCRIPTION_MAX:
             note = "\n\n… (açıklama Azure'un 4000 karakter sınırına sığdırıldı — liste kısaltıldı)"
             description = description[:PR_DESCRIPTION_MAX - len(note)] + note
-        url = f"{self._repo_api_url(repo_id_or_name)}/pullrequests"
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pullrequests"
         params = {"api-version": self.API_VERSION}
         body: dict = {
             "sourceRefName": f"refs/heads/{source_branch}",
@@ -551,6 +651,68 @@ class AzureDevOpsClient:
             raise requests.HTTPError(f"{resp.status_code} PR oluşturulamadı: {(resp.text or '')[:400]}",
                                      response=resp)
         return resp.json()
+
+    def find_pull_request(self, repo_id_or_name: str, source_branch: str, *,
+                          project: str | None = None) -> dict | None:
+        """O daldan açılmış en yeni PR (her durumda); yoksa None.
+        {"id","status","url","closed_at","merge_commit","target"} — status Azure'un verdiği:
+        active | completed | abandoned."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pullrequests"
+        params = {
+            "searchCriteria.sourceRefName": f"refs/heads/{source_branch}",
+            "searchCriteria.status": "all",
+            "api-version": self.API_VERSION,
+        }
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        vals = resp.json().get("value", [])
+        if not vals:
+            return None
+        pr = max(vals, key=lambda v: int(v.get("pullRequestId") or 0))
+        repo = pr.get("repository") or {}
+        proj = (repo.get("project") or {}).get("name") \
+            or project or self._find_repo_project(repo_id_or_name)
+        repo_name = repo.get("name") or repo_id_or_name
+        return {
+            "id": pr.get("pullRequestId"),
+            "status": pr.get("status") or "",
+            "url": f"{self.org_url}/{proj}/_git/{repo_name}/pullrequest/{pr.get('pullRequestId')}",
+            "closed_at": pr.get("closedDate") or "",
+            "merge_commit": (pr.get("lastMergeCommit") or {}).get("commitId") or "",
+            "target": (pr.get("targetRefName") or "").removeprefix("refs/heads/"),
+            # PR'ı açan kimlik (PAT sahibiyle karşılaştırılır: başkasının PR'ı Tempo'nun sayılmaz)
+            "created_by": (pr.get("createdBy") or {}).get("id") or "",
+        }
+
+    def find_pull_request_between(self, repo_id_or_name: str, source_branch: str, target_branch: str, *,
+                                  project: str | None = None) -> dict | None:
+        """`source_branch` → `target_branch` arasındaki en yeni PR (her durumda); yoksa None. Uzun ömürlü dallar
+        arası taşıma PR'ları (staging → preprod) için: `find_pull_request` yalnız kaynağa bakar, aynı kaynaktan başka
+        hedefe açılmış PR'ı döndürebilir. {"id","status","url","source_commit","created_by"}."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pullrequests"
+        params = {
+            "searchCriteria.sourceRefName": f"refs/heads/{source_branch}",
+            "searchCriteria.targetRefName": f"refs/heads/{target_branch}",
+            "searchCriteria.status": "all",
+            "api-version": self.API_VERSION,
+        }
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        vals = resp.json().get("value", [])
+        if not vals:
+            return None
+        pr = max(vals, key=lambda v: int(v.get("pullRequestId") or 0))
+        repo = pr.get("repository") or {}
+        proj = (repo.get("project") or {}).get("name") \
+            or project or self._find_repo_project(repo_id_or_name)
+        repo_name = repo.get("name") or repo_id_or_name
+        return {
+            "id": pr.get("pullRequestId"),
+            "status": pr.get("status") or "",
+            "url": f"{self.org_url}/{proj}/_git/{repo_name}/pullrequest/{pr.get('pullRequestId')}",
+            "source_commit": (pr.get("lastMergeSourceCommit") or {}).get("commitId") or "",
+            "created_by": (pr.get("createdBy") or {}).get("id") or "",
+        }
 
     def delete_branch(self, repo_id_or_name: str, branch_name: str) -> bool:
         """Remote branch'i siler. Branch yoksa False doner (hata firlatmaz).
@@ -901,6 +1063,122 @@ class AzureDevOpsClient:
             # build PR'ın daha eski bir hâli içindir (pr_review bunu "eski commit" diye işaretler).
             "source_version": b.get("sourceVersion") or "",
         }
+
+    def _strict_json(self, url: str, params: dict | None = None) -> dict:
+        """GET → JSON sözlüğü; 200 dışı her yanıt, JSON olmayan gövde ve bağlantı hatası yükselir (kapı kanıtı
+        okunamadıysa 'yok' sayılmaz)."""
+        resp = requests.get(url, headers=self._headers, params={"api-version": self.API_VERSION, **(params or {})},
+                            timeout=30)
+        if resp.status_code != 200:
+            raise ValueError(f"Azure isteği başarısız (HTTP {resp.status_code}): {url}")
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise ValueError(f"Azure yanıtı JSON değil: {url}")
+        return body
+
+    def get_test_pipeline(self, repo_id_or_name: str) -> dict | None:
+        """Reponun `<repo>-test` build tanımı ve koştuğu test hattı dosyası — sürüm yükseltmede test hattının
+        TEK kaynağı (dört ayrı `yml-files` reposu var; core'un Core-test'i EcomLojistik/yml-files'ı koşar).
+        Tanım reponun projesinde (kesin çözüm) adıyla aranır, büyük/küçük harf duyarsız; hiç yoksa None, birden
+        çok varsa ValueError. Dönüş: {id, name, project, yaml (process.type 2 değilse None; baştaki '/' atılır),
+        repo_id, repo_name, branch (refs/heads/ olmadan), repo_project (repo GUID'i organizasyon genelinde
+        çözülür)}. 200 dışı / JSON olmayan her yanıt yükselir."""
+        project = self._repo_project_strict(repo_id_or_name)
+        name = f"{repo_id_or_name}-test"
+        body = self._strict_json(f"{self.org_url}/{project}/_apis/build/definitions", {"name": name})
+        hits = [d for d in body.get("value") or [] if str(d.get("name") or "").lower() == name.lower()]
+        if not hits:
+            return None
+        if len(hits) > 1:
+            raise ValueError(f"'{name}' adlı birden çok build tanımı var ({project}: "
+                             f"{', '.join(str(d.get('name')) + ' #' + str(d.get('id')) for d in hits)}) — "
+                             "hangisinin test hattı olduğu belirsiz.")
+        det = self._strict_json(f"{self.org_url}/{project}/_apis/build/definitions/{int(hits[0]['id'])}")
+        proc = det.get("process") or {}
+        yml = proc.get("yamlFilename") if proc.get("type") == 2 else None
+        rep = det.get("repository") or {}
+        repo_id = str(rep.get("id") or "")
+        repo_project = ""
+        if repo_id:
+            rb = self._strict_json(f"{self.org_url}/_apis/git/repositories/{repo_id}")
+            repo_project = str((rb.get("project") or {}).get("name") or "")
+        return {"id": det.get("id") or hits[0].get("id"), "name": det.get("name") or hits[0].get("name"),
+                "project": project, "yaml": (str(yml).lstrip("/") or None) if yml else None,
+                "repo_id": repo_id, "repo_name": str(rep.get("name") or ""),
+                "branch": str(rep.get("defaultBranch") or "").replace("refs/heads/", "", 1),
+                "repo_project": repo_project}
+
+    def list_definition_builds(self, project: str, definition_id: int, *, min_time: str = "",
+                               top: int = 50) -> list[dict]:
+        """Tanımın PR build'leri (reason=pullRequest), en yeni kuyruktan geriye; get_pr_build ile aynı biçim."""
+        url = f"{self.org_url}/{project}/_apis/build/builds"
+        params = {
+            "api-version": self.API_VERSION,
+            "definitions": int(definition_id),
+            "reasonFilter": "pullRequest",
+            "queryOrder": "queueTimeDescending",
+            "$top": int(top),
+        }
+        if min_time:
+            params["minTime"] = min_time
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        return [{
+            "build_id": b.get("id"),
+            "status": b.get("status"),
+            "result": b.get("result"),
+            "definition": (b.get("definition") or {}).get("name"),
+            "url": ((b.get("_links") or {}).get("web") or {}).get("href"),
+            "project": project,
+            "queue_time": b.get("queueTime") or "",
+            "source_version": b.get("sourceVersion") or "",
+        } for b in resp.json().get("value", []) or []]
+
+    def get_last_push_date(self, repo_id_or_name: str, branch: str, *, project: str | None = None) -> str:
+        """Dala yapılan EN SON push'un zamanı (`value[0].date`). Pipeline repolarına doğrudan push yapılıyor:
+        commit zamanı, önce yazılıp sonra push edilen değişiklikte erkene düşer — kanıt saati push zamanıdır.
+        Push yoksa ya da `date` alanı yoksa "" (okunamaz → kapı kapalı). 200 dışı / JSON olmayan yanıt yükselir."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/pushes"
+        resp = requests.get(url, headers=self._headers, timeout=30, params={
+            "api-version": self.API_VERSION,
+            "searchCriteria.refName": f"refs/heads/{branch}",
+            "$top": 1,
+        })
+        if resp.status_code != 200:
+            raise ValueError(f"Push listesi okunamadı (HTTP {resp.status_code}): {repo_id_or_name} {branch}")
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise ValueError(f"Push listesi JSON değil: {repo_id_or_name} {branch}")
+        vals = body.get("value") or []
+        return str((vals[0] or {}).get("date") or "") if vals and isinstance(vals[0], dict) else ""
+
+    def get_last_commit_date(self, repo_id_or_name: str, path: str, branch: str, *,
+                             project: str | None = None) -> str:
+        """Dosyaya dokunan en son commit'in zamanı (committer, yoksa author) — dalın first-parent çizgisinde.
+        Commit yoksa "". firstParent şart: varsayılan (sadeleştirilmiş) geçmiş, "Merge (no fast-forward)" ile
+        tamamlanan PR'da özellik dalındaki commit'i (push zamanı) döndürür, merge commit'ini değil."""
+        url = f"{self._repo_api_url(repo_id_or_name, project)}/commits"
+        params = {
+            "api-version": self.API_VERSION,
+            "searchCriteria.itemPath": path,
+            "searchCriteria.itemVersion.version": branch,
+            "searchCriteria.itemVersion.versionType": "branch",
+            "searchCriteria.historyMode": "firstParent",
+            "searchCriteria.$top": 1,
+        }
+        resp = requests.get(url, headers=self._headers, params=params, timeout=30)
+        resp.raise_for_status()
+        vals = resp.json().get("value", []) or []
+        if not vals:
+            return ""
+        c = vals[0]
+        return str((c.get("committer") or {}).get("date") or (c.get("author") or {}).get("date") or "")
 
     def get_build_failure_summary(
         self, project: str, build_id: int, max_chars: int = 4000

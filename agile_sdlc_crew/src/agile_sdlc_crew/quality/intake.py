@@ -372,6 +372,7 @@ def _assignee(client) -> str:
 
 
 AC_FIELD = "Microsoft.VSTS.Common.AcceptanceCriteria"
+PRIORITY_FIELD = "Microsoft.VSTS.Common.Priority"
 
 
 def _create_task(client, fields: dict, parent_id: int) -> int:
@@ -383,7 +384,14 @@ def _create_task(client, fields: dict, parent_id: int) -> int:
         if code != 400 and "400" not in str(e):
             raise
         rest = {k: v for k, v in fields.items() if k != AC_FIELD}
-        return int(client.create_work_item("Task", rest, parent_id=parent_id)["id"])
+        try:
+            return int(client.create_work_item("Task", rest, parent_id=parent_id)["id"])
+        except Exception as e2:  # noqa: BLE001 — öncelik alanı tipte yoksa onsuz bir kez daha (iş yine açılır)
+            code2 = getattr(getattr(e2, "response", None), "status_code", None)
+            if PRIORITY_FIELD not in rest or (code2 != 400 and "400" not in str(e2)):
+                raise
+            rest.pop(PRIORITY_FIELD)
+            return int(client.create_work_item("Task", rest, parent_id=parent_id)["id"])
 
 
 def _open_tasks(client, groups: list[Group], story: dict, cfg: dict, deps: Deps, *, source: str,
@@ -407,6 +415,8 @@ def _open_tasks(client, groups: list[Group], story: dict, cfg: dict, deps: Deps,
         if me:
             fields["System.AssignedTo"] = me
         fields[AC_FIELD] = render.acceptance_block(g)
+        if g.priority:
+            fields[PRIORITY_FIELD] = int(g.priority)
         for k, v in (cfg.get("task_fields") or {}).items():
             fields.setdefault(k, v)
         try:

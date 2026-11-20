@@ -3779,6 +3779,59 @@ def test_quality_endpoints():
           and "function loadQuality" in html and "loadQuality();" in html)
 
 
+def test_upgrade_api_surface():
+    print("\n[U6] Sürüm yükseltme — ayarlar, uçlar, kart")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    schema = {e["key"]: e for e in pc.SCHEMA}
+    want = {"CREW_TECHDEBT_UPGRADE": False, "CREW_TECHDEBT_UPGRADE_AUTO": False, "CREW_TECHDEBT_UPGRADE_BUMP": True,
+            "CREW_TECHDEBT_UPGRADE_POLL_MIN": 30, "CREW_TECHDEBT_UPGRADE_MAX_OPEN": 3,
+            "CREW_TECHDEBT_UPGRADE_SPRINT": "next", "CREW_TECHDEBT_UPGRADE_CI_WAIT_H": 72}
+    check("yedi yükseltme ayarı varsayılanlarıyla şemada",
+          all(k in schema and schema[k]["default"] == v for k, v in want.items()),
+          str({k: schema.get(k, {}).get("default") for k in want}))
+    check("araç yolu ayarları şemada yok",
+          "CREW_UPGRADE_PHP_BINS" not in schema and "CREW_UPGRADE_PYTHON_BINS" not in schema)
+    paths = {getattr(r, "path", "") for r in server.app.routes}
+    check("repos / scan / take yolları kayıtlı",
+          {"/api/techdebt/upgrade/repos", "/api/techdebt/upgrade/scan", "/api/techdebt/upgrade/take"} <= paths)
+    check("start / stop / bump yolları kayıtlı",
+          {"/api/techdebt/upgrade/start", "/api/techdebt/upgrade/stop", "/api/techdebt/upgrade/bump"} <= paths)
+    orig = pc.get
+    pc.get = lambda k: False if k == "CREW_TECHDEBT_UPGRADE" else (True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN") else orig(k))
+    try:
+        tc = TestClient(server.app)
+        check("bayrak kapalıyken repos → 403", tc.get("/api/techdebt/upgrade/repos").status_code == 403)
+        check("bayrak kapalıyken scan → 403", tc.get("/api/techdebt/upgrade/scan?repo=x").status_code == 403)
+        check("bayrak kapalıyken take → 403",
+              tc.post("/api/techdebt/upgrade/take", json={"repo": "x", "group_ids": ["a"]}).status_code == 403)
+        for ep in ("start", "stop", "bump"):
+            check(f"bayrak kapalıyken {ep} → 403",
+                  tc.post(f"/api/techdebt/upgrade/{ep}", json={"repo": "x", "team": "T"}).status_code == 403)
+    finally:
+        pc.get = orig
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("kart yükseltme işlevleri ve mod anahtarı",
+          all(n in html for n in ("function loadUpgradeRepos", "function upgradeScan", "function renderUpgrade",
+                                  "function upgradeTake", "tempo_modern_mode", "tempo_upgrade_to")))
+
+    def _fn(name):
+        i = html.find("function " + name) if "async function " + name not in html else html.find("async function " + name)
+        j = html.find("\nfunction ", i + 1)
+        j2 = html.find("\nasync function ", i + 1)
+        j = min(x for x in (j, j2, len(html)) if x > 0)
+        return html[i:j]
+    scan_src, changed_src = _fn("upgradeScan"), _fn("_upToChanged")
+    check("_upShouldRetry var ve upgradeScan onu çağırıyor",
+          "function _upShouldRetry" in html and "_upShouldRetry(" in scan_src)
+    check("tempo_upgrade_to yalnız _upToChanged içinde yazılıyor",
+          html.count("setItem('tempo_upgrade_to'") == 1 and "setItem('tempo_upgrade_to'" in changed_src
+          and "setItem" not in scan_src)
+    check("kayıtlı hedef 400 verince tek otomatik yeniden deneme",
+          "retried" in scan_src and "_upDropSaved()" in scan_src)
+
+
 def test_quality_review_fixes():
     print("\n[Q10] Kalite alımı — son inceleme düzeltmeleri")
     import requests as _rq
@@ -4264,7 +4317,8 @@ def test_techdebt_sprint_choice():
     from agile_sdlc_crew.quality import modern, php_modern
     from agile_sdlc_crew import server
     check("take sprint'i story çözümüne geçirir",
-          "iteration=sprint" in inspect_source(php_modern.take) and "iteration=sprint" in inspect_source(modern.take)
+          "sprint=sprint" in inspect_source(php_modern.take) and "sprint=sprint" in inspect_source(modern.take)
+          and "iteration=sprint" in inspect_source(php_modern._open_and_report)
           and "sprint" in server.TechdebtModernTakeRequest.model_fields)
     html = (Path(__file__).resolve().parents[1] / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
     check("arayüz: sprint seçici, varsayılan aktif, take'e gider",
@@ -5750,7 +5804,7 @@ def test_delete_push_payload():
     class _C(_azb.AzureDevOpsClient):
         _headers = {}
     c = _C.__new__(_C)
-    c.list_branches = lambda repo: [{"name": "refs/heads/b", "objectId": "abc"}]
+    c.list_branches = lambda repo, project=None: [{"name": "refs/heads/b", "objectId": "abc"}]
     c._repo_api_url = lambda repo, project=None: "https://x/repo"
     c.API_VERSION = "7.1"
     _orig_post = _azb.requests.post
@@ -5931,8 +5985,9 @@ def test_wi_lifecycle_on_queue():
 
     src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/server.py").read_text()
     check("server: her kuyruğa almada işaretleme (_ensure_worker)", "threading.Thread(target=_wi_mark_queued_jobs" in src)
-    check("server: iş kuyruktan alınınca In Progress (_wi_start_job, pipeline + modern_fix)",
-          src.count("_wi_start_job(job)") == 2 and "db.start_job(job_id)\n                modern_fix" not in src)
+    # upgrade_bump de _wi_start_job'dan geçer (running'e alınır); WI'ı _wi_tracked süzgeci yüzünden taşınmaz
+    check("server: iş kuyruktan alınınca In Progress (_wi_start_job, pipeline + modern_fix + upgrade_bump)",
+          src.count("_wi_start_job(job)") == 3 and "db.start_job(job_id)\n                modern_fix" not in src)
     check("server: başlatma kuyruk turuyla aynı kilit altında", "with _wi_mark_lock:\n        db.start_job(job_id)" in src)
     check("server: silinen kuyruk işi ve restart'ta yarım kalan iş geri alınır",
           'f"iş #{job_id} silindi"' in src and '"sunucu yeniden başladı"' in src)
@@ -6326,6 +6381,3233 @@ def test_modern_multilang():
           and 'class="tdmSel" data-rule=' in html)
     check("kart çok dilli: başlık, dil:repo seçimi, araç uygular etiketi",
           '<span class="h">Modernleştirme</span>' in html and "function _tdmSel()" in html and "Araç uygular" in html)
+
+
+class _BumpFake:
+    """upgrade_bump testleri için sahte Azure istemcisi: gerçek ağa çıkmaz."""
+
+    def __init__(self, files, forbid=(), branches=None, prs=None, me="tempo-id", boom=(),
+                 create_result=None, deny_ops=()):
+        import requests
+        self._rq = requests
+        self.deny_ops = set(deny_ops)       # boşsa her işlemde; doluysa yalnız bu işlemlerde hata ver
+        self.files = {(p, r, b, pa.lstrip("/")): v for (p, r, b, pa), v in files.items()}
+        self.forbid, self.boom = set(forbid), dict(boom)
+        self.oids = {}                      # (project, repo) -> {branch: oid}
+        for k, v in (branches or {}).items():
+            self.oids[k] = dict(v) if isinstance(v, dict) else {b: "oid-" + b for b in v}
+        self.existing_prs, self.me = prs or {}, me
+        self.create_result = create_result or {}
+        self.created, self.pushes, self.prs, self.writes = [], [], [], 0
+        self.created_oid = []
+
+    def _bs(self, project, repo):
+        return self.oids.setdefault((project, repo), {"main": "oid-main", "production": "oid-production"})
+
+    def get_file_bytes(self, repo, path, branch=None, project=None, *, version=None, version_type=None):
+        if version is not None:
+            # F8: commit'ten okuma — sahte depoda commit, o oid'i taşıyan dalın içeriğidir
+            assert version_type == "commit", version_type
+            branch = next((b for b, o in self._bs(project, repo).items() if o == version), None)
+        v = self.files.get((project, repo, branch, path.lstrip("/")))
+        return v if (v is None or isinstance(v, bytes)) else v.encode("utf-8")
+
+    def list_branches(self, repo, project=None):
+        return [{"name": f"refs/heads/{b}", "objectId": o} for b, o in self._bs(project, repo).items()]
+
+    def get_authenticated_user(self):
+        if self.me is None:
+            raise RuntimeError("kimlik çözülemedi")
+        return {"id": self.me}
+
+    def find_pull_request(self, repo, source_branch, *, project=None):
+        return self.existing_prs.get((project, repo, source_branch))
+
+    def _deny(self, repo, op=""):
+        if self.deny_ops and op not in self.deny_ops:
+            return
+        if repo in self.forbid:
+            raise self._rq.HTTPError("403", response=SimpleNamespace(status_code=403))
+        if repo in self.boom:
+            exc = self.boom[repo]
+            if isinstance(exc, int):
+                raise self._rq.HTTPError(str(exc), response=SimpleNamespace(status_code=exc))
+            raise exc
+
+    def create_branch(self, repo, branch_name, source_branch="main", project=None, source_object_id=None):
+        self._deny(repo, "create")
+        res = self.create_result.get(repo)
+        if res is not None:
+            return res
+        bs = self._bs(project, repo)
+        bs[branch_name] = source_object_id or bs[source_branch]
+        self.created_oid.append(source_object_id)
+        self.created.append((project, repo, branch_name, source_branch))
+        self.writes += 1
+        return {"value": [{"success": True, "updateStatus": "succeeded"}]}
+
+    def push_changes(self, repo, branch, changes, commit_message, project=None, old_object_id=None):
+        self._deny(repo, "push")
+        self.pushes.append({"repo": repo, "branch": branch, "changes": changes,
+                            "project": project, "msg": commit_message, "old_object_id": old_object_id})
+        for c in changes:
+            self.files[(project, repo, branch, c["path"].lstrip("/"))] = (
+                __import__("base64").b64decode(c["content"]) if c.get("contentType") == "base64encoded"
+                else c["content"])
+        self._bs(project, repo)[branch] = "oid-pushed"
+        self.writes += 1
+
+    def create_pull_request(self, repo, source_branch, target_branch="main", title="",
+                            description="", work_item_ids=None, draft=False, project=None):
+        self._deny(repo, "pr")
+        n = 100 + len(self.prs)
+        self.prs.append({"repo": repo, "draft": draft, "project": project, "target": target_branch,
+                         "wi": work_item_ids, "title": title, "id": n})
+        self.writes += 1
+        return {"pullRequestId": n, "repository": {"name": repo}}
+
+
+def _bump_dec(change):
+    """push_changes'e giden değişikliğin içeriği (base64ise çözülmüş metin)."""
+    import base64
+    if change.get("contentType") == "base64encoded":
+        return base64.b64decode(change["content"]).decode("utf-8")
+    return change["content"]
+
+
+def test_upgrade_bump_sites():
+    """Sürüm satırı değişikliği: yalnız kayıttaki siteye ait tek satır, taslak PR, çapraz proje,
+    403'te diff; hiçbir site yazılmadan önce hepsi doğrulanır."""
+    print("\n[Sürüm adımı: tek satırlık değişiklik]")
+    import requests
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+
+    src = "FROM eu/prod-ar/php-8-2:1.0\nRUN x\n"
+    site = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+            "path": "build/a/Dockerfile", "line": 1, "old": "php-8-2:1.0", "new": "php-8-4:1.0",
+            "blocked": ""}
+    check("yalnız o satır değişir", bump.apply_site(src, site) ==
+          "FROM eu/prod-ar/php-8-4:1.0\nRUN x\n")
+    check("CRLF korunur", bump.apply_site(src.replace("\n", "\r\n"), site) ==
+          "FROM eu/prod-ar/php-8-4:1.0\r\nRUN x\r\n")
+    check("sonda satır sonu yoksa korunur", bump.apply_site("FROM eu/prod-ar/php-8-2:1.0", site) ==
+          "FROM eu/prod-ar/php-8-4:1.0")
+
+    def raises(fn, exc):
+        try:
+            fn()
+        except exc:
+            return True
+        except Exception:
+            return False
+        return False
+
+    check("satır değişmişse SiteChanged",
+          raises(lambda: bump.apply_site("FROM eu/prod-ar/php-8-3:1.0\nRUN x\n", site), bump.SiteChanged))
+    check("old satırda iki kez → SiteChanged", raises(lambda: bump.apply_site(
+        "FROM php-8-2:1.0 php-8-2:1.0\n", site), bump.SiteChanged))
+    check("satır aralık dışı → SiteChanged",
+          raises(lambda: bump.apply_site(src, dict(site, line=3)), bump.SiteChanged)
+          and raises(lambda: bump.apply_site(src, dict(site, line=0)), bump.SiteChanged))
+    check("izinsiz karakter (yeni satır / kabuk) → SiteChanged",
+          raises(lambda: bump.apply_site(src, dict(site, new="php-8-4:1.0\nRUN evil")), bump.SiteChanged)
+          and raises(lambda: bump.apply_site(src, dict(site, new="php-8-4;rm -rf")), bump.SiteChanged))
+    check("old == new → SiteChanged",
+          raises(lambda: bump.apply_site(src, dict(site, new=site["old"])), bump.SiteChanged))
+    check("dal adı", bump.branch_name("php", "core", "8.4") == "tempo/upgrade-php-core-8.4")
+    # I6: yalnız rakam dizileri değişebilir
+    s8 = {"line": 1, "old": ">=8", "new": ">=8.4", "path": "composer.json"}
+    check("I6: new, old'u içerip büyüyorsa SiteChanged",
+          raises(lambda: bump.apply_site('"php": ">=8"\n', dict(s8, old=">=8", new=">=8.4")), bump.SiteChanged))
+    check("I6: JSON anahtarı enjeksiyonu SiteChanged",
+          raises(lambda: bump.apply_site('"php": ">=8.2"\n', dict(s8, old=">=8.2",
+                                                                  new='>=8.4", "x": "y')), bump.SiteChanged))
+    check("I6: yalnız rakam farkı geçer", bump.apply_site('"php": ">=8.2"\n', dict(s8, old=">=8.2", new=">=8.4"))
+          == '"php": ">=8.4"\n')
+    # G1: diff satır sonu işaretçisi
+    try:
+        sd = bump._diff_text([("f", "FROM php-8-2:1.0", "FROM php-8-4:1.0")])
+    except Exception as e:
+        sd = f"HATA {e!r}"
+    check("G1: sonda satır sonu yoksa 'No newline' işaretçisi, diff düzgün",
+          sd.count("\\ No newline at end of file") == 2 and "\n-FROM php-8-2:1.0\n\\ No" in sd
+          and "\n+FROM php-8-4:1.0\n\\ No" in sd, repr(sd))
+
+    def mk(repo, path, line, old, new, project="FLODevOps", branch="production"):
+        return {"where": "devops", "repo": repo, "project": project, "branch": branch, "path": path,
+                "line": line, "old": old, "new": new, "blocked": ""}
+
+    dock_a = "FROM eu/php-8-2:1.0\nRUN x\nFROM eu/php-8-2:1.0 AS b\n"
+    dock_b = "FROM eu/php-8-2:1.0\n"
+    files = {("FLODevOps", "anatolia", "production", "build/a/Dockerfile"): dock_a,
+             ("FLODevOps", "anatolia", "production", "build/b/Dockerfile"): dock_b,
+             ("FLODevOps", "russia", "production", "build/r/Dockerfile"): dock_b}
+    s_a1 = mk("anatolia", "build/a/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    s_a3 = mk("anatolia", "build/a/Dockerfile", 3, "php-8-2:1.0", "php-8-4:1.0")
+    s_b = mk("anatolia", "build/b/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    s_r = mk("russia", "build/r/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    bn = "tempo/upgrade-php-core-8.4"
+    kw = dict(branch=bn, title="T", body="B", wi_id=7)
+
+    fc = _BumpFake(files)
+    r = bump.push_sites(fc, [s_a1, s_a3, s_b, s_r], **kw)
+    check("bölge reposu başına tek PR, taslak",
+          [p["repo"] for p in r["prs"]] == ["anatolia", "russia"] and len(fc.prs) == 2
+          and all(c["draft"] for c in fc.prs), str(fc.prs))
+    check("project parametresi geçer", fc.pushes and all(c["project"] == "FLODevOps" for c in fc.pushes)
+          and all(c["project"] == "FLODevOps" for c in fc.prs)
+          and all(c[0] == "FLODevOps" for c in fc.created))
+    check("hedef dal sitenin dalı", all(c["target"] == "production" for c in fc.prs)
+          and all(c[3] == "production" for c in fc.created))
+    pa = [p for p in fc.pushes if p["repo"] == "anatolia"]
+    check("repo başına tek commit, iki dosya", len(pa) == 1 and len(pa[0]["changes"]) == 2)
+    ca = {c["path"].lstrip("/"): c for c in pa[0]["changes"]}
+    check("aynı dosyada iki site de uygulanır, başka satıra dokunulmaz",
+          _bump_dec(ca["build/a/Dockerfile"]) == "FROM eu/php-8-4:1.0\nRUN x\nFROM eu/php-8-4:1.0 AS b\n"
+          and ca["build/a/Dockerfile"]["changeType"] == "edit"
+          and all(c["path"].startswith("/") for c in pa[0]["changes"]))
+    check("başka projedeki repoya WI bağlanmaz", all(c["wi"] is None for c in fc.prs))
+    check("r['prs'] biçimi", set(r["prs"][0]) >= {"repo", "id", "url"} and r["fallback"] == []
+          and r["errors"] == [])
+    fnorm = _BumpFake(files)
+    bump.push_sites(fnorm, [s_a1, dict(s_a3, path="/build/a/Dockerfile")], **kw)
+    check("yol normalleşir: /a ve a aynı dosya → push'ta TAM BİR değişiklik, iki site de uygulanmış",
+          len(fnorm.pushes) == 1 and len(fnorm.pushes[0]["changes"]) == 1
+          and _bump_dec(fnorm.pushes[0]["changes"][0]) ==
+          "FROM eu/php-8-4:1.0\nRUN x\nFROM eu/php-8-4:1.0 AS b\n", str(fnorm.pushes))
+
+    # 403 → diff
+    ff = _BumpFake(files, forbid={"anatolia"})
+    r = bump.push_sites(ff, [s_a1, s_r], **kw)
+    fb = r["fallback"]
+    check("403 → diff fallback'e, öteki repo devam eder",
+          len(fb) == 1 and fb[0]["repo"] == "anatolia" and fb[0]["project"] == "FLODevOps"
+          and fb[0]["diff"].count("\n+") == 2 and "a/build/a/Dockerfile" in fb[0]["diff"]
+          and "b/build/a/Dockerfile" in fb[0]["diff"]
+          and [p["repo"] for p in r["prs"]] == ["russia"], str(fb))
+    check("diff yalnız tek satırı değiştirir",
+          [l for l in fb[0]["diff"].splitlines() if l.startswith("-") and not l.startswith("---")]
+          == ["-FROM eu/php-8-2:1.0"])
+    # G1: sırlar maskelenir
+    sec_files = {("FLODevOps", "russia", "production", "build/r/Dockerfile"):
+                 "FROM eu/php-8-2:1.0\nENV TOKEN=ghp_AbCdEf0123456789AbCdEf0123456789AbCd\n"}
+    rs = bump.push_sites(_BumpFake(sec_files, forbid={"russia"}), [s_r], **kw)
+    check("G1: fallback diff'i maskelenir", rs["fallback"] and "ghp_AbCdEf0123456789" not in
+          rs["fallback"][0]["diff"], str(rs["fallback"]))
+
+    # I3: sonraki repo hatası öncekini kaybettirmez
+    fb2 = _BumpFake(files, boom={"russia": 500})
+    r = bump.push_sites(fb2, [s_a1, s_r], **kw)
+    check("I3: B 500 verir → A prs'te, B errors'ta",
+          [p["repo"] for p in r["prs"]] == ["anatolia"] and len(r["errors"]) == 1
+          and r["errors"][0]["repo"] == "russia" and r["errors"][0]["project"] == "FLODevOps"
+          and "500" in r["errors"][0]["error"], str(r))
+    fb3 = _BumpFake(files, boom={"russia": requests.ConnectionError("bağlantı koptu")})
+    r = bump.push_sites(fb3, [s_a1, s_r], **kw)
+    check("I3: ConnectionError de errors'a düşer", [p["repo"] for p in r["prs"]] == ["anatolia"]
+          and r["errors"] and r["errors"][0]["repo"] == "russia", str(r))
+    fb4 = _BumpFake(files, boom={"russia": ValueError("Branch bulunamadi")})
+    r = bump.push_sites(fb4, [s_a1, s_r], **kw)
+    check("I3: ValueError de errors'a düşer", [p["repo"] for p in r["prs"]] == ["anatolia"]
+          and r["errors"] and r["errors"][0]["repo"] == "russia", str(r))
+    fb5 = _BumpFake(files, boom={"russia": requests.ConnectionError("Basic dXNlcjpwYXNz token=abcDEF123456789xyzXYZ987")})
+    r = bump.push_sites(fb5, [s_r], **kw)
+    check("I3: hata metni maskelenir", r["errors"] and "abcDEF123456789xyzXYZ987" not in r["errors"][0]["error"],
+          str(r))
+
+    # I2: create_branch 200 + success:false
+    perm = {"value": [{"success": False, "updateStatus": "createBranchPermissionRequired"}]}
+    fp = _BumpFake(files, create_result={"anatolia": perm})
+    r = bump.push_sites(fp, [s_a1, s_r], **kw)
+    check("I2: createBranchPermissionRequired → fallback, öteki repo devam",
+          [f["repo"] for f in r["fallback"]] == ["anatolia"] and [p["repo"] for p in r["prs"]] == ["russia"]
+          and not [p for p in fp.pushes if p["repo"] == "anatolia"], str(r))
+    other = {"value": [{"success": False, "updateStatus": "invalidRefName"}]}
+    fo = _BumpFake(files, create_result={"anatolia": other})
+    r = bump.push_sites(fo, [s_a1, s_r], **kw)
+    check("I2: başka success:false → errors, push denenmez",
+          [e["repo"] for e in r["errors"]] == ["anatolia"] and [p["repo"] for p in r["prs"]] == ["russia"]
+          and not [p for p in fo.pushes if p["repo"] == "anatolia"], str(r))
+
+    # engelli / satırsız site → hiçbir şey yazılmaz
+    f0 = _BumpFake(files)
+    check("engelli site → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(f0, [s_r, dict(s_a1, blocked="imaj yok")], **kw), ValueError)
+          and f0.writes == 0)
+    check("line=0 → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(f0, [dict(s_r, line=0)], **kw), ValueError) and f0.writes == 0)
+    check("geçersiz repo adı / yol → ValueError",
+          raises(lambda: bump.push_sites(f0, [dict(s_r, repo="a/../b")], **kw), ValueError)
+          and raises(lambda: bump.push_sites(f0, [dict(s_r, path="../x/Dockerfile")], **kw), ValueError)
+          and raises(lambda: bump.push_sites(f0, [dict(s_r, path="build/-x/Dockerfile")], **kw), ValueError)
+          and f0.writes == 0)
+    check("aynı repoda farklı hedef dal → ValueError",
+          raises(lambda: bump.push_sites(f0, [s_a1, dict(s_b, branch="main")], **kw), ValueError)
+          and f0.writes == 0)
+    # I6: yinelenen site ve elle düzenlenmesi gereken kısıt
+    check("I6: aynı (proje, repo, yol, satır) iki site → ValueError",
+          raises(lambda: bump.push_sites(f0, [s_a1, dict(s_a1)], **kw), ValueError)
+          and raises(lambda: bump.push_sites(f0, [s_a1, dict(s_a1, path="/build/a/Dockerfile")], **kw),
+                     ValueError) and f0.writes == 0)
+    s_hand = {"where": "code", "repo": "core", "project": "", "branch": "main", "path": "composer.json",
+              "line": 1, "old": "^7.4|^8.0", "new": ">=8.4", "blocked": ""}
+    try:
+        bump.push_sites(_BumpFake({}), [s_hand], **kw)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check("I6: rakam dışı değişen kısıt → ValueError 'elle düzenlenmeli', yazma yok",
+          "elle düzenlenmeli" in msg and "composer.json" in msg, msg)
+
+    # C1: dal adı doğrulaması
+    for bad, why in (("production", "hedef dal"), ("main", "hedef dal"),
+                     ("tempo/upgrade-php-core", "desen"), ("refs/heads/tempo/upgrade-php-core-8.4", "refs/"),
+                     ("tempo/upgrade-php-core..x-8.4", ".."), ("feature/x", "desen"),
+                     ("tempo/upgrade-php-core-8.4\n", "satır sonu")):
+        fbad = _BumpFake(files, branches={("FLODevOps", "russia"): {"main": "o1", "production": "o2", bad: "o3"}},
+                         prs={("FLODevOps", "russia", bad): {"id": 1, "status": "active", "url": "u",
+                                                              "closed_at": "", "merge_commit": "",
+                                                              "target": "production", "created_by": "tempo-id"}})
+        check(f"C1: dal '{bad[:30]!r}' ({why}) → ValueError, yazma yok",
+              raises(lambda: bump.push_sites(fbad, [s_r], branch=bad, title="T", body="B", wi_id=7), ValueError)
+              and fbad.writes == 0)
+    fsame = _BumpFake(files)
+    check("C1: dal = sitelerden birinin hedef dalı → ValueError",
+          raises(lambda: bump.push_sites(fsame, [s_r, dict(s_a1, branch=bn)], **kw), ValueError)
+          and fsame.writes == 0)
+
+    # geç SiteChanged → ilk repoya da yazılmaz
+    files_bad = dict(files)
+    files_bad[("FLODevOps", "russia", "production", "build/r/Dockerfile")] = "FROM eu/php-8-3:1.0\n"
+    fl = _BumpFake(files_bad)
+    check("ikinci repoda SiteChanged → ilkine de yazma yok",
+          raises(lambda: bump.push_sites(fl, [s_a1, s_r], **kw), bump.SiteChanged) and fl.writes == 0)
+    # I5: UTF-8 değil / boş / yok
+    fu = _BumpFake({**files, ("FLODevOps", "russia", "production", "build/r/Dockerfile"):
+                    b"FROM eu/php-8-2:1.0\n# \xe7\xf6\n"})
+    check("I5: UTF-8 olmayan dosya → SiteChanged, yazma yok",
+          raises(lambda: bump.push_sites(fu, [s_a1, s_r], **kw), bump.SiteChanged) and fu.writes == 0)
+    fe0 = _BumpFake({**files, ("FLODevOps", "russia", "production", "build/r/Dockerfile"): b""})
+    check("I5: boş dosya → SiteChanged", raises(lambda: bump.push_sites(fe0, [s_r], **kw), bump.SiteChanged)
+          and fe0.writes == 0)
+    fn = _BumpFake({k: v for k, v in files.items() if k[1] != "russia"})
+    check("I5: dosya yok (None) → SiteChanged", raises(lambda: bump.push_sites(fn, [s_r], **kw), bump.SiteChanged)
+          and fn.writes == 0)
+    fj = _BumpFake({("FLODevOps", "russia", "production", "build/r/Dockerfile"): "FROM eu/php-8-2:1.0\n# é\n"})
+    rj = bump.push_sites(fj, [s_r], **kw)
+    check("I5: UTF-8 içerik bayt-bayt korunur", _bump_dec(fj.pushes[0]["changes"][0]) ==
+          "FROM eu/php-8-4:1.0\n# é\n", str(rj))
+
+    # dal zaten var: C1 + S1 + I4
+    def pr(**o):
+        d = {"id": 55, "status": "active", "url": "https://x/55", "closed_at": "",
+             "merge_commit": "", "target": "production", "created_by": "tempo-id"}
+        d.update(o)
+        return d
+
+    def branches_with(oid):
+        return {("FLODevOps", "russia"): {"main": "oid-main", "production": "oid-production", bn: oid}}
+
+    fe = _BumpFake(files, branches=branches_with("oid-foreign"))
+    check("dal var, PR yok, boş değil → ValueError, dokunulmaz",
+          raises(lambda: bump.push_sites(fe, [s_r], **kw), ValueError) and fe.writes == 0)
+    fe2 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): "FROM eu/php-8-4:1.0\n"},
+                    branches=branches_with("oid-ours"), prs={("FLODevOps", "russia", bn): pr()})
+    r = bump.push_sites(fe2, [s_r], **kw)
+    check("dal var + Tempo'nun açık PR'ı + içerik zaten bizim → reused, hiçbir yazma yok",
+          fe2.writes == 0 and not fe2.pushes and not fe2.prs and not fe2.created
+          and r["prs"] == [{"repo": "russia", "id": 55, "url": "https://x/55", "reused": True}], str(r))
+    fe3 = _BumpFake(files, branches=branches_with("oid-foreign"),
+                    prs={("FLODevOps", "russia", bn): pr(status="completed")})
+    check("dal var, PR kapanmış → ValueError",
+          raises(lambda: bump.push_sites(fe3, [s_r], **kw), ValueError) and fe3.writes == 0)
+    fe4 = _BumpFake(files, branches=branches_with("oid-foreign"),
+                    prs={("FLODevOps", "russia", bn): pr(target="main")})
+    check("C1: aktif PR'ın hedefi farklı → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(fe4, [s_r], **kw), ValueError) and fe4.writes == 0)
+    fe5 = _BumpFake(files, branches=branches_with("oid-foreign"),
+                    prs={("FLODevOps", "russia", bn): pr(created_by="someone-else")})
+    check("S1: PR'ı Tempo açmamış → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(fe5, [s_r], **kw), ValueError) and fe5.writes == 0)
+    fe6 = _BumpFake(files, branches=branches_with("oid-foreign"), me=None,
+                    prs={("FLODevOps", "russia", bn): pr()})
+    check("S1: kimlik çözülemezse yeniden kullanılmaz → ValueError",
+          raises(lambda: bump.push_sites(fe6, [s_r], **kw), ValueError) and fe6.writes == 0)
+    fe7 = _BumpFake(files, branches=branches_with("oid-foreign"), me="",
+                    prs={("FLODevOps", "russia", bn): pr(created_by="")})
+    check("S1: boş kimlik (''=='') eşleşme sayılmaz → ValueError",
+          raises(lambda: bump.push_sites(fe7, [s_r], **kw), ValueError) and fe7.writes == 0)
+
+    # I4: tekrarlanabilirlik
+    fr1 = _BumpFake(files, branches=branches_with("oid-production"))
+    r = bump.push_sites(fr1, [s_r], **kw)
+    check("I4: artık boş dal (objectId = hedef) → create_branch atlanır, push + PR",
+          not fr1.created and len(fr1.pushes) == 1 and len(fr1.prs) == 1 and r["prs"][0]["repo"] == "russia", str(r))
+    fr2 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): "FROM eu/php-8-4:1.0\n"},
+                    branches=branches_with("oid-ours"))
+    try:
+        r = bump.push_sites(fr2, [s_r], **kw)
+    except ValueError as e:
+        r = str(e)
+    check("S1: dalda bizim içerik (+ yabancı commit olabilir) var, PR yok → ValueError, yazma ve PR yok",
+          isinstance(r, str) and bn in r and "silin" in r and fr2.writes == 0 and not fr2.prs, str(r))
+    fr3 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): "FROM eu/php-8-9:1.0\n"},
+                    branches=branches_with("oid-ours"))
+    check("I4: dalda farklı içerik, PR yok → ValueError",
+          raises(lambda: bump.push_sites(fr3, [s_r], **kw), ValueError) and fr3.writes == 0)
+    fr4 = _BumpFake(files, forbid={"russia"}, deny_ops={"push"})
+    r = bump.push_sites(fr4, [s_r], **kw)
+    check("I4: yeni dal oluşturuldu, push 403 → fallback, boş dal kaldı",
+          len(r["fallback"]) == 1 and r["prs"] == [] and len(fr4.created) == 1
+          and fr4._bs("FLODevOps", "russia")[bn] == "oid-production", str(r))
+    fr4.forbid.clear()
+    r2 = bump.push_sites(fr4, [s_r], **kw)
+    check("I4: ikinci koşu (artık boş dal) → create_branch yok, push + PR",
+          len(fr4.created) == 1 and len(fr4.pushes) == 1 and len(r2["prs"]) == 1
+          and r2["fallback"] == [] and r2["errors"] == [], str(r2))
+
+    # kod reposu sitesi: project boş → client None geçer, WI bağlanır
+    files_c = {(None, "core", "main", "composer.json"): '{"require": {"php": ">=8.2"}}\n'}
+    s_c = {"where": "code", "repo": "core", "project": "", "branch": "main", "path": "composer.json",
+           "line": 1, "old": ">=8.2", "new": ">=8.4", "blocked": ""}
+    fcc = _BumpFake(files_c)
+    r = bump.push_sites(fcc, [s_c], **kw)
+    check("kod reposu: project=None, WI bağlanır",
+          fcc.pushes[0]["project"] is None and fcc.prs[0]["project"] is None
+          and fcc.prs[0]["wi"] == [7]
+          and _bump_dec(fcc.pushes[0]["changes"][0]) == '{"require": {"php": ">=8.4"}}\n', str(fcc.pushes))
+
+    # istemci: project parametresi opsiyonel ve geriye uyumlu
+    import inspect
+    from agile_sdlc_crew.tools.azure_devops_base import AzureDevOpsClient as C
+    for n in ("create_branch", "push_changes", "create_pull_request", "list_branches"):
+        p = inspect.signature(getattr(C, n)).parameters.get("project")
+        check(f"{n}(project=None)", p is not None and p.default is None)
+    p = inspect.signature(C.find_pull_request).parameters["project"]
+    check("find_pull_request keyword-only project", p.kind is p.KEYWORD_ONLY)
+    check("get_file_bytes var", "get_file_bytes" in dir(C))
+
+
+def test_upgrade_bump_round2():
+    """Fix round 2: mevcut dala push yok (S1/S1b), hedef objectId sabitlenir (H1), baytlar aynen (H2),
+    aşama/dal bilgisi (M1), her istisna repo başına yakalanır (M2), yol kenar durumları (M3)."""
+    print("\n[Sürüm adımı: sertleştirme turu 2]")
+    import base64
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+
+    def raises(fn, exc=ValueError):
+        try:
+            fn()
+        except exc:
+            return True
+        except Exception:
+            return False
+        return False
+
+    def mk(repo, path, line, old, new, project="FLODevOps", branch="production"):
+        return {"where": "devops", "repo": repo, "project": project, "branch": branch, "path": path,
+                "line": line, "old": old, "new": new, "blocked": ""}
+
+    dock = "FROM eu/php-8-2:1.0\n"
+    rpath = ("FLODevOps", "russia", "production", "build/r/Dockerfile")
+    files = {("FLODevOps", "anatolia", "production", "build/a/Dockerfile"): dock, rpath: dock}
+    s_a = mk("anatolia", "build/a/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    s_r = mk("russia", "build/r/Dockerfile", 1, "php-8-2:1.0", "php-8-4:1.0")
+    bn = "tempo/upgrade-php-core-8.4"
+    kw = dict(branch=bn, title="T", body="B", wi_id=7)
+    new_ru = "FROM eu/php-8-4:1.0\n"
+
+    def br(oid):
+        return {("FLODevOps", "russia"): {"main": "oid-main", "production": "oid-production", bn: oid}}
+
+    def pr(**o):
+        d = {"id": 55, "status": "active", "url": "https://x/55", "closed_at": "",
+             "merge_commit": "", "target": "production", "created_by": "tempo-id"}
+        d.update(o)
+        return d
+
+    # S1: yabancı commit'li önceden oluşturulmuş dal, PR yok
+    f1 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): new_ru,
+                    ("FLODevOps", "russia", bn, "other.txt"): "foreign"}, branches=br("oid-foreign"))
+    try:
+        bump.push_sites(f1, [s_r], **kw)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check("S1: bizim içerik + yabancı commit, PR yok → ValueError (dalı adıyla sil de), yazma/PR yok",
+          bn in msg and "silin" in msg and f1.writes == 0 and not f1.prs, msg)
+    # S1b: Tempo PR'ı, dalda içerik farklı / dosya yok
+    f2 = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): "FROM eu/php-8-9:1.0\n"},
+                   branches=br("oid-ours"), prs={("FLODevOps", "russia", bn): pr()})
+    try:
+        bump.push_sites(f2, [s_r], **kw)
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check("S1b: Tempo PR'ı ama dal içeriği farklı → ValueError (PR no + dal), yazma yok",
+          "PR dalı güncel değil" in msg and "55" in msg and bn in msg and f2.writes == 0, msg)
+    f2b = _BumpFake(files, branches=br("oid-ours"), prs={("FLODevOps", "russia", bn): pr()})
+    check("S1b: Tempo PR'ı, dalda dosya yok → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(f2b, [s_r], **kw)) and f2b.writes == 0)
+    f2c = _BumpFake({**files, ("FLODevOps", "russia", bn, "build/r/Dockerfile"): new_ru},
+                    branches=br("oid-ours"), prs={("FLODevOps", "russia", bn): pr()})
+    r = bump.push_sites(f2c, [s_a, s_r], **kw)
+    check("S1b: reused yalnız o repoda; öteki repo normal akar",
+          [(p["repo"], p.get("reused", False)) for p in r["prs"]] == [("anatolia", False), ("russia", True)]
+          and len(f2c.pushes) == 1 and f2c.pushes[0]["repo"] == "anatolia", str(r))
+
+    # H1: hedef objectId sabitlenir
+    f3 = _BumpFake(files)
+    bump.push_sites(f3, [s_r], **kw)
+    check("H1: create_branch source_object_id = doğrulanan hedef oid",
+          f3.created_oid == ["oid-production"], str(f3.created_oid))
+    check("H1: push_changes old_object_id = aynı oid", f3.pushes[0]["old_object_id"] == "oid-production",
+          str(f3.pushes[0]["old_object_id"]))
+    f3b = _BumpFake(files, branches=br("oid-production"))
+    bump.push_sites(f3b, [s_r], **kw)
+    check("H1: artık boş dalda da push o oid üzerine, create yok",
+          not f3b.created and f3b.pushes[0]["old_object_id"] == "oid-production")
+
+    # H2: BOM + CRLF bayt-bayt
+    orig = b"\xef\xbb\xbfFROM eu/php-8-2:1.0\r\nRUN x\r\n"
+    f4 = _BumpFake({**files, rpath: orig})
+    bump.push_sites(f4, [s_r], **kw)
+    ch = f4.pushes[0]["changes"][0]
+    got = base64.b64decode(ch["content"])
+    check("H2: contentType base64encoded", ch.get("contentType") == "base64encoded", str(ch.get("contentType")))
+    check("H2: BOM + CRLF — yalnız düzenlenen satır farklı, bayt-bayt",
+          got == orig.replace(b"php-8-2", b"php-8-4") and got.startswith(b"\xef\xbb\xbf"), repr(got))
+
+    # M1: aşama + dal yazıldı mı
+    f5 = _BumpFake(files, forbid={"russia"}, deny_ops={"pr"})
+    r = bump.push_sites(f5, [s_r], **kw)
+    e = (r["fallback"] or [{}])[0]
+    check("M1: PR oluşturma 403 → fallback stage 'pr', branch_written True",
+          e.get("stage") == "pr" and e.get("branch_written") is True and len(f5.pushes) == 1, str(r))
+    f6 = _BumpFake(files, forbid={"russia"}, deny_ops={"create"})
+    e = (bump.push_sites(f6, [s_r], **kw)["fallback"] or [{}])[0]
+    check("M1: dal oluşturma 403 → stage 'create', branch_written False",
+          e.get("stage") == "create" and e.get("branch_written") is False, str(e))
+    f7 = _BumpFake(files, boom={"russia": 500}, deny_ops={"push"})
+    e = (bump.push_sites(f7, [s_r], **kw)["errors"] or [{}])[0]
+    check("M1: push 500 → errors stage 'push', branch_written True (dal oluşturuldu)",
+          e.get("stage") == "push" and e.get("branch_written") is True, str(e))
+    f8 = _BumpFake(files, boom={"russia": 500}, deny_ops={"pr"})
+    e = (bump.push_sites(f8, [s_r], **kw)["errors"] or [{}])[0]
+    check("M1: PR 500 → errors stage 'pr', branch_written True",
+          e.get("stage") == "pr" and e.get("branch_written") is True, str(e))
+
+    # M2: dict olmayan value[0]
+    f9 = _BumpFake(files, create_result={"russia": {"value": ["bozuk"]}})
+    r = bump.push_sites(f9, [s_a, s_r], **kw)
+    check("M2: value[0] dict değil → errors'a düşer, önceki repo'nun PR'ı kaybolmaz",
+          [p["repo"] for p in r["prs"]] == ["anatolia"] and [x["repo"] for x in r["errors"]] == ["russia"], str(r))
+    f10 = _BumpFake(files)
+    f10.create_pull_request = lambda *a, **k: None          # PR yanıtı okunamıyor (res.get patlar)
+    r = bump.push_sites(f10, [s_r], **kw)
+    check("M2: PR yanıtı bozuksa istisna sızmaz → errors", len(r["errors"]) == 1 and not r["prs"], str(r))
+
+    # M3: '.' segmenti
+    fd = _BumpFake(files)
+    check("M3: '.' yol segmenti → ValueError, yazma yok",
+          raises(lambda: bump.push_sites(fd, [dict(s_r, path="build/./r/Dockerfile")], **kw)) and fd.writes == 0)
+
+
+def test_upgrade_client_find_pr_and_bytes():
+    """İstemci: find_pull_request en yeni PR'ı pullRequestId'ye göre seçer ve createdBy döndürür;
+    get_file_bytes ham baytları verir (JSON'a çevirmez)."""
+    print("\n[Sürüm adımı: istemci ucu]")
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+    c = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+    c.org_url, c.project = "https://dev.azure.com/o", "P"
+    class _Cl(azb.AzureDevOpsClient):
+        _headers = {"Authorization": "x"}
+        _base_api_url = "https://x/P/_apis"
+    c.__class__ = _Cl
+    c._repo_api_url = lambda repo, project=None: f"https://x/{project or 'P'}/{repo}"
+    vals = [{"pullRequestId": 7, "status": "abandoned", "creationDate": "2026-11-17T10:00:00Z",
+             "createdBy": {"id": "old"}, "targetRefName": "refs/heads/main"},
+            {"pullRequestId": 9, "status": "active", "creationDate": "2026-01-01T00:00:00Z",
+             "createdBy": {"id": "me", "uniqueName": "m@x"}, "targetRefName": "refs/heads/production",
+             "lastMergeCommit": {"commitId": "abc"}, "repository": {"name": "r", "project": {"name": "FLO"}}}]
+
+    class R:
+        def __init__(self, js=None, content=b"", status=200):
+            self._js, self.content, self.status_code, self.ok = js, content, status, status < 400
+            self.text = content.decode("utf-8", "replace")
+
+        def json(self):
+            return self._js
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                import requests
+                raise requests.HTTPError(str(self.status_code), response=self)
+    seen = {}
+    og, og_post = azb.requests.get, azb.requests.post
+    try:
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            seen.update(url=url, params=params, headers=headers) or
+            (R({"value": vals}) if url.endswith("/pullrequests") else R(content=b'{"content": "x"}\xff')))
+        pr = c.find_pull_request("r", "tempo/upgrade-php-r-8.4", project="FLO")
+        check("en yüksek pullRequestId seçilir", pr and pr["id"] == 9, str(pr))
+        check("created_by döner", pr and pr["created_by"] == "me", str(pr))
+        check("alanlar", pr and pr["status"] == "active" and pr["target"] == "production"
+              and pr["merge_commit"] == "abc" and pr["closed_at"] == "", str(pr))
+        b = c.get_file_bytes("r", "/a/b.json", "production", project="FLO")
+        check("get_file_bytes ham bayt döner (JSON 'content' çözülmez)", b == b'{"content": "x"}\xff', repr(b))
+        check("octet-stream istenir", (seen["headers"] or {}).get("Accept") == "application/octet-stream"
+              and seen["params"].get("$format") == "octetStream", str(seen))
+        azb.requests.get = lambda *a, **k: R(status=404)
+        check("404 → None", c.get_file_bytes("r", "/a", "production") is None)
+        # H1 / H2: create_branch(source_object_id), push_changes(old_object_id, contentType)
+        posted = []
+        azb.requests.post = lambda url, headers=None, json=None, params=None, timeout=None: (
+            posted.append((url, json)) or R({"value": [{"success": True}]}))
+        c.list_branches = lambda repo, project=None: (_ for _ in ()).throw(AssertionError("list_branches çağrılmamalı"))
+        c.create_branch("r", "tempo/upgrade-php-r-8.4", "production", project="FLO", source_object_id="abc123")
+        check("create_branch source_object_id'yi newObjectId yapar (hedef adı aranmaz)",
+              posted[-1][1][0]["newObjectId"] == "abc123", str(posted[-1]))
+        c.push_changes("r", "tempo/upgrade-php-r-8.4",
+                       [{"changeType": "edit", "path": "/a", "content": "Zm9v", "contentType": "base64encoded"},
+                        {"changeType": "edit", "path": "/b", "content": "x"}],
+                       "m", project="FLO", old_object_id="abc123")
+        body = posted[-1][1]
+        check("push_changes old_object_id'yi refUpdate oldObjectId yapar (dal başı aranmaz)",
+              body["refUpdates"][0]["oldObjectId"] == "abc123", str(body))
+        ch = body["commits"][0]["changes"]
+        check("contentType geçer; verilmezse rawtext",
+              ch[0]["newContent"]["contentType"] == "base64encoded" and ch[1]["newContent"]["contentType"] == "rawtext",
+              str(ch))
+        # Yorumlar sayfalı: işaret araması devam belirteciyle bütün sayfaları okur, sınırda 'tamam değil' der
+        pages, asked = {None: ("t1", [1, 2]), "t1": ("t2", [3]), "t2": (None, [4])}, []
+
+        def cget(url, headers=None, params=None, timeout=None, **k):
+            asked.append(dict(params or {}))
+            tok, ids = pages[(params or {}).get("continuationToken")]
+            js = {"comments": [{"id": i, "text": f"c{i}", "createdDate": "2026-11-17T10:00:00Z",
+                                "createdBy": {"displayName": "x"}} for i in ids]}
+            if tok:
+                js["continuationToken"] = tok
+            return R(js)
+        azb.requests.get = cget
+        rows, complete = c.get_work_item_comments_all(5)
+        check("yorumlar: bütün sayfalar okunur", complete and [r["id"] for r in rows] == [1, 2, 3, 4]
+              and [r["metin"] for r in rows][-1] == "c4" and asked[1].get("continuationToken") == "t1", str(asked))
+        rows, complete = c.get_work_item_comments_all(5, max_items=2)
+        check("yorumlar: sınır aşılırsa tamam değil", not complete and len(rows) == 2, str(rows))
+        check("tek sayfalık eski okuyucu aynı", [r["id"] for r in c.get_work_item_comments(5)] == [1, 2])
+    finally:
+        azb.requests.get, azb.requests.post = og, og_post
+
+
+def _ci_src(pins):
+    """Taramanın ci_source'u: sabitlemenin dosyası (F1 sonrası tanımdan gelir; burada ilk sabitlemeden)."""
+    return {k: pins[0][k] for k in ("repo", "project", "branch", "path")} if pins else None
+
+
+class _UpFake(_BumpFake):
+    """Yükseltme durumu / izleme işi / sürüm adımı için sahte Azure: PR'lar (proje, repo, dal),
+    PR build'leri (queue_time + sonuç), WIQL (izleme + tempo-upgrade işleri), yorum / iş kayıtları."""
+    org_url, project = "https://dev.azure.com/o", "P"
+
+    def __init__(self, files=None, *, prs=None, builds=None, tracks=(), tasks=(), defs=None, commit_dates=None,
+                 requests_=(), areas=None, issue_tasks=None, summary_error=None, **k):
+        super().__init__(files or {}, prs=prs, **k)
+        # builds: tanım id → build listesi (sahte minTime'ı YOK SAYAR — sıkı "sonra" süzgeci kodda olmalı)
+        self.builds, self.tracks, self.tasks = dict(builds or {}), list(tracks), list(tasks)
+        self.defs = dict(defs or {})                  # repo → {"id","name","project"} | Exception
+        self.commit_dates = dict(commit_dates or {})  # (project, repo, branch, path) → tarih | Exception
+        self.requests_ = list(requests_)              # DevOps istekleri (tempo-devops)
+        self.areas = dict(areas or {})
+        self.issue_tasks = dict(issue_tasks or {})    # build id → [{name, result}]
+        self.summary_error = summary_error            # verilirse get_build_failure_summary bunu yükseltir
+        self.def_calls, self.build_calls = [], []
+        self.wis, self.comments, self.states, self.wiql, self.descs, self.summaries = [], [], [], [], [], []
+
+    def query_work_items(self, wiql, limit=0):
+        import html as _h
+        self.wiql.append(wiql)
+        pool = (self.tracks if "tempo-upgrade-track" in wiql
+                else self.requests_ if "CONTAINS 'tempo-devops'" in wiql
+                else self.tasks if "CONTAINS 'tempo-upgrade'" in wiql else [])
+        needles = [n.replace("''", "'") for n in re.findall(r"\[System\.Description\] CONTAINS '((?:[^']|'')*)'", wiql)]
+        return [w for w in pool
+                if all(n in _h.unescape(w["fields"].get("System.Description") or "") for n in needles)]
+
+    def get_team_area_path(self, team=""):
+        return self.areas.get(team, "P\\T") if team else ""
+
+    def get_test_pipeline(self, repo):
+        name = f"{repo}-test"
+        self.def_calls.append((repo, name))
+        d = self.defs.get(repo)
+        if isinstance(d, Exception):
+            raise d
+        return d if d and d["name"].lower() == name.lower() else None
+
+    def list_definition_builds(self, project, definition_id, *, min_time="", top=50):
+        self.build_calls.append((project, definition_id, min_time))
+        return list(self.builds.get(definition_id, []))
+
+    def get_build_issue_tasks(self, project, build_id):
+        return list(self.issue_tasks.get(build_id, []))
+
+    def get_last_commit_date(self, repo, path, branch, *, project=None):
+        raise AssertionError("F7: kanıt saati dosyanın commit zamanından okunmaz (dalın son push'u)")
+
+    def get_last_push_date(self, repo, branch, *, project=None):
+        """F7: dalın son push'u. commit_dates anahtarındaki yol yok sayılır: aynı (proje, repo, dal) altındaki
+        değerlerin en geçi; biri hata ise yükselir, hiç yoksa ""."""
+        vals = [v for (p, r, b, _path), v in self.commit_dates.items() if (p, r, b) == (project, repo, branch)]
+        for v in vals:
+            if isinstance(v, Exception):
+                raise v
+        return max(vals) if vals and all(vals) else ""
+
+    def list_iterations(self, team=""):
+        return [{"path": "P\\T\\S1"}, {"path": "P\\T\\S2"}]
+
+    def create_work_item(self, type_name, fields, parent_id=None):
+        wi = {"id": 900 + len(self.wis), "fields": dict(fields, **{"System.State": "To Do"})}
+        self.wis.append(dict(fields, _type=type_name))
+        self.tracks.append(wi)
+        return wi
+
+    def add_comment(self, wid, text):
+        self.comments.append((wid, text))
+
+    def get_work_item_type_states(self, t):
+        return [{"name": "To Do", "category": "Proposed"}, {"name": "Done", "category": "Completed"}]
+
+    def set_work_item_state(self, wid, st):
+        self.states.append((wid, st))
+        for w in self.tracks:
+            if w["id"] == wid:
+                w["fields"]["System.State"] = st
+
+    def get_build_failure_summary(self, project, build_id, max_chars=4000):
+        self.summaries.append(build_id)
+        if self.summary_error is not None:
+            raise self.summary_error
+        return f"FAILED [Task] Run tests: CoreTest::testFoo (#{build_id})"
+
+    def get_repository(self, repo):
+        return {"id": "g-" + repo, "defaultBranch": "refs/heads/main"}
+
+    def create_pull_request(self, repo, source_branch, target_branch="main", title="", description="",
+                            work_item_ids=None, draft=False, project=None):
+        self.descs.append(description)
+        return super().create_pull_request(repo, source_branch, target_branch, title, description,
+                                           work_item_ids, draft, project)
+
+
+def test_upgrade_status_and_steps():
+    """Yükseltme durumu (§5 aşama tablosu), izleme işi, sıradaki sürüm adımı (§6 ön koşulları), CI kanıtı
+    yalnız merge'den SONRA kuyruğa giren build, run'ın yeniden doğrulaması, BUMP kapalıyken diff, işçi /
+    yeniden deneme / yaşam döngüsü."""
+    print("\n[Sürüm yükseltme: durum, izleme işi, sürüm adımı]")
+    import inspect
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_bump as bump, upgrade_track as ut
+
+    BR = "tempo/upgrade-php-core-8.4"
+    MERGED = "2026-11-10T10:00:00.1234567Z"
+    dv_a = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+            "path": "/build/core/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+            "blocked": ""}
+    dv_r = dict(dv_a, repo="russia")
+    ci_s = {"where": "ci", "repo": "yml-files", "project": "EcomBackend", "branch": "main",
+            "path": "Test Pipelines/core.yml", "line": 2, "old": "'8.2'", "new": "'8.4'", "blocked": ""}
+    code_s = {"where": "code", "repo": "core", "project": "", "branch": "", "path": "composer.json",
+              "line": 3, "old": "^8.2", "new": "^8.4", "blocked": ""}
+    code_bad = dict(code_s, old="^7.4|^8.0", new=">=8.4")   # yalnız rakam değişimi değil → elle
+
+    pin_below = {"repo": "yml-files", "project": "EcomBackend", "branch": "main", "path": "Test Pipelines/core.yml",
+                 "line": 2, "version": "8.2"}
+    pin_at = dict(pin_below, version="8.4")
+
+    def mkscan(blocking=0, blockers=(), sites=None, rows=(), up=False, pins="below"):
+        pins = {"below": [pin_below], "at": [pin_at], "none": []}.get(pins, pins) if isinstance(pins, str) else pins
+        return {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": up,
+                "sites": [dv_a, dv_r, ci_s, code_s] if sites is None else sites, "blocking": blocking,
+                "blockers": list(blockers), "auto": list(rows), "infra": [], "human": [], "ci_pins": pins,
+                "ci_source": _ci_src(pins)}
+
+    def pr(pid, status, closed=MERGED):
+        return {"id": pid, "status": status, "url": f"https://x/pr/{pid}", "closed_at": closed if status != "active" else "",
+                "merge_commit": "m", "target": "main", "created_by": "tempo-id"}
+
+    def build(bid, q, result="succeeded", status="completed", definition="Core-test"):
+        return {"build_id": bid, "status": status, "result": result, "definition": definition,
+                "url": f"https://x/b/{bid}", "project": "EcomBackend", "queue_time": q, "source_version": ""}
+
+    CORE_DEF = {"core": {"id": 5, "name": "Core-test", "project": "EcomBackend"}}
+    PIN_FILE = ("EcomBackend", "yml-files", "main", "Test Pipelines/core.yml")
+
+    def cf(builds=(), defs=True, date=MERGED, **k):
+        """Test hattı dosyası hedefte; son değişikliği `date`; Core-test tanımının build'leri `builds`."""
+        return _UpFake(defs=CORE_DEF if defs else {}, builds={5: list(builds)}, commit_dates={PIN_FILE: date}, **k)
+
+    def task_wi(wid, fps, tags="tempo-quality; tempo-upgrade", state="To Do",
+                title="[core] Sürüm yükseltme 8.2→8.4: x"):
+        return {"id": wid, "fields": {"System.Title": title, "System.State": state, "System.Tags": tags,
+                                      "System.Description": "<p>x</p>" + "".join(
+                                          f"<p><small>tempo-fp: {f}</small></p>" for f in fps)}}
+
+    def track_wi(wid=500, to="8.4", state="To Do", repo="core", area="P\\T", tags="tempo-upgrade-track"):
+        return {"id": wid, "fields": {"System.Title": "izleme", "System.State": state, "System.AreaPath": area,
+                                      "System.Tags": tags,
+                                      "System.Description": f"<p><small>tempo-upgrade-key: php:{repo}:{to}</small></p>"}}
+
+    ci_key = ("EcomBackend", "yml-files", BR)
+    old_b = build(1, "2026-11-10T09:00:00Z")                # merge'den ÖNCE kuyruğa girmiş yeşil
+    new_g = build(2, "2026-11-10T11:00:00.5Z")
+    new_r = build(3, "2026-11-10T12:00:00Z", result="failed")
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "core"
+        root.mkdir()
+        (root / "composer.json").write_text('{\n  "require": {\n    "php": "^8.2"\n  }\n}\n', encoding="utf-8")
+        cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+               "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+               "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+        deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                           record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+
+        def st(scan, c=None, **k):
+            return ut.status(c or _UpFake(), "core", "php", to="8.4", deps=deps, scan=scan, wait_h=72, root=root, **k)
+
+        # ── Aşama tablosu (§5) ──
+        s = st(mkscan(blocking=2))
+        check("engelleyen bulgu → hazırlık", s["stage"] == "hazırlık" and not s["next"]["ready"], str(s["stage"]))
+        c_t = _UpFake(tasks=[task_wi(70, ["php_modern:core:implicit_nullable:app/A.php"]),
+                             task_wi(71, ["php_modern:core:implicit_nullable:app/B.php"], state="Done"),
+                             task_wi(72, ["php_modern:web:implicit_nullable:app/A.php"])])
+        s = st(mkscan(), c_t)
+        check("açık engelleyen tempo-upgrade işi → hazırlık (kapalı / başka repo sayılmaz)",
+              s["stage"] == "hazırlık" and [t["id"] for t in s["open_tasks"]] == [70]
+              and s["open_tasks"][0]["blocking"], str(s["open_tasks"]))
+        c_nb = _UpFake(tasks=[task_wi(73, ["php_modern:core:implicit_nullable:app/A.php"],
+                                      tags="tempo-quality; tempo-upgrade; needs-human"),
+                              task_wi(74, ["php_modern:core:probe:deprecation:app/E.php"])])
+        s = st(mkscan(), c_nb)
+        check("engellemeyen açık iş (insan işi deprecation / probe uyarısı) → hazır",
+              s["stage"] == "hazır" and sorted(t["id"] for t in s["open_tasks"]) == [73, 74]
+              and not any(t["blocking"] for t in s["open_tasks"]), str(s["open_tasks"]))
+        s = st(mkscan(blockers=[{"name": "laravel/framework", "detail": "laravel/framework: PHP ^7.3 — 8.4'ü dışlıyor"}]))
+        check("yalnız composer engeli → engelli", s["stage"] == "engelli" and not s["next"]["ready"]
+              and "laravel" in s["next"]["reason"], str(s["next"]))
+        s = st(mkscan(rows=[{"rule": "x", "blocking": False, "pre_fixable": False}]))
+        check("fix_min > şimdiki bulgusu → engelli", s["stage"] == "engelli", s["stage"])
+        s_clean = st(mkscan())
+        nx = s_clean["next"]
+        check("temiz → hazır, sıradaki ci", s_clean["stage"] == "hazır" and nx["step"] == "ci" and nx["ready"] is True
+              and nx["sites"] == [ci_s], str(nx))
+        check("STAGES", ut.STAGES == ("hazırlık", "engelli", "hazır", "test hattı", "üretim", "tamam"))
+        s = st(mkscan(), _UpFake(prs={ci_key: pr(11, "active")}))
+        check("CI PR'ı açık → test hattı, prod hazır değil",
+              s["stage"] == "test hattı" and s["next"]["step"] == "prod" and not s["next"]["ready"]
+              and "#11" in s["next"]["reason"] and s["prs"]["ci"]["id"] == 11, str(s["next"]))
+        check("merge'den ÖNCE kuyruğa girmiş yeşil build kanıt değil",
+              bump.ci_evidence(cf([old_b]), "core", MERGED, wait_h=72)["state"] == "none")
+        # CI dosyası hedefte (kim yaptıysa), test hattı PR'ı Tempo'nun kaydında 'completed'
+        at = dict(sites=[dv_a, dv_r, code_s], pins="at")
+        s = st(mkscan(**at), cf([old_b], prs={ci_key: pr(11, "completed")}))
+        check("CI dosyası hedefte, sonrasında build yok → test hattı, prod yok",
+              s["stage"] == "test hattı" and s["next"]["step"] == "prod" and not s["next"]["ready"]
+              and s["evidence"]["state"] == "none", str(s["next"]))
+        s2 = st(mkscan(**at), cf([new_g, old_b]))
+        check("dosya değişikliğinden sonra yeşil → prod hazır",
+              s2["stage"] == "hazır" and s2["next"]["step"] == "prod" and s2["next"]["ready"] is True
+              and s2["next"]["sites"] == [dv_a, dv_r] and s2["next"]["test_note"] == "", str(s2["next"]))
+        c_red = cf([new_r, new_g, old_b])
+        ev = bump.ci_evidence(c_red, "core", MERGED, wait_h=72)
+        check("sonrasında kırmızı → prod yok, özet var",
+              ev["state"] == "red" and ev["summary"] and "CoreTest" in ev["summary"] and ev["build"]["id"] == 3,
+              str(ev))
+        s = st(mkscan(**at), c_red)
+        check("kırmızı kanıtla prod adımı hazır değil, nedeni özet",
+              s["next"]["step"] == "prod" and not s["next"]["ready"] and "CoreTest" in s["next"]["reason"])
+        check("kırmızı kanıt prod'u bekletiyor → blocked_by_evidence", s["next"].get("blocked_by_evidence") is True)
+        s_prep = st(mkscan(blocking=2, **at), c_red)
+        check("hazırlıkta kırmızı kanıt bekletmiyor → blocked_by_evidence yok",
+              s_prep["evidence"]["state"] == "red" and s_prep["next"].get("blocked_by_evidence") is False
+              and s_clean["next"].get("blocked_by_evidence") is False, str(s_prep["next"]))
+        s_nopin = st(mkscan(sites=[dv_a, dv_r, code_s], pins="none"), c_red)
+        check("sabitleme yokken kırmızı kanıt da prod'u bekletir → blocked_by_evidence",
+              s_nopin["next"]["step"] == "prod" and s_nopin["next"].get("blocked_by_evidence") is True, str(s_nopin["next"]))
+        ev2 = bump.ci_evidence(cf([build(4, "2026-11-10T11:00:00Z", status="inProgress", result=None), old_b]),
+                               "core", MERGED, wait_h=72)
+        check("koşan build kanıt değil; bekleme süresi dolmuş", ev2["state"] == "none" and ev2["overdue"] is True,
+              str(ev2))
+        check("<repo>-test tanımı yok → no_pipeline",
+              bump.ci_evidence(cf(defs=False), "core", MERGED, wait_h=72)["state"] == "no_pipeline")
+        check("zaman damgası: 7 haneli kesir + Z", bump._ts(MERGED) < bump._ts("2026-11-10T10:00:00.2Z")
+              and bump._ts("x") is None)
+        # no_pipeline: prod açılır, ilk satır "Test kanıtı yok"
+        s = st(mkscan(**at), cf(defs=False))
+        check("no_pipeline → prod hazır, test notu 'Test kanıtı yok'",
+              s["next"]["step"] == "prod" and s["next"]["ready"] and s["next"]["test_note"] == "Test kanıtı yok"
+              and s["stage"] == "hazır", str(s["next"]))
+        # russia imajı yayınlanmamış
+        dv_rb = dict(dv_r, blocked=upgrade.UNPUBLISHED)
+        s3 = st(mkscan(sites=[dv_a, dv_rb, code_s], pins="at"), cf([new_g]))
+        check("russia engelli → prod hiçbir bölgeye açılmaz",
+              "imaj" in s3["next"]["reason"] and not s3["next"]["ready"] and s3["next"]["step"] == "prod"
+              and s3["stage"] == "engelli", str(s3["next"]))
+        s3b = st(mkscan(sites=[dv_a, dv_rb, ci_s, code_s]))
+        check("russia engelli, CI adımı da açılmaz (neden imaj)",
+              s3b["next"]["step"] == "ci" and not s3b["next"]["ready"] and "imaj" in s3b["next"]["reason"])
+        # üretim
+        c_pd = cf([new_g], prs={("FLODevOps", "anatolia", BR): pr(21, "active"),
+                                ("FLODevOps", "russia", BR): pr(22, "active")})
+        s = st(mkscan(**at), c_pd)
+        check("FLODevOps PR'ları açık → üretim; sıradaki code ama hazır değil",
+              s["stage"] == "üretim" and s["next"]["step"] == "code" and not s["next"]["ready"]
+              and len(s["prs"]["devops"]) == 2, str(s["next"]))
+        c_part = cf([new_g], prs={("FLODevOps", "anatolia", BR): pr(21, "active")})
+        s = st(mkscan(**at), c_part)
+        check("bölgelerden birinin PR'ı eksik → üretim, prod yeniden atılabilir",
+              s["stage"] == "üretim" and s["next"]["step"] == "prod" and s["next"]["ready"], str(s["next"]))
+        # tamam: üretim hedefte → kod reposu
+        s4 = st(mkscan(sites=[], up=True))
+        check("üretim hedefte → sıradaki code", s4["stage"] == "tamam" and s4["next"]["step"] == "code"
+              and s4["next"]["ready"] and s4["next"]["sites"][0]["path"] == "composer.json"
+              and s4["next"]["sites"][0]["branch"] == "main" and s4["next"]["sites"][0]["new"] == "^8.4",
+              str(s4["next"]))
+        s = st(mkscan(sites=[], up=True), _UpFake(prs={(None, "core", BR): pr(31, "active")}))
+        check("kod PR'ı açık → code hazır değil", s["next"]["step"] == "code" and not s["next"]["ready"])
+        # CI sitesi yok → ci atlanır
+        s = st(mkscan(sites=[dv_a, dv_r, code_s], pins="none"))
+        # turu 2 (B3b): sabitleme yokken de <repo>-test tanımı aranır; burada tanım yok → no_pipeline
+        check("test hattı sabitlemesi yok, tanım yok → sıradaki prod, 'Test kanıtı yok'",
+              s["next"]["step"] == "prod" and s["next"]["ready"] and s["next"]["test_note"] == "Test kanıtı yok"
+              and (s["evidence"] or {}).get("state") == "no_pipeline", str(s["next"]))
+        # devops sitesi yok → tek adım code, hazır'da açılır
+        s = st(mkscan(sites=[ci_s, code_s]))
+        check("devops sitesi yok → code tek adım, hazır'da açık",
+              s["next"]["step"] == "code" and s["next"]["ready"] and s["next"]["sites"][0]["branch"] == "main",
+              str(s["next"]))
+        s = st(mkscan(blocking=1, sites=[code_s]))
+        check("devops sitesi yok ama hazırlık → code hazır değil", s["next"]["step"] == "code"
+              and not s["next"]["ready"])
+        # rakam dizisi dışı kod sitesi: code adımında elle; ci / prod etkilenmez
+        s = st(mkscan(sites=[dv_a, dv_r, ci_s, code_bad]))
+        check("elle düzenlenecek kod sitesi ci'yi bekletmez", s["stage"] == "hazır" and s["next"]["step"] == "ci"
+              and s["next"]["ready"], str(s["next"]))
+        s = st(mkscan(sites=[dv_a, dv_r, code_bad], pins="none"), _UpFake())
+        check("elle düzenlenecek kod sitesi prod'u bekletmez", s["next"]["step"] == "prod" and s["next"]["ready"])
+        s = st(mkscan(sites=[code_bad]))
+        check("yalnız elle kod sitesi → code hazır değil, neden 'elle', manual listede",
+              s["next"]["step"] == "code" and not s["next"]["ready"] and "elle" in s["next"]["reason"]
+              and s["next"]["manual"][0]["old"] == "^7.4|^8.0", str(s["next"]))
+
+        # ── İzleme işi ──
+        index = {"core": [{"src": "anatolia/build/core", "images": ["eu/php-8-2:1.0"]}],
+                 "web": [{"src": "anatolia/build/web", "images": ["eu/php-8-4:1.0"]}]}
+        yml = "variables:\n  phpVersion: '8.2'\nresources:\n  - repository: s\n    name: EcomBackend/core\n"
+        pkw = dict(index=index, root=root, read=lambda d, p: "FROM eu/php-8-2:1.0\n",
+                   yml_files={"Test Pipelines/core.yml": yml}, app_map_cache={})
+        c = _UpFake()
+        first = ut.start(c, "core", "php", team="T", deps=deps, **pkw)
+        f0 = c.wis[0] if c.wis else {}
+        check("start: izleme Task'ı (takım alanı, kök iteration, etiket, anahtar satırı)",
+              first["created"] and f0.get("_type") == "Task" and f0.get("System.Tags") == "tempo-upgrade-track"
+              and f0.get("System.AreaPath") == "P\\T" and f0.get("System.IterationPath") == "P\\T"
+              and "tempo-upgrade-key: php:core:8.4" in f0.get("System.Description", "")
+              and "8.2 → 8.4" in f0.get("System.Description", ""), str(f0))
+        first_id = first["id"]
+        check("ikinci start aynı izleme işini döner",
+              ut.start(c, "core", "php", team="T", deps=deps, **pkw)["id"] == first_id and len(c.wis) == 1)
+        check("başka hedefle start da aynı işi döner (repo × dil başına bir)",
+              ut.start(c, "core", "php", to="8.3", team="T", deps=deps, **pkw)["id"] == first_id and len(c.wis) == 1)
+        try:
+            ut.start(c, "core", "php", to="9.9", team="T", deps=deps, **pkw)
+            check("geçersiz hedef → ValueError", False)
+        except ValueError:
+            check("geçersiz hedef → ValueError", True)
+        check("tracked", ut.tracked(c, "T") == [{"id": first_id, "lang": "php", "repo": "core", "to": "8.4"}],
+              str(ut.tracked(c, "T")))
+        r = ut.stop(c, "core", "php", team="T")
+        check("stop: yorum + Done", r["closed"] and c.states == [(first_id, "Done")]
+              and c.comments and c.comments[-1][0] == first_id and ut.find_open(c, "php", "core") is None)
+        try:
+            ut.stop(c, "core", "php", team="T")
+            check("açık iş yokken stop → ValueError", False)
+        except ValueError:
+            check("açık iş yokken stop → ValueError", True)
+
+        # ── queue_step ──
+        created = []
+
+        def cj(wid, use_hal, title, *, job_kind, job_payload):
+            created.append({"wid": wid, "title": title, "kind": job_kind, "payload": json.loads(job_payload)})
+            return 77
+        try:
+            bump.queue_step(_UpFake(), "core", "php", team="T", deps=deps, create_job=cj, open_jobs=lambda t: [],
+                            status_fn=lambda *a, **k: s_clean)
+            check("izleme işi yokken bump → ValueError", False)
+        except ValueError as e:
+            check("izleme işi yokken bump → ValueError", "başlatın" in str(e))
+        blocked_st = st(mkscan(sites=[dv_a, dv_rb, ci_s, code_s]))
+        try:
+            bump.queue_step(_UpFake(tracks=[track_wi()]), "core", "php", team="T", deps=deps, create_job=cj,
+                            open_jobs=lambda t: [], status_fn=lambda *a, **k: blocked_st)
+            check("ön koşul yoksa queue_step → ValueError(next.reason)", False)
+        except ValueError as e:
+            check("ön koşul yoksa queue_step → ValueError(next.reason)",
+                  str(e) == blocked_st["next"]["reason"] and not created, str(e))
+        q = bump.queue_step(_UpFake(tracks=[track_wi()]), "core", "php", team="T", deps=deps, create_job=cj,
+                            open_jobs=lambda t: [], status_fn=lambda *a, **k: s_clean)
+        pl = created[0]["payload"] if created else {}
+        check("queue_step: upgrade_bump işi, WI = izleme işi, kapsam INSERT'te",
+              q["job_id"] == 77 and created[0]["kind"] == "upgrade_bump" and created[0]["wid"] == "500"
+              and set(pl) == {"lang", "repo", "from", "to", "step", "sites", "track_id", "team"}
+              and pl["step"] == "ci" and pl["from"] == "8.2" and pl["to"] == "8.4" and pl["sites"] == [ci_s]
+              and pl["track_id"] == 500 and pl["team"] == "T", str(created))
+
+        # ── run: gerçek durum hesabıyla (tarama + plan) uçtan uca CI adımı ──
+        skw = dict(pkw, scan_fn=lambda r, **k: {"files": 1, "sha": "s", "hits": [], "adoption": {}, "errors": []},
+                   head_sha_fn=lambda r: "s", probe_fn=lambda *a, **k: ([], {"ran": False, "tool": "", "reason": "yok"}))
+        yml_files = {("EcomBackend", "yml-files", "main", "Test Pipelines/core.yml"): yml}
+        orig_get = pc.get
+        flags = {"CREW_TECHDEBT_UPGRADE_BUMP": True, "CREW_DEVOPS_REQUESTS": True, "CREW_DEVOPS_TEAM": "DevOps"}
+        pc.get = lambda k: flags[k] if k in flags else orig_get(k)
+        reqs = []
+        rq = lambda client, **k: (reqs.append(k), {"id": 4242, "created": True})[1]
+        try:
+            created.clear()
+            ce = _UpFake(yml_files, tracks=[track_wi()])
+            bump.queue_step(ce, "core", "php", team="T", deps=deps, create_job=cj, open_jobs=lambda t: [], **skw)
+            job = {"job_kind": "upgrade_bump", "job_payload": json.dumps(created[0]["payload"])}
+            out = bump.run(77, load_job=lambda j: job, client=ce, deps=deps, request_fn=rq, **skw)
+            check("run ci: tek taslak PR yml-files'a, yalnız sürüm satırı",
+                  len(ce.prs) == 1 and ce.prs[0]["project"] == "EcomBackend" and ce.prs[0]["draft"]
+                  and len(ce.pushes) == 1 and _bump_dec(ce.pushes[0]["changes"][0]) == yml.replace("'8.2'", "'8.4'")
+                  and ce.pushes[0]["branch"] == BR, str(ce.prs))
+            check("run ci: PR açıklaması test hattı metni, DevOps isteği yok",
+                  ce.descs and "ile test edilir" in ce.descs[0] and "üretim hâlâ `8.2`" in ce.descs[0] and not reqs)
+            check("run ci: izleme işine PR yorumu", ce.comments and ce.comments[-1][0] == 500
+                  and "PR" in ce.comments[-1][1] and out["prs"] and out["step"] == "ci", str(ce.comments))
+            # site satırı değişmiş → iş başarısız, push yok, yorum yazılır
+            yml2 = yml.replace("'8.2'", "'8.3'")
+            cm = _UpFake({("EcomBackend", "yml-files", "main", "Test Pipelines/core.yml"): yml2}, tracks=[track_wi()])
+            raised_site_changed = False
+            try:
+                bump.run(77, load_job=lambda j: job, client=cm, deps=deps, request_fn=rq,
+                         **dict(skw, yml_files={"Test Pipelines/core.yml": yml2}))
+            except bump.StepFailed:
+                raised_site_changed = True
+            check("site değişmişse iş başarısız, push yok", raised_site_changed and not cm.pushes and cm.writes == 0)
+            check("yeniden doğrulama nedeni izleme işine yazılır",
+                  cm.comments and cm.comments[-1][0] == 500 and "kayıttaki gibi değil" in cm.comments[-1][1],
+                  str(cm.comments))
+            # izleme işi kapalıysa adım atılmaz
+            cc = _UpFake(yml_files, tracks=[track_wi(state="Done")])
+            try:
+                bump.run(77, load_job=lambda j: job, client=cc, deps=deps, request_fn=rq, **skw)
+                check("izleme işi kapalı → StepFailed, push yok", False)
+            except bump.StepFailed:
+                check("izleme işi kapalı → StepFailed, push yok", not cc.pushes)
+
+            # ── run: prod adımı (status enjekte) — DevOps isteği + 'Test kanıtı yok' ilk satır ──
+            dock = "FROM eu/php-8-2:1.0\nRUN x\n"
+            pfiles = {("FLODevOps", "anatolia", "production", "build/core/Dockerfile"): dock,
+                      ("FLODevOps", "russia", "production", "build/core/Dockerfile"): dock}
+            prod_st = {"repo": "core", "current": "8.2", "target": "8.4",
+                       "next": {"step": "prod", "ready": True, "reason": "", "sites": [dv_a, dv_r], "manual": [],
+                                "test_note": "Test kanıtı yok"}}
+            pjob = {"job_kind": "upgrade_bump", "job_payload": json.dumps(
+                {"lang": "php", "repo": "core", "from": "8.2", "to": "8.4", "step": "prod", "sites": [dv_a, dv_r],
+                 "track_id": 500, "team": "T"})}
+            cp = _UpFake(pfiles, tracks=[track_wi()])
+            reqs.clear()
+            out = bump.run(78, load_job=lambda j: pjob, client=cp, deps=deps, request_fn=rq,
+                           status_fn=lambda *a, **k: prod_st)
+            check("run prod: bölge başına taslak PR, açıklamanın ilk satırı 'Test kanıtı yok'",
+                  sorted(p["repo"] for p in cp.prs) == ["anatolia", "russia"] and all(p["draft"] for p in cp.prs)
+                  and all(d.splitlines()[0] == "Test kanıtı yok" for d in cp.descs), str(cp.descs))
+            check("run prod: DevOps isteği anahtarı, PR bağlantıları, merge sırası, geri alma",
+                  len(reqs) == 1 and reqs[0]["key"] == "upgrade:php:core:8.4:prod" and reqs[0]["source_wi"] == 500
+                  and "PR #" in reqs[0]["body_html"] and "Merge sırası" in reqs[0]["body_html"]
+                  and "Geri alma" in reqs[0]["body_html"] and "eu/php-8-2:1.0" in reqs[0]["body_html"]
+                  and out["devops_request"] == 4242, str(reqs))
+            # BUMP kapalı: push_sites hiç çağrılmaz, diff DevOps isteğine
+            flags["CREW_TECHDEBT_UPGRADE_BUMP"] = False
+            pushes_called = []
+            co = _UpFake(pfiles, tracks=[track_wi()])
+            reqs.clear()
+            bump.run(79, load_job=lambda j: pjob, client=co, deps=deps, request_fn=rq,
+                     status_fn=lambda *a, **k: prod_st, push_fn=lambda *a, **k: pushes_called.append(1))
+            check("BUMP kapalı → push_sites çağrılmaz, yazma yok",
+                  not pushes_called and not co.pushes and co.writes == 0)
+            check("BUMP kapalı → diff DevOps isteğinde",
+                  len(reqs) == 1 and "-FROM eu/php-8-2:1.0" in reqs[0]["body_html"]
+                  and "+FROM eu/php-8-4:1.0" in reqs[0]["body_html"] and "kapalı" in reqs[0]["body_html"], str(reqs))
+            flags["CREW_TECHDEBT_UPGRADE_BUMP"] = True
+            # adım artık hazır değil (ör. kanıt kırmızıya döndü) → başarısız, push yok
+            red_st = dict(prod_st, next=dict(prod_st["next"], ready=False, reason="build kırmızı"))
+            cr = _UpFake(pfiles, tracks=[track_wi()])
+            try:
+                bump.run(80, load_job=lambda j: pjob, client=cr, deps=deps, request_fn=rq,
+                         status_fn=lambda *a, **k: red_st)
+                check("hazır olmayan adım run'da atılmaz", False)
+            except bump.StepFailed as e:
+                check("hazır olmayan adım run'da atılmaz", not cr.pushes and "build kırmızı" in str(e))
+            try:
+                bump.run(81, load_job=lambda j: {"job_kind": "upgrade_bump", "job_payload": json.dumps(
+                    dict(json.loads(pjob["job_payload"]), repo="../x"))}, client=cr, deps=deps)
+                check("geçersiz kapsam → StepFailed", False)
+            except bump.StepFailed:
+                check("geçersiz kapsam → StepFailed", not cr.pushes)
+        finally:
+            pc.get = orig_get
+
+    # ── Sunucu: işçi, yaşam döngüsü, yeniden deneme, uçlar ──
+    check("upgrade_bump WI yaşam döngüsünde izlenmez", not server._wi_tracked({"job_kind": "upgrade_bump"})
+          and server._wi_tracked({"job_kind": "modern_fix"}))
+    wsrc = inspect.getsource(server._queue_worker)
+    check("işçi upgrade_bump → upgrade_bump.run", '"upgrade_bump"' in wsrc and "upgrade_bump.run(job_id)" in wsrc)
+    payload = json.dumps({"step": "prod"})
+    og, oc, oe = server.db.get_job, server.db.create_job, server._ensure_worker
+    made = []
+    server.db.get_job = lambda jid: {"id": jid, "status": "failed", "work_item_id": "500", "use_hal": 0,
+                                     "wi_title": "t", "job_kind": "upgrade_bump", "job_payload": payload}
+    server.db.create_job = lambda *a, **k: (made.append((a, k)), 6)[1]
+    server._ensure_worker = lambda: None
+    try:
+        r = TestClient(server.app).post("/api/jobs/5/retry")
+        check("yeniden deneme türü ve kapsamı korur", r.status_code == 202 and made
+              and made[0][1] == {"job_kind": "upgrade_bump", "job_payload": payload}, str(made))
+    finally:
+        server.db.get_job, server.db.create_job, server._ensure_worker = og, oc, oe
+
+    from agile_sdlc_crew.quality import modern as _md
+    saved = (pc.get, server.AzureDevOpsClient, _md.repos, _md.build_index, ut.tracked, upgrade.scan, ut.status)
+    pc.get = lambda k: True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE") else saved[0](k)
+    server.AzureDevOpsClient = lambda: object()
+    _md.repos = lambda c: {"items": [{"repo": "core", "lang": "php", "label": "PHP", "version": "8.2"},
+                                      {"repo": "web", "lang": "php", "label": "PHP", "version": "8.2"}]}
+    _md.build_index = lambda c: {}
+    calls = []
+    ut.tracked = lambda c, team: (calls.append(team), [{"id": 500, "lang": "php", "repo": "core", "to": "8.4"}])[1]
+    upgrade.scan = lambda c, repo, lang, **k: {"repo": repo, "lang": lang, "current": "8.2", "target": "8.4"}
+    ut.status = lambda c, repo, lang, **k: {"stage": "hazır", "scan_given": k.get("scan") is not None}
+    try:
+        tc = TestClient(server.app)
+        js = tc.get("/api/techdebt/upgrade/repos?team=T").json()
+        rows = {i["repo"]: i for i in js.get("items", [])}
+        check("repos: tek tracked çağrısı, satırda tracked + watch_target",
+              calls == ["T"] and rows["core"]["tracked"] and rows["core"]["watch_target"] == "8.4"
+              and not rows["web"]["tracked"] and rows["web"]["watch_target"] == "", str(js))
+        js = tc.get("/api/techdebt/upgrade/scan?repo=core").json()
+        check("scan yanıtında status bloğu (taramadan, ikinci tarama yok)",
+              js.get("status") == {"stage": "hazır", "scan_given": True}, str(js))
+        check("bump: takım yoksa 400", tc.post("/api/techdebt/upgrade/bump", json={"repo": "core"}).status_code == 400)
+    finally:
+        pc.get, server.AzureDevOpsClient, _md.repos, _md.build_index, ut.tracked, upgrade.scan, ut.status = saved
+
+
+
+def test_upgrade_fix_round1():
+    """Görev 8 düzeltme turu 1: kapılar AÇIK değil KAPALI düşer.
+    F1 kanıt yalnız `<repo>-test` TANIMININ build'i; F2 test hattı kapısı dosyanın DURUMUNA bağlı (Tempo PR'ına
+    değil); F3 başlığı düzenlenmiş / başka geçişin açık işi de bekletir; F4 üretim hedefteyken kart kod adımını
+    görür; F5 kanıt bloğu; F7 bilinmeyen PR durumu; F8 DevOps'a devredilen adım yeniden kuyruğa girmez;
+    F9 stop takım alanını ve etiketi doğrular."""
+    print("\n[Sürüm yükseltme: düzeltme turu 1]")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_bump as bump, upgrade_track as ut
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+
+    BR = "tempo/upgrade-php-core-8.4"
+    T0 = "2026-11-10T10:00:00.1234567Z"
+    dv_a = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+            "path": "/build/core/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+            "blocked": ""}
+    dv_r = dict(dv_a, repo="russia")
+    ci_s = {"where": "ci", "repo": "yml-files", "project": "EcomBackend", "branch": "main",
+            "path": "Test Pipelines/core.yml", "line": 2, "old": "'8.2'", "new": "'8.4'", "blocked": ""}
+    pin = {"repo": "yml-files", "project": "EcomBackend", "branch": "main", "path": "Test Pipelines/core.yml",
+           "line": 2, "version": "8.4"}
+    PIN_FILE = ("EcomBackend", "yml-files", "main", "Test Pipelines/core.yml")
+    CORE_DEF = {"core": {"id": 5, "name": "Core-test", "project": "EcomBackend"}}
+
+    def b(bid, q, result="succeeded", status="completed"):
+        return {"build_id": bid, "status": status, "result": result, "definition": "Core-test",
+                "url": f"https://x/b/{bid}", "project": "EcomBackend", "queue_time": q, "source_version": ""}
+
+    def scan(sites, pins, up=False):
+        return {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": up, "sites": sites,
+                "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins,
+                "ci_source": _ci_src(pins)}
+
+    def track_wi(wid=500, to="8.4", area="P\\T", tags="tempo-upgrade-track"):
+        return {"id": wid, "fields": {"System.Title": "izleme", "System.State": "To Do", "System.AreaPath": area,
+                                      "System.Tags": tags,
+                                      "System.Description": f"<p><small>tempo-upgrade-key: php:core:{to}</small></p>"}}
+
+    def pr(pid, status):
+        return {"id": pid, "status": status, "url": f"https://x/pr/{pid}", "closed_at": "", "merge_commit": "",
+                "target": "main", "created_by": "tempo-id"}
+
+    def raises(fn, exc=Exception):
+        try:
+            fn()
+        except exc as e:
+            return str(e) or True
+        return False
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "core"
+        root.mkdir()
+        (root / "composer.json").write_text('{\n  "require": {\n    "php": "^8.2"\n  }\n}\n', encoding="utf-8")
+        cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+               "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+               "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+        deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                           record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+
+        def st(sc, c, **k):
+            return ut.status(c, "core", "php", to="8.4", deps=deps, scan=sc, wait_h=72, root=root, **k)
+
+        # ── F1: kanıt tanıma bağlı ──
+        c = _UpFake(defs=CORE_DEF, builds={5: [b(2, "2026-11-10T11:00:00Z")]})
+        ev = bump.ci_evidence(c, "core", T0, wait_h=72)
+        check("F1: tanım adı <repo>-test ile aranır, build'ler o tanımdan, minTime = since",
+              c.def_calls == [("core", "core-test")] and c.build_calls == [("EcomBackend", 5, T0)]
+              and ev["state"] == "green", str((c.def_calls, c.build_calls, ev)))
+        check("F1: tanımın tam since anında kuyruğa girmiş build'i sayılmaz (sıkı 'sonra')",
+              bump.ci_evidence(_UpFake(defs=CORE_DEF, builds={5: [b(2, T0)]}), "core", T0, wait_h=72)["state"]
+              == "none")
+        check("F1: tanım okunamazsa hata yükselir (no_pipeline DEĞİL)",
+              raises(lambda: bump.ci_evidence(_UpFake(defs={"core": RuntimeError("401")}), "core", T0, wait_h=72),
+                     RuntimeError))
+        newer_red = [b(3, "2026-11-10T12:00:00Z", result="failed"), b(2, "2026-11-10T11:00:00Z")]
+        check("F1: en yeni tamamlanmış build kırmızıysa red",
+              bump.ci_evidence(_UpFake(defs=CORE_DEF, builds={5: newer_red}), "core", T0, wait_h=72)["state"] == "red")
+        part = [b(4, "2026-11-10T11:00:00Z", result="partiallySucceeded")]
+        ok_issue = {4: [{"name": "SonarQube Analysis", "result": "succeededWithIssues"}]}
+        bad_issue = {4: [{"name": "Run Unit Tests", "result": "succeededWithIssues"}]}
+        check("F1: kısmi başarı yalnız test dışı adımda → green",
+              bump.ci_evidence(_UpFake(defs=CORE_DEF, builds={5: part}, issue_tasks=ok_issue), "core", T0,
+                               wait_h=72)["state"] == "green")
+        check("F1: kısmi başarı test adımında → red",
+              bump.ci_evidence(_UpFake(defs=CORE_DEF, builds={5: part}, issue_tasks=bad_issue), "core", T0,
+                               wait_h=72)["state"] == "red")
+        check("F1: since okunamazsa hata (kanıt sayılmaz)",
+              raises(lambda: bump.ci_evidence(_UpFake(defs=CORE_DEF), "core", "dün", wait_h=72), ValueError))
+        # F5: kanıt bloğu
+        ev = bump.ci_evidence(_UpFake(defs=CORE_DEF, builds={5: [b(2, "2026-11-10T11:00:00Z")]}), "core", T0,
+                              wait_h=72)
+        check("F5: kanıt bloğu {state, build{id,url,queue_time}, summary, overdue, since}",
+              set(ev) == {"state", "build", "summary", "overdue", "since"} and ev["since"] == T0
+              and ev["build"] == {"id": 2, "url": "https://x/b/2", "queue_time": "2026-11-10T11:00:00Z"}, str(ev))
+
+        # İstemci uçları (ağ yok)
+        cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+        cl.org_url, cl.project = "https://dev.azure.com/o", "P"
+        cl._find_repo_project = lambda r: "EcomBackend"
+        cl._repo_project_strict = lambda r: "EcomBackend"   # kesin çözüm turu 2'de ayrıca sınanır
+        cl._repo_api_url = lambda repo, project=None: f"https://x/{project or 'P'}/_apis/git/repositories/{repo}"
+
+        class _Cl(azb.AzureDevOpsClient):
+            _headers = {"Authorization": "x"}
+        cl.__class__ = _Cl
+        seen = []
+
+        class _R:
+            status_code = 200
+
+            def __init__(self, js):
+                self._js = js
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._js
+
+        def fake_get(url, headers=None, params=None, timeout=None, **k):
+            seen.append((url, params))
+            if url.endswith("/build/definitions"):
+                return _R({"value": [{"id": 3, "name": "Core-lint"}, {"id": 5, "name": "Core-test"}]})
+            if url.endswith("/build/definitions/5"):
+                return _R({"id": 5, "name": "Core-test", "process": {"type": 2, "yamlFilename": "Test Pipelines/core.yml"},
+                           "repository": {"id": "g", "name": "yml-files", "defaultBranch": "refs/heads/main"}})
+            if url.endswith("/_apis/git/repositories/g"):
+                return _R({"id": "g", "project": {"name": "EcomBackend"}})
+            if url.endswith("/commits"):
+                return _R({"value": [{"committer": {"date": "2026-11-10T10:00:00Z"}, "author": {"date": "x"}}]})
+            return _R({"value": [{"id": 9, "status": "completed", "result": "failed",
+                                  "definition": {"name": "Core-test"}, "queueTime": "2026-11-10T11:00:00Z",
+                                  "_links": {"web": {"href": "https://b/9"}}}]})
+        og = azb.requests.get
+        azb.requests.get = fake_get
+        try:
+            d = cl.get_test_pipeline("core")
+            def_seen = list(seen)
+            seen.clear()
+            rows = cl.list_definition_builds("EcomBackend", 5, min_time=T0, top=20)
+            when = cl.get_last_commit_date("yml-files", "/Test Pipelines/core.yml", "main", project="EcomBackend")
+        finally:
+            azb.requests.get = og
+        check("istemci: tanım adı büyük/küçük harf duyarsız, repo projesinde",
+              {k: (d or {}).get(k) for k in ("id", "name", "project")} == {"id": 5, "name": "Core-test", "project": "EcomBackend"}
+              and def_seen[0][0].endswith("/EcomBackend/_apis/build/definitions")
+              and def_seen[0][1]["name"] == "core-test", str((d, def_seen[:1])))
+        p1 = seen[0][1]
+        check("istemci: tanım build'leri (definitions, pullRequest, minTime, yeni→eski, $top)",
+              p1["definitions"] == 5 and p1["reasonFilter"] == "pullRequest" and p1["minTime"] == T0
+              and p1["queryOrder"] == "queueTimeDescending" and p1["$top"] == 20
+              and rows[0]["build_id"] == 9 and rows[0]["queue_time"] == "2026-11-10T11:00:00Z"
+              and rows[0]["url"] == "https://b/9", str((p1, rows)))
+        p2 = seen[1][1]
+        check("istemci: dosyanın son commit zamanı (itemPath + dal, tek kayıt)",
+              when == "2026-11-10T10:00:00Z" and p2["searchCriteria.itemPath"] == "/Test Pipelines/core.yml"
+              and p2["searchCriteria.itemVersion.version"] == "main" and p2["searchCriteria.$top"] == 1
+              and "/EcomBackend/_apis/git/repositories/yml-files/commits" in seen[1][0], str(seen[1]))
+
+        # ── F2: test hattı kapısı dosyanın durumuna bağlı ──
+        green_after = {5: [b(2, "2026-11-10T11:00:00Z")]}
+        s = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds={}, commit_dates={PIN_FILE: T0}))
+        check("F2: CI satırı Tempo PR'ı olmadan hedefe gelmiş, build yok → prod yok, test hattı",
+              s["next"]["step"] == "prod" and not s["next"]["ready"] and s["stage"] == "test hattı"
+              and s["evidence"]["state"] == "none" and s["evidence"]["since"] == T0, str(s["next"]))
+        s = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds=green_after, commit_dates={PIN_FILE: T0}))
+        check("F2: dosya değişikliğinden sonra yeşil → prod hazır, kanıt saati dosyanın commit'i",
+              s["next"]["step"] == "prod" and s["next"]["ready"] and s["evidence"]["since"] == T0, str(s["next"]))
+        s = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds=green_after, commit_dates={PIN_FILE: ""}))
+        check("F2: dosyanın son değişiklik zamanı okunamazsa prod yok",
+              not s["next"]["ready"] and "son değişiklik zamanı okunamadı" in s["next"]["reason"], str(s["next"]))
+        s = st(scan([dv_a, dv_r], [pin]),
+               _UpFake(defs=CORE_DEF, builds=green_after, commit_dates={PIN_FILE: RuntimeError("500")}))
+        check("F2: commit sorgusu hata verirse de prod yok", not s["next"]["ready"]
+              and "son değişiklik zamanı okunamadı" in s["next"]["reason"])
+        s = st(scan([dv_a, dv_r], None), _UpFake())
+        check("F2: test hattı dosyaları okunamadıysa (ci_pins None) prod / ci yok",
+              not s["next"]["ready"] and "okunamadı" in s["next"]["reason"], str(s["next"]))
+        pin_low = dict(pin, version="8.2")
+        s = st(scan([dv_a, dv_r, ci_s], [pin_low]), _UpFake(prs={("EcomBackend", "yml-files", BR): pr(11, "active")}))
+        check("F2: satır hedefin altında + Tempo CI PR'ı açık → test hattı, prod yok",
+              s["stage"] == "test hattı" and s["next"]["step"] == "prod" and not s["next"]["ready"])
+        s = st(scan([dv_a, dv_r, ci_s], [pin_low]), _UpFake())
+        check("F2: satır hedefin altında, PR yok → ci hazır", s["next"]["step"] == "ci" and s["next"]["ready"])
+        # plan / sites: hedefteki satır da ci_pins'te
+        index = {"core": [{"src": "anatolia/build/core", "images": ["eu/php-8-2:1.0"]}],
+                 "web": [{"src": "anatolia/build/web", "images": ["eu/php-8-4:1.0"]}]}
+        yml_at = "variables:\n  phpVersion: '8.4'\nresources:\n  - repository: s\n    name: EcomBackend/core\n"
+        pl = upgrade.plan(None, "core", "php", to="8.4", deps=deps, index=index, root=root,
+                          read=lambda d, p: "FROM eu/php-8-2:1.0\n", yml_files={"Test Pipelines/core.yml": yml_at})
+        check("F2: plan ci_pins hedefteki satırı da döner, CI sitesi yok",
+              pl.get("ci_pins") == [{"repo": "yml-files", "project": "EcomBackend", "branch": "main",
+                                     "path": "Test Pipelines/core.yml", "line": 2, "version": "8.4"}]
+              and not [x for x in pl["sites"] if x["where"] == "ci"], str(pl.get("ci_pins")))
+
+        class _Boom:
+            def get_repository(self, r):
+                raise RuntimeError("yml-files okunamadı")
+        check("F2: yml-files okunamazsa ci_pins None (bilinmiyor), [] değil",
+              upgrade._ci_scan(_Boom(), "core", "php", "8.4", None)[1] is None)
+
+        # ── F3: başlığı düzenlenmiş / başka geçişin açık işi de bekletir ──
+        def task_wi(wid, fp, title):
+            return {"id": wid, "fields": {"System.Title": title, "System.State": "To Do",
+                                          "System.Tags": "tempo-quality; tempo-upgrade",
+                                          "System.Description": f"<p><small>tempo-fp: {fp}</small></p>"}}
+        c3 = _UpFake(tasks=[task_wi(80, "php_modern:core:loose_compare_numeric:app/L.php", "elle değiştirilmiş başlık"),
+                            task_wi(81, "php_modern:core:implicit_nullable:app/A.php",
+                                    "[core] Sürüm yükseltme 8.2→8.3: x")])
+        s = st(scan([dv_a, dv_r, ci_s], [pin_low]), c3)
+        check("F3: başlıktan bağımsız: düzenlenmiş başlık + başka hedefin işi → hazırlık",
+              s["stage"] == "hazırlık" and sorted(t["id"] for t in s["open_tasks"]) == [80, 81]
+              and all(t["blocking"] for t in s["open_tasks"]), str(s["open_tasks"]))
+
+        # ── F7: bilinmeyen PR durumu ──
+        s = st(scan([dv_a, dv_r, ci_s], [pin_low]), _UpFake(prs={("EcomBackend", "yml-files", BR): pr(11, "notSet")}))
+        check("F7: CI PR'ı bilinmeyen durumda → ci hazır değil, çökmez",
+              s["next"]["step"] == "ci" and not s["next"]["ready"] and "notSet" in s["next"]["reason"], str(s["next"]))
+        s = st(scan([dv_a, dv_r], [pin]),
+               _UpFake(defs=CORE_DEF, builds=green_after, commit_dates={PIN_FILE: T0},
+                       prs={("FLODevOps", "anatolia", BR): pr(21, "notSet")}))
+        check("F7: üretim PR'ı bilinmeyen durumda → prod hazır değil",
+              s["next"]["step"] == "prod" and not s["next"]["ready"] and "notSet" in s["next"]["reason"], str(s["next"]))
+        s = st(scan([], [], up=True), _UpFake(prs={(None, "core", BR): pr(31, "notSet")}))
+        check("F7: kod PR'ı bilinmeyen durumda → code hazır değil",
+              s["next"]["step"] == "code" and not s["next"]["ready"] and "notSet" in s["next"]["reason"], str(s["next"]))
+
+        # ── F8: DevOps'a devredilmiş adım ──
+        def req_wi(wid, key, state="To Do"):
+            return {"id": wid, "fields": {"System.State": state, "System.Tags": "tempo-devops",
+                                          "System.Description": f"<p>x</p><p><small>tempo-devops-key: {key}</small></p>"}}
+        s = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds=green_after, commit_dates={PIN_FILE: T0},
+                                                  requests_=[req_wi(4242, "upgrade:php:core:8.4:prod")]))
+        check("F8: açık DevOps isteği → adım hazır değil, handed_off",
+              s["next"]["step"] == "prod" and not s["next"]["ready"] and s["next"]["handed_off"] == 4242
+              and s["next"]["reason"] == "DevOps isteği açık: #4242", str(s["next"]))
+        s = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds=green_after, commit_dates={PIN_FILE: T0},
+                                                  requests_=[req_wi(4242, "upgrade:php:core:8.4:prod", "Done"),
+                                                             req_wi(4243, "upgrade:php:core:8.4:ci")]))
+        check("F8: kapalı istek / başka adımın isteği engellemez",
+              s["next"]["ready"] and s["next"]["handed_off"] is None, str(s["next"]))
+        check("F8: anahtar adımı içerir", bump.step_key("php", "core", "8.4", "ci") == "upgrade:php:core:8.4:ci")
+
+        # ── F9: stop takım alanını ve etiketi doğrular ──
+        c9 = _UpFake(tracks=[track_wi(area="P\\Other")])
+        check("F9: başka takımın alanındaki izleme işi kapatılmaz",
+              raises(lambda: ut.stop(c9, "core", "php", team="T"), ValueError) and not c9.states)
+        c9b = _UpFake(tracks=[track_wi()])
+        check("F9: takım alanı çözümlenemezse ValueError",
+              raises(lambda: ut.stop(c9b, "core", "php", team=""), ValueError) and not c9b.states)
+        c9c = _UpFake(tracks=[track_wi(tags="tempo-upgrade")])
+        check("F9: izleme etiketi olmayan iş izleme işi sayılmaz",
+              raises(lambda: ut.stop(c9c, "core", "php", team="T"), ValueError) and not c9c.states)
+        c9d = _UpFake(tracks=[track_wi(area="P\\T\\Alt")])
+        check("F9: takım alanının altındaki iş kapatılır", ut.stop(c9d, "core", "php", team="T")["closed"]
+              and c9d.states == [(500, "Done")])
+
+        # ── F4: üretim hedefteyken kart kod adımını görür ──
+        idx_done = {"core": [{"src": "anatolia/build/core", "images": ["eu/php-8-4:1.0"]}]}
+        skw = dict(index=idx_done, root=root, read=lambda d, p: "FROM eu/php-8-4:1.0\n", yml_files={},
+                   app_map_cache={}, scan_fn=lambda r, **k: {"files": 1, "sha": "s", "hits": [], "adoption": {},
+                                                             "errors": []},
+                   head_sha_fn=lambda r: "s", probe_fn=lambda *a, **k: ([], {"ran": False, "tool": "", "reason": ""}))
+        c4 = _UpFake(tracks=[track_wi()])
+        check("F4: hedefe ulaşılmışken scan(to=8.4) 400 sebebi (ValueError)",
+              raises(lambda: upgrade.scan(c4, "core", "php", to="8.4", deps=deps, **skw), ValueError))
+        v = ut.watch_view(c4, "core", "php", to="8.4", deps=deps, **skw)
+        check("F4: izleme işi varken görünüm: up_to_date, boş bulgu, status = kod adımı",
+              v is not None and v["up_to_date"] is True and v["auto"] == [] and v["human"] == []
+              and v["status"]["stage"] == "tamam" and v["status"]["next"]["step"] == "code"
+              and v["status"]["next"]["ready"] and v["target"] == "8.4", str(v and v.get("status")))
+        check("F4: izleme işi yoksa görünüm yok", ut.watch_view(_UpFake(), "core", "php", to="8.4", deps=deps, **skw)
+              is None)
+        idx_low = {"core": [{"src": "anatolia/build/core", "images": ["eu/php-8-2:1.0"]}],
+                   "web": [{"src": "anatolia/build/web", "images": ["eu/php-8-4:1.0"]}]}
+        check("F4: üretim hedefte değilse görünüm yok",
+              ut.watch_view(c4, "core", "php", to="8.4", deps=deps, **dict(skw, index=idx_low)) is None)
+
+    # F4 / F8: uçlar ve run anahtarı
+    saved = (pc.get, server.AzureDevOpsClient, upgrade.scan, ut.status, ut.watch_view)
+    pc.get = lambda k: True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE") else saved[0](k)
+    server.AzureDevOpsClient = lambda: object()
+
+    def _raise(*a, **k):
+        raise ValueError("Hedef sürüm seçilemez: '8.4'")
+    upgrade.scan = _raise
+    ut.status = lambda *a, **k: {"stage": "x"}
+    try:
+        tc = TestClient(server.app)
+        ut.watch_view = lambda c, repo, lang, **k: {"up_to_date": True, "status": {"stage": "tamam"}}
+        r = tc.get("/api/techdebt/upgrade/scan?repo=core&to=8.4")
+        check("F4: hedefe ulaşılmış izlenen repo → 200 + status", r.status_code == 200
+              and r.json().get("status") == {"stage": "tamam"}, str(r.status_code))
+        ut.watch_view = lambda c, repo, lang, **k: None
+        check("F4: izleme yoksa eski 400 korunur", tc.get("/api/techdebt/upgrade/scan?repo=core&to=8.4").status_code
+              == 400)
+        upgrade.scan = lambda c, repo, lang, **k: {"repo": repo, "lang": lang, "current": "8.4", "target": None,
+                                                   "up_to_date": True}
+        ut.watch_view = lambda c, repo, lang, **k: {"up_to_date": True, "status": {"stage": "tamam", "w": 1}}
+        r = tc.get("/api/techdebt/upgrade/scan?repo=core")
+        check("F4: hedefsiz tarama 'güncel' derse de izleme görünümü döner",
+              r.status_code == 200 and r.json().get("status") == {"stage": "tamam", "w": 1}, str(r.json()))
+    finally:
+        pc.get, server.AzureDevOpsClient, upgrade.scan, ut.status, ut.watch_view = saved
+
+
+def test_upgrade_bump_expect_step():
+    print("\n[U9b] Sürüm adımı — onaylanan adım ve açık iş koruması")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import upgrade_bump as bump, upgrade_track as ut
+    track = {"id": 500, "to": "8.4", "lang": "php", "repo": "core", "area": "A"}
+    st = {"repo": "core", "current": "8.2", "stage": "hazır",
+          "next": {"step": "ci", "ready": True, "reason": "", "sites": []}}
+    created = []
+
+    def cj(wid, use_hal, title, *, job_kind, job_payload):
+        created.append(wid)
+        return 9
+    saved_fo = ut.find_open
+    ut.find_open = lambda c, lang, repo: track
+    try:
+        kw = dict(team="T", create_job=cj, status_fn=lambda *a, **k: st, open_jobs=lambda tid: [])
+        q = bump.queue_step(object(), "core", "php", expect_step="ci", **kw)
+        check("expect_step eşleşirse kuyruğa alır", q["job_id"] == 9 and q["step"] == "ci", str(q))
+        created.clear()
+        try:
+            bump.queue_step(object(), "core", "php", expect_step="prod", **kw)
+            check("expect_step farklıysa StepChanged", False)
+        except bump.StepChanged as e:
+            check("expect_step farklıysa StepChanged, iş yok",
+                  not created and "üretim" in str(e) and "test hattı" in str(e), str(e))
+        try:
+            bump.queue_step(object(), "core", "php", expect_step="x", **kw)
+            check("geçersiz expect_step → ValueError", False)
+        except bump.StepChanged:
+            check("geçersiz expect_step → ValueError", False)
+        except ValueError:
+            check("geçersiz expect_step → ValueError", not created)
+        try:
+            bump.queue_step(object(), "core", "php", **dict(kw, open_jobs=lambda tid: [{"id": 3}]))
+            check("açık adım işi varsa reddeder", False)
+        except bump.StepChanged as e:
+            check("açık adım işi varsa reddeder, iş yok", not created and "500" in str(e), str(e))
+    finally:
+        ut.find_open = saved_fo
+
+    orig_pc, orig_qs, orig_cl, orig_w = pc.get, bump.queue_step, server.AzureDevOpsClient, server._ensure_worker
+    pc.get = lambda k: True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE") else orig_pc(k)
+    server.AzureDevOpsClient = lambda: object()
+    server._ensure_worker = lambda: None
+    seen = []
+
+    def qs(c, repo, lang, **k):
+        seen.append(k.get("expect_step"))
+        raise k["boom"] if "boom" in k else bump.StepChanged("Durum değişti")
+    bump.queue_step = qs
+    try:
+        tc = TestClient(server.app)
+        body = {"repo": "core", "team": "T", "step": "ci"}
+        r = tc.post("/api/techdebt/upgrade/bump", json=body)
+        check("uç: StepChanged → 409 + Türkçe mesaj, expect_step iletilir",
+              r.status_code == 409 and r.json().get("error") == "Durum değişti" and seen == ["ci"], str(r.text))
+        bump.queue_step = lambda c, repo, lang, **k: (_ for _ in ()).throw(ValueError("Hazır değil"))
+        check("uç: hazır değil → 400", tc.post("/api/techdebt/upgrade/bump", json=body).status_code == 400)
+        check("uç: geçersiz step → 400",
+              tc.post("/api/techdebt/upgrade/bump", json=dict(body, step="x")).status_code == 400)
+    finally:
+        pc.get, bump.queue_step, server.AzureDevOpsClient, server._ensure_worker = orig_pc, orig_qs, orig_cl, orig_w
+
+
+class _AdvFake:
+    """Otomatik ilerletme için sahte Azure: izleme işleri, tempo-upgrade işleri, sprintler, yorumlar
+    (zaman damgalı; Azure gibi HTML döner), oluşturulan WI'ler ve durum geçişleri."""
+    org_url, project = "https://dev.azure.com/o", "P"
+
+    def __init__(self, tracks=(), tasks=(), future=True):
+        self.tracks, self.tasks, self.future = list(tracks), list(tasks), future
+        self.created, self.comments, self.states, self.wiql = [], [], [], []
+        self.store, self.cstate, self.truncated = {}, {}, set()
+        self.clock = "2026-11-17T10:00:00.000Z"
+
+    def created_wis(self):
+        """Açılan WI'ler board'da görünür (varsayılan açık-iş sayacı ve kırmızı build Task araması bunları okur)."""
+        return [{"id": 700 + i, "fields": dict(f, **{"System.State": self.cstate.get(700 + i, "To Do")})}
+                for i, f in enumerate(self.created)]
+
+    def query_work_items(self, wiql, limit=0):
+        import html as _h
+        self.wiql.append(wiql)
+        needles = [n.replace("''", "'") for n in re.findall(r"\[System\.Description\] CONTAINS '((?:[^']|'')*)'", wiql)]
+        if "tempo-upgrade-track" in wiql:
+            m = re.search(r"\[System\.AreaPath\] UNDER '((?:[^']|'')*)'", wiql)
+            area = m.group(1).replace("''", "'").lower() if m else None
+            pool = [w for w in self.tracks if area is None or w["fields"]["System.AreaPath"].lower() == area
+                    or w["fields"]["System.AreaPath"].lower().startswith(area + "\\")]
+        elif "'User Story'" in wiql:
+            return []
+        elif "CONTAINS 'tempo-upgrade'" in wiql:
+            pool = [w for w in self.tasks + self.created_wis()
+                    if "tempo-upgrade" in {t.strip() for t in (w["fields"].get("System.Tags") or "").split(";")}]
+        else:
+            pool = []
+        return [w for w in pool if all(n in _h.unescape(w["fields"].get("System.Description") or "") for n in needles)]
+
+    def get_work_item_comments_all(self, wid, max_items=1000):
+        return list(self.store.get(wid, [])), wid not in self.truncated
+
+    def get_team_area_path(self, team=""):
+        return {"T": "P\\T", "U": "P\\U"}.get(team, "")
+
+    def list_teams(self):
+        return [{"name": "T"}, {"name": "U"}]
+
+    def list_iterations(self, team=""):
+        its = [{"name": "S23", "path": "P\\S23", "attributes": {"timeFrame": "current"}}]
+        if self.future:
+            its.append({"name": "S24", "path": "P\\S24", "attributes": {"timeFrame": "future", "startDate": "2026-11-24"}})
+        return its
+
+    def create_work_item(self, type_name, fields, parent_id=None):
+        self.created.append(dict(fields, _type=type_name, _parent=parent_id))
+        return {"id": 700 + len(self.created) - 1, "fields": fields}
+
+    def update_work_item(self, wid, ops):
+        return {}
+
+    def get_authenticated_user(self):
+        return {"uniqueName": "me@x"}
+
+    def add_comment(self, wid, text):
+        self.comments.append((wid, text))
+        # Azure markdown'ı HTML olarak geri verir; işaretler etiket soyularak aranmalı
+        self.store.setdefault(wid, []).append({"id": len(self.comments), "yazar": "Tempo", "tarih": self.clock,
+                                               "metin": "<div>" + text.replace("<p>", "<p dir=\"auto\">") + "</div>"})
+        return {}
+
+    def get_work_item_comments(self, wid):
+        return list(self.store.get(wid, []))
+
+    def get_work_item_type_states(self, t):
+        return [{"name": "To Do", "category": "Proposed"}, {"name": "Done", "category": "Completed"}]
+
+    def set_work_item_state(self, wid, st):
+        self.states.append((wid, st))
+        for w in self.tracks:
+            if w["id"] == wid:
+                w["fields"]["System.State"] = st
+
+
+def test_upgrade_advance():
+    """Otomatik ilerletme (spec §7): butonların fonksiyonlarından geçer, tavanlar, sprint, kırmızı build /
+    CI bekleme notu bir kez, devir ve hazır-değil'de sessiz, hata öğe başına, tamam'da kapanış, yoklayıcı."""
+    print("\n[U10] Sürüm yükseltme — otomatik ilerletme ve yoklayıcı")
+    import queue as _queue
+    import threading as _th
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake, upgrade_bump as bump, upgrade_track as ut
+
+    # ── queue_step: create_job verilse de açık iş koruması (Görev 9'dan devir) + kilit ──
+    track = {"id": 500, "to": "8.4", "lang": "php", "repo": "core", "area": "P\\T"}
+    st_ci = {"repo": "core", "current": "8.2", "stage": "hazır",
+             "next": {"step": "ci", "ready": True, "reason": "", "sites": [], "handed_off": None}}
+    made = []
+    saved_fo, saved_ob = ut.find_open, bump._open_bump_jobs
+    ut.find_open = lambda c, lang, repo: track
+    bump._open_bump_jobs = lambda tid: [{"id": 3}]
+    try:
+        try:
+            bump.queue_step(object(), "core", "php", team="T", status_fn=lambda *a, **k: st_ci,
+                            create_job=lambda *a, **k: (made.append(1), 9)[1])
+            check("queue_step: create_job enjekte olsa da açık adım işi reddedilir", False, str(made))
+        except bump.StepChanged:
+            check("queue_step: create_job enjekte olsa da açık adım işi reddedilir", not made)
+        held = []
+        q = bump.queue_step(object(), "core", "php", team="T", status_fn=lambda *a, **k: st_ci,
+                            open_jobs=lambda tid: (held.append(bump._QUEUE_LOCK.locked()), [])[1],
+                            create_job=lambda *a, **k: (held.append(bump._QUEUE_LOCK.locked()), 9)[1])
+        check("queue_step: kontrol → INSERT tek kilit altında", q["job_id"] == 9 and held == [True, True]
+              and not bump._QUEUE_LOCK.locked(), str(held))
+    finally:
+        ut.find_open, bump._open_bump_jobs = saved_fo, saved_ob
+
+    MAX_OPEN = 3
+    flags = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE": True,
+             "CREW_TECHDEBT_UPGRADE_AUTO": True, "CREW_TECHDEBT_UPGRADE_MAX_OPEN": MAX_OPEN,
+             "CREW_TECHDEBT_UPGRADE_SPRINT": "next", "CREW_TECHDEBT_UPGRADE_POLL_MIN": 30,
+             "CREW_TECHDEBT_UPGRADE_CI_WAIT_H": 72}
+    orig_get = pc.get
+    pc.get = lambda k: flags[k] if k in flags else orig_get(k)
+
+    def track_wi(wid=500, repo="core", area="P\\T", to="8.4", state="To Do"):
+        return {"id": wid, "fields": {"System.Title": "izleme", "System.State": state, "System.AreaPath": area,
+                                      "System.Tags": "tempo-upgrade-track",
+                                      "System.Description": f"<p><small>tempo-upgrade-key: php:{repo}:{to}</small></p>"}}
+
+    def task_wi(wid, fp, tags="tempo-quality; tempo-techdebt; tempo-upgrade"):
+        return {"id": wid, "fields": {"System.Title": "x", "System.State": "To Do", "System.Tags": tags,
+                                      "System.Description": f"<p><small>tempo-fp: {fp}</small></p>"}}
+
+    def stt(stage="hazırlık", step="ci", ready=False, reason="hazırlık bitmedi", ev=None, code_pr=None, handed=None,
+            blocked_ev=False):
+        return {"repo": "core", "current": "8.2", "target": "8.4", "stage": stage, "evidence": ev,
+                "prs": {"ci": None, "devops": [], "code": code_pr},
+                "next": {"step": step, "ready": ready, "reason": reason, "sites": [], "manual": [], "test_note": "",
+                         "handed_off": handed, "blocked_by_evidence": blocked_ev}}
+
+    hits = [{"rule": "implicit_nullable", "file": "app/A.php", "line": 3, "text": "function f(int $a = null)"},
+            {"rule": "deprecated_84", "file": "app/B.php", "line": 5, "text": "lcg_value()"}]
+    probe = ([{"rule": "probe:error", "file": "app/D.php", "line": 9, "text": "fn(", "message": "Parse error: x"}],
+             {"ran": True, "tool": "/x/php8.4", "reason": ""})
+    jobs, queued = [], []
+
+    def cj(wid, use_hal, title, *, job_kind, job_payload):
+        jobs.append({"wid": wid, "kind": job_kind, "payload": json.loads(job_payload)})
+        return 77
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            for name in ("core", "web"):
+                (base / name).mkdir()
+                (base / name / "composer.json").write_text('{"require": {"php": "^8.0"}}', encoding="utf-8")
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+            deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(),
+                               queue=lambda w, t: (queued.append((w, t)), 9)[1], record=lambda **k: None,
+                               now=lambda: 1e9, cfg=lambda: cfg)
+            index = {r: [{"src": f"anatolia/build/{r}", "images": ["eu/prod-ar/php-8-2:1.0"]}] for r in ("core", "web")}
+            kw = dict(index=index, scan_fn=lambda root, **k: {"files": 3, "sha": "s1", "hits": list(hits), "adoption": {},
+                                                              "errors": []},
+                      head_sha_fn=lambda r: "s1", app_map_cache={}, read=lambda d, p: "", yml_files={},
+                      probe_fn=lambda root, lang, cur, to, **k: probe)
+            NOW = _dt(2026, 11, 17, 10, 0, tzinfo=_tz.utc)
+
+            def adv(c, st, **k):
+                sfn = st if callable(st) else (lambda *a, **kk: st)
+                base_kw = dict(team="T", deps=deps, create_job=cj, bump_jobs=lambda tid: [], status_fn=sfn, now=NOW,
+                               last_bump_job=lambda tid, step, to: None)
+                return ut.advance(c, **{**base_kw, **kw, **k})
+
+            # ── Tavanlar + sprint ──
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt(), open_jobs=lambda repo: 2)
+            check("tavan: 2 açıkken 1 iş alınır", len(r) == 1 and len(r[0]["took"]) == 1, str(r))
+            check("otomatik alım bir sonraki sprint'e",
+                  c.created and c.created[-1]["System.IterationPath"] == "P\\S24"
+                  and "tempo-upgrade" in c.created[-1]["System.Tags"], str(c.created[-1:]))
+            check("alınan iş kuyruğa (queued)", r[0]["queued"] and queued, str(r))
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt(), open_jobs=lambda repo: 3)
+            check("tavan doluyken alım yok", r[0]["took"] == [] and not c.created, str(r))
+            cfg["max_take"] = 1
+            c = _AdvFake(tracks=[track_wi()])
+            try:
+                r = adv(c, stt(), open_jobs=lambda repo: 0)
+            finally:
+                cfg["max_take"] = 8
+            check("max_take MAX_OPEN'dan küçükse o kazanır", len(r[0]["took"]) == 1, str(r))
+            # varsayılan sayaç: açık tempo-upgrade işleri (needs-human hariç)
+            c = _AdvFake(tracks=[track_wi()], tasks=[
+                task_wi(61, "php_modern:core:x:app/Q.php"), task_wi(62, "php_modern:core:y:app/R.php"),
+                task_wi(63, "php_modern:core:z:app/S.php", tags="tempo-quality; tempo-upgrade; needs-human"),
+                task_wi(64, "php_modern:web:x:app/Q.php")])
+            r = adv(c, stt())
+            check("varsayılan sayaç: needs-human ve başka repo sayılmaz (2 açık → 1 alım)", len(r[0]["took"]) == 1,
+                  str(r))
+            c = _AdvFake(tracks=[track_wi()], future=False)
+            r = adv(c, stt(), open_jobs=lambda repo: 0)
+            check("sonraki sprint yok → alım yok, not", r[0]["took"] == [] and not c.created
+                  and "sprint" in r[0]["note"], str(r))
+            # varsayılan sayaçla iki tur: ilk tur tavana kadar alır, ikinci tur kendi açtıklarını sayar
+            queued.clear()
+            c = _AdvFake(tracks=[track_wi()])
+            r1 = adv(c, stt())
+            n_tasks = len([w for w in c.created if w["_type"] == "Task"])
+            r2 = adv(c, stt())
+            check("varsayılan sayaç, iki tur: ilk tur 3 alır, ikincisi hiç (açtıklarını sayar)",
+                  len(r1[0]["took"]) == 3 and n_tasks == 3 and r2[0]["took"] == []
+                  and len([w for w in c.created if w["_type"] == "Task"]) == 3, str((r1, r2)))
+            flags["CREW_TECHDEBT_UPGRADE_MAX_OPEN"] = 0
+            c = _AdvFake(tracks=[track_wi()])
+            try:
+                r = adv(c, stt(), open_jobs=lambda repo: 0)
+            finally:
+                flags["CREW_TECHDEBT_UPGRADE_MAX_OPEN"] = MAX_OPEN
+            check("MAX_OPEN 0 → otomatik alım yok (3'e dönmez)", r[0]["took"] == [] and not c.created, str(r))
+
+            # ── Sürüm adımı ──
+            jobs.clear()
+            c = _AdvFake(tracks=[track_wi()])
+            r_ready = adv(c, stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3)
+            check("hazır → ci adımı kuyruğa", r_ready[0]["queued_step"] == "ci" and len(jobs) == 1
+                  and jobs[0]["kind"] == "upgrade_bump" and jobs[0]["wid"] == "500" and r_ready[0]["queued"], str(r_ready))
+            jobs.clear()
+            r_dup = adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
+                        bump_jobs=lambda tid: [{"id": 1}])
+            check("kuyrukta bump varken ikinci açılmaz", r_dup[0]["queued_step"] is None and not jobs
+                  and r_dup[0]["note"], str(r_dup))
+            # son adım işi başarısızsa otomatik ilerletme o adımı bir daha açmaz (yeniden deneme insanın)
+            asked = []
+
+            def last_failed(tid, step, to):
+                asked.append((tid, step, to))
+                return {"id": 41, "status": "failed"}
+            c = _AdvFake(tracks=[track_wi()])
+            rs = [adv(c, stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3, last_bump_job=last_failed)
+                  for _ in range(2)]
+            check("son adım işi failed → iki turda da kuyruk yok, not insanı bekliyor",
+                  not jobs and all(x[0]["queued_step"] is None and "#41" in x[0]["note"] and "insan" in x[0]["note"]
+                                   for x in rs) and asked[0] == (500, "ci", "8.4"), str((rs, asked)))
+            for stt_ in ("needs_human", "needs_info"):
+                r = adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
+                        last_bump_job=lambda tid, step, to, s=stt_: {"id": 42, "status": s})
+                check(f"son adım işi {stt_} → kuyruk yok", r[0]["queued_step"] is None and not jobs, str(r))
+            # F4 (son düzeltme): PR bırakmadan tamamlanan adım (401/403 → diff, BUMP kapalı) hâlâ hazır görünür;
+            # otomatik ilerletme onu her turda yeniden kuyruğa almaz — adım işi HİÇ yoksa kuyruğa alınır.
+            rs = [adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
+                      last_bump_job=lambda tid, step, to: {"id": 43, "status": "completed"}) for _ in range(2)]
+            check("F4: son adım işi completed → iki turda da kuyruk yok, not düğmeyi söyler",
+                  not jobs and all(x[0]["queued_step"] is None and "#43" in x[0]["note"] and "tamamlandı" in x[0]["note"]
+                                   and "düğme" in x[0]["note"] for x in rs), str(rs))
+            r = adv(_AdvFake(tracks=[track_wi()]), stt("hazır", "ci", True, ""), open_jobs=lambda repo: 3,
+                    last_bump_job=lambda tid, step, to: None)
+            check("F4: adım işi hiç yoksa kuyruğa", r[0]["queued_step"] == "ci" and len(jobs) == 1, str(r))
+            jobs.clear()
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt("hazırlık", "ci", False, "Hazırlık bitmedi"), open_jobs=lambda repo: 3)
+            check("hazır değil → kuyruk yok, yorum yok", r[0]["queued_step"] is None and not jobs and not c.comments
+                  and not c.created, str(r))
+            red = {"state": "red", "build": {"id": 33, "url": "https://x/b/33", "queue_time": ""},
+                   "summary": "FAILED CoreTest::testFoo password=hunter2", "overdue": False, "since": "2026-11-10T10:00:00Z"}
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt("test hattı", "prod", False, "devir", ev=red, handed=4242), open_jobs=lambda repo: 3)
+            check("DevOps'a devredilmiş → hiçbir şey yazılmaz / kuyruğa girmez",
+                  r[0]["queued_step"] is None and not jobs and not c.comments and not c.created, str(r))
+
+            # ── Kırmızı build yalnız sıradaki adımı (prod) O bekletiyorsa ──
+            for stage_, step_ in (("hazırlık", "ci"), ("engelli", "prod"), ("hazırlık", "prod")):
+                c = _AdvFake(tracks=[track_wi()])
+                adv(c, stt(stage_, step_, False, "x", ev=red), open_jobs=lambda repo: 3)
+                check(f"kırmızı build {stage_}/{step_} aşamasında (kanıt bekletmiyor) → hiçbir şey",
+                      not c.comments and not c.created, str((c.comments, c.created)))
+
+            # ── Kırmızı build: build başına bir kez yorum + needs-human Task ──
+            c = _AdvFake(tracks=[track_wi()])
+            st_red = stt("test hattı", "prod", False, "build kırmızı", ev=red, blocked_ev=True)
+            r1 = adv(c, st_red, open_jobs=lambda repo: 3)
+            human = [w for w in c.created if "needs-human" in (w.get("System.Tags") or "")]
+            check("kırmızı: izleme işine bir yorum (özet + build bağlantısı + işaret)",
+                  len(c.comments) == 1 and c.comments[0][0] == 500 and "CoreTest" in c.comments[0][1]
+                  and "https://x/b/33" in c.comments[0][1] and "tempo-upgrade-red:33" in c.comments[0][1], str(c.comments))
+            check("kırmızı: bir needs-human Task (tempo-upgrade, teknik borç, repo/dil/hedef, maskeli)",
+                  len(human) == 1 and "tempo-upgrade" in human[0]["System.Tags"] and "tempo-techdebt" in human[0]["System.Tags"]
+                  and "core" in human[0]["System.Title"] and "8.4" in human[0]["System.Title"]
+                  and "https://x/b/33" in human[0]["System.Description"] and "hunter2" not in human[0]["System.Description"]
+                  and "hunter2" not in c.comments[0][1], str(human))
+            check("kırmızı: prod kuyruğa girmez", r1[0]["queued_step"] is None and not jobs)
+            n_c, n_w = len(c.comments), len(c.created)
+            adv(c, st_red, open_jobs=lambda repo: 3)
+            check("aynı build ikinci turda sessiz", len(c.comments) == n_c and len(c.created) == n_w,
+                  str(c.comments[n_c:]))
+            red_task = 700 + next(i for i, w in enumerate(c.created) if "needs-human" in (w.get("System.Tags") or ""))
+            check("kırmızı Task izleme işine bağlı işaret taşır",
+                  "tempo-upgrade-red-track: 500" in c.created[red_task - 700]["System.Description"])
+            red2 = dict(red, build={"id": 34, "url": "https://x/b/34", "queue_time": ""})
+            st_red2 = stt("test hattı", "prod", False, "build kırmızı", ev=red2, blocked_ev=True)
+            adv(c, st_red2, open_jobs=lambda repo: 3)
+            on_task = [t for w, t in c.comments[n_c:] if w == red_task]
+            on_track = [t for w, t in c.comments[n_c:] if w == 500]
+            check("Task açıkken yeni kırmızı build: yeni Task yok, açık Task'a bir yorum, izleme işine bir yorum",
+                  len(c.created) == n_w and len(on_task) == 1 and "tempo-upgrade-red:34" in on_task[0]
+                  and "https://x/b/34" in on_task[0] and len(on_track) == 1 and "tempo-upgrade-red:34" in on_track[0],
+                  str(c.comments[n_c:]))
+            n_c2 = len(c.comments)
+            adv(c, st_red2, open_jobs=lambda repo: 3)
+            check("aynı ikinci build tekrar yazılmaz", len(c.comments) == n_c2 and len(c.created) == n_w)
+            c.cstate[red_task] = "Done"          # insan Task'ı kapattı
+            red3 = dict(red, build={"id": 35, "url": "https://x/b/35", "queue_time": ""})
+            adv(c, stt("test hattı", "prod", False, "build kırmızı", ev=red3, blocked_ev=True), open_jobs=lambda repo: 3)
+            new_human = [w for w in c.created[n_w:] if "needs-human" in (w.get("System.Tags") or "")]
+            check("insan Task'ı kapattıktan sonra yeni kırmızı build → yeni Task",
+                  len(new_human) == 1 and "tempo-upgrade-red:35" in new_human[0]["System.Description"], str(c.created[n_w:]))
+
+            # ── CI bekleme notu: since başına bir kez ──
+            wait = {"state": "none", "build": None, "summary": "", "overdue": True, "since": "2026-11-10T10:00:00Z"}
+            c = _AdvFake(tracks=[track_wi()])
+            for _ in range(2):
+                adv(c, stt("test hattı", "prod", False, "build yok", ev=wait, blocked_ev=True), open_jobs=lambda repo: 3)
+            notes = sum(1 for _w, t in c.comments if "tempo-upgrade-ci-wait" in t)
+            check("CI bekleme notu bir kez", notes == 1 and "yeniden tetikleyin" in c.comments[0][1]
+                  and "2026-11-10T10:00:00Z" in c.comments[0][1], str(c.comments))
+            adv(c, stt("test hattı", "prod", False, "build yok", ev=dict(wait, since="2026-11-12T10:00:00Z"),
+                       blocked_ev=True), open_jobs=lambda repo: 3)
+            check("yeni since → yeni not", sum(1 for _w, t in c.comments if "tempo-upgrade-ci-wait" in t) == 2)
+            c = _AdvFake(tracks=[track_wi()])
+            adv(c, stt("test hattı", "prod", False, "build yok", ev=dict(wait, overdue=False), blocked_ev=True),
+                open_jobs=lambda repo: 3)
+            check("süre dolmadan not yok", not c.comments)
+            c = _AdvFake(tracks=[track_wi()])
+            adv(c, stt("hazırlık", "ci", False, "x", ev=wait), open_jobs=lambda repo: 3)
+            check("CI bekleme notu yalnız kanıt adımı bekletirken", not c.comments)
+            # yorumların hepsi okunamadıysa (sayfa sınırı) karar verilemez → yazılmaz
+            c = _AdvFake(tracks=[track_wi()])
+            c.truncated.add(500)
+            adv(c, stt("test hattı", "prod", False, "build yok", ev=wait, blocked_ev=True), open_jobs=lambda repo: 3)
+            adv(c, st_red, open_jobs=lambda repo: 3)
+            check("yorumlar sınırda kesildi → işaretli yorum yazılmaz",
+                  not [t for w, t in c.comments if w == 500], str(c.comments))
+
+            # ── Hata öğe başına; 24 saatte bir yorum ──
+            def st_err(cl, repo, lang, **k):
+                if repo == "core":
+                    raise RuntimeError("Azure 503 geçici")
+                return stt("hazır", "ci", True, "")
+            c = _AdvFake(tracks=[track_wi(), track_wi(501, repo="web")])
+            jobs.clear()
+            r = adv(c, st_err, open_jobs=lambda repo: 3)
+            by = {x["repo"]: x for x in r}
+            check("A'nın hatası B'yi durdurmaz", set(by) == {"core", "web"} and "503" in by["core"]["note"]
+                  and by["web"]["queued_step"] == "ci" and len(jobs) == 1 and jobs[0]["wid"] == "501", str(r))
+            errs = [t for w, t in c.comments if w == 500 and "tempo-upgrade-err:" in t]
+            check("hata izleme işine bir kez yorumlanır", len(errs) == 1, str(c.comments))
+            adv(c, st_err, open_jobs=lambda repo: 3, now=NOW + _td(hours=2))
+            check("aynı hata 24 saat içinde yeniden yorumlanmaz",
+                  len([t for w, t in c.comments if w == 500 and "tempo-upgrade-err:" in t]) == 1)
+            c.clock = "2026-11-17T10:00:00Z"
+            adv(c, st_err, open_jobs=lambda repo: 3, now=NOW + _td(hours=25))
+            check("24 saat sonra yeniden yorumlanır",
+                  len([t for w, t in c.comments if w == 500 and "tempo-upgrade-err:" in t]) == 2)
+            # AUTO tur ortasında kapatılırsa sıradaki öğeye geçilmez
+            seen_repos = []
+
+            def st_off(cl, repo, lang, **k):
+                seen_repos.append(repo)
+                flags["CREW_TECHDEBT_UPGRADE_AUTO"] = False
+                return stt("hazırlık", "ci", False, "x")
+            jobs.clear()
+            try:
+                r = adv(_AdvFake(tracks=[track_wi(), track_wi(501, repo="web")]), st_off, open_jobs=lambda repo: 3)
+            finally:
+                flags["CREW_TECHDEBT_UPGRADE_AUTO"] = True
+            check("AUTO kapanınca tur sıradaki izleme işinde durur", seen_repos == ["core"] and len(r) == 1, str(r))
+            import inspect
+            sig = inspect.signature(ut.advance).parameters
+            check("advance imzasında **kw yok; tarama enjeksiyonları adlı",
+                  not any(p.kind == p.VAR_KEYWORD for p in sig.values())
+                  and {"scan_fn", "index", "probe_fn", "last_bump_job", "track_ids"} <= set(sig), str(list(sig)))
+
+            # ── tamam → izleme işi kapanır (bir kez) ──
+            c = _AdvFake(tracks=[track_wi()])
+            r_done = adv(c, stt("tamam", None, False, "Yükseltme tamamlandı."), open_jobs=lambda repo: 3)
+            check("tamam → izleme işi kapanır", r_done[0]["closed"] and c.states == [(500, "Done")]
+                  and any("tamamlandı" in t for _w, t in c.comments), str((r_done, c.comments)))
+            check("ikinci turda kapalı iş yok", adv(c, stt("tamam", None, False, ""), open_jobs=lambda repo: 3) == []
+                  and c.states == [(500, "Done")])
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt("tamam", "code", False, "Kod reposu PR'ı #31 açık", code_pr={"id": 31, "status": "active"}),
+                    open_jobs=lambda repo: 3)
+            check("kod PR'ı açıkken kapanmaz", not r[0]["closed"] and not c.states, str(r))
+            c = _AdvFake(tracks=[track_wi()])
+            r = adv(c, stt("hazır", "ci", False, "x"), open_jobs=lambda repo: 3)
+            check("tamam dışı aşamada kapanmaz", not r[0]["closed"] and not c.states)
+
+        # ── Yoklayıcı turu ──
+        got = []
+        flags["CREW_TECHDEBT_UPGRADE_AUTO"] = False
+        check("AUTO kapalı: tur hiçbir Azure çağrısı yapmaz",
+              ut._tick(lambda: got.append(1), on_queued=lambda: got.append("w")) == [] and got == [])
+        flags["CREW_TECHDEBT_UPGRADE_AUTO"] = True
+        calls, woke = [], []
+        cpoll = _AdvFake(tracks=[track_wi(), track_wi(501, repo="web", area="P\\U"),
+                                 track_wi(502, repo="api", area="P\\T\\Sub")])
+
+        def fake_adv(client, *, team, track_ids=None, **k):
+            calls.append((team, sorted(track_ids or [])))
+            return [{"id": i, "queued": team == "U"} for i in sorted(track_ids or [])]
+        out = ut._tick(lambda: cpoll, on_queued=lambda: woke.append(1), advance_fn=fake_adv)
+        check("tur: takımlar izleme işlerinin alanından, her iş bir kez",
+              sorted(calls) == [("T", [500, 502]), ("U", [501])],
+              str(calls))
+        check("tur: kuyruğa giren varsa işçi uyandırılır (bir kez)", woke == [1] and len(out) == 3, str(woke))
+
+        # ── start_poller: tek thread, ilk tur bir aralık sonra, hata thread'i öldürmez ──
+        steps, events = _queue.Queue(), []
+        stop = _th.Event()
+
+        def fsleep(s):
+            events.append(("sleep", s))
+            steps.get(timeout=5)
+
+        ticks = []
+
+        def ftick(get_client, on_queued=None):
+            ticks.append(1)
+            if len(ticks) == 1:
+                raise RuntimeError("tur hatası")
+            return []
+        t1 = ut.start_poller(lambda: cpoll, interval_min=1, sleep=fsleep, tick=ftick, stop_event=stop)
+        t2 = ut.start_poller(lambda: cpoll, interval_min=1, sleep=fsleep, tick=ftick, stop_event=stop)
+        import time as _time
+        for _ in range(100):
+            if events:
+                break
+            _time.sleep(0.01)
+        check("start_poller iki kez → tek thread", t1 is t2 and t1.daemon and t1.is_alive())
+        check("ilk tur bir aralık beklendikten sonra (en az 5 dk)", events == [("sleep", 300)] and ticks == [], str(events))
+        steps.put("go")
+        for _ in range(200):
+            if len(events) >= 2:
+                break
+            _time.sleep(0.01)
+        steps.put("go")
+        for _ in range(200):
+            if len(ticks) >= 2:
+                break
+            _time.sleep(0.01)
+        check("turun hatası thread'i durdurmaz", len(ticks) == 2 and t1.is_alive(), str((ticks, events)))
+        stop.set()
+        steps.put("go")
+        t1.join(2)
+        check("durdurulunca thread biter", not t1.is_alive())
+        check("start_poller modülün stop()'unu gölgelemez", "stop" not in inspect.signature(ut.start_poller).parameters
+              and callable(ut.stop))
+
+        # ── Sunucu: yoklayıcı üç anahtar açıkken başlar, işçiyi sunucu uyandırır ──
+        from agile_sdlc_crew import server
+        src = inspect.getsource(server._start_upgrade_poller)
+        check("sunucu: start_poller, POLL_MIN, _ensure_worker, üç anahtar",
+              "start_poller" in src and "CREW_TECHDEBT_UPGRADE_POLL_MIN" in src and "_ensure_worker" in src
+              and all(k in src for k in ('"CREW_TECHDEBT"', '"CREW_TECHDEBT_PHP_MODERN"', '"CREW_TECHDEBT_UPGRADE"')))
+        qsrc = inspect.getsource(ut)
+        check("quality/ işçiyi çağırmaz", "_ensure_worker()" not in qsrc)
+    finally:
+        pc.get = orig_get
+        ut._POLLER = None
+
+
+def test_upgrade_card():
+    print("\n[U9] Sürüm yükseltme kartı — aşama şeridi ve düğmeler")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import upgrade, upgrade_track as ut
+    html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("upgradeStart / upgradeStop / upgradeBump var",
+          all(f"function {n}(" in html for n in ("upgradeStart", "upgradeStop", "upgradeBump")))
+    check("dört aşama etiketi", all(f"'{lb}'" in html for lb in ("Hazırlık", "Hazır", "Test hattı", "Üretim")))
+    check("Engelli durumu metinle gösterilir", "Engelli" in html)
+
+    def _fn(name):
+        i = html.find("async function " + name)
+        if i < 0:
+            i = html.find("function " + name)
+        js = [x for x in (html.find("\nfunction ", i + 1), html.find("\nasync function ", i + 1), html.find("\nconst ", i + 1)) if x > 0]
+        return html[i:min(js)]
+    bump, status_src, link = _fn("upgradeBump"), _fn("_upStatusHtml"), _fn("_upLink")
+    check("upgradeBump next.ready ve tracked'e bakar", "nx.ready" in bump and "tracked" in bump)
+    check("düğme yalnız tracked && next.ready===true iken etkin", "canBump=tracked&&nx.ready===true" in status_src
+          and "disabled" in status_src)
+    check("upgradeBump step gönderir, ready===true ister",
+          "step:nx.step" in bump and "nx.ready===true" in bump)
+    post_src = _fn("_upPost")
+    check("_upPost 409'da yeniden tarar, kör yeniden-etkinleştirme yok",
+          "409" in post_src and "_upRefresh()" in post_src and "b.disabled=false" not in post_src
+          and "isConnected&&b.id!=='tdmUpBump'" in post_src)
+    ref_src = _fn("_upRefresh")
+    check("_upRefresh: tarama düşerse scan=null + Türkçe bayat satırı",
+          "_tdm.scan=null" in ref_src and "Durum yenilenemedi — yeniden tarayın" in ref_src
+          and "İzleme durumu okunamadı" in ref_src)
+    check("üç POST yolu kullanılıyor",
+          all(p in html for p in ("'/api/techdebt/upgrade/start'", "'/api/techdebt/upgrade/stop'",
+                                  "'/api/techdebt/upgrade/bump'")))
+    check("bağlantı yalnız https:// ile", "indexOf('https://')===0" in link and "escHtml(u)" in link)
+    check("durdur / adım için confirm", "confirm(" in _fn("_upPost") and "Devam edilsin mi" in html)
+    check("kart sunucudan gelen next.reason'ı olduğu gibi yazar", "nx.reason" in status_src)
+    check("repos çağrısı takımı geçirir", "upgrade/repos'+(team" in html)
+
+    saved = (pc.get, server.AzureDevOpsClient, upgrade.scan, ut.status)
+    pc.get = lambda k: True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE") else saved[0](k)
+    server.AzureDevOpsClient = lambda: object()
+    upgrade.scan = lambda c, repo, lang, **k: {"repo": repo, "lang": lang, "current": "8.2", "target": "8.4"}
+    ut.status = lambda c, repo, lang, **k: {"stage": "hazır", "next": {"step": "ci", "ready": True, "reason": "x"}}
+    try:
+        js = TestClient(server.app).get("/api/techdebt/upgrade/scan?repo=core").json()
+        check("scan yanıtı status bloğu taşır", (js.get("status") or {}).get("next", {}).get("ready") is True, str(js))
+    finally:
+        pc.get, server.AzureDevOpsClient, upgrade.scan, ut.status = saved
+
+
+def test_upgrade_fix_round2():
+    """Görev 8 düzeltme turu 2: prod, `<repo>-test`'in CI dosyası değiştikten SONRA yeşil koştuğu kanıtı
+    olmadan açılamaz. B1 kanıt saati merge'den önceye düşmez (firstParent + Tempo CI PR'ının kapanışı);
+    B2 repo projesi kesin bulunamazsa hata (önbellekli yedek proje → sahte no_pipeline yok); B3 okunamayan
+    sürüm satırı ve sabitlemesiz repo da kapıyı kapalı tutar. Her denetim ayrı çalışır (biri çökse de
+    ötekiler raporlanır)."""
+    print("\n[Sürüm yükseltme: düzeltme turu 2]")
+    import requests as _rq
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_bump as bump, upgrade_track as ut
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+
+    BR = "tempo/upgrade-php-core-8.4"
+    T1, T2, T3, T4 = ("2026-11-10T09:00:00Z", "2026-11-10T10:00:00Z", "2026-11-10T11:00:00Z",
+                      "2026-11-10T12:00:00Z")
+    dv_a = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+            "path": "/build/core/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+            "blocked": ""}
+    dv_r = dict(dv_a, repo="russia")
+    ci_s = {"where": "ci", "repo": "yml-files", "project": "EcomBackend", "branch": "main",
+            "path": "Test Pipelines/core.yml", "line": 2, "old": "'8.2'", "new": "'8.4'", "blocked": ""}
+    pin = {"repo": "yml-files", "project": "EcomBackend", "branch": "main", "path": "Test Pipelines/core.yml",
+           "line": 2, "version": "8.4"}
+    PIN_FILE = ("EcomBackend", "yml-files", "main", "Test Pipelines/core.yml")
+    CORE_DEF = {"core": {"id": 5, "name": "Core-test", "project": "EcomBackend"}}
+    ci_key = ("EcomBackend", "yml-files", BR)
+
+    def b(bid, q, result="succeeded", status="completed"):
+        return {"build_id": bid, "status": status, "result": result, "definition": "Core-test",
+                "url": f"https://x/b/{bid}", "project": "EcomBackend", "queue_time": q, "source_version": ""}
+
+    def scan(sites, pins):
+        return {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False,
+                "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins,
+                "ci_source": _ci_src(pins)}
+
+    def pr(pid, status, closed=""):
+        return {"id": pid, "status": status, "url": f"https://x/pr/{pid}", "closed_at": closed, "merge_commit": "",
+                "target": "main", "created_by": "tempo-id"}
+
+    def safe(fn):
+        """(sonuç, hata) — bir denetimin çökmesi ötekileri gizlemesin."""
+        try:
+            return fn(), None
+        except Exception as e:  # noqa: BLE001
+            return None, e
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "core"
+        root.mkdir()
+        (root / "composer.json").write_text('{\n  "require": {\n    "php": "^8.2"\n  }\n}\n', encoding="utf-8")
+        cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+               "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+               "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+        deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                           record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+
+        def st(sc, c):
+            return safe(lambda: ut.status(c, "core", "php", to="8.4", deps=deps, scan=sc, wait_h=72, root=root))
+
+        # ── B1: kanıt saati merge'den önceye düşmez ──
+        cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+        cl.org_url, cl.project = "https://dev.azure.com/o", "P"
+        cl._repo_api_url = lambda repo, project=None: f"https://x/{project or 'P'}/_apis/git/repositories/{repo}"
+
+        class _Cl(azb.AzureDevOpsClient):
+            _headers = {"Authorization": "x"}
+        cl.__class__ = _Cl
+
+        class _R:
+            def __init__(self, js=None, status=200):
+                self._js, self.status_code, self.ok = js, status, status < 400
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise _rq.HTTPError(str(self.status_code), response=self)
+
+            def json(self):
+                return self._js
+        og = azb.requests.get
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: _R({"value": [{"committer": {
+            "date": T3 if (params or {}).get("searchCriteria.historyMode") == "firstParent" else T1}}]})
+        try:
+            when, err = safe(lambda: cl.get_last_commit_date("yml-files", "/Test Pipelines/core.yml", "main",
+                                                             project="EcomBackend"))
+        finally:
+            azb.requests.get = og
+        check("B1a: dosyanın son commit'i firstParent ile (merge commit'i, özellik dalının commit'i değil)",
+              when == T3, str((when, err)))
+        prs_done = {ci_key: pr(11, "completed", closed=T3)}
+        s, err = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds={5: [b(2, T2)]},
+                                                       commit_dates={PIN_FILE: T1}, prs=prs_done))
+        check("B1b: commit T1 ama Tempo CI PR'ı T3'te kapandı → since T3, T2'deki yeşil kanıt değil",
+              s is not None and s["evidence"] and s["evidence"]["since"] == T3 and s["evidence"]["state"] == "none"
+              and not s["next"]["ready"], str((s and s["evidence"], err)))
+        s, err = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4), b(2, T2)]},
+                                                       commit_dates={PIN_FILE: T1}, prs=prs_done))
+        check("B1b: T3'ten sonra yeşil → prod hazır", s is not None and s["next"]["step"] == "prod"
+              and s["next"]["ready"], str((s and s["next"], err)))
+        s, err = st(scan([dv_a, dv_r], [pin]), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4)]},
+                                                       commit_dates={PIN_FILE: T1},
+                                                       prs={ci_key: pr(11, "completed", closed="")}))
+        check("B1b: tamamlanmış Tempo CI PR'ının kapanış zamanı okunamazsa prod yok",
+              s is not None and not s["next"]["ready"] and "okunamadı" in s["next"]["reason"],
+              str((s and s["next"], err)))
+        pin2 = dict(pin, path="Test Pipelines/core-api.yml")
+        s, err = st(scan([dv_a, dv_r], [pin, pin2]),
+                    _UpFake(defs=CORE_DEF, builds={5: [b(2, T2)]},
+                            commit_dates={PIN_FILE: T1, ("EcomBackend", "yml-files", "main", pin2["path"]): T3}))
+        check("ek: birden çok sabitleme dosyasında en geç değişiklik zamanı",
+              s is not None and s["evidence"] and s["evidence"]["since"] == T3 and s["evidence"]["state"] == "none",
+              str((s and s["evidence"], err)))
+
+        # ── ek: iptal edilen en yeni build + since'ten önceki tamamlanmış build → none; okunamayan özet → red ──
+        ev, err = safe(lambda: bump.ci_evidence(
+            _UpFake(defs=CORE_DEF, builds={5: [b(3, T4, result="canceled"), b(1, T1)]}), "core", T2, wait_h=72))
+        check("ek: iptal edilen en yeni build, önceki build since'ten önce → none",
+              ev is not None and ev["state"] == "none", str((ev, err)))
+        ev, err = safe(lambda: bump.ci_evidence(
+            _UpFake(defs=CORE_DEF, builds={5: [b(3, T4, result="failed")]}, summary_error=RuntimeError("500")),
+            "core", T2, wait_h=72))
+        check("ek: özeti okunamayan kırmızı build kırmızı kalır",
+              ev is not None and ev["state"] == "red" and "okunamadı" in ev["summary"], str((ev, err)))
+
+        # ── B2: repo projesi kesin bulunamazsa hata ──
+        cl2 = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+        cl2.org_url, cl2.project, cl2.repo_projects = "https://dev.azure.com/o", "P", ["EcomBackend", "Other"]
+        cl2._repo_project_cache = {}
+        cl2.__class__ = _Cl
+        seen = []
+
+        def g_boom(url, headers=None, params=None, timeout=None, **k):
+            seen.append(url)
+            if "/git/repositories/" in url:
+                raise _rq.ConnectionError("geçici hata")
+            return _R({"value": []})
+        azb.requests.get = g_boom
+        try:
+            d, err = safe(lambda: cl2.get_test_pipeline("core"))
+        finally:
+            azb.requests.get = og
+        check("B2: repo sorgusu hata verirse tanım araması hata (yanlış projede boş liste → no_pipeline değil)",
+              d is None and err is not None and not any("/build/definitions" in u for u in seen)
+              and "core" not in cl2._repo_project_cache, str((d, err, seen)))
+        seen.clear()
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            seen.append(url), _R(status=404) if "/git/repositories/" in url else _R({"value": []}))[1]
+        try:
+            d, err = safe(lambda: cl2.get_test_pipeline("core"))
+        finally:
+            azb.requests.get = og
+        check("B2: repo hiçbir projede yoksa hata", d is None and err is not None
+              and not any("/build/definitions" in u for u in seen), str((d, err, seen)))
+        seen.clear()
+        cl2._repo_project_cache = {"core": "EcomBackend"}  # _find_repo_project'in önbelleğe yazdığı yedek
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            seen.append(url),
+            _R(status=200, js={"id": "g"}) if url.endswith("/Other/_apis/git/repositories/core")
+            else _R(status=404) if "/git/repositories/" in url
+            else _R({"value": [{"id": 5, "name": "Core-test"}]}))[1]
+        try:
+            d, err = safe(lambda: cl2.get_test_pipeline("core"))
+        finally:
+            azb.requests.get = og
+        check("B2: önbellekteki yedek proje kullanılmaz; repo gerçekten bulunduğu projede aranır",
+              {k: (d or {}).get(k) for k in ("id", "name", "project")} == {"id": 5, "name": "Core-test", "project": "Other"}
+              and any(u.endswith("/Other/_apis/build/definitions") for u in seen), str((d, err, seen)))
+        # status / queue_step / uç: hata yükselir, hiçbir şey hazır değil
+        sc_at = scan([dv_a, dv_r], [pin])
+        c_err = _UpFake(defs={"core": RuntimeError("repo projesi bulunamadı")}, commit_dates={PIN_FILE: T1})
+        s, err = st(sc_at, c_err)
+        check("B2: tanım okunamazsa status hata verir (hazır değil)", s is None and err is not None, str(s))
+        track = {"id": 500, "fields": {"System.Title": "izleme", "System.State": "To Do", "System.AreaPath": "P\\T",
+                                       "System.Tags": "tempo-upgrade-track",
+                                       "System.Description": "<p><small>tempo-upgrade-key: php:core:8.4</small></p>"}}
+        c_q = _UpFake(defs={"core": RuntimeError("repo projesi bulunamadı")}, commit_dates={PIN_FILE: T1},
+                      tracks=[track])
+        made = []
+        q, err = safe(lambda: bump.queue_step(
+            c_q, "core", "php", team="T", deps=deps,
+            create_job=lambda *a, **k: (made.append(1), 1)[1], open_jobs=lambda t: [],
+            status_fn=lambda cl_, r, l, **k: ut.status(cl_, r, l, to=k.get("to"), deps=deps, scan=sc_at, wait_h=72,
+                                                       root=root)))
+        check("B2: queue_step hata verir, iş açılmaz", q is None and err is not None and not made, str(q))
+        saved = (pc.get, server.AzureDevOpsClient, upgrade.scan, ut.watch_view)
+        pc.get = lambda k: True if k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE") else saved[0](k)
+        server.AzureDevOpsClient = lambda: _UpFake(defs={"core": RuntimeError("repo projesi bulunamadı")},
+                                                   commit_dates={PIN_FILE: T1})
+        upgrade.scan = lambda c, repo, lang, **k: dict(sc_at)
+        ut.watch_view = lambda *a, **k: None
+        try:
+            js = TestClient(server.app).get("/api/techdebt/upgrade/scan?repo=core&to=8.4").json()
+        finally:
+            pc.get, server.AzureDevOpsClient, upgrade.scan, ut.watch_view = saved
+        check("B2: tarama ucu durum hatasını raporlar", "error" in (js.get("status") or {}), str(js.get("status")))
+
+        # ── B3a: okunamayan sürüm satırı ──
+        def ci_of(lang, line, to):
+            yml = f"variables:\n  {line}\nresources:\n  - repository: s\n    name: EcomBackend/core\n"
+            return safe(lambda: upgrade._ci_scan(None, "core", lang, to, {"Test Pipelines/core.yml": yml}))
+        for lang, line, to, raw in (("python", "pythonVersion: '3.x'", "3.12", "3.x"),
+                                    ("php", "phpVersion: $(phpVer)", "8.4", "$(phpVer)"),
+                                    ("php", "phpVersion: 8", "8.4", "8")):
+            res, err = ci_of(lang, line, to)
+            pins_ = (res or ([], []))[1] or []
+            check(f"B3a: '{line}' → boş sürümlü sabitleme + ham metin, site yok",
+                  res is not None and len(pins_) == 1 and pins_[0]["version"] == "" and pins_[0]["unparsed"] == raw
+                  and res[0] == [], str((res, err)))
+        res, err = ci_of("go", "goVersion: '1.22.5'", "1.25")
+        sites_, pins_ = res or ([], [])
+        check("B3a: üç parçalı sürüm major.minor ile karşılaştırılır, site elle (otomatik değil)",
+              res is not None and pins_ and pins_[0]["version"] == "1.22" and len(sites_) == 1
+              and sites_[0]["blocked"] == "sürüm satırı elle düzenlenmeli" and not bump.pushable(sites_[0]),
+              str((res, err)))
+        res, err = ci_of("go", "goVersion: '1.25.1'", "1.25")
+        check("B3a: üç parçalı sürüm hedefte → sabitleme 1.25, site yok",
+              res is not None and res[1] and res[1][0]["version"] == "1.25" and res[0] == [], str((res, err)))
+        bad_pin = dict(pin, version="", unparsed="$(phpVer)")
+        s, err = st(scan([dv_a, dv_r], [bad_pin]), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4)]},
+                                                           commit_dates={PIN_FILE: T1}))
+        check("B3a: okunamayan satır → prod hazır değil, neden dosyayı adlandırır",
+              s is not None and not s["next"]["ready"]
+              and "test hattı sürüm satırı okunamadı: Test Pipelines/core.yml" in s["next"]["reason"],
+              str((s and s["next"], err)))
+        low = dict(pin, version="8.2")
+        s, err = st(scan([dv_a, dv_r, ci_s], [low, dict(bad_pin, path="Test Pipelines/other.yml")]), _UpFake())
+        check("B3a: okunamayan satır → ci de hazır değil",
+              s is not None and not s["next"]["ready"]
+              and "test hattı sürüm satırı okunamadı: Test Pipelines/other.yml" in s["next"]["reason"],
+              str((s and s["next"], err)))
+
+        # ── B3b: sabitleme yok ama <repo>-test tanımı var → en yeni build yeşil olmalı ──
+        s, err = st(scan([dv_a, dv_r], []), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4, result="failed")]}))
+        check("B3b: sabitleme yok, tanımın en yeni build'i kırmızı → prod yok",
+              s is not None and s["next"]["step"] == "prod" and not s["next"]["ready"]
+              and s["evidence"] and s["evidence"]["state"] == "red", str((s and s["next"], err)))
+        s, err = st(scan([dv_a, dv_r], []), _UpFake(defs=CORE_DEF, builds={5: []}))
+        check("B3b: sabitleme yok, tanımın tamamlanmış build'i yok → prod yok",
+              s is not None and not s["next"]["ready"] and s["next"]["reason"], str((s and s["next"], err)))
+        s, err = st(scan([dv_a, dv_r], []), _UpFake(defs=CORE_DEF, builds={5: [b(3, T4)]}))
+        check("B3b: sabitleme yok, tanımın en yeni build'i yeşil → prod hazır",
+              s is not None and s["next"]["ready"] and (s["evidence"] or {}).get("state") == "green",
+              str((s and s["next"], err)))
+        s, err = st(scan([dv_a, dv_r], []), _UpFake())
+        check("B3b: sabitleme yok, tanım yok → prod hazır, 'Test kanıtı yok'",
+              s is not None and s["next"]["ready"] and s["next"]["test_note"] == "Test kanıtı yok",
+              str((s and s["next"], err)))
+
+
+def test_upgrade_fix_round3():
+    """Görev 8 düzeltme turu 3. N1: gerçek test hattı dosyaları sürümü `goVersion` ile değil `GoTool@0` →
+    `inputs: version:` (gocrons), `image: golang:1.21.4` (myduck), `UsePythonVersion@0` → `versionSpec:` ile
+    sabitliyor — bunlar sabitleme sayılır; sabitlemesiz bir hattın yeşil build'i 'zayıf kanıt' notuyla gider.
+    N2: repo adı birden çok projede varsa ya da yanıt 200+JSON değilse proje çözümü hata verir."""
+    print("\n[Sürüm yükseltme: düzeltme turu 3]")
+    import requests as _rq
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_bump as bump, upgrade_track as ut
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+
+    def safe(fn):
+        try:
+            return fn(), None
+        except Exception as e:  # noqa: BLE001
+            return None, e
+
+    def scan_ci(repo, lang, to, yml, path="Test Pipelines/x.yml"):
+        return safe(lambda: upgrade._ci_scan(None, repo, lang, to, {path: yml}))
+
+    head = "trigger: none\nresources:\n  repositories:\n    - repository: src\n      type: git\n      name: EcomBackend/{repo}\n"
+    gotool = head.format(repo="gocrons") + ("steps:\n  - checkout: src\n  - task: GoTool@0\n    displayName: Go\n"
+                                            "    inputs:\n      version: '1.24.4'\n  - script: go test ./...\n")
+    res, err = scan_ci("gocrons", "go", "1.25", gotool)
+    sites, pins = res or ([], [])
+    check("N1a: GoTool@0 inputs version (1.24.4) → sabitleme 1.24, site elle, neden satır + hedef",
+          res is not None and [p["version"] for p in pins] == ["1.24"] and pins[0]["line"] == 12 and len(sites) == 1
+          and sites[0]["blocked"] == upgrade.CI_HAND and not bump.pushable(sites[0]), str((res, err)))
+    myduck = ("resources:\n  containers:\n    - container: golang\n      image: golang:1.21.4\n  repositories:\n"
+              "    - repository: s\n      name: EcomBackend/myduck\njobs:\n  - job: t\n    container: golang\n")
+    res, err = scan_ci("myduck", "go", "1.25", myduck)
+    sites, pins = res or ([], [])
+    check("N1a: image golang:1.21.4 → sabitleme 1.21 (konteyner takma adı 'golang' sabitleme değil)",
+          res is not None and [(p["version"], p["line"]) for p in pins] == [("1.21", 4)] and len(sites) == 1
+          and sites[0]["blocked"] == upgrade.CI_HAND, str((res, err)))
+    reg = head.format(repo="svc") + "container: myreg.io/library/golang:1.21-alpine\n"
+    res, err = scan_ci("svc", "go", "1.25", reg)
+    sites, pins = res or ([], [])
+    check("N1a: önekli + son ekli golang imajı (1.21-alpine) → sabitleme, otomatik site",
+          res is not None and [p["version"] for p in pins] == ["1.21"] and len(sites) == 1
+          and sites[0]["old"] == "myreg.io/library/golang:1.21-alpine"
+          and sites[0]["new"] == "myreg.io/library/golang:1.25-alpine" and bump.pushable(sites[0]), str((res, err)))
+    py = head.format(repo="segflo") + ("steps:\n  - task: UsePythonVersion@0\n    inputs:\n      versionSpec: '3.11'\n"
+                                       "      addToPath: true\n  - script: pytest\n")
+    res, err = scan_ci("segflo", "python", "3.12", py)
+    sites, pins = res or ([], [])
+    check("N1a: UsePythonVersion@0 versionSpec → sabitleme + otomatik site",
+          res is not None and [p["version"] for p in pins] == ["3.11"] and len(sites) == 1
+          and sites[0]["old"] == "'3.11'" and sites[0]["new"] == "'3.12'" and bump.pushable(sites[0]), str((res, err)))
+    pyimg = head.format(repo="segflo") + "container: python:3.11-slim\n"
+    res, err = scan_ci("segflo", "python", "3.12", pyimg)
+    check("N1a: image python:3.11-slim → sabitleme",
+          res is not None and [p["version"] for p in res[1]] == ["3.11"], str((res, err)))
+    phpimg = head.format(repo="core") + "container: eu/prod-ar/php-8-2:1.0\n"
+    res, err = scan_ci("core", "php", "8.4", phpimg)
+    check("N1a: PHP imajı php-8-2:1.0 → sabitleme + site (imaj ayrıştırıcısı)",
+          res is not None and [p["version"] for p in res[1]] == ["8.2"] and len(res[0]) == 1
+          and res[0][0]["new"] == "eu/prod-ar/php-8-4:1.0", str((res, err)))
+    var = gotool.replace("'1.24.4'", "$(goVersion)")
+    res, err = scan_ci("gocrons", "go", "1.25", var)
+    check("N1a: GoTool version $(goVersion) → okunamayan sabitleme",
+          res is not None and len(res[1]) == 1 and res[1][0]["version"] == ""
+          and res[1][0]["unparsed"] == "$(goVersion)" and res[0] == [], str((res, err)))
+    two = head.format(repo="gocrons") + ("steps:\n  - task: NodeTool@0\n    inputs:\n      version: '18.x'\n"
+                                         "  - task: GoTool@0\n    inputs:\n      version: '1.24'\n"
+                                         "  - script: echo\n    env:\n      version: '9.9'\n"
+                                         "  # - task: GoTool@0\n  #   inputs:\n  #     version: '1.10'\n")
+    res, err = scan_ci("gocrons", "go", "1.25", two)
+    check("N1a: başka görevin / betiğin version'ı ve yorum satırları sabitleme değil",
+          res is not None and [(p["version"], p["line"]) for p in res[1]] == [("1.24", 13)], str((res, err)))
+
+    # Gerekçe uygulanabilir: yol:satır + hedef
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "core"
+        root.mkdir()
+        (root / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+        deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                           record=lambda **k: None, now=lambda: 1e9, cfg=lambda: {"repos_dir": base})
+        dv_a = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+                "path": "/build/core/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+                "blocked": ""}
+
+        def st(sites, pins, c):
+            sc = {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False,
+                  "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": pins,
+                  "ci_source": _ci_src(pins)}
+            return safe(lambda: ut.status(c, "core", "php", to="8.4", deps=deps, scan=sc, wait_h=72, root=root))
+        bad = {"repo": "yml-files", "project": "EcomBackend", "branch": "main", "path": "Test Pipelines/core.yml",
+               "line": 7, "version": "", "unparsed": "$(phpVer)"}
+        s, err = st([dv_a], [bad], _UpFake())
+        check("N1a: okunamayan satırın gerekçesi yol:satır ve hedefi söyler",
+              s is not None and "Test Pipelines/core.yml:7" in s["next"]["reason"]
+              and "8.4 yapılmalı" in s["next"]["reason"], str((s and s["next"], err)))
+        ci_hand = {"where": "ci", "repo": "yml-files", "project": "EcomBackend", "branch": "main",
+                   "path": "Test Pipelines/core.yml", "line": 9, "old": "8.2.1", "new": "8.2.1", "blocked": upgrade.CI_HAND}
+        low = {"repo": "yml-files", "project": "EcomBackend", "branch": "main", "path": "Test Pipelines/core.yml",
+               "line": 9, "version": "8.2"}
+        s, err = st([dv_a, ci_hand], [low], _UpFake())
+        check("N1a: elle düzenlenecek CI satırının gerekçesi yol:satır ve hedefi söyler",
+              s is not None and not s["next"]["ready"] and "Test Pipelines/core.yml:9" in s["next"]["reason"]
+              and "8.4 yapılmalı" in s["next"]["reason"], str((s and s["next"], err)))
+
+        # N1b: sabitlemesiz hattın yeşil build'i zayıf kanıt
+        CORE_DEF = {"core": {"id": 5, "name": "Core-test", "project": "EcomBackend"}}
+
+        def b(bid, q, result="succeeded"):
+            return {"build_id": bid, "status": "completed", "result": result, "definition": "Core-test",
+                    "url": "", "project": "EcomBackend", "queue_time": q, "source_version": ""}
+        s, err = st([dv_a], [], _UpFake(defs=CORE_DEF, builds={5: [b(3, "2026-11-10T12:00:00Z")]}))
+        note = (s or {}).get("next", {}).get("test_note", "")
+        check("N1b: sabitleme yok + yeşil → hazır ama 'Test kanıtı zayıf' notu",
+              s is not None and s["next"]["ready"] and note.startswith("Test kanıtı zayıf")
+              and "sabitlemesi bulunamadı" in note, str((s and s["next"], err)))
+        title, body = bump._bodies({"repo": "core", "from": "8.2", "to": "8.4", "step": "prod", "sites": [dv_a],
+                                    "track_id": 500}, note or "x")
+        check("N1b: not üretim PR açıklamasının ilk satırı", body.splitlines()[0] == (note or "x"))
+        s, err = st([dv_a], [], _UpFake(defs=CORE_DEF, builds={5: [b(3, "2026-11-10T12:00:00Z", "failed")]}))
+        check("N1b: sabitleme yok + kırmızı → hazır değil", s is not None and not s["next"]["ready"])
+        s, err = st([dv_a], [], _UpFake(defs=CORE_DEF, builds={5: []}))
+        check("N1b: sabitleme yok + tamamlanmış build yok → hazır değil", s is not None and not s["next"]["ready"])
+
+    # N2: proje çözümü kesin ve tekil
+    class _Cl(azb.AzureDevOpsClient):
+        _headers = {"Authorization": "x"}
+
+    class _R:
+        def __init__(self, status=200, js=None, text=""):
+            self.status_code, self._js, self.text = status, js, text
+            self.ok = status < 400
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise _rq.HTTPError(str(self.status_code), response=self)
+
+        def json(self):
+            if self._js is None:
+                raise ValueError("JSON değil")
+            return self._js
+
+    def mk():
+        c = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+        c.org_url, c.project, c.repo_projects = "https://dev.azure.com/o", "P", ["EcomBackend", "Other"]
+        c._repo_project_cache = {}
+        c.__class__ = _Cl
+        return c
+    og = azb.requests.get
+    try:
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: _R(200, {"id": "g"})
+        p, err = safe(lambda: mk()._repo_project_strict("core"))
+        check("N2: iki projede aynı adlı repo → hata, projeler adlandırılır",
+              p is None and isinstance(err, ValueError) and "EcomBackend" in str(err) and "Other" in str(err),
+              str((p, err)))
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            _R(203, None, "<html>Sign in</html>") if "/EcomBackend/" in url else _R(404))
+        p, err = safe(lambda: mk()._repo_project_strict("core"))
+        check("N2: 203 HTML oturum sayfası olumlu sayılmaz → hata", p is None and err is not None, str((p, err)))
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            _R(200, {"value": []}) if "/EcomBackend/" in url else _R(404))
+        p, err = safe(lambda: mk()._repo_project_strict("core"))
+        check("N2: 200 ama repo id'siz JSON olumlu sayılmaz → hata", p is None and err is not None, str((p, err)))
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            _R(200, {"id": "g"}) if "/Other/" in url else _R(404))
+        p, err = safe(lambda: mk()._repo_project_strict("core"))
+        check("N2: tek olumlu yanıt → o proje", p == "Other", str((p, err)))
+    finally:
+        azb.requests.get = og
+
+
+def _upgrade_deps(base):
+    """Son düzeltme testleri için ağsız Deps (board boş, freshen kapalı)."""
+    from agile_sdlc_crew.quality import intake
+    cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+           "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+           "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+    return intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                       record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+
+
+def test_upgrade_final_f2_three_part():
+    """F2: üç parçalı imaj etiketi (golang:1.24.4-alpine, php:8.2.12-fpm) yeniden yazılmaz — rakam-dizisi kuralı
+    golang:1.27.4 gibi var olmayabilecek bir etiket uydururdu. Site old == new, elle düzenlenir."""
+    print("\n[Sürüm yükseltme son düzeltme F2: üç parçalı imaj etiketi]")
+    from agile_sdlc_crew.quality import upgrade, upgrade_bump as bump, upgrade_track as ut
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "svc"
+        root.mkdir()
+        for lang, img, to in (("go", "golang:1.24.4-alpine", "1.27"), ("php", "php:8.2.12-fpm", "8.4"),
+                              ("go", "myreg.io/library/golang:1.24.4", "1.27"),
+                              ("python", "10.1.1.1:5000/python:3.11.9-slim", "3.13")):
+            (root / "Dockerfile").write_text(f"FROM {img} AS build\nRUN x\n", encoding="utf-8")
+            cs = [s for s in upgrade._code_sites("svc", root, lang, to) if s["path"] == "Dockerfile"]
+            check(f"F2 kod Dockerfile {img}: elle düzenlenir, etiket uydurulmaz",
+                  len(cs) == 1 and cs[0]["old"] == cs[0]["new"] == img and cs[0]["blocked"] == upgrade.CI_HAND
+                  and cs[0]["line"] == 1 and not bump.pushable(cs[0]), str(cs))
+        (root / "Dockerfile").write_text("FROM golang:1.24-alpine\n", encoding="utf-8")
+        cs = upgrade._code_sites("svc", root, "go", "1.27")
+        check("F2 iki parçalı etiket yine otomatik", len(cs) == 1 and cs[0]["new"] == "golang:1.27-alpine"
+              and bump.pushable(cs[0]), str(cs))
+        for img in ("golang:1.24.4", "10.1.1.1:5000/library/golang:1.24.4-alpine"):
+            index = {"gocrons": [{"src": "anatolia/build/alf", "images": [img]}],
+                     "x": [{"src": "anatolia/build/x", "images": [upgrade.image_for(img, "go", "1.27")]}]}
+            ss = upgrade._devops_sites(None, "gocrons", "go", "1.27", index, lambda d, p, i=img: f"FROM {i}\n")
+            check(f"F2 FLODevOps {img}: aynı bölgede yeni etiket olsa da elle",
+                  len(ss) == 1 and ss[0]["old"] == ss[0]["new"] == img and ss[0]["blocked"] == upgrade.CI_HAND
+                  and ss[0]["line"] == 1 and not bump.pushable(ss[0]), str(ss))
+        check("F2 _three_part: önekli/son ekli, iki parçalı değil",
+              upgrade._three_part("eu/golang:1.24.4-alpine", "go") and upgrade._three_part("php:8.2.12", "php")
+              and upgrade._three_part("prod-ar/python-3-13-7:1.0", "python")
+              and not upgrade._three_part("eu/prod-ar/php-8-2:1.0", "php")
+              and not upgrade._three_part("golang:1.24-alpine", "go"))
+        # gerekçe yol:satır ve hedefi söyler
+        dv = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+              "path": "/build/alf/Dockerfile", "line": 1, "old": "golang:1.24.4", "new": "golang:1.24.4",
+              "blocked": upgrade.CI_HAND}
+        groot = base / "gocrons"
+        groot.mkdir()
+        (groot / "go.mod").write_text("module x\n\ngo 1.24\n", encoding="utf-8")
+        sc = {"repo": "gocrons", "lang": "go", "current": "1.24", "target": "1.27", "up_to_date": False,
+              "sites": [dv], "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": [],
+              "ci_source": None}
+        s = ut.status(_UpFake(), "gocrons", "go", to="1.27", deps=_upgrade_deps(base), scan=sc, wait_h=72, root=groot)
+        check("F2 gerekçe dosya:satır ve hedefi söyler", not s["next"]["ready"] and s["stage"] == "engelli"
+              and "/build/alf/Dockerfile:1" in s["next"]["reason"] and "1.27" in s["next"]["reason"], str(s["next"]))
+        csite = dict(dv, where="code", repo="gocrons", project="", branch="", path="Dockerfile", line=3)
+        sc2 = dict(sc, sites=[csite])
+        s = ut.status(_UpFake(), "gocrons", "go", to="1.27", deps=_upgrade_deps(base), scan=sc2, wait_h=72,
+                      root=groot)
+        check("F2 kod sitesi gerekçesi dosya:satır ve hedef", not s["next"]["ready"]
+              and "Dockerfile:3" in s["next"]["reason"] and "1.27" in s["next"]["reason"], str(s["next"]))
+
+
+def test_upgrade_final_f3_published():
+    """F3: `selectable` imaj kanıtıyla tutarlı — bir sürüm 'yayınlanmış' ancak reponun her servis imajının yeni
+    hâli o bölgede zaten kullanılıyorsa (ve üç parçalı değilse); varsayılan hedef bilinen sürümlerle kesişir."""
+    print("\n[Sürüm yükseltme son düzeltme F3: yayınlanmış imaj tutarlılığı]")
+    from agile_sdlc_crew.quality import upgrade
+    idx_go = {"gocrons": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4"]}],
+              "x": [{"src": "anatolia/build/x", "images": ["golang:1.27.4", "golang:1.25.4", "golang:1.26.4"]}]}
+    svc = upgrade._devops_services("gocrons", "go", idx_go, None)
+    sel = upgrade.selectable("go", "1.24", idx_go, svc)
+    check("F3 Go golang:1.24.4 → hiçbir hedef yayınlanmış değil", sel and not any(s["published"] for s in sel),
+          str(sel))
+    ss = upgrade._devops_sites(None, "gocrons", "go", "1.27", idx_go, lambda d, p: "FROM golang:1.24.4\n")
+    check("F3 Go sitesi elle düzenlenir", len(ss) == 1 and ss[0]["blocked"] == upgrade.CI_HAND, str(ss))
+    check("F3 servisi olmayan repo → yayınlanmış", all(s["published"] for s in upgrade.selectable("go", "1.24", {}, {})))
+    idx = {"core": [{"src": "anatolia/build/l", "images": ["eu/php-8-2:1.0"]},
+                    {"src": "russia/build/l", "images": ["10.1.1.1:5000/php-8-2:1.0"]}],
+           "web": [{"src": "anatolia/build/w", "images": ["eu/php-8-4:1.0"]}]}
+    sel = {s["version"]: s for s in upgrade.selectable("php", "8.2", idx, upgrade._devops_services("core", "php", idx, None))}
+    check("F3 anatolia'da yeni imaj var, russia'da yok → 8.4 yayınlanmamış", sel["8.4"]["published"] is False,
+          str(sel))
+    idx2 = dict(idx, ru=[{"src": "russia/build/ru", "images": ["10.1.1.1:5000/php-8-4:1.0"]}])
+    sel = {s["version"]: s for s in upgrade.selectable("php", "8.2", idx2, upgrade._devops_services("core", "php", idx2, None))}
+    check("F3 iki bölgede de yeni imaj → 8.4 yayınlanmış", sel["8.4"]["published"] is True
+          and sel["8.3"]["published"] is False, str(sel))
+    check("F3 ortak yüklem _image_ok", upgrade._image_ok({"eu/php-8-4:1.0"}, "eu/php-8-2:1.0", "php", "8.4")
+          and not upgrade._image_ok({"golang:1.27.4"}, "golang:1.24.4", "go", "1.27")
+          and not upgrade._image_ok(set(), "eu/php-8-2:1.0", "php", "8.4"))
+    idx3 = {"a": [{"src": "anatolia/build/a", "images": ["eu/php-8-4:1.0", "eu/php-8-9:1.0"]}]}
+    check("F3 varsayılan hedef bilinen sürümlerle kesişir (8.9 listede yok)",
+          upgrade.default_target("php", "8.2", idx3) == "8.4", str(upgrade.default_target("php", "8.2", idx3)))
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        (base / "core").mkdir()
+        (base / "core" / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+        rd = lambda d, p: ("FROM 10.1.1.1:5000/php-8-2:1.0\n" if d == "russia" else "FROM eu/php-8-2:1.0\n")
+        pl = upgrade.plan(None, "core", "php", to="8.4", deps=_upgrade_deps(base), index=idx, read=rd, yml_files={})
+        sel = {s["version"]: s for s in pl["selectable"]}
+        check("F3 plan seçilebilirleri servislerle hesaplar", sel["8.4"]["published"] is False
+              and any(s["where"] == "devops" and s["blocked"] == upgrade.UNPUBLISHED for s in pl["sites"]), str(sel))
+
+
+def test_upgrade_final_f6_ci_parse():
+    """F6: test hattı satırı ayrıştırma delikleri — (a) sürümsüz GoTool / UsePythonVersion bloğu sonraki adımın
+    `version:`'ını almaz (blok, görevin girintisinde ya da daha sığ her satırda biter); (b) değeri bulunamayan
+    sürüm görevi okunamayan sabitlemedir (akış biçimi, satır sonu yorumu, tırnaklı görev adı); (c) liste biçimi
+    değişken (`- name: phpVersion` / `value:`) tanınır, anahtar adı geçip sabitleme çıkmazsa okunamayan sabitleme."""
+    print("\n[Sürüm yükseltme son düzeltme F6: test hattı ayrıştırma]")
+    from agile_sdlc_crew.quality import upgrade, upgrade_bump as bump
+
+    def scan_ci(repo, lang, to, yml):
+        try:
+            return upgrade._ci_scan(None, repo, lang, to, {"Test Pipelines/x.yml": yml}), None
+        except Exception as e:  # noqa: BLE001
+            return None, e
+    head = "resources:\n  repositories:\n    - repository: src\n      name: EcomBackend/{repo}\n"
+    go = head.format(repo="gocrons")
+    # (a) sürüm girdisi olmayan GoTool, sonraki adımın version'ı
+    for nxt in ("  - publish: out\n    artifact: x\n    version: '1.21'\n",
+                "  - download: current\n    version: '1.21'\n",
+                "  - ${{ if eq(1, 1) }}:\n    - script: echo\n      version: '1.21'\n",
+                "variables:\n  version: '1.21'\n"):
+        yml = go + "steps:\n  - task: GoTool@0\n    displayName: Go\n" + nxt
+        res, err = scan_ci("gocrons", "go", "1.25", yml)
+        sites, pins = res or ([], [])
+        check(f"F6a: sürümsüz GoTool başka adımın version'ını almaz ({nxt.split(':')[0].strip()})",
+              res is not None and sites == [] and len(pins) == 1 and pins[0]["version"] == ""
+              and pins[0]["line"] == 6 and "GoTool" in pins[0]["unparsed"] and "okunamadı" in pins[0]["unparsed"],
+              str((res, err)))
+    # (b) okunamayan sürüm görevi
+    for label, body in (("akış biçimi", "  - task: GoTool@0\n    inputs: { version: '1.24' }\n  - script: x\n"),
+                        ("dosya sonu", "  - task: GoTool@0\n    inputs:\n      goPath: x\n")):
+        res, err = scan_ci("gocrons", "go", "1.25", go + "steps:\n" + body)
+        pins = (res or ([], []))[1]
+        check(f"F6b: {label} → okunamayan sabitleme", res is not None and len(pins) == 1 and pins[0]["version"] == ""
+              and "okunamadı" in pins[0]["unparsed"], str((res, err)))
+    for task in ("- task: GoTool@0  # go kurulumu", "- task: 'GoTool@0'", '- task: "GoTool@0" # x'):
+        res, err = scan_ci("gocrons", "go", "1.25", go + f"steps:\n  {task}\n    inputs:\n      version: '1.24'\n")
+        sites, pins = res or ([], [])
+        check(f"F6b: görev satırı tanınır ({task})", res is not None and [p["version"] for p in pins] == ["1.24"]
+              and len(sites) == 1 and bump.pushable(sites[0]) and sites[0]["new"] == "'1.25'", str((res, err)))
+    py = head.format(repo="segflo") + "steps:\n  - task: UsePythonVersion@0\n  - script: pytest\n    versionSpec: '3.9'\n"
+    res, err = scan_ci("segflo", "python", "3.12", py)
+    check("F6a: UsePythonVersion de aynı kural", res is not None and res[0] == [] and len(res[1]) == 1
+          and res[1][0]["version"] == "" and "UsePythonVersion" in res[1][0]["unparsed"], str((res, err)))
+    # (c) liste biçimi değişkenler
+    core = head.format(repo="core")
+    res, err = scan_ci("core", "php", "8.4", core + "variables:\n- name: phpVersion\n  value: '8.2'\n")
+    sites, pins = res or ([], [])
+    check("F6c: - name: phpVersion / value: '8.2' → sabitleme + otomatik site",
+          res is not None and [(p["version"], p["line"]) for p in pins] == [("8.2", 7)] and len(sites) == 1
+          and sites[0]["old"] == "'8.2'" and sites[0]["new"] == "'8.4'" and bump.pushable(sites[0]), str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "parameters:\n  - name: 'phpVersion'\n    type: string\n"
+                                                    "    default: '8.2'\n")
+    check("F6c: parametre default'u da sabitleme", res is not None and [p["version"] for p in res[1]] == ["8.2"],
+          str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "variables:\n- name: phpVersion\n  value: $(v)\n")
+    check("F6c: liste biçimi okunamayan değer", res is not None and len(res[1]) == 1 and res[1][0]["version"] == ""
+          and res[0] == [], str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "variables:\n- name: phpVersion\n- name: other\n  value: '1'\n")
+    check("F6c: değersiz liste değişkeni okunamayan", res is not None and len(res[1]) == 1
+          and res[1][0]["version"] == "", str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "steps:\n  - script: php${{ variables.phpVersion }} -v\n")
+    check("F6c: anahtar geçiyor ama sabitleme yok → okunamayan (bilinmeyen 'yok' sayılmaz)",
+          res is not None and len(res[1]) == 1 and res[1][0]["version"] == "" and res[1][0]["line"] == 6,
+          str((res, err)))
+    res, err = scan_ci("core", "php", "8.4", core + "variables:\n  phpVersion: '8.2'\nsteps:\n"
+                                                    "  - script: sudo update-alternatives --set php /usr/bin/php$(phpVersion)\n")
+    check("F6c: sabitlenmiş anahtarın kullanımı ikinci sabitleme değil",
+          res is not None and [p["version"] for p in res[1]] == ["8.2"] and len(res[0]) == 1, str((res, err)))
+
+
+class _PipeFake:
+    """F1: `<repo>-test` tanımı + dosyası için sahte istemci (ağ yok). pipe: dict | None | Exception;
+    files: (proje, repo, dal, yol) → metin; legacy: proje → {yol: metin} (kod projesinin yml-files'ı)."""
+
+    def __init__(self, pipe=None, files=None, legacy=None, project="EcomLojistik", legacy_error=None):
+        self.pipe, self.files, self.legacy = pipe, dict(files or {}), dict(legacy or {})
+        self.project, self.legacy_error, self.calls = project, legacy_error, []
+
+    def get_test_pipeline(self, repo):
+        self.calls.append(("pipe", repo))
+        if isinstance(self.pipe, Exception):
+            raise self.pipe
+        return self.pipe
+
+    def _repo_project_strict(self, repo):
+        return self.project
+
+    def get_file_content(self, repo, path, branch=None, project=None):
+        self.calls.append(("file", project, repo, branch, path))
+        if repo == "yml-files" and branch is None:
+            return (self.legacy.get(project) or {}).get(path.lstrip("/"), "")
+        v = self.files.get((project, repo, branch, path.lstrip("/")))
+        if v is None:
+            raise RuntimeError("404 dosya yok")
+        return v
+
+    def get_items_in_path(self, repo, path="/", branch=None, recursion_level="oneLevel", project=None):
+        self.calls.append(("items", project, repo, branch, path))
+        if self.legacy_error is not None:
+            raise self.legacy_error
+        return [{"path": "/" + p, "isFolder": False} for p in (self.legacy.get(project) or {})]
+
+
+def test_upgrade_final_f1_pipeline_source():
+    """F1: test hattı dosyası `<repo>-test` TANIMINDAN okunur (repository + process.yamlFilename) — dört ayrı
+    yml-files var; core'un Core-test'i EcomLojistik/yml-files:Test Pipelines/Core.yml'ı koşar. Okunamayan /
+    tanınmayan her durum kapıyı kapalı tutar."""
+    print("\n[Sürüm yükseltme son düzeltme F1: test hattı tanımı kaynak]")
+    import requests as _rq
+    from agile_sdlc_crew.quality import upgrade, upgrade_bump as bump, upgrade_track as ut
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+
+    core_yml = ("trigger: none\nresources:\n  repositories:\n    - repository: core\n      name: EcomLojistik/core\n"
+                "variables:\n  phpVersion: '8.2'\n")
+    pipe = {"id": 55, "name": "Core-test", "project": "EcomLojistik", "yaml": "Test Pipelines/Core.yml",
+            "repo_id": "c5d0", "repo_name": "yml-files", "branch": "main", "repo_project": "EcomLojistik"}
+    fkey = ("EcomLojistik", "yml-files", "main", "Test Pipelines/Core.yml")
+    src = {"repo": "yml-files", "project": "EcomLojistik", "branch": "main", "path": "Test Pipelines/Core.yml"}
+
+    def safe(fn):
+        try:
+            return fn(), None
+        except Exception as e:  # noqa: BLE001
+            return None, e
+
+    c = _PipeFake(pipe, {fkey: core_yml})
+    res, err = safe(lambda: upgrade._ci_scan(c, "core", "php", "8.4", None))
+    sites, pins = res or ([], [])
+    check("F1 core: tanımın dosyası (başka proje) okunur → sabitleme + otomatik site",
+          res is not None and pins == [dict(src, line=7, version="8.2")] and len(sites) == 1
+          and sites[0]["project"] == "EcomLojistik" and sites[0]["repo"] == "yml-files" and bump.pushable(sites[0])
+          and ("file", "EcomLojistik", "yml-files", "main", "/Test Pipelines/Core.yml") in c.calls, str((res, err, c.calls)))
+    r = upgrade._ci_read(_PipeFake(pipe, {fkey: core_yml}), "core", "php", "8.4", None)
+    check("F1 kaynak ve tanım döner", r["source"] == src and r["definition"] == pipe and r["live"], str(r))
+    # Test Pipelines/ dışında duran dosya da okunur (önek süzgeci yok)
+    p2 = dict(pipe, yaml="pipelines/core-test.yml")
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(p2, {fkey[:3] + ("pipelines/core-test.yml",): core_yml}),
+                                             "core", "php", "8.4", None))
+    check("F1 dosya Test Pipelines/ dışında da okunur", res is not None and [p["version"] for p in res[1]] == ["8.2"],
+          str((res, err)))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(None), "core", "php", "8.4", None))
+    check("F1 tanım yok, eski dosya da yok → ([], [])", res == ([], []), str((res, err)))
+    leg = _PipeFake(None, legacy={"EcomBackend": {"Test Pipelines/myduck.yml": core_yml.replace("EcomLojistik/core",
+                                                                                                 "EcomBackend/mcduck")}},
+                    project="EcomBackend")
+    res, err = safe(lambda: upgrade._ci_scan(leg, "mcduck", "go", "1.27", None))
+    check("F1 tanım yok ama kod projesinin yml-files'ında repoyu anan dosya var → okunamayan sabitleme",
+          res is not None and res[0] == [] and len(res[1]) == 1 and res[1][0]["version"] == ""
+          and "mcduck-test" in res[1][0]["unparsed"] and res[1][0]["path"] == "Test Pipelines/myduck.yml",
+          str((res, err)))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(None, legacy_error=RuntimeError("500")), "core", "php", "8.4",
+                                             None))
+    check("F1 eski dosya araması hata verirse bilinmiyor (None)", res is not None and res[1] is None, str((res, err)))
+    for label, p, why in (("YAML değil", dict(pipe, yaml=None), "YAML"),
+                          ("kod reposunun kendi dosyası", dict(pipe, repo_name="core", repo_project="EcomLojistik"),
+                           "kod reposu")):
+        res, err = safe(lambda p=p: upgrade._ci_scan(_PipeFake(p, {fkey: core_yml}), "core", "php", "8.4", None))
+        check(f"F1 {label} → tek okunamayan sabitleme, site yok",
+              res is not None and res[0] == [] and len(res[1]) == 1 and res[1][0]["version"] == ""
+              and why in res[1][0]["unparsed"], str((res, err)))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(pipe, {fkey: core_yml.replace("EcomLojistik/core", "X/other")}),
+                                             "core", "php", "8.4", None))
+    check("F1 dosya repoyu checkout etmiyor → okunamayan sabitleme ('paylaşılan / şablon')",
+          res is not None and res[0] == [] and len(res[1]) == 1 and "paylaşılan" in res[1][0]["unparsed"],
+          str((res, err)))
+    tmpl = core_yml.replace("variables:\n  phpVersion: '8.2'\n", "extends:\n  template: base.yml\n")
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(pipe, {fkey: tmpl}), "core", "php", "8.4", None))
+    check("F1 template/extends + sabitleme yok → okunamayan sabitleme",
+          res is not None and len(res[1]) == 1 and res[1][0]["version"] == "" and "template" in res[1][0]["unparsed"],
+          str((res, err)))
+    plain = core_yml.replace("variables:\n  phpVersion: '8.2'\n", "steps:\n  - script: make test\n")
+    r = upgrade._ci_read(_PipeFake(pipe, {fkey: plain}), "core", "php", "8.4", None)
+    check("F1 okunan, repoyu anan, sürüm satırı ve şablonu olmayan dosya → sabitleme yok (zayıf kanıt yolu)",
+          r["pins"] == [] and r["source"] == src and r["definition"] == pipe, str(r))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(ValueError("iki tanım")), "core", "php", "8.4", None))
+    check("F1 tanım okunamazsa sabitlemeler None (bilinmiyor)", res is not None and res[1] is None, str((res, err)))
+    res, err = safe(lambda: upgrade._ci_scan(_PipeFake(pipe, {}), "core", "php", "8.4", None))
+    check("F1 tanımın dosyası okunamazsa None", res is not None and res[1] is None, str((res, err)))
+
+    # plan: ci_source + tanım, servis/kod siteleri yanında
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        (base / "core").mkdir()
+        (base / "core" / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+        index = {"core": [{"src": "anatolia/build/l", "images": ["eu/php-8-2:1.0"]}],
+                 "web": [{"src": "anatolia/build/w", "images": ["eu/php-8-4:1.0"]}]}
+        pl = upgrade.plan(_PipeFake(pipe, {fkey: core_yml}), "core", "php", to="8.4", deps=_upgrade_deps(base),
+                          index=index, read=lambda d, p: "FROM eu/php-8-2:1.0\n", app_map_cache={})
+        check("F1 plan ci_source + ci_test_def", pl["ci_source"] == src and pl.get("ci_test_def") == pipe
+              and [s["project"] for s in pl["sites"] if s["where"] == "ci"] == ["EcomLojistik"], str(pl))
+        pl2 = upgrade.plan(None, "core", "php", to="8.4", deps=_upgrade_deps(base), index=index,
+                           read=lambda d, p: "FROM eu/php-8-2:1.0\n", yml_files={}, app_map_cache={})
+        check("F1 enjekte yolda sabitleme yoksa ci_source None, tanım çözülmez", pl2["ci_source"] is None
+              and "ci_test_def" not in pl2, str(pl2))
+
+        # status: CI PR'ı ci_source'ta aranır; yoksa aranmaz; kanıt çözülmüş tanımla (ikinci arama yok)
+        dv = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+              "path": "/build/l/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+              "blocked": ""}
+        ci_s = {"where": "ci", "repo": "yml-files", "project": "EcomLojistik", "branch": "main",
+                "path": "Test Pipelines/Core.yml", "line": 7, "old": "'8.2'", "new": "'8.4'", "blocked": ""}
+        low = dict(src, line=7, version="8.2")
+        BR = "tempo/upgrade-php-core-8.4"
+        prs = {("EcomLojistik", "yml-files", BR): {"id": 11, "status": "active", "url": "u", "closed_at": "",
+                                                   "merge_commit": "", "target": "main", "created_by": "tempo-id"}}
+
+        def scan_(sites, pins, source, **k):
+            return dict({"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False,
+                         "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [],
+                         "ci_pins": pins, "ci_source": source}, **k)
+        s = ut.status(_UpFake(prs=prs), "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv, ci_s], [low], src), wait_h=72, root=base / "core")
+        check("F1 CI PR'ı tanımın reposunda (EcomLojistik) aranır", s["prs"]["ci"] and s["prs"]["ci"]["id"] == 11
+              and s["stage"] == "test hattı" and not s["next"]["ready"], str(s["prs"]))
+        s = ut.status(_UpFake(prs=prs), "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv], [], None, ci_test_def=None), wait_h=72, root=base / "core")
+        check("F1 ci_source yoksa CI PR'ı aranmaz", s["prs"]["ci"] is None, str(s["prs"]))
+        c_ev = _UpFake(defs={"core": {"id": 5, "name": "Core-test", "project": "EcomLojistik"}},
+                       builds={55: [{"build_id": 9, "status": "completed", "result": "succeeded", "definition": "Core-test",
+                                     "url": "", "project": "EcomLojistik", "queue_time": "2026-11-10T12:00:00Z",
+                                     "source_version": ""}]})
+        s = ut.status(c_ev, "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv], [], src, ci_test_def=pipe), wait_h=72, root=base / "core")
+        check("F1 kanıt çözülmüş tanımla aranır (tanım ikinci kez sorulmaz)",
+              not c_ev.def_calls and c_ev.build_calls and c_ev.build_calls[0][:2] == ("EcomLojistik", 55)
+              and s["next"]["ready"] and s["next"]["test_note"].startswith("Test kanıtı zayıf"),
+              str((c_ev.def_calls, c_ev.build_calls, s["next"])))
+        s = ut.status(c_ev, "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv], [], None, ci_test_def=None), wait_h=72, root=base / "core")
+        check("F1 çözülmüş 'tanım yok' → Test kanıtı yok, ikinci arama yok",
+              not c_ev.def_calls and s["next"]["test_note"] == "Test kanıtı yok", str(s["next"]))
+        s = ut.status(c_ev, "core", "php", to="8.4", deps=_upgrade_deps(base),
+                      scan=scan_([dv], [], None, ci_test_def=pipe), wait_h=72, root=base / "core")
+        check("F1 tanım var ama dosyası kaynak olarak okunmamış → zayıf kanıtla açılmaz",
+              not s["next"]["ready"] and s["next"]["test_note"] == "", str(s["next"]))
+
+    # İstemci: get_test_pipeline
+    class _Cl(azb.AzureDevOpsClient):
+        _headers = {"Authorization": "x"}
+
+    class _R:
+        def __init__(self, status=200, js=None):
+            self.status_code, self._js, self.ok, self.text = status, js, status < 400, "x"
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise _rq.HTTPError(str(self.status_code), response=self)
+
+        def json(self):
+            if self._js is None:
+                raise ValueError("JSON değil")
+            return self._js
+
+    def mk():
+        cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+        cl.org_url, cl.project, cl.repo_projects = "https://dev.azure.com/o", "P", ["EcomBackend", "EcomLojistik"]
+        cl._repo_project_cache = {}
+        cl.__class__ = _Cl
+        cl._repo_project_strict = lambda r: "EcomLojistik"
+        return cl
+    detail = {"id": 55, "name": "Core-test", "process": {"type": 2, "yamlFilename": "/Test Pipelines/Core.yml"},
+              "repository": {"id": "c5d0", "name": "yml-files", "type": "TfsGit", "defaultBranch": "refs/heads/main"}}
+
+    def router(defs=None, det=None, repo=None):
+        seen = []
+
+        def get(url, headers=None, params=None, timeout=None, **k):
+            seen.append((url, dict(params or {})))
+            if url.endswith("/build/definitions"):
+                return defs if isinstance(defs, _R) else _R(200, {"value": defs})
+            if "/build/definitions/" in url:
+                return det if isinstance(det, _R) else _R(200, det)
+            if "/_apis/git/repositories/" in url:
+                return repo if isinstance(repo, _R) else _R(200, repo)
+            return _R(404)
+        return get, seen
+    og = azb.requests.get
+    try:
+        get, seen = router([{"id": 3, "name": "Core-lint"}, {"id": 55, "name": "Core-test"}], detail,
+                           {"id": "c5d0", "project": {"name": "EcomLojistik"}})
+        azb.requests.get = get
+        d, err = safe(lambda: mk().get_test_pipeline("core"))
+        check("F1 istemci: tanım + YAML yolu (baştaki / atılır) + repo / dal / repo projesi",
+              d == {"id": 55, "name": "Core-test", "project": "EcomLojistik", "yaml": "Test Pipelines/Core.yml",
+                    "repo_id": "c5d0", "repo_name": "yml-files", "branch": "main", "repo_project": "EcomLojistik"}
+              and seen[0][0].endswith("/EcomLojistik/_apis/build/definitions") and seen[0][1]["name"] == "core-test"
+              and seen[1][0].endswith("/EcomLojistik/_apis/build/definitions/55")
+              and seen[2][0] == "https://dev.azure.com/o/_apis/git/repositories/c5d0", str((d, err, seen)))
+        get, seen = router([{"id": 3, "name": "Core-lint"}])
+        azb.requests.get = get
+        d, err = safe(lambda: mk().get_test_pipeline("core"))
+        check("F1 istemci: tanım yok → None", d is None and err is None and len(seen) == 1, str((d, err)))
+        get, seen = router([{"id": 55, "name": "Core-test"}, {"id": 56, "name": "core-TEST"}])
+        azb.requests.get = get
+        d, err = safe(lambda: mk().get_test_pipeline("core"))
+        check("F1 istemci: aynı adlı iki tanım → ValueError", isinstance(err, ValueError) and "Core-test" in str(err),
+              str((d, err)))
+        get, seen = router([{"id": 55, "name": "Core-test"}], dict(detail, process={"type": 1}),
+                           {"id": "c5d0", "project": {"name": "EcomLojistik"}})
+        azb.requests.get = get
+        d, err = safe(lambda: mk().get_test_pipeline("core"))
+        check("F1 istemci: tasarımcı (YAML olmayan) tanım → yaml None", d is not None and d["yaml"] is None,
+              str((d, err)))
+        for label, args in (("tanım listesi 500", (_R(500),)), ("tanım listesi JSON değil", (_R(200, None),)),
+                            ("tanım ayrıntısı 203", ([{"id": 55, "name": "Core-test"}], _R(203, None))),
+                            ("repo sorgusu 404", ([{"id": 55, "name": "Core-test"}], detail, _R(404)))):
+            get, seen = router(*args)
+            azb.requests.get = get
+            d, err = safe(lambda: mk().get_test_pipeline("core"))
+            check(f"F1 istemci: {label} → hata", d is None and err is not None, str((d, err)))
+    finally:
+        azb.requests.get = og
+    check("F1 CI_REPO / CI_PROJECT sabitleri kalktı, find_build_definition yok",
+          not hasattr(upgrade, "CI_REPO") and not hasattr(upgrade, "CI_PROJECT")
+          and not hasattr(azb.AzureDevOpsClient, "find_build_definition"))
+
+
+def test_upgrade_final_f7_push_clock():
+    """F7: kanıt saati dosyanın commit zamanı değil, sabitleme dosyasının dalına yapılan SON PUSH'un zamanı —
+    pipeline repolarına doğrudan push yapılıyor; önce yazılıp sonra push edilen commit eski bir build'i kanıt
+    saydırırdı. max(push, Tempo CI PR'ının kapanışı) korunur; okunamayan saat kapıyı kapalı tutar."""
+    print("\n[Sürüm yükseltme son düzeltme F7: push saati]")
+    import requests as _rq
+    from agile_sdlc_crew.quality import upgrade_track as ut
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+    T1, T2, T3, T4 = ("2026-11-10T09:00:00Z", "2026-11-10T10:00:00Z", "2026-11-10T11:00:00Z",
+                      "2026-11-10T12:00:00Z")
+    pin = {"repo": "yml-files", "project": "EcomLojistik", "branch": "main", "path": "Test Pipelines/Core.yml",
+           "line": 7, "version": "8.4"}
+    dv = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+          "path": "/build/l/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0", "blocked": ""}
+    CORE_DEF = {"core": {"id": 5, "name": "Core-test", "project": "EcomLojistik"}}
+
+    def b(bid, q):
+        return {"build_id": bid, "status": "completed", "result": "succeeded", "definition": "Core-test", "url": "",
+                "project": "EcomLojistik", "queue_time": q, "source_version": ""}
+
+    class _PushFake(_UpFake):
+        def __init__(self, pushes, **k):
+            super().__init__(**k)
+            self.pushes_asked, self.pushes_map = [], dict(pushes)
+
+        def get_last_push_date(self, repo, branch, *, project=None):
+            self.pushes_asked.append((project, repo, branch))
+            v = self.pushes_map.get((project, repo, branch), "")
+            if isinstance(v, Exception):
+                raise v
+            return v
+
+        def get_last_commit_date(self, *a, **k):
+            raise AssertionError("F7: kanıt saati commit zamanından okunmamalı")
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        (base / "core").mkdir()
+        sc = {"repo": "core", "lang": "php", "current": "8.2", "target": "8.4", "up_to_date": False, "sites": [dv],
+              "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [], "ci_pins": [pin],
+              "ci_source": _ci_src([pin])}
+        key = ("EcomLojistik", "yml-files", "main")
+
+        def st(c):
+            try:
+                return ut.status(c, "core", "php", to="8.4", deps=_upgrade_deps(base), scan=sc, wait_h=72,
+                                 root=base / "core"), None
+            except Exception as e:  # noqa: BLE001
+                return None, e
+        c = _PushFake({key: T3}, defs=CORE_DEF, builds={5: [b(2, T2)]})
+        s, err = st(c)
+        check("F7 commit T1'de ama push T3'te → T2'deki yeşil build kanıt değil",
+              s is not None and (s["evidence"] or {}).get("since") == T3 and (s["evidence"] or {}).get("state") == "none"
+              and not s["next"]["ready"] and c.pushes_asked == [key], str((s and s["evidence"], s and s["next"], err)))
+        s, err = st(_PushFake({key: T3}, defs=CORE_DEF, builds={5: [b(3, T4), b(2, T2)]}))
+        check("F7 push'tan sonra yeşil → prod hazır", s is not None and s["next"]["ready"], str((s and s["next"], err)))
+        for label, v in (("boş", ""), ("okunamayan", "dün"), ("hata", RuntimeError("500"))):
+            s, err = st(_PushFake({key: v}, defs=CORE_DEF, builds={5: [b(3, T4)]}))
+            check(f"F7 push saati {label} → kapı kapalı", s is not None and not s["next"]["ready"]
+                  and "son değişiklik zamanı okunamadı" in s["next"]["reason"], str((s and s["next"], err)))
+
+    # İstemci: get_last_push_date
+    class _Cl(azb.AzureDevOpsClient):
+        _headers = {"Authorization": "x"}
+
+    class _R:
+        def __init__(self, status=200, js=None):
+            self.status_code, self._js, self.ok = status, js, status < 400
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise _rq.HTTPError(str(self.status_code), response=self)
+
+        def json(self):
+            if self._js is None:
+                raise ValueError("JSON değil")
+            return self._js
+    cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+    cl.org_url, cl.project = "https://dev.azure.com/o", "P"
+    cl.__class__ = _Cl
+    cl._repo_api_url = lambda repo, project=None: f"https://x/{project or 'P'}/_apis/git/repositories/{repo}"
+    seen = []
+    og = azb.requests.get
+
+    def use(resp):
+        azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (
+            seen.append((url, dict(params or {}))), resp)[1]
+    try:
+        use(_R(200, {"value": [{"pushId": 9, "date": "2026-11-16T18:56:50.45Z"}]}))
+        when = cl.get_last_push_date("yml-files", "main", project="EcomLojistik")
+        check("F7 istemci: dalın son push'u (refName + $top=1) → date",
+              when == "2026-11-16T18:56:50.45Z" and seen[-1][0] == "https://x/EcomLojistik/_apis/git/repositories/yml-files/pushes"
+              and seen[-1][1].get("searchCriteria.refName") == "refs/heads/main" and seen[-1][1].get("$top") == 1,
+              str((when, seen[-1:])))
+        use(_R(200, {"value": []}))
+        check("F7 istemci: push yok → ''", cl.get_last_push_date("yml-files", "main", project="EcomLojistik") == "")
+        use(_R(200, {"value": [{"pushId": 9}]}))
+        check("F7 istemci: date yok → '' (okunamaz)", cl.get_last_push_date("yml-files", "main") == "")
+        for label, r in (("500", _R(500, {"x": 1})), ("JSON değil", _R(200, None))):
+            use(r)
+            try:
+                cl.get_last_push_date("yml-files", "main")
+                check(f"F7 istemci: {label} → hata", False)
+            except Exception:  # noqa: BLE001
+                check(f"F7 istemci: {label} → hata", True)
+    finally:
+        azb.requests.get = og
+
+
+def test_upgrade_final_f8_pinned_read():
+    """F8: push_sites dosyayı hedef dalın ADIYLA değil, önce alınan hedef commit'inden (target_oid) okur — iki
+    okuma arasındaki eşzamanlı bir düzenleme Tempo'nun dalında geri alınmasın."""
+    print("\n[Sürüm yükseltme son düzeltme F8: sabit commit'ten okuma]")
+    import requests as _rq
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+    from agile_sdlc_crew.tools import azure_devops_base as azb
+
+    class _Shift(_BumpFake):
+        """Dalın adıyla okunan içerik eşzamanlı düzenlemeyle değişmiş (RUN y); hedef commit'teki RUN x."""
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.log = []
+
+        def list_branches(self, repo, project=None):
+            self.log.append(("refs", repo))
+            return super().list_branches(repo, project)
+
+        def get_file_bytes(self, repo, path, branch=None, project=None, *, version=None, version_type=None):
+            self.log.append(("read", branch, version, version_type))
+            if version_type == "commit" and version == "oid-production":
+                return b"FROM eu/php-8-2:1.0\nRUN x\n"
+            return super().get_file_bytes(repo, path, branch, project)
+    files = {("FLODevOps", "anatolia", "production", "build/core/Dockerfile"): "FROM eu/php-8-2:1.0\nRUN y\n"}
+    site = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+            "path": "/build/core/Dockerfile", "line": 1, "old": "eu/php-8-2:1.0", "new": "eu/php-8-4:1.0",
+            "blocked": ""}
+    c = _Shift(files)
+    res = bump.push_sites(c, [site], branch="tempo/upgrade-php-core-8.4", title="t", body="b", wi_id=None)
+    reads = [x for x in c.log if x[0] == "read"]
+    first_read = next(i for i, x in enumerate(c.log) if x[0] == "read")
+    first_refs = next(i for i, x in enumerate(c.log) if x[0] == "refs")
+    check("F8 hedef commit önce alınır, dosya o commit'ten okunur",
+          first_refs < first_read and reads and reads[0][2:] == ("oid-production", "commit"), str(c.log))
+    check("F8 push hedef commit'teki içerikten (eşzamanlı düzenleme geri alınmaz) ve o commit'in üstüne",
+          res["prs"] and len(c.pushes) == 1 and _bump_dec(c.pushes[0]["changes"][0]) == "FROM eu/php-8-4:1.0\nRUN x\n"
+          and c.pushes[0]["old_object_id"] == "oid-production", str((res, c.pushes)))
+
+    # İstemci: get_file_bytes(version=, version_type=) — varsayılan davranış aynı
+    class _Cl(azb.AzureDevOpsClient):
+        _headers = {"Authorization": "x"}
+
+    class _R:
+        status_code, content = 200, b"x"
+
+        def raise_for_status(self):
+            pass
+    cl = azb.AzureDevOpsClient.__new__(azb.AzureDevOpsClient)
+    cl.__class__ = _Cl
+    cl._repo_api_url = lambda repo, project=None: f"https://x/{project}/_apis/git/repositories/{repo}"
+    seen = []
+    og = azb.requests.get
+    azb.requests.get = lambda url, headers=None, params=None, timeout=None, **k: (seen.append(dict(params)), _R())[1]
+    try:
+        cl.get_file_bytes("r", "/a", "production", project="P", version="abc123", version_type="commit")
+        cl.get_file_bytes("r", "/a", "production", project="P")
+    finally:
+        azb.requests.get = og
+    check("F8 istemci: commit sürümüyle okuma", seen[0].get("versionDescriptor.version") == "abc123"
+          and seen[0].get("versionDescriptor.versionType") == "commit", str(seen[0]))
+    check("F8 istemci: varsayılan dal adıyla okuma değişmedi", seen[1].get("versionDescriptor.version") == "production"
+          and seen[1].get("versionDescriptor.versionType") == "branch", str(seen[1]))
+
+
+def test_upgrade_final_f5_resolved_blocks():
+    """F5: engelleyen bulgu kodda dururken Task'ı 'bitmiş gibi' (Resolved / Ready for Production / grace içinde Done)
+    bir durumdaysa dedup onu `skipped`'e atar ve `open_tasks` onu kapalı sayar — hiçbir taraf saymıyordu, aşama
+    `hazır` oluyordu. Tarama `açık WI` atlamalarının engelleyen kurallarını (ayrı kural başına bir) sayar; iptal
+    edilmiş ve 'insan baktı' atlamaları sayılmaz."""
+    print("\n[Sürüm yükseltme son düzeltme F5: çözülmüş görünen engelleyen iş]")
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_track as ut
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for r in ("core", "legacy"):
+            (base / r).mkdir()
+            (base / r / "composer.json").write_text('{"require": {}}', encoding="utf-8")
+        index = {"core": [{"src": "anatolia/build/core", "images": ["eu/php-8-2:1.0"]}],
+                 "legacy": [{"src": "anatolia/build/legacy", "images": ["eu/php-7-4:1.0"]}],
+                 "web": [{"src": "anatolia/build/web", "images": ["eu/php-8-4:1.0"]}]}
+        hits = {"core": [], "legacy": [{"rule": "null_to_internal", "file": "app/L.php", "line": 3, "text": "strlen(null)"},
+                                       {"rule": "null_to_internal", "file": "app/M.php", "line": 4, "text": "trim(null)"}]}
+        probe_err = [{"rule": "probe:error", "file": "app/D.php", "line": 3, "text": "x", "message": "Parse error: y"},
+                     {"rule": "probe:error", "file": "app/E.php", "line": 5, "text": "z", "message": "Parse error: y"}]
+        closed = 1e9 - 10 * 86400
+
+        def run(repo, board):
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / ("c-" + repo)}
+            deps = intake.Deps(gather=None, board=lambda c: board, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                               record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+            sc = upgrade.scan(None, repo, "php", to="8.4", deps=deps, index=index, read=lambda d, p: "", yml_files={},
+                              app_map_cache={}, head_sha_fn=lambda r: "s",
+                              scan_fn=lambda r, **k: {"files": 2, "sha": "s", "hits": list(hits[Path(r).name]),
+                                                      "adoption": {}, "errors": []},
+                              probe_fn=lambda root, lang, cur, to, **k: (
+                                  list(probe_err) if Path(root).name == "core" else [], {"ran": True, "tool": "x",
+                                                                                        "reason": ""}))
+            st = ut.status(_UpFake(), repo, "php", to="8.4", deps=deps, scan=sc, wait_h=72, root=base / repo)
+            return sc, st
+        fps = [f"php_modern:core:probe:error:app/{f}.php" for f in ("D", "E")]
+        sc, st = run("core", {})
+        check("F5 temel: probe hatası engelliyor", sc["blocking"] == 1 and st["stage"] == "hazırlık", str(sc["blocking"]))
+        for state in ("Resolved", "Ready for Production"):
+            sc, st = run("core", {fp: {"wi": 920, "state": state} for fp in fps})
+            check(f"F5 error bulgusunun Task'ı {state} → yine engelli (aynı kural iki dosya = 1), hazırlık",
+                  sc["blocking"] == 1 and not sc["auto"] and st["stage"] == "hazırlık" and not st["next"]["ready"],
+                  str((sc["blocking"], sc["skipped"], st["stage"])))
+        sc, st = run("core", {fp: {"wi": 921, "state": "Done", "closed_at": 1e9 - 3600} for fp in fps})
+        check("F5 grace içinde Done → yine engelli", sc["blocking"] == 1 and st["stage"] == "hazırlık", str(sc["skipped"]))
+        sc, st = run("core", {fp: {"wi": 922, "state": "Canceled"} for fp in fps})
+        check("F5 iptal edilmiş → sayılmaz", sc["blocking"] == 0 and st["stage"] != "hazırlık",
+              str((sc["blocking"], sc["skipped"])))
+        lfps = [f"php_modern:legacy:null_to_internal:app/{f}.php" for f in ("L", "M")]
+        sc, st = run("legacy", {fp: {"wi": 930, "state": "Done", "closed_at": closed} for fp in lfps})
+        check("F5 insan baktı → sayılmaz", sc["blocking"] == 0
+              and any(s["reason"].startswith("insan baktı") for s in sc["skipped"]), str((sc["blocking"], sc["skipped"])))
+        sc, st = run("legacy", {fp: {"wi": 931, "state": "Resolved"} for fp in lfps})
+        check("F5 behavior bulgusunun Task'ı Resolved → engelli", sc["blocking"] == 1 and st["stage"] == "hazırlık",
+              str((sc["blocking"], sc["skipped"])))
+    check("F5 parmak izi → kural yardımcısı tek yerde (upgrade), upgrade_track onu kullanır",
+          ut._fp_blocking is upgrade._fp_blocking)
+
+
+def test_upgrade_final_f9_retry_guard():
+    """F9: `POST /api/jobs/{id}/retry` bir upgrade_bump işini, aynı izleme işi için kuyrukta / çalışan bir adım işi
+    varken yeniden açmaz (queue_step'in açık iş korumasını atlamasın) — 409. DB'ye dokunulmaz."""
+    print("\n[Sürüm yükseltme son düzeltme F9: yeniden deneme koruması]")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import upgrade_bump as bump
+    payload = json.dumps({"step": "prod"})
+    kind = {"v": "upgrade_bump"}
+    saved = (server.db.get_job, server.db.create_job, server._ensure_worker, bump._open_bump_jobs)
+    made, asked = [], []
+    server.db.get_job = lambda jid: {"id": jid, "status": "failed", "work_item_id": "500", "use_hal": 0,
+                                     "wi_title": "t", "job_kind": kind["v"], "job_payload": payload}
+    server.db.create_job = lambda *a, **k: (made.append((a, k)), 6)[1]
+    server._ensure_worker = lambda: None
+    try:
+        tc = TestClient(server.app)
+        bump._open_bump_jobs = lambda tid: (asked.append(tid), [{"id": 3}])[1]
+        r = tc.post("/api/jobs/5/retry")
+        check("F9 açık adım işi varken yeniden deneme → 409, iş açılmaz",
+              r.status_code == 409 and not made and asked == ["500"] and "#3" in r.json().get("error", "")
+              and "kuyrukta" in r.json().get("error", ""), str((r.status_code, r.text, made, asked)))
+        bump._open_bump_jobs = lambda tid: []
+        r = tc.post("/api/jobs/5/retry")
+        check("F9 açık adım işi yoksa yeniden deneme kendi türüyle", r.status_code == 202 and made
+              and made[-1][1] == {"job_kind": "upgrade_bump", "job_payload": payload}, str((r.status_code, made)))
+        made.clear()
+        asked.clear()
+        kind["v"] = "pipeline"
+        bump._open_bump_jobs = lambda tid: (asked.append(tid), [{"id": 3}])[1]
+        r = tc.post("/api/jobs/5/retry")
+        check("F9 pipeline işinin yeniden denemesi etkilenmez", r.status_code == 202 and made and not asked,
+              str((r.status_code, asked)))
+    finally:
+        server.db.get_job, server.db.create_job, server._ensure_worker, bump._open_bump_jobs = saved
+
+
+def test_upgrade_final_f10_catalog_flag():
+    """F10: katalog v4'ün bu dalda EKLENEN kuralları (`upgrade_catalog: true`) CREW_TECHDEBT_UPGRADE kapalıyken
+    modernleştirme hattında yok (yeni davranış varsayılan kapalı); yükseltme hattı onları her zaman görür."""
+    print("\n[Sürüm yükseltme son düzeltme F10: katalog bayrağı]")
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake, modern, php_modern as pm, upgrade
+    new_php = {"curly_offset", "removed_casts", "required_after_optional", "legacy_autoload", "php4_constructor",
+               "loose_compare_numeric", "null_to_internal", "removed_81", "serializable_only", "moved_to_pecl_84",
+               "noncanonical_casts_85", "backtick_exec_85", "deprecated_85"}
+    rules = {r.key: r for r in pm.load_rules()}
+    check("F10 eklenen PHP kuralları işaretli, v3'tekiler (breaks alanı eklenenler dahil) değil",
+          {k for k, r in rules.items() if r.upgrade_catalog} == new_php
+          and not rules["implicit_nullable"].upgrade_catalog and not rules["utf8_encode"].upgrade_catalog,
+          str(sorted(k for k, r in rules.items() if r.upgrade_catalog)))
+    nx = {r.key: r for r in modern.rules_for(modern.LANGS["nextjs"]["source"])}
+    go = {r.key: r for r in modern.rules_for(modern.LANGS["go"]["source"])}
+    check("F10 Next.js / Go eklenenleri işaretli",
+          {k for k, r in nx.items() if r.upgrade_catalog} == {"sync_route_params", "next_legacy_image", "next_lint"}
+          and {k for k, r in go.items() if r.upgrade_catalog} == {"go122_loopvar", "go122_httpmux", "go123_timerchan"},
+          str(({k for k, r in nx.items() if r.upgrade_catalog}, {k for k, r in go.items() if r.upgrade_catalog})))
+    hits = [{"rule": "implicit_nullable", "file": "app/A.php", "line": 3, "text": "x", "module": "app"},
+            {"rule": "str_contains", "file": "app/B.php", "line": 4, "text": "y", "module": "app"},
+            {"rule": "null_to_internal", "file": "app/C.php", "line": 5, "text": "strlen(null)", "module": "app"},
+            {"rule": "curly_offset", "file": "app/D.php", "line": 6, "text": "$s{0}", "module": "app"},
+            {"rule": "removed_81", "file": "app/E.php", "line": 7, "text": "strftime()", "module": "app"}]
+    v3_keys = {"implicit_nullable", "str_contains"}
+    orig = pc.get
+    flag = {"on": False}
+    pc.get = lambda k: flag["on"] if k == "CREW_TECHDEBT_UPGRADE" else orig(k)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            (base / "web").mkdir()
+            (base / "web" / "composer.json").write_text('{"require": {"php": "^8.4"}}', encoding="utf-8")
+            (base / "web" / "app").mkdir()
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+            deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                               record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+            kw = dict(deps=deps, scan_fn=lambda r, **k: {"files": 5, "sha": "s", "hits": list(hits), "adoption": {},
+                                                         "errors": []},
+                      head_sha_fn=lambda r: "s", app_map_cache={})
+            off = pm.scan(None, "web", **kw)
+            rows = off["auto"] + off["infra"] + off["human"]
+            check("F10 bayrak kapalı: modernleştirme taramasında yeni kural yok, özet v3 ile aynı",
+                  off["version"] == "8.4" and set(off["rules"]) == v3_keys
+                  and not ({r["rule"] for r in rows} & new_php), str((off["version"], sorted(off["rules"]))))
+            flag["on"] = True
+            on = pm.scan(None, "web", **kw)
+            check("F10 bayrak açık: yeni kurallar modernleştirmede de görünür",
+                  {"null_to_internal", "curly_offset", "removed_81"} <= set(on["rules"]), str(sorted(on["rules"])))
+            flag["on"] = False
+            # rector_scope_for (Teknik borç listesinden yeniden kuyruk): bayrak kapalıyken yeni kural araç kuralı değil
+            (base / "core").mkdir()
+            (base / "core" / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+            saved_sc = pm.scan_cached
+            pm.scan_cached = lambda *a, **k: {"hits": [{"rule": "curly_offset", "file": "app/D.php", "line": 6}]}
+            try:
+                fp = [pm.fingerprint("core", "curly_offset", "app/D.php")]
+                none_off = pm.rector_scope_for(base / "core", fp, cfg=cfg)
+                flag["on"] = True
+                some_on = pm.rector_scope_for(base / "core", fp, cfg=cfg)
+            finally:
+                pm.scan_cached = saved_sc
+                flag["on"] = False
+            check("F10 rector_scope_for: bayrak kapalı → yeni kural kapsam vermez; açık → verir",
+                  none_off is None and some_on == {"lang": "php", "repo": "core", "scope": {"curly_offset": ["app/D.php"]}},
+                  str((none_off, some_on)))
+            # Next.js modernleştirme grupları (modern.scan / take aynı build_groups'u kullanır)
+            nhits = [{"rule": "next_legacy_image", "file": "app/p.tsx", "line": 1, "text": "x", "module": "app"}]
+            g, _s, summ = pm.build_groups({"hits": nhits}, list(nx.values()), "15.0", repo="site", board_index={},
+                                          now=1e9, cfg=cfg, source=modern.LANGS["nextjs"]["source"])
+            check("F10 Next.js modernleştirme: bayrak kapalı → yeni kural grubu yok", not g and not summ, str(summ))
+            # yükseltme hattı her zaman görür (bayrak kapalı)
+            (base / "legacy").mkdir()
+            (base / "legacy" / "composer.json").write_text('{"require": {}}', encoding="utf-8")
+            idx = {"legacy": [{"src": "anatolia/build/l", "images": ["eu/php-7-4:1.0"]}],
+                   "web": [{"src": "anatolia/build/w", "images": ["eu/php-8-4:1.0"]}]}
+            up = upgrade.scan(None, "legacy", "php", to="8.4", deps=deps, index=idx, read=lambda d, p: "",
+                              yml_files={}, app_map_cache={}, head_sha_fn=lambda r: "s",
+                              scan_fn=lambda r, **k: {"files": 5, "sha": "s", "hits": list(hits), "adoption": {},
+                                                      "errors": []},
+                              probe_fn=lambda *a, **k: ([], {"ran": False, "tool": "", "reason": ""}))
+            check("F10 yükseltme hattı bayrak kapalıyken de yeni kuralları görür",
+                  {"null_to_internal", "curly_offset", "removed_81"} <= set(up["rules"]), str(sorted(up["rules"])))
+    finally:
+        pc.get = orig
 
 
 def test_php_rector_fix():
@@ -7585,6 +10867,43 @@ def test_quality_detail():
     check("Task açıklamasında da kritiklik satırı", "<b>Kritiklik:</b> Yüksek · E_WARNING" in render.task_description(g))
 
 
+def test_upgrade_rules():
+    print("\n[upgrade: katalog breaks/fix_min ve kural süzgeci]")
+    import tempfile
+    from pathlib import Path
+    from agile_sdlc_crew.quality import php_modern as pm, upgrade
+    rules = pm.load_rules()
+    by = {r.key: r for r in rules}
+    check("removed_functions hedefte çalışmaz", by["removed_functions"].breaks == "error")
+    check("implicit_nullable deprecation", by["implicit_nullable"].breaks == "deprecation")
+    check("mekanik kural yükseltme kuralı değil", by["str_contains"].breaks == "")
+    keys = {r.key for r in upgrade.upgrade_rules(rules, "8.2", "8.4")}
+    check("8.2→8.4: 8.3 ve 8.4 kuralları",
+          {"get_class_noarg", "deprecated_83", "implicit_nullable", "deprecated_84"} <= keys, str(keys))
+    check("8.2→8.4: 8.2 ve öncesi yok",
+          not ({"dynamic_properties", "utf8_encode", "removed_functions"} & keys))
+    check("7.4→8.4 removed_functions'ı içerir",
+          "removed_functions" in {r.key for r in upgrade.upgrade_rules(rules, "7.4", "8.4")})
+    check("error engeller", upgrade.blocking(by["removed_functions"], auto=False))
+    check("otomatik deprecation engeller, otomatik olmayan engellemez",
+          upgrade.blocking(by["implicit_nullable"], auto=True)
+          and not upgrade.blocking(by["implicit_nullable"], auto=False))
+    check("breaks boş kural engellemez", not upgrade.blocking(by["str_contains"], auto=True))
+    check("fix_min varsayılanı (7, 0)", by["str_contains"].fix_min == (7, 0))
+    base = ("rules:\n  - key: x\n    since: \"8.0\"\n    kind: deprecation\n"
+            "{extra}")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "r.yaml"
+        p.write_text(base.format(extra="    breaks: saçma\n"), encoding="utf-8")
+        try:
+            pm.load_rules(p)
+            check("geçersiz breaks ValueError", False)
+        except ValueError:
+            check("geçersiz breaks ValueError", True)
+        p.write_text(base.format(extra="    fix_min: \"8.4\"\n"), encoding="utf-8")
+        check("fix_min '8.4' → (8, 4)", pm.load_rules(p)[0].fix_min == (8, 4))
+
+
 def test_php_modern_82_84():
     """core 8.4 sanılıyordu ama öneriler 8.1'de bitiyordu: katalogda 8.2'den sonrası yok
     denecek kadar azdı. Tarayıcıya 8.2/8.3/8.4 kuralları eklendi."""
@@ -7616,6 +10935,4390 @@ def test_php_modern_82_84():
     html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
     check("repo listesi: taranabilenler üstte, bilinmeyenler altta ayrı grupta",
           'items.sort(key=lambda i: (not i.get("scannable")' in md and "Hedef sürümü bilinmeyen (" in html)
+
+
+def test_upgrade_php_rules():
+    """Yükseltme kırılma kuralları (7.4 → 8.5): break.php'de her kural bulunur,
+    ok.php'deki karşı örneklerde hiçbir yükseltme bulgusu çıkmaz."""
+    print("\n[upgrade: PHP kırılma kuralları]")
+    import shutil
+    from agile_sdlc_crew.quality import php_modern as pm
+    if not shutil.which("php"):
+        skip("upgrade PHP kuralları", "php yok"); return
+    fx = Path(__file__).resolve().parent / "fixtures" / "upgrade" / "php"
+    res = pm.scan_repo(fx)
+    by = {r.key: r for r in pm.load_rules()}
+    hits = {(h["rule"], h["file"]) for h in res["hits"]}
+    keys = ("removed_functions", "curly_offset", "removed_casts", "required_after_optional", "legacy_autoload",
+            "php4_constructor", "loose_compare_numeric", "null_to_internal", "removed_81", "serializable_only",
+            "moved_to_pecl_84", "noncanonical_casts_85", "backtick_exec_85", "deprecated_85")
+    for k in keys:
+        check(f"{k} bulundu", (k, "break.php") in hits, str(sorted(h for h in hits if h[1] == "break.php")))
+    got = {(h["rule"], h["line"]) for h in res["hits"] if h["file"] == "break.php"}
+    check("removed_casts hem (real) hem (unset)", {("removed_casts", 5), ("removed_casts", 6)} <= got, str(sorted(got)))
+    check("noncanonical_casts_85 dört cast da", {("noncanonical_casts_85", n) for n in (17, 18, 19, 20)} <= got, str(sorted(got)))
+    check("(double) yalnız 8.5 kuralı; (real) 8.5 kuralı değil", ("noncanonical_casts_85", 5) not in got, str(sorted(got)))
+    check("deprecated_85: curl_close + case ;", {("deprecated_85", 22), ("deprecated_85", 24)} <= got, str(sorted(got)))
+    bad = [h for h in res["hits"] if h["file"] == "ok.php" and by[h["rule"]].breaks]
+    check("karşı örneklerde yükseltme bulgusu yok", not bad, str(bad))
+    for k in keys:
+        check(f"{k} katalogda ve kırılma kuralı", k in by and bool(by[k].breaks), k)
+    for k in ("legacy_autoload", "php4_constructor", "serializable_only"):
+        check(f"{k} line_local değil", not by[k].line_local)
+    check("breaks sınıfları", by["curly_offset"].breaks == "error" and by["php4_constructor"].breaks == "behavior"
+          and by["required_after_optional"].breaks == "deprecation" and by["moved_to_pecl_84"].breaks == "error")
+    check("moved_to_pecl_84 eklenti ister", set(sum(by["moved_to_pecl_84"].requires_if.values(), [])) >= {"imap", "pspell", "oci8"})
+    check("kural since sürümleri", by["removed_81"].since == (8, 1) and by["noncanonical_casts_85"].since == (8, 5)
+          and by["curly_offset"].since == (8, 0))
+
+
+def test_upgrade_probe_and_blockers():
+    """Hedef araçla doğrulama (php -l / compile()) ve composer.lock bağımlılık engelleri."""
+    print("\n[upgrade: probe ve bağımlılık engelleri]")
+    import json as _json
+    import os
+    import shutil
+    import sys as _sys
+    import tempfile
+    from pathlib import Path
+    from agile_sdlc_crew.quality import upgrade
+    A = upgrade.php_constraint_allows
+    check("^7.3|^8.0 8.4'e izin verir", A("^7.3|^8.0", "8.4"))
+    check("~8.1.0 8.4'e izin vermez", not A("~8.1.0", "8.4"))
+    check(">=7.4 <8.3 izin vermez", not A(">=7.4 <8.3", "8.4"))
+    check("anlaşılmayan kısıt engel değil", A("dev-main as 1.0", "8.4"))
+    check("kısıt biçimleri", A(">=7.2.5", "8.4") and A("^8.0 || ^7.4", "8.4") and not A("^7.4", "8.4")
+          and A("8.*", "8.4") and not A("<8.4", "8.4") and A("<=8.4", "8.4") and not A("~8.3.0", "8.4") and A("~8.3", "8.4")
+          and not A("^8.0 <8.3", "8.4") and A(">= 7.4, < 9", "8.4") and not A("7.4 - 8.2", "8.4"))
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "repo"
+        root.mkdir()
+        (root / "composer.lock").write_text(_json.dumps({"packages": [
+            {"name": "a/ok", "version": "1.0", "require": {"php": "^8.0"}},
+            {"name": "b/old", "version": "2.0", "require": {"php": "~8.1.0"}},
+            {"name": "c/none", "version": "1.0"}]}))
+        check("yalnız b/old engel", [b["name"] for b in upgrade.blockers(root, "php", "8.4")] == ["b/old"])
+        check("PHP dışı dilde engel yok", upgrade.blockers(root, "go", "1.25") == [])
+        fake = base / "bin"
+        fake.mkdir()
+        good, bad = fake / "php8.4", fake / "notphp"
+        good.write_text("#!/bin/sh\n"); bad.write_text("#!/bin/sh\n")
+        old = {k: os.environ.get(k) for k in ("CREW_UPGRADE_PHP_BINS", "CREW_UPGRADE_PYTHON_BINS")}
+        try:
+            os.environ["CREW_UPGRADE_PHP_BINS"] = f"8.4={good},8.5={bad},8.6=/yok/php,x.y={good},rel/php=1"
+            check("tool_bins: yalnız php… adlı, var olan, N.N sürümlü", upgrade.tool_bins("CREW_UPGRADE_PHP_BINS", "php") == {"8.4": str(good)},
+                  str(upgrade.tool_bins("CREW_UPGRADE_PHP_BINS", "php")))
+            check("_tool_ok env'e bakar", upgrade._tool_ok("php", "8.4") and not upgrade._tool_ok("php", "8.5"))
+            os.environ.pop("CREW_UPGRADE_PHP_BINS")
+            hits, st = upgrade.probe(root, "php", "8.2", "8.4")
+            check("araç yokken probe atlanır, hata yok", hits == [] and st["ran"] is False and "araç" in st["reason"], str(st))
+            check("Next.js: araç yok", upgrade.probe(root, "nextjs", "14.0", "15.0")[1] == {"ran": False, "tool": "", "reason": "araç yok"})
+            check("pyproject.toml pipeline_config'te değil", "CREW_UPGRADE_PHP_BINS" not in
+                  (Path(upgrade.__file__).parent.parent / "pipeline_config.py").read_text())
+            rules = upgrade.probe_rules([{"rule": "probe:error", "message": "Parse error: x"},
+                                         {"rule": "probe:deprecation", "message": "Deprecated: y"}], to="8.4")
+            by = {r.key: r for r in rules}
+            check("probe_rules alanları", by["probe:error"].breaks == "error" and by["probe:error"].auto and by["probe:error"].line_local
+                  and by["probe:deprecation"].breaks == "deprecation" and not by["probe:deprecation"].auto
+                  and by["probe:error"].since == (8, 4) and "Parse error" in by["probe:error"].title)
+            # PHP
+            php = shutil.which("php")
+            if php:
+                (root / "src").mkdir(); (root / "vendor").mkdir()
+                (root / "src" / "bad.php").write_text("<?php\nfunction ( {\n")
+                (root / "src" / "dep.php").write_text("<?php\nfunction f(int $a = null) { return $a; }\n")
+                (root / "src" / "ok.php").write_text("<?php\nfunction g(?int $a = null) { return $a; }\n")
+                (root / "vendor" / "v.php").write_text("<?php\nfunction ( {\n")
+                link = fake / "php"
+                os.symlink(php, link)
+                os.environ["CREW_UPGRADE_PHP_BINS"] = f"8.4={link}"
+                hits, st = upgrade.probe(root, "php", "8.2", "8.4")
+                errs = [h for h in hits if h["rule"] == "probe:error"]
+                check("php: parse error → probe:error, vendor dışlanır", st["ran"] is True
+                      and [h["file"] for h in errs] == ["src/bad.php"] and errs[0]["line"] >= 1, str((hits, st)))
+                check("php: ok.php temiz", not [h for h in hits if h["file"] == "src/ok.php"])
+                check("php: hit şekli", all(set(h) == {"rule", "file", "line", "text", "message"} for h in hits) and len(hits) >= 1)
+            else:
+                skip("php probe", "yerelde php yok")
+            # Python tuzakları
+            pr = base / "pyrepo"
+            pr.mkdir()
+            marker = base / "MARKER"
+            for n in ("py_compile.py", "ruff.py", "warnings.py", "json.py"):
+                (pr / n).write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+            (pr / "a.py").write_text("def (:\n")
+            (pr / "b.py").write_text("x = 1\nif x is 1:\n    pass\n")
+            (pr / "c.py").write_text("x = 1\n")
+            exe = Path(_sys.executable)
+            link = fake / "python3.x"
+            os.symlink(exe, link)
+            ver = f"{_sys.version_info[0]}.{_sys.version_info[1]}"
+            os.environ["CREW_UPGRADE_PYTHON_BINS"] = f"{ver}={link}"
+            hits, st = upgrade.probe(pr, "python", "3.9", ver)
+            check("python: işaret dosyası oluşmadı (depo kodu çalışmadı)", not marker.exists())
+            check("python: SyntaxError → probe:error", any(h["rule"] == "probe:error" and h["file"] == "a.py" for h in hits), str((hits, st)))
+            check("python: SyntaxWarning → probe:deprecation", any(h["rule"] == "probe:deprecation" and h["file"] == "b.py" and h["line"] == 2 for h in hits), str(hits))
+            check("python: temiz dosya hit'siz", not [h for h in hits if h["file"] == "c.py"])
+            hits2, _ = upgrade.probe(pr, "python", "3.9", ver, files=["../etc/passwd", "c.py"])
+            check("python: kök dışı yol reddedilir", hits2 == [])
+            # Next.js peer engelleri
+            nx = base / "nx"
+            nx.mkdir()
+            (nx / "package.json").write_text(_json.dumps({"dependencies": {"next": "^14.0.0", "react": "17.0.2",
+                                                                          "react-dom": "^17.0.2"}}))
+            bl = upgrade.blockers(nx, "nextjs", "15.0")
+            check("nextjs: react 17 → her paket için peer engeli",
+                  sorted(b["name"] for b in bl) == ["react", "react-dom"] and all(b["kind"] == "peer" for b in bl)
+                  and bl[0]["detail"] == "Next 15.0 en az react 18.2 ister", str(bl))
+            (nx / "package.json").write_text(_json.dumps({"dependencies": {"next": "^14.0.0", "react": "^18.3.0"}}))
+            check("nextjs: react ^18.3.0 engel değil", upgrade.blockers(nx, "nextjs", "15.0") == [])
+            (nx / "package.json").write_text(_json.dumps({"dependencies": {"react": "latest", "react-dom": "workspace:*"}}))
+            check("nextjs: anlaşılmayan sürüm engel değil; package.json yoksa boş",
+                  upgrade.blockers(nx, "nextjs", "15.0") == [] and upgrade.blockers(base / "yok", "nextjs", "15.0") == [])
+            # Go probe
+            import subprocess as sp
+            if shutil.which("go") and shutil.which("git") and upgrade._tool_ok("go", "1.24"):
+                def mk(name, gomod, src):
+                    r = base / name
+                    r.mkdir()
+                    (r / "go.mod").write_text(gomod)
+                    (r / "main.go").write_text(src)
+                    for a in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "i"]):
+                        sp.run(["git", *a], cwd=r, check=True, capture_output=True)
+                    return r
+                bad = mk("gobad", "module m\n\ngo 1.22\n", "package main\n\nfunc main() {\n\t_ = undefinedThing\n}\n")
+                before = (bad / "go.mod").read_bytes()
+                hits, st = upgrade.probe(bad, "go", "1.22", "1.24")
+                check("go: derleme hatası tek probe:error (vet kopyası yok)", st["ran"] is True
+                      and [(h["rule"], h["file"], h["line"]) for h in hits] == [("probe:error", "main.go", 4)], str((hits, st)))
+                wl = sp.run(["git", "worktree", "list"], cwd=bad, capture_output=True, text=True).stdout.strip().splitlines()
+                check("go: geçici worktree kalmadı, go.mod değişmedi", len(wl) == 1 and (bad / "go.mod").read_bytes() == before
+                      and not [p for p in Path(tempfile.gettempdir()).glob("tempo-gprobe-*")], str(wl))
+                ok = mk("gook", "module m\n\ngo 1.22\n", "package main\n\nfunc main() {}\n")
+                hits, st = upgrade.probe(ok, "go", "1.22", "1.24")
+                check("go: temiz modül → ran=True, hit yok", st["ran"] is True and hits == [], str((hits, st)))
+                broken = mk("gobroken", "module m\n\ngo 1.22\n\nfoo bar\n", "package main\n\nfunc main() {}\n")
+                hits, st = upgrade.probe(broken, "go", "1.22", "1.24")
+                check("go: build hiçbir yere varmadı → ran=False + neden", st["ran"] is False and hits == [] and st["reason"], str((hits, st)))
+            else:
+                skip("go probe", "yerelde go/git yok ya da hedeften eski")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+def test_upgrade_plan_sites():
+    """Yükseltme hedefi ve sürüm yerleri: seçilebilir sürümler, imaj kanıtı, CI ve kod siteleri."""
+    print("\n[upgrade: hedef sürüm ve sürüm yerleri]")
+    import tempfile
+    from pathlib import Path
+    from agile_sdlc_crew.quality import intake, upgrade
+    index = {"core": [{"src": "anatolia/build/lojistik", "images": ["eu/prod-ar/php-8-2:1.0"]},
+                      {"src": "russia/build/lojistik", "images": ["10.1.1.1:5000/prod-ar/php-8-2:1.0"]}],
+             "web": [{"src": "anatolia/build/web", "images": ["eu/prod-ar/php-8-4:1.0"]}]}
+    check("varsayılan hedef: yayınlanmış en yüksek imaj", upgrade.default_target("php", "8.2", index) == "8.4")
+    _kv = upgrade.known_versions("nextjs")
+    check("liste sonunu geçmiş repo için hedef yok (Next 16.3, liste 15.0 → geriye yükseltme önerilmez)",
+          upgrade.default_target("nextjs", "99.0", index) is None
+          and upgrade.default_target("nextjs", _kv[-1], index) is None
+          and upgrade.default_target("nextjs", "0.1", index) == _kv[-1])
+    sel = upgrade.selectable("php", "8.2", index)
+    check("seçilebilir: listedeki her üst sürüm", [s["version"] for s in sel] == ["8.3", "8.4", "8.5"])
+    # Görev 2 PHP 8.5 kırılma kurallarını kataloğa ekledi (noncanonical_casts_85) → catalog True
+    check("8.5 seçilebilir: imajı yok ama katalog kuralı var",
+          sel[-1]["published"] is False and sel[-1]["catalog"] is True and sel[1]["published"] is True)
+    check("Go: listenin sonuncusu varsayılan", upgrade.default_target("go", "1.24", {}) == "1.27")
+    check("imaj adı", upgrade.image_for("eu/prod-ar/php-8-2:1.0", "php", "8.4") == "eu/prod-ar/php-8-4:1.0")
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "core"
+        root.mkdir()
+        (root / "composer.json").write_text('{\n  "require": {\n    "php": "^8.2"\n  }\n}\n')
+        df = {"/build/lojistik/Dockerfile": "FROM scratch\nFROM eu/prod-ar/php-8-2:1.0\n"}
+        read = lambda d, p: ("FROM 10.1.1.1:5000/prod-ar/php-8-2:1.0\n" if d == "russia" else "FROM eu/prod-ar/php-8-2:1.0\n")
+        yml = {"Test Pipelines/core.yml": "variables:\n  phpVersion: '8.2'\nresources:\n  - repository: s\n    name: EcomBackend/core\n",
+               "Test Pipelines/other.yml": "variables:\n  phpVersion: '8.2'\nresources:\n    name: EcomBackend/other\n"}
+        ss = upgrade.sites(None, "core", root, "php", "8.2", "8.4", index, read=read, yml_files=yml)
+        dv = {s["repo"]: s for s in ss if s["where"] == "devops"}
+        check("anatolia sitesi açık", dv["anatolia"]["blocked"] == "" and dv["anatolia"]["path"] == "/build/lojistik/Dockerfile"
+              and dv["anatolia"]["line"] == 1 and dv["anatolia"]["new"] == "eu/prod-ar/php-8-4:1.0", str(dv))
+        check("russia imajı yayınlanmamış → engelli", "yayınlanmamış" in dv["russia"]["blocked"], str(dv["russia"]))
+        ci = [s for s in ss if s["where"] == "ci"]
+        check("CI sitesi yalnız core'u anan dosya", [s["path"] for s in ci] == ["Test Pipelines/core.yml"]
+              and ci[0]["line"] == 2 and ci[0]["old"] == "'8.2'" and ci[0]["new"] == "'8.4'", str(ci))
+        cs = [s for s in ss if s["where"] == "code"]
+        check("kod sitesi: composer require.php", len(cs) == 1 and cs[0]["path"] == "composer.json" and cs[0]["line"] == 3
+              and cs[0]["old"] == "^8.2" and cs[0]["new"] == "^8.4", str(cs))
+        deps = intake.Deps(gather=None, board=None, repo_ok=lambda r: True, queue=None, record=None, now=None,
+                           cfg=lambda: {"repos_dir": str(base)})
+        p85 = upgrade.plan(None, "core", "php", to="8.5", deps=deps, index=index, read=read, yml_files=yml)
+        check("yayınlanmamış hedef: bütün üretim siteleri engelli",
+              p85["sites"] and all("yayınlanmamış" in s["blocked"] for s in p85["sites"] if s["where"] == "devops"))
+        p84 = upgrade.plan(None, "core", "php", to="8.4", deps=deps, index=index, read=read, yml_files=yml)
+        check("plan: current/target/up_to_date", p84["current"] == "8.2" and p84["target"] == "8.4" and not p84["up_to_date"]
+              and len(p84["per_src"]) == 2, str(p84["current"]))
+        for bad in ("9.9", "8.4; rm", "8.1"):
+            try:
+                upgrade.plan(None, "core", "php", to=bad, deps=deps, index=index)
+                check(f"geçersiz hedef {bad}", False)
+            except ValueError as e:
+                check(f"geçersiz hedef {bad}", "Hedef sürüm seçilemez" in str(e))
+        idx2 = {"core": [{"src": "anatolia/build/lojistik", "images": ["eu/prod-ar/php-8-4:1.0"]}]}
+        pu = upgrade.plan(None, "core", "php", deps=deps, index=idx2)
+        check("güncel repo: up_to_date, site yok", pu["up_to_date"] is True and pu["sites"] == [], str(pu))
+
+        # Düzeltme turu 1 — 1: bulunamayan Dockerfile satırı sessizce düşmez
+        idx3 = {"core": [{"src": "anatolia/build/a", "images": ["eu/prod-ar/php-8-2:1.0"]},
+                         {"src": "anatolia/build/b", "images": ["eu/prod-ar/php-8-2:1.0"]}],
+                "web": [{"src": "anatolia/build/web", "images": ["eu/prod-ar/php-8-4:1.0"]}]}
+        rd3 = lambda d, p: ("" if "/build/a/" in p else
+                            "FROM eu/prod-ar/php-8-2:1.0 AS x\nRUN true\nFROM eu/prod-ar/php-8-2:1.0\n")
+        s3 = upgrade.sites(None, "core", root, "php", "8.2", "8.4", idx3, read=rd3, yml_files={})
+        d3 = [s for s in s3 if s["where"] == "devops"]
+        miss = [s for s in d3 if s["path"] == "/build/a/Dockerfile"]
+        check("eksik FROM satırı: line 0 + engelli site",
+              len(miss) == 1 and miss[0]["line"] == 0 and "bulunamadı" in miss[0]["blocked"], str(miss))
+        two = sorted(s["line"] for s in d3 if s["path"] == "/build/b/Dockerfile")
+        check("aynı imaj iki FROM satırında: iki site", two == [1, 3], str(two))
+
+        # 3: yalnız app_map/per_src'te bilinen servis de site alır
+        ps = [{"src": "global/build/only", "version": "8.2", "image": "eu/prod-ar/php-8-2:1.0"}]
+        rd4 = lambda d, p: "FROM eu/prod-ar/php-8-2:1.0\n"
+        s4 = upgrade.sites(None, "core", root, "php", "8.2", "8.4", idx3, read=rd4, yml_files={}, per_src=ps)
+        check("per_src'te olan servis için devops sitesi var",
+              any(s["where"] == "devops" and s["repo"] == "global" and s["line"] == 1 for s in s4), str(s4))
+        p4 = upgrade.plan(None, "core", "php", to="8.4", deps=deps, index=idx3, read=rd4, yml_files={})
+        check("plan per_src'i siteye taşır", p4["per_src"] == [] or all(
+            any(s["where"] == "devops" and s["repo"] == x["src"].split("/")[0] for s in p4["sites"]) for x in p4["per_src"]))
+
+        # 2: aralık kısıtı yeniden yazılmaz
+        for cons in ("^7.4|^8.0", ">=7.4 <8.5", ">=7.4,<9"):
+            r2 = base / "cr"
+            r2.mkdir(exist_ok=True)
+            (r2 / "composer.json").write_text('{\n  "require": {\n    "php": "%s"\n  }\n}\n' % cons)
+            c2 = [s for s in upgrade.sites(None, "cr", r2, "php", "7.4", "8.4", {}, yml_files={}) if s["where"] == "code"]
+            if cons == "^7.4|^8.0":
+                check("composer ^|^ yeniden yazılır", len(c2) == 1 and c2[0]["new"] == ">=8.4" and c2[0]["blocked"] == "", str(c2))
+            else:
+                check(f"composer {cons}: elle düzenlenmeli", len(c2) == 1 and "elle" in c2[0]["blocked"]
+                      and c2[0]["new"] == c2[0]["old"], str(c2))
+        r3 = base / "py"
+        r3.mkdir()
+        (r3 / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.8,<3.12"\n')
+        c3 = [s for s in upgrade.sites(None, "py", r3, "python", "3.8", "3.12", {}, yml_files={}) if s["where"] == "code"]
+        check("requires-python üst sınırlı: elle düzenlenmeli", len(c3) == 1 and "elle" in c3[0]["blocked"]
+              and c3[0]["new"] == c3[0]["old"], str(c3))
+
+
+def _fake_hub(tags: dict, calls: list | None = None, down: bool = False):
+    """Docker Hub taklidi: `tags` = {ad: [etiket, …]}; liste ucu `name=<minor>.` süzer, tek etiket ucu 200 / 404."""
+    def fetch(url):
+        if calls is not None:
+            calls.append(url)
+        if down:
+            raise OSError("ağ yok")
+        m = re.search(r"/library/(\w+)/tags\?name=([\d.]+)&", url)
+        if m:
+            return 200, {"results": [{"name": t} for t in tags.get(m.group(1), []) if m.group(2) in t]}
+        m = re.search(r"/library/(\w+)/tags/([^/?]+)$", url)
+        if m:
+            return (200, {"name": m.group(2)}) if m.group(2) in tags.get(m.group(1), []) else (404, None)
+        return 500, None
+    return fetch
+
+
+class _FakeBaseImages:
+    """FLODevOps/base-images taklidi (kayıt tutan): dal -> {yol: bayt}; yazma çağrıları `calls`ta."""
+    PHP84 = (b"ARG PHP_VERSION=8.4.27\nFROM php:${PHP_VERSION}-fpm-trixie\n\nRUN set -ex && \\\n"
+             b"    apt-get update && \\\n    # Opcache\n    docker-php-ext-install opcache && \\\n"
+             b"    docker-php-ext-enable opcache && \\\n    echo done")
+
+    def __init__(self, files=None, prs=None, fail_list=False, fail_at=None, branch_result=None,
+                 move_head_after=None):
+        self.fail_at = fail_at              # "branch" | "push" | "pr" | "deny-branch" | "deny-push"
+        self.branch_result = branch_result
+        self.move_head_after = move_head_after   # list_branches çağrı sayısı; sonrası staging başı ilerler
+        self.list_n = 0
+        self.fail_list_after = None         # bu kadar list_branches çağrısından sonra OSError
+        self.org_url = "https://dev.azure.com/org"
+        self.item_meta: dict = {}           # (dal, yol) -> listeleme öğesine eklenen alanlar (gitObjectType, objectId)
+        self.pr_response = None             # create_pull_request yanıtını ez
+        self.oids: dict = {}                # dal -> başın objectId'si (yoksa "oid-<dal>")
+        self.files = {"staging": dict(files if files is not None else {
+            "/Jenkinsfile": b"pipeline {}", "/README.md": b"# x",
+            "/php-7-4/Dockerfile": b"FROM php:7.4-fpm", "/php-7-4/tag.txt": b"1.0",
+            "/php-8-2/dockerfile": b"ARG PHP_VERSION=8.2.1\nFROM php:${PHP_VERSION}-fpm-trixie", "/php-8-2/tag.txt": b"1.0",
+            "/php-8-4/Dockerfile": self.PHP84, "/php-8-4/tag.txt": b"1.1", "/php-8-4/extra.ini": b"a=1\r\n",
+            "/python-3-13-18/Dockerfile": b"FROM python:3.13.18-slim-trixie", "/python-3-13-18/tag.txt": b"1.0",
+            "/python-3-13-18/requirements.txt": b"requests==2\n"})}
+        self.prs = dict(prs or {})
+        self.fail_list = fail_list
+        self.calls: list = []
+
+    def list_branches(self, repo, project=None):
+        if self.fail_list or (self.fail_list_after is not None and self.list_n >= self.fail_list_after):
+            raise OSError("ağ yok")
+        self.list_n += 1
+        moved = self.move_head_after is not None and self.list_n > self.move_head_after
+        return [{"name": f"refs/heads/{b}",
+                 "objectId": self.oids.get(b, f"oid-{b}") + ("-moved" if moved and b == "staging" else "")}
+                for b in self.files]
+
+    def get_items_in_path(self, repo, path, branch=None, recursion_level="oneLevel", project=None):
+        fs = self.files[branch]
+        path = "/" + path.strip("/")
+        out, dirs = [], set()
+        for p in fs:
+            if path == "/":
+                rel = p.lstrip("/")
+            elif p.startswith(path + "/"):
+                rel = p[len(path) + 1:]
+            else:
+                continue
+            if "/" in rel and recursion_level != "full":
+                dirs.add(path.rstrip("/") + "/" + rel.split("/")[0])
+            else:
+                out.append({"path": p, "isFolder": False, **self.item_meta.get((branch, p), {})})
+        return [{"path": d, "isFolder": True} for d in sorted(dirs)] + out
+
+    def get_file_bytes(self, repo, path, branch=None, project=None, version=None, version_type=None, **kw):
+        if version:
+            assert version_type == "commit", version_type
+            branch = re.sub(r"-moved$", "", version[len("oid-"):])
+        return self.files[branch or "staging"].get(path)
+
+    def _deny(self):
+        import requests as _rq
+        e = _rq.HTTPError("403")
+        e.response = SimpleNamespace(status_code=403)
+        raise e
+
+    def create_branch(self, repo, name, source_branch="main", project=None, source_object_id=None):
+        if self.fail_at == "deny-branch":
+            self._deny()
+        self.calls.append(("branch", name, source_branch, source_object_id))
+        if self.branch_result is not None:
+            return self.branch_result
+        self.files[name] = dict(self.files[source_branch])
+        self.oids[name] = f"oid-{source_branch}"     # yeni dal kaynağın commit'inde
+        return {"value": [{"success": True}]}
+
+    def push_changes(self, repo, branch, changes, msg, project=None, old_object_id=None):
+        import base64 as _b64
+        if self.fail_at == "deny-push":
+            self._deny()
+        self.calls.append(("push", branch, changes, old_object_id, project))
+        self.oids[branch] = f"oid-{branch}"          # push dalın başını ilerletir
+        for c in changes:
+            self.files[branch][c["path"]] = _b64.b64decode(c["content"])
+        return {}
+
+    def create_pull_request(self, repo, src, tgt="main", title="", description="", work_item_ids=None,
+                            draft=False, project=None):
+        if self.fail_at == "pr":
+            raise OSError("PR servisi çöktü")
+        self.calls.append(("pr", src, tgt, title, description, draft, project))
+        self.prs[src] = {"id": 77, "status": "active", "url": "http://pr/77"}
+        if self.pr_response is not None:
+            return self.pr_response
+        return {"pullRequestId": 77, "url": "https://dev.azure.com/org/_apis/git/repositories/x/pullRequests/77",
+                "repository": {"name": repo, "project": {"name": "FLODevOps"}}}
+
+    def find_pull_request(self, repo, branch, project=None):
+        return self.prs.get(branch)
+
+
+def test_upgrade_image_template():
+    """Taban imaj şablonu: gruplama, durum, kaynak dizinden türetme, tek taslak PR."""
+    print("\n[upgrade: taban imaj şablonu]")
+    from agile_sdlc_crew.quality import upgrade_image as ui, upgrade_registry as ur
+    cfg = ui.load_cfg()
+    check("cfg: base-images / staging", cfg["repo"] == "base-images" and cfg["branch"] == "staging")
+    hub = {"php": ["8.5.12", "8.5.12-fpm-trixie", "8.3.9", "8.3.9-fpm-trixie"], "python": ["3.14.2", "3.14.2-slim-trixie"]}
+    res = ur.Resolver(fetch=_fake_hub(hub))
+
+    def site(region, new, blocked="imaj yayınlanmamış", where="devops", path="/build/channel/Dockerfile"):
+        return {"where": where, "repo": region, "project": "FLODevOps", "branch": "production", "path": path,
+                "line": 1, "old": re.sub(r"(php|python)-\d+-\d+(?:-\d+)?:", r"\1-8-2:", new), "new": new,
+                "blocked": blocked}
+    pre = {"anatolia": "europe-west1-docker.pkg.dev/flo-prod-main/prod-ar/", "russia": "10.131.167.220:5000/prod-ar/",
+           "mars": "m.example/"}
+    sites = [site("anatolia", pre["anatolia"] + "php-8-5:1.0", path="/a/Dockerfile"),
+             site("anatolia", pre["anatolia"] + "php-8-5:1.0", path="/b/Dockerfile"),
+             site("russia", pre["russia"] + "php-8-5:1.0", path="/r/Dockerfile"),
+             site("anatolia", "golang:1.27.3"),
+             site("anatolia", pre["anatolia"] + "php-8-5:1.0", where="code"),
+             site("anatolia", pre["anatolia"] + "php-8-5:1.0", blocked="")]
+    need = ui.needed(sites, "php")
+    check("needed: tek dizin, iki bölge, üç site",
+          len(need) == 1 and need[0]["dir"] == "php-8-5" and need[0]["tag"] == "1.0" and need[0]["error"] == ""
+          and sorted(need[0]["regions"]) == ["anatolia", "russia"] and len(need[0]["sites"]) == 3, str(need))
+    check("needed: library imajı hariç", ui.needed([site("anatolia", "golang:1.27.3")], "go") == [])
+    clash = ui.needed([site("anatolia", pre["anatolia"] + "php-8-5:1.0"),
+                       site("russia", pre["russia"] + "php-8-5:1.1")], "php")
+    check("needed: farklı etiket → error",
+          len(clash) == 1 and clash[0]["error"] == "bölgeler farklı etiket istiyor: 1.0, 1.1", str(clash))
+    py = ui.needed([site("anatolia", pre["anatolia"] + "python-3-14-2:1.0")], "python")
+    check("needed: üç parçalı dizin", bool(py) and py[0]["dir"] == "python-3-14-2")
+    check("branch_name", ui.branch_name("php-8-5") == "tempo/base-image-php-8-5")
+    entry = need[0]
+
+    c = _FakeBaseImages()
+    st = ui.state(c, entry)
+    check("state yok", st["state"] == "yok" and st["pr"] is None and st["dir"] == "php-8-5", str(st))
+    c2 = _FakeBaseImages()
+    c2.files["staging"]["/php-8-5/tag.txt"] = b"1.0"
+    st = ui.state(c2, entry)
+    check("state şablon var + bayraklar", st["state"] == "şablon var" and "mainLocation" in st["reason"]
+          and "yandexLocation" in st["reason"], str(st))
+    for status, want in (("active", "pr açık"), ("abandoned", "pr reddedildi")):
+        c3 = _FakeBaseImages(prs={"tempo/base-image-php-8-5": {"id": 5, "status": status, "url": "u"}})
+        st = ui.state(c3, entry)
+        check(f"state {want}", st["state"] == want and st["pr"]["id"] == 5, str(st))
+    c4 = _FakeBaseImages(prs={"tempo/base-image-php-8-5": {"id": 5, "status": "completed", "url": "u"}})
+    st = ui.state(c4, entry)
+    check("state completed ama dizin yok → belirsiz", st["state"] == "belirsiz" and st["reason"], str(st))
+    st = ui.state(c, dict(entry, error="bölgeler farklı etiket istiyor: 1.0, 1.1"))
+    check("state entry.error → belirsiz", st["state"] == "belirsiz" and "farklı etiket" in st["reason"])
+    st = ui.state(_FakeBaseImages(fail_list=True), entry)
+    check("state okuma hatası → belirsiz", st["state"] == "belirsiz" and st["reason"], str(st))
+
+    b = ui.build(c, "php", "8.5", entry, resolver=res)
+    f = b["files"]
+    d = f["/php-8-5/Dockerfile"].decode()
+    check("build php: kaynak php-8-4, tam 8.5.12", b["source"] == "php-8-4" and b["full"] == "8.5.12", str(b["source"]))
+    check("build php: ARG değişti, FROM aynı",
+          d.startswith("ARG PHP_VERSION=8.5.12\nFROM php:${PHP_VERSION}-fpm-trixie\n"))
+    check("build php: opcache satırları yok, öncesi korunur",
+          "docker-php-ext" not in d and "apt-get update && \\\n" in d and d.endswith("echo done"))
+    check("build php: tag.txt satır sonsuz", f["/php-8-5/tag.txt"] == b"1.0")
+    check("build php: diğer dosya bayt eşit", f["/php-8-5/extra.ini"] == b"a=1\r\n")
+    check("build php: not var", any("Opcache" in n for n in b["notes"]), str(b["notes"]))
+    cl = _FakeBaseImages({"/php-8-2/dockerfile": b"ARG PHP_VERSION=8.2.1\nFROM php:${PHP_VERSION}-fpm-trixie",
+                          "/php-8-2/tag.txt": b"1.0"})
+    bl = ui.build(cl, "php", "8.3", dict(entry, dir="php-8-3"), resolver=res)
+    check("build: küçük harfli dockerfile adı korunur",
+          set(bl["files"]) == {"/php-8-3/dockerfile", "/php-8-3/tag.txt"}
+          and bl["files"]["/php-8-3/dockerfile"].startswith(b"ARG PHP_VERSION=8.3.9"), str(set(bl["files"])))
+    check("build php 8.3: düzeltme notu yok", not any("düzeltme uygulanmadı" in n for n in bl["notes"]))
+    cn = _FakeBaseImages({"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm-trixie\nRUN true",
+                          "/php-8-4/tag.txt": b"1.0"})
+    bn = ui.build(cn, "php", "8.5", entry, resolver=res)
+    check("build: drop eşleşmezse 'düzeltme uygulanmadı'",
+          any(n.startswith("düzeltme uygulanmadı") for n in bn["notes"]), str(bn["notes"]))
+
+    pe = py[0]
+    bp = ui.build(c, "python", "3.14", pe, resolver=res)
+    check("build python: dizin, sürüm, sonek, requirements, tag",
+          bp["source"] == "python-3-13-18"
+          and bp["files"]["/python-3-14-2/Dockerfile"] == b"FROM python:3.14.2-slim-trixie"
+          and bp["files"]["/python-3-14-2/requirements.txt"] == b"requests==2\n"
+          and bp["files"]["/python-3-14-2/tag.txt"] == b"1.0", str(bp["files"]))
+
+    def fails(name, cl, lang, to, e, r=res, frag="", cfg_=None):
+        try:
+            ui.build(cl, lang, to, e, resolver=r, cfg=cfg_)
+        except ui.ImageTemplateError as ex:
+            check(name, frag in str(ex), str(ex))
+        else:
+            check(name, False, "hata fırlatılmadı")
+    fails("kaynak yok", _FakeBaseImages({"/php-9-0/tag.txt": b"1.0"}), "php", "8.5", entry, frag="Kaynak dizin bulunamadı")
+    two = _FakeBaseImages({"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nARG PHP_VERSION=8.4.2\nFROM php:${PHP_VERSION}-fpm",
+                           "/php-8-4/tag.txt": b"1.0"})
+    fails("iki sürüm satırı", two, "php", "8.5", entry, frag="sürüm satırı")
+    fails("latest_patch None", c, "php", "8.5", entry, r=ur.Resolver(fetch=_fake_hub({})), frag="yama")
+    fails("tag_exists False", c, "php", "8.5", entry,
+          r=ur.Resolver(fetch=_fake_hub({}), patches={"php": {"8.5": "8.5.12"}}), frag="Docker Hub")
+    fails("tag_exists None", c, "php", "8.5", entry,
+          r=ur.Resolver(fetch=lambda u: (500, None), patches={"php": {"8.5": "8.5.12"}}), frag="doğrulanamadı")
+    bad = dict(cfg, fixes={"php": {"8.5": [{"drop": r"echo done", "note": "x"}]}})
+    fails("drop satırı \\ ile bitmiyor", c, "php", "8.5", entry, frag="\\", cfg_=bad)
+
+    # --- fix round 1: dar düzeltme kuralı
+    def php_with(body: bytes):
+        return _FakeBaseImages({"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm-trixie\n" + body,
+                                "/php-8-4/tag.txt": b"1.0"})
+    multi = php_with(b"RUN set -ex && \\\n    docker-php-ext-install opcache pdo_mysql gd && \\\n    echo done")
+    fails("çok eklentili opcache satırı atılmaz", multi, "php", "8.5", entry, frag="docker-php-ext-install opcache pdo_mysql")
+    head = php_with(b"RUN docker-php-ext-install opcache \\\n    && echo done")
+    fails("RUN ile başlayan satır atılmaz", head, "php", "8.5", entry, frag="RUN docker-php-ext-install opcache")
+    last = php_with(b"RUN set -ex && \\\n    echo a && \\\n    docker-php-ext-enable opcache")
+    fails("zincirin son satırı atılmaz", last, "php", "8.5", entry, frag="docker-php-ext-enable opcache")
+    check("gerçek iki satır atılır, çevresi korunur",
+          b"docker-php-ext" not in ui.build(c, "php", "8.5", entry, resolver=res)["files"]["/php-8-5/Dockerfile"])
+
+    # --- fix round 1: yazma korumaları
+    def pr_calls(cl):
+        return [x[0] for x in cl.calls]
+    bname = "tempo/base-image-php-8-5"
+    cf = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cf, "php", "8.5", entry, resolver=res)
+        check("PR hatası → ImageTemplateError", False)
+    except ui.ImageTemplateError as ex:
+        check("PR hatası dalı adlandırır, push yapıldı der", bname in str(ex) and "Push yapıldı" in str(ex), str(ex))
+        check("PR hatası: bu çağrı dal + push yazdı → wrote True", ex.wrote is True)
+    cf2 = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cf2, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    n_before = len(cf2.calls)
+    try:
+        ui.open_pr(cf2, "php", "8.5", entry, resolver=res)
+        check("ikinci deneme de PR'da düşer", False)
+    except ui.ImageTemplateError as ex:
+        check("dal hazır, yalnız PR yine açılamadı → wrote False, yeni dal / push yok",
+              ex.wrote is False and pr_calls(cf2)[n_before:] == [], f"{ex.wrote} {pr_calls(cf2)[n_before:]}")
+    check("PR hatasından sonra dal + push yazılmış", pr_calls(cf) == ["branch", "push"], str(pr_calls(cf)))
+    cf.fail_at = None
+    k = len(cf.calls)
+    r = ui.open_pr(cf, "php", "8.5", entry, resolver=res)
+    check("aynı içerikli dal: yalnız PR açılır", pr_calls(cf)[k:] == ["pr"] and r["state"] == "pr açık", str(cf.calls[k:]))
+    cd = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cd, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    cd.fail_at = None
+    cd.files[bname]["/php-8-5/tag.txt"] = b"9.9"
+    k = len(cd.calls)
+    try:
+        ui.open_pr(cd, "php", "8.5", entry, resolver=res)
+        check("farklı içerikli dal reddedilir", False)
+    except ui.ImageTemplateError as ex:
+        check("farklı içerikli dal reddedilir, yazma yok", len(cd.calls) == k and "farklı" in str(ex), str(ex))
+    ce = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(ce, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    ce.fail_at = None
+    ce.files[bname]["/php-8-5/EXTRA"] = b"x"
+    k = len(ce.calls)
+    try:
+        ui.open_pr(ce, "php", "8.5", entry, resolver=res)
+        check("fazladan dosyalı dal reddedilir", False)
+    except ui.ImageTemplateError:
+        check("fazladan dosyalı dal reddedilir, yazma yok", len(ce.calls) == k)
+    cl_ = _FakeBaseImages()
+    cl_.files[bname] = dict(cl_.files["staging"])
+    cl_.oids[bname] = "oid-staging"
+    r = ui.open_pr(cl_, "php", "8.5", entry, resolver=res)
+    check("boş kalan dal yeniden kullanılır (branch yok, push + PR)", pr_calls(cl_) == ["push", "pr"] and r["state"] == "pr açık",
+          str(pr_calls(cl_)))
+    cg = _FakeBaseImages()
+    cg.files[bname] = dict(cg.files["staging"], **{"/other": b"x"})
+    cg.oids[bname] = "oid-other-commit"
+    try:
+        ui.open_pr(cg, "php", "8.5", entry, resolver=res)
+        check("başka commit'li dal reddedilir", False)
+    except ui.ImageTemplateError:
+        check("başka commit'li dal reddedilir, yazma yok", cg.calls == [])
+    cmv = _FakeBaseImages(move_head_after=3)
+    try:
+        ui.open_pr(cmv, "php", "8.5", entry, resolver=res)
+        check("hedef dal ilerledi → hata", False)
+    except ui.ImageTemplateError as ex:
+        check("hedef dal build sırasında ilerledi → yazma yok", cmv.calls == [] and "ilerledi" in str(ex), str(ex))
+    for where in ("deny-branch", "deny-push"):
+        cdn = _FakeBaseImages(fail_at=where)
+        try:
+            ui.open_pr(cdn, "php", "8.5", entry, resolver=res)
+            check(f"{where}: ImageTemplateError", False)
+        except ui.ImageTemplateError as ex:
+            check(f"{where}: ImageTemplateError, yetki + dal adı", "401/403" in str(ex) and bname in str(ex), str(ex))
+    cnb = _FakeBaseImages(branch_result={"value": [{"success": False, "updateStatus": "PermissionRequired"}]})
+    try:
+        ui.open_pr(cnb, "php", "8.5", entry, resolver=res)
+        check("create_branch success False → hata", False)
+    except ui.ImageTemplateError as ex:
+        check("create_branch success False → hata, push yok",
+              "PermissionRequired" in str(ex) and "Push yapılmadı" in str(ex) and pr_calls(cnb) == ["branch"], str(ex))
+    nu = _FakeBaseImages({"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm\n\xff\xfe",
+                          "/php-8-4/tag.txt": b"1.0"})
+    fails("UTF-8 olmayan Dockerfile", nu, "php", "8.5", entry, frag="UTF-8")
+    big = _FakeBaseImages({**{f"/php-8-4/f{i}": b"x" for i in range(21)}, "/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm"})
+    fails("21 dosya → hata", big, "php", "8.5", entry, frag="dosya var")
+    huge = _FakeBaseImages({"/php-8-4/blob": b"x" * 2_100_000, "/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nFROM php:${PHP_VERSION}-fpm"})
+    fails("2 MB üstü → hata", huge, "php", "8.5", entry, frag="MB")
+    # needed: geçersiz etiket / bilinmeyen bölge / başka önek
+    for bad_tag in (".5", "-x"):
+        e_ = ui.needed([site("anatolia", pre["anatolia"] + f"php-8-5:{bad_tag}")], "php")
+        check(f"needed: etiket {bad_tag!r} → error", len(e_) == 1 and "geçersiz etiket" in e_[0]["error"], str(e_))
+        check(f"state: etiket {bad_tag!r} → belirsiz, PR yok",
+              ui.state(_FakeBaseImages(), e_[0])["state"] == "belirsiz")
+    e_ = ui.needed([site("mars", pre["mars"] + "php-8-5:1.0")], "php")
+    check("needed: bilinmeyen bölge → error", len(e_) == 1 and e_[0]["error"] == "bilinmeyen bölge: mars", str(e_))
+    foreign = site("anatolia", pre["anatolia"] + "php-8-5:1.0")
+    foreign["old"] = "other.example/x/php-8-2:1.0"
+    check("needed: old ile farklı önek → bizim imajımız değil", ui.needed([foreign], "php") == [])
+    # PR metni: ters tırnak / denetim karakteri, sınır, RU cümlesi korunur
+    evil = dict(entry, sites=[site("anatolia", pre["anatolia"] + "php-8-5:1.0", path="/a`b\x07/Dockerfile")]
+                + [site("russia", pre["russia"] + "php-8-5:1.0", path=f"/r{i}/" + "x" * 150) for i in range(300)])
+    cev = _FakeBaseImages()
+    r = ui.open_pr(cev, "php", "8.5", evil, resolver=res, repo="rp`o")
+    dv = cev.calls[-1][4]
+    check("açıklama: ters tırnak/denetim karakteri yok", "/ab/Dockerfile" in dv and "\x07" not in dv and "rp`o" not in dv)
+    check("açıklama ≤ 4000, RU cümlesi + bayraklar duruyor, liste kısaldı",
+          len(dv) <= 4000 and "RU registry" in dv and "yandexLocation" in dv and "mainLocation" in dv
+          and "servis daha" in dv, str(len(dv)))
+    check("URL: web bağlantısı (API url'si değil)",
+          r["pr"]["url"] == "https://dev.azure.com/org/FLODevOps/_git/base-images/pullrequest/77", r["pr"]["url"])
+    # round 2: içerik eşitliği, etiket, ağ hatası
+    cj = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cj, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    cj.fail_at = None
+    cj.files[bname]["/Jenkinsfile"] = b"pipeline { evil }"
+    k = len(cj.calls)
+    try:
+        ui.open_pr(cj, "php", "8.5", entry, resolver=res)
+        check("aynı yollar, değişmiş Jenkinsfile → reddedilir", False)
+    except ui.ImageTemplateError:
+        check("aynı yollar, değişmiş Jenkinsfile → reddedilir, yazma yok", len(cj.calls) == k)
+    ck = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(ck, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    ck.fail_at = None
+    ck.files["staging"]["/README.md"] = b"# staging moved"      # hedef içeriği dal açıldıktan sonra değişti
+    ck.oids["staging"] = "oid-staging-moved"
+    k = len(ck.calls)
+    try:
+        ui.open_pr(ck, "php", "8.5", entry, resolver=res)
+        check("hedef kaydı → dal artık eşit değil", False)
+    except ui.ImageTemplateError:
+        check("hedef sabit commit'ten farklı → reddedilir, yazma yok", len(ck.calls) == k)
+    for tg in ("a/b", "1.0 x", "x" * 65):
+        e_ = ui.needed([site("anatolia", pre["anatolia"] + f"php-8-5:{tg}")], "php")
+        check(f"needed: etiket {tg[:12]!r} → entry error", len(e_) == 1 and "geçersiz etiket" in e_[0]["error"], str(e_))
+    cn2 = _FakeBaseImages()
+    cn2.fail_list_after = 3
+    try:
+        ui.open_pr(cn2, "php", "8.5", entry, resolver=res)
+        check("ağ hatası → ImageTemplateError", False)
+    except ui.ImageTemplateError as ex:
+        check("build sonrası ağ hatası ImageTemplateError, yazma yok", cn2.calls == [])
+        check("hazırlık hatası dalı adlandırır, push yapılmadı der",
+              bname in str(ex) and "Push yapılmadı" in str(ex), str(ex))
+    except OSError:
+        check("build sonrası ağ hatası ImageTemplateError", False, "ham OSError")
+    # round 3: düz dosya olmayan öğe / nesne kimliği / bozuk PR yanıtı / tag temizliği
+    cs = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(cs, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    cs.fail_at = None
+    cs.item_meta[(bname, "/README.md")] = {"gitObjectType": "commit"}      # submodule
+    k = len(cs.calls)
+    try:
+        ui.open_pr(cs, "php", "8.5", entry, resolver=res)
+        check("submodule (commit) öğeli dal reddedilir", False)
+    except ui.ImageTemplateError:
+        check("submodule (commit) öğeli dal reddedilir, yazma yok", len(cs.calls) == k)
+    co = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(co, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    co.fail_at = None
+    co.item_meta[(bname, "/README.md")] = {"gitObjectType": "blob", "objectId": "aaa"}
+    co.item_meta[("staging", "/README.md")] = {"gitObjectType": "blob", "objectId": "bbb"}
+    k = len(co.calls)
+    try:
+        ui.open_pr(co, "php", "8.5", entry, resolver=res)
+        check("aynı bayt, farklı objectId → reddedilir", False)
+    except ui.ImageTemplateError:
+        check("aynı bayt, farklı objectId → reddedilir, yazma yok", len(co.calls) == k)
+    ci = _FakeBaseImages(fail_at="pr")
+    try:
+        ui.open_pr(ci, "php", "8.5", entry, resolver=res)
+    except ui.ImageTemplateError:
+        pass
+    ci.fail_at = None
+    for br_ in (bname, "staging"):
+        ci.item_meta[(br_, "/README.md")] = {"gitObjectType": "blob", "objectId": "same"}
+    k = len(ci.calls)
+    ui.open_pr(ci, "php", "8.5", entry, resolver=res)
+    check("blob + eşit objectId → yalnız PR", [x[0] for x in ci.calls[k:]] == ["pr"])
+    cp = _FakeBaseImages()
+    cp.pr_response = ["garip"]
+    try:
+        ui.open_pr(cp, "php", "8.5", entry, resolver=res)
+        check("bozuk PR yanıtı → hata", False)
+    except ui.ImageTemplateError as ex:
+        check("bozuk PR yanıtı: dal adı + 'kontrol et'", bname in str(ex) and "kontrol" in str(ex), str(ex))
+    cp2 = _FakeBaseImages()
+    cp2.pr_response = {"url": "x"}
+    try:
+        ui.open_pr(cp2, "php", "8.5", entry, resolver=res)
+        check("id'siz PR yanıtı → hata", False)
+    except ui.ImageTemplateError as ex:
+        check("id'siz PR yanıtı: 'kontrol et'", "kontrol" in str(ex), str(ex))
+    check("state: tag temizlenir", ui.state(_FakeBaseImages(), dict(entry, tag="1.\x070`"))["tag"] == "1.0")
+
+    c5 = _FakeBaseImages()
+    r1 = ui.open_pr(c5, "php", "8.5", entry, resolver=res, repo="svc-a")
+    kinds = [x[0] for x in c5.calls]
+    check("open_pr: bir branch, bir push, bir taslak PR", kinds == ["branch", "push", "pr"], str(kinds))
+    br, pu, pr = c5.calls
+    check("open_pr: dal adı + sabit objectId", br[1] == "tempo/base-image-php-8-5" and br[2] == "staging"
+          and br[3] == "oid-staging" and pu[3] == "oid-staging", str(br))
+    check("open_pr: push hepsi add + base64",
+          all(x["changeType"] == "add" and x["contentType"] == "base64encoded" for x in pu[2])
+          and {x["path"] for x in pu[2]} >= {"/php-8-5/Dockerfile", "/php-8-5/tag.txt"}, str(pu[2]))
+    check("open_pr: proje, taslak, hedef", pu[4] == "FLODevOps" and pr[5] is True and pr[2] == "staging"
+          and pr[6] == "FLODevOps")
+    check("open_pr: başlık", pr[3] == "php-8-5 taban imaj şablonu (PHP 8.5.12)", pr[3])
+    desc = pr[4]
+    check("open_pr: açıklama içeriği",
+          "yandexLocation" in desc and "mainLocation" in desc and "/r/Dockerfile" in desc
+          and "baseImage=php-8-5" in desc and "RU registry" in desc and "svc-a" in desc
+          and "doğrulanmadı" in desc and len(desc) <= 4000, desc)
+    check("open_pr: sonuç", r1["state"] == "pr açık" and r1["pr"]["id"] == 77 and isinstance(r1["notes"], list), str(r1))
+    n = len(c5.calls)
+    r2 = ui.open_pr(c5, "php", "8.5", entry, resolver=res, repo="svc-a")
+    check("ikinci çağrı ikinci PR açmaz", len(c5.calls) == n and r2["state"] == "pr açık", str(r2))
+    for name, cl2, want in (
+            ("pr reddedildi", _FakeBaseImages(prs={"tempo/base-image-php-8-5": {"id": 5, "status": "abandoned", "url": "u"}}),
+             "pr reddedildi"),
+            ("şablon var", c2, "şablon var")):
+        k = len(cl2.calls)
+        r = ui.open_pr(cl2, "php", "8.5", entry, resolver=res)
+        check(f"open_pr {name}: yazma yok", r["state"] == want and len(cl2.calls) == k, str(r))
+    many = dict(entry, sites=[site("anatolia", pre["anatolia"] + "php-8-5:1.0", path=f"/s{i}/Dockerfile")
+                              for i in range(40)])
+    cm = _FakeBaseImages()
+    ui.open_pr(cm, "php", "8.5", many, resolver=res)
+    dm = cm.calls[-1][4]
+    check("açıklama sınırlı: ilk 10 + '… ve 30 servis daha'",
+          "/s9/Dockerfile" in dm and "/s10/Dockerfile" not in dm and "… ve 30 servis daha" in dm and len(dm) <= 4000)
+
+
+def test_upgrade_image_wiring():
+    """Taban imaj şablonu bağlama: ayar kapalıyken bugünkü çıktı, durum `images`, engel nedeni, otomatik
+    ilerletme (yok → bir kez, pr açık → hiç), uç (403 / 404 / 409 / 200 / hata → 502)."""
+    print("\n[upgrade: taban imaj şablonu bağlama]")
+    from fastapi.testclient import TestClient
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import intake, upgrade, upgrade_image as ui, upgrade_track as ut
+
+    html_ = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
+    check("kart: imaj satırları, düğme, uç ve kaçış",
+          "function _upImagesHtml(" in html_ and "Şablon PR'ı aç" in html_ and "'/api/techdebt/upgrade/image'" in html_
+          and "escHtml(dir" in html_ and "h+=_upImagesHtml(st.images)" in html_)
+    check("kart: onay metni ayardan (kaynak dal / hedef dal / repo)",
+          'data-source="${escHtml(' in html_ and "d.source" in html_ and "d.branch" in html_
+          and "d.repo" in html_ and "'tempo/base-image-${dir}'" not in html_)
+    pre = "eu/prod-ar/"
+    unp = {"where": "devops", "repo": "anatolia", "project": "FLODevOps", "branch": "production",
+           "path": "/build/core/Dockerfile", "line": 1, "old": pre + "php-8-2:1.0", "new": pre + "php-8-5:1.0",
+           "blocked": upgrade.UNPUBLISHED}
+    other = dict(unp, blocked="elle düzenlenmeli", path="/build/web/Dockerfile")
+
+    def mkscan(sites):
+        return {"repo": "core", "lang": "php", "current": "8.2", "target": "8.5", "up_to_date": False,
+                "sites": sites, "blocking": 0, "blockers": [], "auto": [], "infra": [], "human": [],
+                "ci_pins": [], "ci_source": None}
+    cur_state = {"dir": "php-8-5", "tag": "1.0", "regions": ["anatolia"], "state": "yok", "reason": "", "pr": None}
+    flags = {"CREW_TECHDEBT_UPGRADE_IMAGE": True}
+    orig_get = pc.get
+    pc.get = lambda k: flags[k] if k in flags else orig_get(k)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "core"
+            root.mkdir()
+            (root / "composer.json").write_text('{"require": {"php": "^8.2"}}', encoding="utf-8")
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+            deps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: (base / r).is_dir(), queue=None,
+                               record=lambda **k: None, now=lambda: 1e9, cfg=lambda: cfg)
+
+            def st(sites, **k):
+                return ut.status(_UpFake(), "core", "php", to="8.5", deps=deps, scan=mkscan(sites), wait_h=72,
+                                 root=root, **k)
+            calls = []
+
+            def sfn(c, entry, **k):
+                calls.append(entry["dir"])
+                return dict(cur_state, dir=entry["dir"])
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = False
+            s = st([unp], image_state_fn=sfn)
+            check("ayar kapalı → images == [], durum çağrılmaz", s["images"] == [] and not calls, str(s["images"]))
+            base_reason = s["next"]["reason"]
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = True
+            s = st([other], image_state_fn=sfn)
+            check("UNPUBLISHED site yok → images == []", s["images"] == [] and not calls)
+            s = st([unp], image_state_fn=sfn)
+            check("ayar açık + UNPUBLISHED site → images dolu",
+                  [i["dir"] for i in s["images"]] == ["php-8-5"] and s["images"][0]["state"] == "yok"
+                  and calls == ["php-8-5"], str(s["images"]))
+            check("engel nedeni yine üretim adımını kapatır", s["next"]["step"] == "prod" and not s["next"]["ready"])
+            icfg = ui.load_cfg()
+            im0 = s["images"][0]
+            check("images girdisi onay metni için repo / proje / hedef dal / kaynak dal taşır",
+                  im0["repo"] == icfg["repo"] and im0["project"] == icfg.get("project") and im0["branch"] == icfg["branch"]
+                  and im0["source_branch"] == "tempo/base-image-php-8-5" and im0["state"] == "yok", str(im0))
+            s = st([unp], image_state_fn=lambda c, e, **k: dict(cur_state, state="pr açık", pr={"id": 46551, "url": "u"}))
+            check("engel nedenine imaj durumu eklenir",
+                  "php-8-5: şablon PR'ı #46551 açık" in s["next"]["reason"]
+                  and s["next"]["reason"].startswith(base_reason.split(" — ")[0]), s["next"]["reason"])
+
+            def boom(c, e, **k):
+                raise RuntimeError("Azure çöktü")
+            s = st([unp], image_state_fn=boom)
+            check("durum istisnası → belirsiz, status düşmez",
+                  s["images"] and s["images"][0]["state"] == "belirsiz" and "Azure çöktü" in s["images"][0]["reason"]
+                  and s["stage"], str(s["images"]))
+
+        # ── otomatik ilerletme ──
+        class _CF:
+            def __init__(self):
+                self.comments = []
+
+            def get_work_item_comments(self, wid):
+                return []
+
+            def add_comment(self, wid, html_):
+                self.comments.append((wid, html_))
+
+        def adv_one(images, *, open_fn, auto_img=True, handed=None, take=None, now=None, cf=None):
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = auto_img
+            tr = {"id": 500, "repo": "core", "lang": "php", "to": "8.5"}
+            res = {"id": 500, "note": ""}
+            stt = {"stage": "engelli", "images": images,
+                   "next": {"step": "prod", "ready": False, "handed_off": handed}}
+            cf = cf or _CF()
+            s_scan, s_take = ut._fresh_scan, ut._auto_take
+            ut._fresh_scan = lambda *a, **k: mkscan([unp])
+            ut._auto_take = take or (lambda *a, **k: None)
+            try:
+                ut._advance_one(cf, tr, res, team="T", deps=None, create_job=None, open_jobs=None, bump_jobs=None,
+                                status_fn=lambda *a, **k: stt, take_fn=None, last_bump_job=None, kw={},
+                                image_open_fn=open_fn, now=now)
+            finally:
+                ut._fresh_scan, ut._auto_take = s_scan, s_take
+            return res, cf
+        opened = []
+
+        def ofn(client, lang, to, entry, **k):
+            opened.append((lang, to, entry["dir"], k.get("repo")))
+            return {"state": "pr açık", "pr": {"id": 9, "url": "https://x/pr/9"}, "notes": []}
+        res, cf = adv_one([cur_state], open_fn=ofn)
+        check("_advance_one: yok → open_pr bir kez, nota PR yazılır",
+              opened == [("php", "8.5", "php-8-5", "core")] and "#9" in res["note"], f"{opened} {res}")
+        opened.clear()
+        adv_one([dict(cur_state, state="pr açık", pr={"id": 5, "url": "u"})], open_fn=ofn)
+        adv_one([dict(cur_state, state="belirsiz")], open_fn=ofn)
+        adv_one([cur_state], open_fn=ofn, auto_img=False)
+        check("_advance_one: pr açık / belirsiz / ayar kapalı → open_pr yok", opened == [])
+
+        def bad(client, lang, to, entry, **k):
+            raise ui.ImageTemplateError("dal var ama içeriği farklı")
+        res, cf = adv_one([cur_state], open_fn=bad)
+        check("_advance_one: hata adımı durdurmaz, nota + izleme Task'ına yorum",
+              "dal var ama içeriği farklı" in res["note"] and len(cf.comments) == 1 and cf.comments[0][0] == 500,
+              f"{res} {cf.comments}")
+
+        # devredilmiş adım, sıra, yalıtım
+        opened.clear()
+        res, cf = adv_one([cur_state], open_fn=ofn, handed=777)
+        check("_advance_one: adım DevOps'a devredilmişken de open_pr bir kez",
+              len(opened) == 1 and "#777" in res["note"] and "#9" in res["note"], f"{opened} {res}")
+        order = []
+        opened.clear()
+
+        def take_ok(*a, **k):
+            order.append("take")
+        adv_one([cur_state], open_fn=lambda *a, **k: (order.append("image"), ofn(*a, **k))[1], take=take_ok)
+        check("_advance_one: imaj adımı _auto_take'ten önce", order == ["image", "take"], str(order))
+
+        def take_boom(*a, **k):
+            raise RuntimeError("alım çöktü")
+        opened.clear()
+        try:
+            adv_one([cur_state], open_fn=ofn, take=take_boom)
+            check("_advance_one: _auto_take istisnası yükselir", False)
+        except RuntimeError:
+            check("_advance_one: _auto_take çökse de imaj PR'ı açılmış", len(opened) == 1, str(opened))
+        took = []
+        s_needed = ui.needed
+        ui.needed = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("beklenmeyen"))
+        try:
+            adv_one([cur_state], open_fn=ofn, take=lambda *a, **k: took.append(1))
+            check("_advance_one: imaj adımı beklenmedik hata verse de _auto_take çalışır", took == [1], str(took))
+        finally:
+            ui.needed = s_needed
+        # hata yorumu: enjekte `now` ve 24 sa kısma
+        import hashlib
+        from datetime import datetime as _dt2, timezone as _tz2
+        NOW = _dt2(2026, 11, 17, 12, 0, tzinfo=_tz2.utc)
+        msg = "php-8-5: şablon PR'ı açılamadı: dal var ama içeriği farklı"
+        mark = ut.ERR_MARK + hashlib.sha1(msg.encode("utf-8")).hexdigest()[:10]
+
+        class _CM(_CF):
+            def __init__(self, when):
+                super().__init__()
+                self.when = when
+
+            def get_work_item_comments(self, wid):
+                return [{"metin": f"<p>{mark}</p>", "tarih": self.when}]
+        _, cf = adv_one([cur_state], open_fn=bad, now=NOW, cf=_CM("2026-11-17T11:00:00Z"))
+        check("hata yorumu: son 24 saatte aynı işaret varsa ikinci yorum yok", cf.comments == [], str(cf.comments))
+        _, cf = adv_one([cur_state], open_fn=bad, now=NOW, cf=_CM("2026-11-15T11:00:00Z"))
+        check("hata yorumu: işaret 24 saatten eskiyse bir yorum", len(cf.comments) == 1, str(cf.comments))
+
+        # ── uç ──
+        track = {"id": 500, "to": "8.5", "lang": "php", "repo": "core", "area": "P\\T"}
+        cf = _CF()
+        s_get, s_cl, s_scan = pc.get, server.AzureDevOpsClient, ut._fresh_scan
+        s_fo, s_st, s_op = ut.find_open, ui.state, ui.open_pr
+        flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = True
+        for k in ("CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN", "CREW_TECHDEBT_UPGRADE"):
+            flags[k] = True
+        server.AzureDevOpsClient = lambda: cf
+        ut._fresh_scan = lambda *a, **k: mkscan([unp])
+        ut.find_open = lambda c, lang, repo: track
+        cur = {"st": dict(cur_state)}
+        ui.state = lambda c, e, **k: dict(cur["st"], dir=e["dir"])
+        got = []
+
+        def op(c, lang, to, entry, **k):
+            got.append((lang, to, entry["dir"], k.get("repo")))
+            return {"state": "pr açık", "pr": {"id": 12, "url": "https://x/pr/12"}, "notes": []}
+        ui.open_pr = op
+        body = {"repo": "core", "lang": "php", "to": "8.5", "team": "T", "dir": "php-8-5"}
+        try:
+            tc = TestClient(server.app)
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = False
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: ayar kapalı → 403, open_pr yok", r.status_code == 403 and not got, r.text)
+            flags["CREW_TECHDEBT_UPGRADE_IMAGE"] = True
+            r = tc.post("/api/techdebt/upgrade/image", json=dict(body, dir="php-9-9"))
+            check("uç: bilinmeyen dizin → 404", r.status_code == 404 and r.json().get("error") and not got, r.text)
+            r = tc.post("/api/techdebt/upgrade/image", json=dict(body, team=""))
+            check("uç: takım yok → 400", r.status_code == 400, r.text)
+            cur["st"] = dict(cur_state, state="pr açık", pr={"id": 5, "url": "u"}, reason="zaten açık")
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: pr açık → 409 + neden", r.status_code == 409 and "açık" in r.json().get("error", "")
+                  and not got, r.text)
+            cur["st"] = dict(cur_state, state="belirsiz", reason="okunamadı: x")
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: belirsiz → 409, open_pr yok", r.status_code == 409 and not got, r.text)
+            for bad_to in ("8", "8.5.1", "x.y", "8.5; rm"):
+                r = tc.post("/api/techdebt/upgrade/image", json=dict(body, to=bad_to))
+                check(f"uç: geçersiz hedef {bad_to!r} → 400", r.status_code == 400 and r.json().get("error")
+                      and not got, r.text)
+            cur["st"] = dict(cur_state)
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: başarılı → 200, open_pr sonucu, repo iletilir",
+                  r.status_code == 200 and r.json()["pr"]["id"] == 12 and got == [("php", "8.5", "php-8-5", "core")],
+                  r.text)
+            check("uç: izleme Task'ına PR bağlantısı yorumu",
+                  len(cf.comments) == 1 and "https://x/pr/12" in cf.comments[0][1], str(cf.comments))
+            ui.open_pr = lambda *a, **k: (_ for _ in ()).throw(ui.ImageTemplateError("dal bulunamadı"))
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: ImageTemplateError → Türkçe neden", r.status_code in (409, 502)
+                  and "dal bulunamadı" in r.json().get("error", ""), r.text)
+            ui.open_pr = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("401 Unauthorized"))
+            r = tc.post("/api/techdebt/upgrade/image", json=body)
+            check("uç: başka istisna → 500 değil, Türkçe neden",
+                  r.status_code == 502 and "Şablon PR'ı açılamadı" in r.json().get("error", ""), r.text)
+        finally:
+            pc.get, server.AzureDevOpsClient, ut._fresh_scan = s_get, s_cl, s_scan
+            ut.find_open, ui.state, ui.open_pr = s_fo, s_st, s_op
+    finally:
+        pc.get = orig_get
+
+
+def test_upgrade_registry():
+    """Docker Hub yama çözücüsü: en büyük yama, elle sabitleme, hata → None, etiket kanıtı, önbellek."""
+    print("\n[upgrade: yama sürümü çözücü]")
+    from agile_sdlc_crew.quality import upgrade_registry as ur
+    calls: list = []
+    r = ur.Resolver(fetch=_fake_hub({"php": ["8.5.2", "8.5.12", "8.5.9-fpm", "8.5", "8.4.30"]}, calls))
+    check("en büyük yama (8.5.12; -fpm ve iki parçalı sayılmaz)", r.latest_patch("php", "8.5") == "8.5.12")
+    n = len(calls)
+    check("ikinci çağrı önbellekten", r.latest_patch("php", "8.5") == "8.5.12" and len(calls) == n)
+    check("etiket 200 → True", r.tag_exists("php", "8.5.12") is True)
+    check("etiket 404 → False", r.tag_exists("php", "8.9.9") is False)
+    n = len(calls)
+    r.tag_exists("php", "8.5.12")
+    r.tag_exists("php", "8.9.9")
+    check("etiket sonucu (olumsuz dahil) önbellekte", len(calls) == n)
+    pc: list = []
+    rp = ur.Resolver(fetch=_fake_hub({}, pc), patches={"php": {"8.5": "8.5.99"}})
+    check("yaml patch Hub'a gitmeden döner", rp.latest_patch("php", "8.5") == "8.5.99" and not pc)
+    check("yaml patch başka minörü etkilemez", rp.latest_patch("php", "8.4") is None)
+    bad = ur.Resolver(fetch=lambda u: (500, None))
+    check("500 → None", bad.latest_patch("php", "8.5") is None and bad.tag_exists("php", "8.5.1") is None)
+    junk = ur.Resolver(fetch=lambda u: (200, None))
+    check("bozuk JSON → None", junk.latest_patch("php", "8.5") is None)
+    boom = ur.Resolver(fetch=_fake_hub({}, down=True))
+    check("istisna → None", boom.latest_patch("php", "8.5") is None and boom.tag_exists("php", "8.5.1") is None)
+    check("eşleşme yok → None", ur.Resolver(fetch=_fake_hub({"php": ["8.4.1"]})).latest_patch("php", "8.5") is None)
+    nc: list = []
+    rn = ur.Resolver(fetch=_fake_hub({}, nc))
+    check("geçersiz etiket → None, fetch çağrılmaz",
+          all(rn.tag_exists("php", t) is None for t in ("", "-x", "a b", "8.5/../x", "8.5?x=1")) and not nc)
+    check("bilinmeyen ad / geçersiz minör → None, fetch çağrılmaz",
+          rn.latest_patch("ruby", "8.5") is None and rn.latest_patch("php", "8") is None
+          and rn.tag_exists("ruby", "1.2.3") is None and not nc)
+    nh = ur.Resolver(fetch=_fake_hub({"node": ["20.17.0", "20.17.3", "20.17"]}))
+    check("node adı kabul edilir (taban imaj güvenliği)", nh.latest_patch("node", "20.17") == "20.17.3")
+    check("default() tekil", ur.default() is ur.default())
+    # User-Agent: varsayılan fetch başlığı gönderir (ağ yok, get enjekte)
+    seen: dict = {}
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"results": []}
+
+    def _get(url, **kw):
+        seen.update(kw, url=url)
+        return _R()
+    st, _d = ur._http_fetch("https://hub.docker.com/x", get=_get)
+    check("varsayılan fetch User-Agent başlığı gönderir",
+          st == 200 and seen["headers"] == {"User-Agent": "tempo-upgrade"} and seen["timeout"] == 10, str(seen))
+    # hata belleği: Hub çökünce 60 sn çağrı yapılmaz, süre dolunca tekrar denenir
+    now = [1000.0]
+    fc: list = []
+
+    def failing(url):
+        fc.append(url)
+        raise OSError("zaman aşımı")
+    rd = ur.Resolver(fetch=failing, clock=lambda: now[0])
+    for _ in range(3):
+        rd.latest_patch("golang", "1.27")
+        rd.tag_exists("golang", "1.27.3")
+    check("çöken Hub bir kez çağrılır", len(fc) == 1, str(fc))
+    now[0] += 61
+    rd.latest_patch("golang", "1.27")
+    check("bellek dolunca yeniden denenir", len(fc) == 2, str(fc))
+    sc: list = []
+    r5 = ur.Resolver(fetch=lambda u: (sc.append(u) or (500, None)), clock=lambda: now[0])
+    r5.latest_patch("php", "8.5")
+    r5.tag_exists("php", "8.5.1")
+    check("500 de belleğe alınır", len(sc) == 1, str(sc))
+    # 404 çökme sayılmaz, kesin cevap 1 sa önbellekte
+    hc: list = []
+    r6 = ur.Resolver(fetch=_fake_hub({}, hc), clock=lambda: now[0])
+    r6.tag_exists("php", "9.9.9")
+    r6.tag_exists("php", "9.9.8")
+    check("404 sonrası Hub çökmüş sayılmaz", len(hc) == 2)
+    # tam eşleşme: sondaki satır sonu URL'ye girmez
+    nl: list = []
+    r7 = ur.Resolver(fetch=_fake_hub({}, nl))
+    check("sondaki \\n reddedilir", r7.latest_patch("php", "8.5\n") is None and r7.tag_exists("php", "8.5.1\n") is None
+          and not nl)
+    # tam genişlikli rakam (re.ASCII): URL kurulmadan reddedilir
+    fw: list = []
+    r11 = ur.Resolver(fetch=_fake_hub({}, fw))
+    check("tam genişlikli rakam reddedilir",
+          r11.latest_patch("php", "\uff18.\uff15") is None and r11.tag_exists("php", "\uff18.\uff15.1") is None and not fw)
+    # bozuk yaml: yükleyici düşmez
+    bad_docs = ("patch: [1, 2]\n", "patch: abc\n", "- a\n- b\n", "just text\n", "patch: {php: [1], python: x}\n", "a: [\n")
+    for i, doc in enumerate(bad_docs):
+        with tempfile.TemporaryDirectory() as td:
+            yp = Path(td) / "u.yaml"
+            yp.write_text(doc, encoding="utf-8")
+            try:
+                got = ur._load_patches(yp)
+                rr = ur.Resolver(fetch=_fake_hub({}), patches=got)
+                check(f"bozuk yaml #{i} düşmez", isinstance(got, dict) and rr.latest_patch("php", "8.5") is None, repr(got))
+            except Exception as e:  # noqa: BLE001
+                check(f"bozuk yaml #{i} düşmez", False, repr(e))
+    check("olmayan yaml dosyası düşmez", ur._load_patches(Path("/nonexistent/u.yaml")) == {})
+    rt = ur.Resolver(fetch=_fake_hub({}), patches={"php": ["x"], "python": None, 3: {"a": "b"}})
+    check("Resolver non-dict girdilere dayanıklı", rt.latest_patch("php", "8.5") is None)
+    # yaml pin doğrulaması
+    r8 = ur.Resolver(fetch=_fake_hub({"php": ["8.5.12"]}), patches={"php": {"8.5": "8.4.1"}})
+    check("geçersiz pin yok sayılır, Hub'a düşer", r8.latest_patch("php", "8.5") == "8.5.12")
+    r9 = ur.Resolver(fetch=_fake_hub({}), patches={"php": {8.5: "8.5.7"}})
+    check("float anahtarlı pin kabul edilir", r9.latest_patch("php", "8.5") == "8.5.7")
+    r10 = ur.Resolver(fetch=_fake_hub({}), patches={"php": {"8.5": "8.5.x"}})
+    check("rakam olmayan pin yok sayılır", r10.latest_patch("php", "8.5") is None)
+
+
+def test_upgrade_patch_sites():
+    """Yama sürümü çözücüsüyle siteler: üç parçalı etiketler ve genel imajlar Hub kanıtıyla yazılır."""
+    print("\n[upgrade: yama sürümlü siteler]")
+    from agile_sdlc_crew.quality import upgrade, upgrade_bump as bump, upgrade_registry as ur
+    hub = {"golang": ["1.27.1", "1.27.3", "1.27.3-bookworm"], "python": ["3.14.2", "3.13-slim"],
+           "php": ["8.5.12", "8.5.12-fpm"]}
+    res = ur.Resolver(fetch=_fake_hub(hub))
+    dead = ur.Resolver(fetch=_fake_hub({}, down=True))
+
+    def dsites(images, lang, to, r, extra=None, doc=None):
+        index = {"svc": [{"src": "anatolia/build/svc", "images": images}]}
+        for i, e in enumerate(extra or []):
+            index.setdefault(f"o{i}", []).append(e)
+        txt = doc or "".join(f"FROM {i}\n" for i in images)
+        return [s for s in upgrade._devops_sites(None, "svc", lang, to, index, lambda d, p: txt, None, resolver=r)
+                if s["where"] == "devops"]
+    s = dsites(["golang:1.24.4"], "go", "1.27", res)
+    check("golang:1.24.4 → golang:1.27.3, engelsiz, pushable",
+          len(s) == 1 and s[0]["new"] == "golang:1.27.3" and s[0]["blocked"] == "" and bump.pushable(s[0]), str(s))
+    s = dsites(["golang:1.24.4-alpine"], "go", "1.27", res)
+    check("Hub'da 1.27.3-alpine yok → CI_HAND, old == new",
+          s[0]["blocked"] == upgrade.CI_HAND and s[0]["old"] == s[0]["new"] == "golang:1.24.4-alpine", str(s))
+    s = dsites(["golang:1.24.4-bookworm"], "go", "1.27", res)
+    check("etiketli varyant Hub'da varsa engelsiz", s[0]["new"] == "golang:1.27.3-bookworm" and s[0]["blocked"] == "", str(s))
+    s = dsites(["eu/prod-ar/python-3-13-7:1.0"], "python", "3.14", res)
+    check("kendi imajımız: yeni etiket + UNPUBLISHED",
+          s[0]["new"] == "eu/prod-ar/python-3-14-2:1.0" and s[0]["blocked"] == upgrade.UNPUBLISHED, str(s))
+    s = dsites(["eu/prod-ar/python-3-13-7:1.0"], "python", "3.14", res,
+               extra=[{"src": "anatolia/build/other", "images": ["eu/prod-ar/python-3-14-2:1.0"]}])
+    check("aynı imaj bölgede kullanılıyorsa engelsiz (üç parçalı da)",
+          s[0]["new"] == "eu/prod-ar/python-3-14-2:1.0" and s[0]["blocked"] == "" and bump.pushable(s[0]), str(s))
+    s = dsites(["python:3.11-slim"], "python", "3.13", res)
+    check("iki parçalı library imajı Hub'da var → engelsiz",
+          s[0]["new"] == "python:3.13-slim" and s[0]["blocked"] == "", str(s))
+    s = dsites(["python:3.11-alpine"], "python", "3.13", res)
+    check("iki parçalı library imajı Hub'da yok → UNPUBLISHED",
+          s[0]["new"] == "python:3.13-alpine" and s[0]["blocked"] == upgrade.UNPUBLISHED, str(s))
+    s = dsites(["python:3.11-slim"], "python", "3.13", dead)
+    check("Hub okunamadı → iki parçalı UNPUBLISHED", s[0]["blocked"] == upgrade.UNPUBLISHED, str(s))
+    s = dsites(["golang:1.24.4"], "go", "1.27", dead)
+    check("latest_patch None → bugünkü CI_HAND", s[0]["blocked"] == upgrade.CI_HAND and s[0]["old"] == s[0]["new"], str(s))
+    s0 = dsites(["golang:1.24.4"], "go", "1.27", None)
+    check("resolver=None → bugünkü davranış", s0[0]["blocked"] == upgrade.CI_HAND and s0[0]["old"] == s0[0]["new"], str(s0))
+    # selectable.published, site yüklemiyle aynı
+    idx = {"svc": [{"src": "anatolia/build/svc", "images": ["golang:1.24.4"]}]}
+    svc = upgrade._devops_services("svc", "go", idx, None)
+    sel = {x["version"]: x["published"] for x in upgrade.selectable("go", "1.24", idx, svc, resolver=res)}
+    sel0 = {x["version"]: x["published"] for x in upgrade.selectable("go", "1.24", idx, svc)}
+    check("selectable.published çözücüyle: 1.27 yayınlı (Hub'da var), 1.26 değil",
+          sel["1.27"] is True and sel["1.26"] is False, str(sel))
+    check("selectable çözücüsüz: üç parçalı hiç yayınlı değil", not any(sel0.values()), str(sel0))
+    # CI: GoTool ve image:
+    src = {"repo": "yml-files", "project": "P", "branch": "main"}
+    gt = "steps:\n  - task: GoTool@0\n    inputs:\n      version: '1.24.4'\n"
+    out, pins = upgrade._parse_ci_file(gt, "T/x.yml", "go", "1.27", src, resolver=res)
+    check("GoTool '1.24.4' → '1.27.3'", len(out) == 1 and out[0]["old"] == "'1.24.4'" and out[0]["new"] == "'1.27.3'"
+          and out[0]["blocked"] == "" and bump.pushable(out[0]), str(out))
+    out, _ = upgrade._parse_ci_file(gt, "T/x.yml", "go", "1.27", src, resolver=dead)
+    check("GoTool: sürüm çözülemedi → CI_HAND", out[0]["blocked"] == upgrade.CI_HAND and out[0]["old"] == out[0]["new"], str(out))
+    out, _ = upgrade._parse_ci_file(gt, "T/x.yml", "go", "1.27", src)
+    check("GoTool: resolver=None → CI_HAND", out[0]["blocked"] == upgrade.CI_HAND, str(out))
+    ci_img = "container:\n  image: golang:1.24.4-bookworm\n"
+    out, _ = upgrade._parse_ci_file(ci_img, "T/x.yml", "go", "1.27", src, resolver=res)
+    check("CI image: library etiketi Hub'da → yazılır",
+          len(out) == 1 and out[0]["new"] == "golang:1.27.3-bookworm" and out[0]["blocked"] == "", str(out))
+    out, _ = upgrade._parse_ci_file("image: golang:1.24.4-alpine\n", "T/x.yml", "go", "1.27", src, resolver=res)
+    check("CI image: Hub'da yok → CI_HAND", out[0]["blocked"] == upgrade.CI_HAND and out[0]["old"] == out[0]["new"], str(out))
+    # kod reposu Dockerfile
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "Dockerfile").write_text("FROM golang:1.24.4-bookworm AS b\n", encoding="utf-8")
+        cs = upgrade._code_sites("svc", root, "go", "1.27", resolver=res)
+        check("kod Dockerfile: library etiketi Hub'da → yazılır",
+              len(cs) == 1 and cs[0]["new"] == "golang:1.27.3-bookworm" and cs[0]["blocked"] == "" and bump.pushable(cs[0]), str(cs))
+        cs = upgrade._code_sites("svc", root, "go", "1.27", resolver=dead)
+        check("kod Dockerfile: Hub okunamadı → CI_HAND", cs[0]["blocked"] == upgrade.CI_HAND and cs[0]["old"] == cs[0]["new"], str(cs))
+        cs = upgrade._code_sites("svc", root, "go", "1.27")
+        check("kod Dockerfile: resolver=None → CI_HAND", cs[0]["blocked"] == upgrade.CI_HAND, str(cs))
+    # digest sabitli imaj: yeniden yazılmaz, Hub'a gidilmez
+    dg = "golang:1.24.4@sha256:" + "a" * 64
+    dcalls: list = []
+    rdg = ur.Resolver(fetch=_fake_hub(hub, dcalls))
+    s = dsites([dg], "go", "1.27", rdg)
+    check("digest sabitli devops imajı: CI_HAND, old == new, Hub çağrısı yok",
+          s[0]["blocked"] == upgrade.CI_HAND and s[0]["old"] == s[0]["new"] == dg and not dcalls, str(s))
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "Dockerfile").write_text(f"FROM {dg}\n", encoding="utf-8")
+        cs = upgrade._code_sites("svc", Path(td), "go", "1.27", resolver=rdg)
+        check("digest sabitli kod Dockerfile: CI_HAND, Hub çağrısı yok",
+              cs[0]["blocked"] == upgrade.CI_HAND and cs[0]["old"] == cs[0]["new"] and not dcalls, str(cs))
+    out, cpins = upgrade._parse_ci_file(f"image: {dg}\n", "T/x.yml", "go", "1.27", src, resolver=rdg)
+    check("digest sabitli CI image: yazılmaz (okunamayan sabitleme, kapı kapalı), Hub çağrısı yok",
+          not out and len(cpins) == 1 and cpins[0]["version"] == "" and not dcalls, str((out, cpins)))
+    # iki parçalı özetli imaj: üç yolda da yeniden yazılmaz (resolver'lı ve resolver'sız), Hub'a gidilmez
+    dg2 = "python:3.11-slim@sha256:" + "b" * 64
+    for label, rr in (("resolver'lı", ur.Resolver(fetch=_fake_hub(hub, dcalls))), ("resolver'sız", None)):
+        s = dsites([dg2], "python", "3.13", rr)
+        check(f"iki parçalı özetli devops imajı ({label}): CI_HAND, old == new",
+              s[0]["blocked"] == upgrade.CI_HAND and s[0]["old"] == s[0]["new"] == dg2, str(s))
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "Dockerfile").write_text(f"FROM {dg2}\n", encoding="utf-8")
+            cs = upgrade._code_sites("svc", Path(td), "python", "3.13", resolver=rr)
+            check(f"iki parçalı özetli kod Dockerfile ({label}): CI_HAND, old == new",
+                  len(cs) == 1 and cs[0]["blocked"] == upgrade.CI_HAND and cs[0]["old"] == cs[0]["new"] == dg2, str(cs))
+        out, _cp = upgrade._parse_ci_file(f"image: {dg2}\n", "T/x.yml", "python", "3.13", src, resolver=rr)
+        check(f"iki parçalı özetli CI image ({label}): CI_HAND, old == new",
+              len(out) == 1 and out[0]["blocked"] == upgrade.CI_HAND and out[0]["old"] == out[0]["new"] == dg2, str(out))
+    idx2 = {"svc": [{"src": "anatolia/build/svc", "images": [dg2]}]}
+    sel2 = upgrade.selectable("python", "3.11", idx2, upgrade._devops_services("svc", "python", idx2, None),
+                              resolver=ur.Resolver(fetch=_fake_hub(hub, dcalls)))
+    check("selectable: özetli imaj üst sürüm için yayınlı sayılmaz", not any(x["published"] for x in sel2), str(sel2))
+    check("özetli imajlarda Hub hiç çağrılmadı", not dcalls, str(dcalls))
+    # plan: ayar açık + resolver=None → modül tekili
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import intake
+    saved_get, saved_default = pc.get, ur._DEFAULT
+    pc.get = lambda k: True if k == "CREW_TECHDEBT_UPGRADE_PATCH" else saved_get(k)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "gocrons"
+            root.mkdir()
+            (root / "go.mod").write_text("module gocrons\n\ngo 1.24.0\n", encoding="utf-8")
+            idx = {"gocrons": [{"src": "anatolia/build/gocrons", "images": ["golang:1.24.4"]}]}
+            deps = intake.Deps(gather=None, board=None, repo_ok=lambda r: True, queue=None, record=None, now=None,
+                               cfg=lambda: {"repos_dir": td})
+            rd = lambda d, p: "FROM golang:1.24.4\n"
+            ur._DEFAULT = res
+            on = upgrade.plan(None, "gocrons", "go", to="1.27", deps=deps, index=idx, root=root, read=rd, yml_files={})
+            dv = [x for x in on["sites"] if x["where"] == "devops"]
+            check("plan: ayar açık → varsayılan çözücü kullanılır",
+                  len(dv) == 1 and dv[0]["new"] == "golang:1.27.3" and dv[0]["blocked"] == "", str(on["sites"]))
+            pc.get = saved_get
+            off = upgrade.plan(None, "gocrons", "go", to="1.27", deps=deps, index=idx, root=root, read=rd, yml_files={})
+            dv = [x for x in off["sites"] if x["where"] == "devops"]
+            check("plan: ayar kapalı → çözücü yok (bugünkü davranış)",
+                  len(dv) == 1 and dv[0]["blocked"] == upgrade.CI_HAND and dv[0]["old"] == dv[0]["new"], str(off["sites"]))
+    finally:
+        pc.get, ur._DEFAULT = saved_get, saved_default
+    # yardımcılar
+    check("image_for_full: etiket + varyant", upgrade.image_for_full("golang:1.24.4-alpine", "go", "1.27.3") == "golang:1.27.3-alpine")
+    check("image_for_full: kayıt deposu önekli", upgrade.image_for_full("eu/prod-ar/python-3-13-7:1.0", "python", "3.14.2")
+          == "eu/prod-ar/python-3-14-2:1.0")
+    check("image_for_full: eşleşme yok aynen", upgrade.image_for_full("python:3.11-slim", "python", "3.14.2") == "python:3.11-slim")
+    check("is_library_image",
+          upgrade.is_library_image("golang:1.24.4", "go") and upgrade.is_library_image("docker.io/library/python:3.11", "python")
+          and upgrade.is_library_image("php:8.2-fpm", "php") and not upgrade.is_library_image("eu/prod-ar/php-8-2:1.0", "php")
+          and not upgrade.is_library_image("myreg.io/library/golang:1.24.4", "go"))
+
+
+def test_upgrade_scan_take():
+    """Yükseltme taraması ve alımı: mevcut modernleştirme yolunu (build_groups, board dedup,
+    _open_tasks, Rector kuyruğu) yeniden kullanır; yalnız yükseltme kuralları + hedef araç
+    bulguları, önekli başlık, tempo-upgrade etiketi, araç kapsamında upgrade_to."""
+    print("\n[upgrade: tarama, alım, Task metni]")
+    import inspect
+    from agile_sdlc_crew.quality import intake, modern_fix, php_modern as pm, render, upgrade
+    from agile_sdlc_crew.quality.model import Finding, Group
+
+    class C:
+        org_url, project = "https://dev.azure.com/o", "P"
+
+        def __init__(self):
+            self.created = []
+
+        def list_iterations(self, team=""):
+            return [{"name": "S23", "path": "P\\S23", "attributes": {"timeFrame": "current"}}]
+
+        def query_work_items(self, wiql, limit=0):  # story zaten var → created[0] Task olur
+            return [{"id": 500, "fields": {"System.AreaPath": "P\\T", "System.IterationPath": "P\\S23"}}]
+
+        def get_team_area_path(self, team=""):
+            return "P\\T"
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append(fields)
+            return {"id": 700 + len(self.created), "fields": fields}
+
+        def update_work_item(self, wid, ops):
+            return {}
+
+        def get_authenticated_user(self):
+            return {"uniqueName": "me@x"}
+
+    index = {"core": [{"src": "anatolia/build/core", "images": ["eu/prod-ar/php-8-2:1.0"]}],
+             "web": [{"src": "anatolia/build/web", "images": ["eu/prod-ar/php-8-4:1.0"]}],
+             "legacy": [{"src": "anatolia/build/legacy", "images": ["eu/prod-ar/php-8-0:1.0"]}]}
+    php_hits = {
+        "core": [{"rule": "implicit_nullable", "file": "app/A.php", "line": 3, "text": "function f(int $a = null)"},
+                 {"rule": "deprecated_84", "file": "app/B.php", "line": 5, "text": "lcg_value()"},
+                 {"rule": "str_contains", "file": "app/A.php", "line": 7, "text": "strpos($a, 'x') !== false"},
+                 {"rule": "moved_to_pecl_84", "file": "app/C.php", "line": 4, "text": "imap_open($h)"}],
+        "legacy": [{"rule": "null_to_internal", "file": "app/L.php", "line": 2, "text": "strlen(null)"},
+                   {"rule": "null_to_internal", "file": "app/L.php", "line": 8, "text": "trim(null)"},
+                   {"rule": "null_to_internal", "file": "app/M.php", "line": 3, "text": "strlen(null)"},
+                   {"rule": "serializable_only", "file": "app/S.php", "line": 1, "text": "class S implements Serializable"},
+                   {"rule": "serializable_only", "file": "app/T.php", "line": 1, "text": "class T implements Serializable"},
+                   {"rule": "loose_compare_numeric", "file": "app/L.php", "line": 4, "text": "0 == 'a'"}]}
+    probes = {
+        "core": ([{"rule": "probe:error", "file": "app/A.php", "line": 3, "text": "x", "message": "Deprecated twice"},
+                  {"rule": "probe:error", "file": "app/D.php", "line": 9, "text": "fn(", "message": "Parse error: x"},
+                  {"rule": "probe:deprecation", "file": "app/E.php", "line": 2, "text": "y", "message": "Deprecated: z"}],
+                 {"ran": True, "tool": "/x/php8.4", "reason": ""}),
+        "legacy": ([], {"ran": False, "tool": "", "reason": "hedef sürüm için araç yok — yalnız katalog"})}
+    queued, queued_payloads, scanned = [], [], []
+    _tr = pm.tool_rules
+    pm.tool_rules = lambda rules: {r.key for r in rules if r.key in ("implicit_nullable", "deprecated_84")}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            for name in ("core", "web", "legacy"):
+                (base / name).mkdir()
+                (base / name / "composer.json").write_text('{"require": {"php": "^8.0"}}', encoding="utf-8")
+            cfg = {"pack_sp": 3, "pack_files": 5, "grace_days": 3, "task_fields": {}, "sonar_url": "", "nr_days": 7,
+                   "php_exclude": [], "php_bin": "php", "scan_ttl_h": 24, "max_take": 8, "freshen": False,
+                   "repos_dir": base, "targets_cache": base / "t.yaml", "scan_cache": base / "cache"}
+            board = {}
+
+            def mk(b):
+                return intake.Deps(gather=None, board=lambda c: b, repo_ok=lambda r: (base / r).is_dir(),
+                                   queue=lambda w, t: (queued.append((w, t)), 9)[1], record=lambda **k: None,
+                                   now=lambda: 1e9, cfg=lambda: cfg,
+                                   queue_tool=lambda w, t, p: (queued_payloads.append(p), 8)[1])
+            deps = mk(board)
+
+            def scan_fn(repo_root, **kw):
+                scanned.append(Path(repo_root).name)
+                return {"files": 4, "sha": "s1", "hits": list(php_hits[Path(repo_root).name]), "adoption": {}, "errors": []}
+            kw = dict(index=index, scan_fn=scan_fn, head_sha_fn=lambda r: "s1", app_map_cache={}, read=lambda d, p: "",
+                      yml_files={}, probe_fn=lambda root, lang, cur, to, **k: probes[Path(root).name])
+            client = C()
+            res = upgrade.scan(client, "core", "php", to="8.4", deps=deps, **kw)
+            check("şimdiki/hedef sürüm ve probe durumu", res["current"] == "8.2" and res["target"] == "8.4"
+                  and res["probe"] == {"ran": True, "tool": "/x/php8.4", "reason": ""}, str((res.get("current"), res.get("probe"))))
+            check("başlık önekli", res["auto"] and all(r["title"].startswith("[core] Sürüm yükseltme 8.2→8.4:")
+                                                        for r in res["auto"] + res["infra"] + res["human"]),
+                  str([r["title"] for r in res["auto"]]))
+            check("parmak izi modernleştirme ile aynı", res["auto"][0]["fingerprints"][0].startswith("php_modern:core:"))
+            check("mekanik kural yok", not [r for r in res["auto"] + res["human"] if r["rule"] == "str_contains"])
+            by = {r["rule"]: r for r in res["auto"] + res["infra"] + res["human"]}
+            check("otomatik deprecation engeller + araç; probe hatası pipeline'a, engeller",
+                  by["implicit_nullable"]["blocking"] and by["implicit_nullable"]["tool"] and by["implicit_nullable"]["pre_fixable"]
+                  and by["probe:error"]["blocking"] and not by["probe:error"]["tool"]
+                  and by["probe:error"] in res["auto"], str({k: (v["blocking"], v["tool"]) for k, v in by.items()}))
+            check("katalog bulgusunun satırındaki probe hatası tekrar sayılmaz",
+                  by["probe:error"]["files"] == ["app/D.php"], str(by["probe:error"]["files"]))
+            check("probe uyarısı insan işi, engellemez", by["probe:deprecation"] in res["human"]
+                  and not by["probe:deprecation"]["blocking"])
+            check("PECL'e taşınan eklenti: altyapı satırı, error → engeller",
+                  by["moved_to_pecl_84"] in res["infra"] and by["moved_to_pecl_84"]["blocking"]
+                  and by["moved_to_pecl_84"]["breaks"] == "error")
+            check("sayımlar", res["counts"]["error"] == 2 and res["counts"]["deprecation"] == 3
+                  and res["counts"]["behavior"] == 0 and res["blocking"] == 4, str((res["counts"], res["blocking"])))
+            check("kural özetinde breaks", res["rules"]["implicit_nullable"]["breaks"] == "deprecation")
+            check("blockers ve siteler yanıtta", isinstance(res["blockers"], list) and isinstance(res["sites"], list)
+                  and res["selectable"])
+
+            leg = upgrade.scan(client, "legacy", "php", to="8.4", deps=deps, **kw)
+            lb = {}
+            for r in leg["auto"] + leg["infra"] + leg["human"]:
+                lb.setdefault(r["rule"], []).append(r)
+            check("behavior insan işi ve engelleyen", lb.get("null_to_internal") and all(
+                r["needs_human"] and r["blocking"] and r["breaks"] == "behavior"
+                and r["human_reason"] == "Davranış değişikliği: otomatik düzeltilemez" for r in lb["null_to_internal"])
+                  and all(r["needs_human"] and r["blocking"] for r in leg["human"] if r["breaks"] == "behavior"), str(lb.keys()))
+            check("behavior kuralı tek grup (iki dosya)", len(lb["null_to_internal"]) == 1
+                  and sorted(lb["null_to_internal"][0]["files"]) == ["app/L.php", "app/M.php"])
+            check("yapısal + file birimli kural (Serializable) TEK needs-human grup, engellemez",
+                  len(lb.get("serializable_only", [])) == 1 and lb["serializable_only"][0] in leg["human"]
+                  and lb["serializable_only"][0]["needs_human"] and not lb["serializable_only"][0]["blocking"]
+                  and len(lb["serializable_only"][0]["files"]) == 2, str(lb.get("serializable_only")))
+            check("since == şimdiki sürüm olan kural yok (8.0 → loose_compare_numeric)", "loose_compare_numeric" not in lb)
+            check("probe doğrulanamadı: durum olduğu gibi", leg["probe"] == probes["legacy"][1] and leg["counts"]["behavior"] == 3)
+
+            # board'da aynı parmak izi açık → ikinci kez listelenmez
+            open_fp = {fp: {"wi": 900, "state": "Active"} for r in res["auto"] for fp in r["fingerprints"]}
+            res2 = upgrade.scan(client, "core", "php", to="8.4", deps=mk(open_fp), **kw)
+            check("board'da açık parmak izi atlanır", res2["skipped_counts"].get("açık WI") and not res2["auto"],
+                  str(res2["skipped_counts"]))
+
+            # İnsanın 'baktım' diye kapattığı behavior işi aynı yerlerle yeniden açılmaz (spec §5)
+            closed = 1e9 - 10 * 86400
+            done = {f"php_modern:legacy:null_to_internal:{f}": {"wi": 910, "state": "Done", "closed_at": closed}
+                    for f in ("app/L.php", "app/M.php")}
+            leg_d = upgrade.scan(client, "legacy", "php", to="8.4", deps=mk(done), **kw)
+            rows_d = leg_d["auto"] + leg_d["infra"] + leg_d["human"]
+            check("kapalı behavior işi, aynı dosyalar → listelenmez, engellemez, skipped'te",
+                  not [r for r in rows_d if r["rule"] == "null_to_internal"]
+                  and leg_d["blocking"] == leg["blocking"] - 1
+                  and any(s["reason"] == "insan baktı: WI #910" for s in leg_d["skipped"]), str((leg_d["blocking"],
+                                                                                              leg_d["skipped"])))
+            php_hits["legacy"].append({"rule": "null_to_internal", "file": "app/N.php", "line": 6, "text": "strlen(null)"})
+            leg_n = upgrade.scan(client, "legacy", "php", to="8.4", deps=mk(done), **dict(kw, head_sha_fn=lambda r: "s2"))
+            nb = [r for r in leg_n["auto"] + leg_n["infra"] + leg_n["human"] if r["rule"] == "null_to_internal"]
+            check("aynı + yeni dosya → yalnız yeni dosyalı grup, engelleyen",
+                  len(nb) == 1 and nb[0]["files"] == ["app/N.php"] and nb[0]["blocking"]
+                  and nb[0]["fingerprints"] == ["php_modern:legacy:null_to_internal:app/N.php"], str(nb))
+            php_hits["legacy"].pop()
+            done_err = {"php_modern:core:probe:error:app/D.php": {"wi": 911, "state": "Done", "closed_at": closed}}
+            res_e = upgrade.scan(client, "core", "php", to="8.4", deps=mk(done_err), **kw)
+            pe = [r for r in res_e["auto"] if r["rule"] == "probe:error"]
+            check("kapalı error işi, bulgu duruyor → bugünkü gibi yeniden açılır",
+                  len(pe) == 1 and pe[0]["blocking"] and pe[0]["recurring_of"] == 910 + 1
+                  and not any("insan baktı" in s["reason"] for s in res_e["skipped"]), str(pe))
+
+            gid = {r["rule"]: r["gid"] for r in res["auto"]}
+            out = upgrade.take(client, "core", "php", [gid["implicit_nullable"], gid["probe:error"]], to="8.4", deps=deps, **kw)
+            check("iki Task açıldı (story zaten var)", len(client.created) == 2 and len(out["tasks"]) == 2, str(out)[:300])
+            t0 = client.created[0]
+            check("Task etiketi", "tempo-upgrade" in t0["System.Tags"] and "tempo-src-php_modern" in t0["System.Tags"]
+                  and t0["System.Tags"].endswith("tempo-upgrade"), t0["System.Tags"])
+            check("Task başlığı önekli ve 128 içinde", t0["System.Title"].startswith("[core] Sürüm yükseltme 8.2→8.4:")
+                  and len(t0["System.Title"]) <= 128, t0["System.Title"])
+            check("Task: şimdiki sürümde de çalışmalı", "8.2 sürümünde de çalışmalı" in t0["System.Description"]
+                  and "8.2 → 8.4 (sürüm yükseltme" in t0["System.Description"])
+            check("Task parmak izi satırı modernleştirme ile aynı", "tempo-fp: php_modern:core:implicit_nullable:app/A.php"
+                  in t0["System.Description"])
+            check("araç kapsamı upgrade_to taşır", len(queued_payloads) == 1
+                  and json.loads(queued_payloads[0])["upgrade_to"] == "8.4"
+                  and json.loads(queued_payloads[0])["scope"] == {"implicit_nullable": ["app/A.php"]}, str(queued_payloads))
+            check("probe hatası işi pipeline'a", len(queued) == 1 and "probe:error" in queued[0][1]
+                  and queued[0][1].startswith("[core] Sürüm yükseltme"), str(queued))
+            try:
+                upgrade.take(client, "core", "php", ["000000000000"], to="8.4", deps=deps, **kw)
+                check("bilinmeyen gid → ValueError", False)
+            except ValueError as e:
+                check("bilinmeyen gid → ValueError", "tarama" in str(e), str(e))
+            cfg["max_take"] = 1
+            n_created = len(client.created)
+            try:
+                capped = upgrade.take(client, "core", "php", [gid["deprecated_84"], gid["probe:error"]], to="8.4",
+                                      deps=deps, **kw)
+            finally:
+                cfg["max_take"] = 8
+            check("istek başı tavan", len(client.created) == n_created + 1 and len(capped["tasks"]) == 1
+                  and [s["reason"] for s in capped["skipped"]] == ["istek başı tavan (1)"], str(capped.get("skipped")))
+            intake._LOCK.acquire()
+            try:
+                try:
+                    upgrade.take(client, "core", "php", [gid["deprecated_84"]], to="8.4", deps=deps, **kw)
+                    check("kilitliyken Busy", False)
+                except intake.Busy:
+                    check("kilitliyken Busy", True)
+            finally:
+                intake._LOCK.release()
+            n_scan = len(scanned)
+            check("güncel repo taranmaz", upgrade.scan(client, "web", "php", deps=deps, **kw)["up_to_date"] is True
+                  and len(scanned) == n_scan)
+            try:
+                upgrade.take(client, "web", "php", ["x"], deps=deps, **kw)
+                check("güncel repoda alım → ValueError", False)
+            except ValueError:
+                check("güncel repoda alım → ValueError", True)
+
+            # Python: ast kataloğu (depo kodu çalıştırılmaz), sözdizimi bozuk dosya atlanır
+            py = base / "pyapp"
+            (py / "venv").mkdir(parents=True)
+            (py / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.11"\n')
+            (py / "a.py").write_text("import imp\nfrom distutils.util import strtobool\nimport asyncore as A\n")
+            (py / "b.py").write_text("from datetime import datetime\nx = datetime.utcnow()\ny = datetime.datetime.utcfromtimestamp(0)\n")
+            (py / "c.py").write_text("import cgi\n")
+            (py / "bad.py").write_text("import imp\ndef (:\n")
+            (py / "venv" / "v.py").write_text("import imp\n")
+            pkw = dict(index={}, read=lambda d, p: "", yml_files={}, probe_fn=lambda *a, **k: ([], {"ran": False, "tool": "", "reason": "yok"}))
+            pr = upgrade.scan(client, "pyapp", "python", to="3.12", deps=deps, **pkw)
+            pb = {r["rule"]: r for r in pr["auto"] + pr["infra"] + pr["human"]}
+            check("python: 3.12 kuralları bulunur, 3.13 (cgi) yok", set(pb) == {"imp", "distutils", "asyncore", "datetime_utcnow"},
+                  str(sorted(pb)))
+            check("python: bozuk dosya ve venv atlanır", pb["imp"]["files"] == ["a.py"], str(pb["imp"]["files"]))
+            check("python: utcnow + utcfromtimestamp iki yer", pb["datetime_utcnow"]["count"] == 2, str(pb["datetime_utcnow"]["count"]))
+            check("python: otomatik düzeltilemeyen kural insan işi (auto listesi boş), error → engeller",
+                  not pr["auto"] and pb["imp"] in pr["human"] and pb["imp"]["needs_human"] and pb["imp"]["blocking"]
+                  and pb["imp"]["breaks"] == "error" and not pb["imp"]["tool"]
+                  and pb["imp"]["fingerprints"][0] == "py_modern:pyapp:imp:a.py"
+                  and pb["imp"]["title"].startswith("[pyapp] Sürüm yükseltme 3.11→3.12:"), str(sorted(r["rule"] for r in pr["auto"])))
+            check("python: asyncore insan işi ama error → engeller", pb["asyncore"] in pr["human"] and pb["asyncore"]["blocking"])
+            n_tool, n_pipe = len(queued_payloads), len(queued)
+            upgrade.take(client, "pyapp", "python", [pb["imp"]["gid"]], to="3.12", deps=deps, **pkw)
+            check("python: insan işi Task açılır, hiçbir kuyruğa alınmaz", len(queued_payloads) == n_tool and len(queued) == n_pipe
+                  and "needs-human" in client.created[-1]["System.Tags"], str(queued))
+            check("Task metni yükseltme kataloğundan, 'otomatik' değil 'tasarım kararı'",
+                  "importlib" in client.created[-1]["System.Description"]
+                  and "tasarım kararı" in client.created[-1]["System.Description"])
+            py_rules = pm.load_rules(upgrade.PY_UPGRADE_RULES)
+            check("python kataloğu: auto:false kuralların hepsi structural + file",
+                  py_rules and all(r.kind == "structural" and r.unit == "file" for r in py_rules if not r.auto),
+                  str([r.key for r in py_rules if not r.auto and r.kind != "structural"]))
+            loose = [r.key for lg in ("nextjs", "go") for r in upgrade.catalog(lg)
+                     if r.breaks and not r.auto and r.kind not in ("structural", "report")]
+            check("Next.js / Go yükseltme kuralları: otomatik değilse structural ya da report", not loose, str(loose))
+
+            # Next.js: senkron istek API'leri behavior; next lint yalnız sayı
+            nx = base / "nx"
+            (nx / "app" / "p").mkdir(parents=True)
+            (nx / "package.json").write_text(json.dumps({"dependencies": {"next": "14.2.0", "react": "18.3.0"},
+                                                         "scripts": {"lint": "next lint"}}))
+            (nx / "app" / "a.tsx").write_text("const h = headers()\nimport { useFormState } from 'react-dom'\n")
+            (nx / "app" / "p" / "page.tsx").write_text("export default function P({ params }) { return params.slug }\n")
+            nr = upgrade.scan(client, "nx", "nextjs", to="15.0", deps=deps, **pkw)
+            nb = {r["rule"]: r for r in nr["auto"] + nr["infra"] + nr["human"]}
+            check("nextjs: senkron API'ler behavior, insan, engeller; breaks'siz kural yok",
+                  set(nb) == {"sync_request_api", "sync_route_params"}
+                  and all(r["needs_human"] and r["blocking"] and r["breaks"] == "behavior" for r in nb.values()), str(sorted(nb)))
+            check("nextjs: next lint rapor (sayı, iş yok)", nr["rules"].get("next_lint", {}).get("count") == 1, str(nr["rules"].keys()))
+
+            # Go: katalog yalnız rapor; probe hatası iş olur
+            go = base / "goapp"
+            go.mkdir()
+            (go / "go.mod").write_text("module m\n\ngo 1.21\n")
+            gkw = dict(pkw, probe_fn=lambda *a, **k: ([{"rule": "probe:error", "file": "main.go", "line": 4, "text": "x",
+                                                         "message": "undefined: y"}], {"ran": True, "tool": "go", "reason": ""}))
+            gr = upgrade.scan(client, "goapp", "go", to="1.23", deps=deps, **gkw)
+            check("go: döngü değişkeni / GODEBUG rapor olarak sayılır, iş açmaz",
+                  gr["rules"].get("go122_loopvar", {}).get("count") == 1 and gr["rules"]["go122_loopvar"]["kind"] == "report"
+                  and not any(r["rule"].startswith("go12") for r in gr["auto"] + gr["human"]), str(gr["rules"].keys()))
+            check("go: probe hatası otomatik iş (pipeline)", [r["rule"] for r in gr["auto"]] == ["probe:error"]
+                  and gr["auto"][0]["fingerprints"][0].startswith("go_modern:goapp:"))
+    finally:
+        pm.tool_rules = _tr
+
+    # fix_min > şimdiki sürüm → insan işi
+    r = pm.Rule(key="x84", since=(8, 4), kind="deprecation", title="T", summary="", advantages=[], risks=[], before="",
+                after="", ref="", auto=True, breaks="error", fix_min=(8, 4))
+    g = Group(source="php_modern", repo="core", title="T — a.php", fingerprints=["php_modern:core:x84:a.php"],
+              findings=[Finding(source="php_modern", repo="core", file="a.php", rule="x84", lines=[1], uris=["1|x"])])
+    upgrade._mark_groups([g], {"x84": r}, "8.2", "8.4")
+    check("fix_min > şimdiki → needs_human + neden", g.needs_human and g.human_reason
+          == "Düzeltme yalnız 8.4 ve sonrasında çalışır — sürüm adımıyla birlikte ele alınmalı", g.human_reason)
+    check("Group.extra_tags render'da sona eklenir", g.extra_tags == ["tempo-upgrade"]
+          and render.task_tags(g, lane="techdebt").endswith("needs-human; tempo-upgrade")
+          and Group(source="s", repo="r", title="t", fingerprints=[], findings=[]).extra_tags == [])
+    long = Group(source="php_modern", repo="core", title="x" * 200, fingerprints=["php_modern:core:x84:a.php"], findings=g.findings)
+    upgrade._mark_groups([long], {"x84": r}, "8.2", "8.4")
+    check("uzun başlıkta önek korunur", render.task_title(long).startswith("[core] Sürüm yükseltme 8.2→8.4: x")
+          and len(render.task_title(long)) == 128)
+
+    # modern_fix: upgrade_to ayrı okunur, load_scope 4'lü kalır, hedef araç hatası dosyayı düşürür
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "gocrons").mkdir()
+        p = '{"lang": "go", "repo": "gocrons", "scope": {"any": ["a.go"]}, "upgrade_to": "1.25"}'
+        check("load_scope 4'lü kalır", len(modern_fix.load_scope(p, Path(td))) == 4)
+    check("upgrade_to doğrulanır", modern_fix.upgrade_target(p) == "1.25"
+          and modern_fix.upgrade_target('{"upgrade_to": "1.25; rm -rf /"}') == ""
+          and modern_fix.upgrade_target('{"upgrade_to": 8.4}') == "" and modern_fix.upgrade_target("") == "")
+    fake = lambda root, lang, cur, to, files=None: (
+        [{"rule": "probe:error", "file": "app/B.php", "line": 2, "text": "", "message": "Parse error: y"},
+         {"rule": "probe:deprecation", "file": "app/A.php", "line": 1, "text": "", "message": "Deprecated: z"},
+         {"rule": "probe:error", "file": "app/Z.php", "line": 1, "text": "", "message": "kapsam dışı"}],
+        {"ran": True, "tool": "php8.4", "reason": ""})
+    drops = modern_fix._upgrade_drops(Path("/nonexistent"), "php", "8.2", "8.4", ["app/A.php", "app/B.php"], probe=fake)
+    check("hedef araçta hata veren dosya düşer (uyarı ve kapsam dışı değil)", list(drops) == ["app/B.php"]
+          and "8.4" in drops["app/B.php"] and "Parse error" in drops["app/B.php"], str(drops))
+    check("Go probe'u değişen dosyaları değil HEAD'i derler → dosya düşürmez",
+          modern_fix._upgrade_drops(Path("/x"), "go", "1.22", "1.24", ["app/B.php"], probe=fake) == {})
+    check("hedef araç yoksa düşürme yok", modern_fix._upgrade_drops(
+        Path("/x"), "php", "8.2", "8.4", ["a.php"], probe=lambda *a, **k: ([], {"ran": False, "tool": "", "reason": ""})) == {})
+    src = inspect.getsource(modern_fix._run_scoped)
+    check("Rector sürümü şimdiki üretim sürümü (upgrade_to'dan alınmaz)",
+          "apply_tool(root, lang, scope, version)" in src
+          and "fix_leftovers(root, scope, version, upgrade_to=upgrade_to)" in src
+          and "upgrade_to" not in inspect.getsource(modern_fix.php_apply)
+          and "upgrade_to" not in inspect.getsource(modern_fix.rector_config)
+          and "_upgrade_drops(root, lang, version, upgrade_to, changed)" in src)
+    check("run upgrade_to'yu iş kaydından okur", "upgrade_to=upgrade_target(job.get(\"job_payload\")"
+          in inspect.getsource(modern_fix.run))
+
+    # Fix round 1 — 4: ek denetim açık kalır (fail-open): probe istisnası işi düşürmez
+    def boom(*a, **k):
+        raise RuntimeError("git worktree açılamadı")
+    try:
+        got = modern_fix._upgrade_drops(Path("/x"), "php", "8.2", "8.4", ["app/A.php"], probe=boom)
+    except Exception as e:  # noqa: BLE001
+        got = e
+    check("probe istisnası: hiçbir dosya düşmez, iş sürer", got == {}, repr(got))
+
+    # Fix round 1 — 2: pencere talimatı şimdiki sürümde de çalışmayı ister
+    from agile_sdlc_crew import pipeline_config as _pc
+    from agile_sdlc_crew.quality import modern
+    nc = {r.key: r for r in pm.load_rules()}["null_coalesce"]
+    sentence = ("The code must keep working on PHP 8.2 as well as on 8.4; "
+                "do not use syntax or functions that only exist in 8.4.")
+    check("talimat: upgrade_to yokken değişmez", modern_fix._rule_instruction(nc, "8.2") ==
+          modern_fix._rule_instruction(nc, "8.2", "") and "8.4" not in modern_fix._rule_instruction(nc, "8.2"))
+    check("talimat: upgrade_to varken cümle eklenir", sentence in modern_fix._rule_instruction(nc, "8.2", "8.4"),
+          modern_fix._rule_instruction(nc, "8.2", "8.4"))
+    seen_items = []
+    _sf, _bw, _get = pm.scan_files, modern_fix.batch_window_fix, _pc.get
+    left = [[{"rule": "null_coalesce", "file": "app/A.php", "line": 2}], []]
+    pm.scan_files = lambda root, files, **k: left.pop(0) if left else []
+    modern_fix.batch_window_fix = lambda root, items, **k: (seen_items.extend(items), 1)[1]
+    _pc.get = lambda key, *a, **k: True if key == "CREW_MODERN_FIX_LLM_LEFTOVERS" else _get(key, *a, **k)
+    try:
+        modern_fix.fix_leftovers(Path("/x"), {"null_coalesce": ["app/A.php"]}, "8.2", upgrade_to="8.4")
+        with_up = [i for _f, _l, i in seen_items]
+        seen_items.clear()
+        left[:] = [[{"rule": "null_coalesce", "file": "app/A.php", "line": 2}], []]
+        modern_fix.fix_leftovers(Path("/x"), {"null_coalesce": ["app/A.php"]}, "8.2")
+        without = [i for _f, _l, i in seen_items]
+    finally:
+        pm.scan_files, modern_fix.batch_window_fix, _pc.get = _sf, _bw, _get
+    check("fix_leftovers upgrade_to'yu talimata taşır; yokken eklemez",
+          with_up and sentence in with_up[0] and without and "8.4" not in without[0], f"{with_up} {without}")
+    check("_run_scoped her iki fix_leftovers çağrısında upgrade_to geçer",
+          inspect.getsource(modern_fix._run_scoped).count("upgrade_to=upgrade_to)") >= 2)
+
+    # Fix round 1 — 3: seçim/tavan ve Task açma tek yerde
+    srcs = {f.__module__: inspect.getsource(f) for f in (pm.take, modern.take, upgrade.take)}
+    check("üç take ortak _pick + _open_and_report kullanır",
+          all("_pick(" in s and "_open_and_report(" in s for s in srcs.values()), str({k: ("_pick(" in s) for k, s in srcs.items()}))
+    qdir = Path(pm.__file__).parent
+    check("tavan metni tek yerde (php_modern)",
+          sum((qdir / f).read_text().count("istek başı tavan") for f in ("php_modern.py", "modern.py", "upgrade.py")) == 1)
+
+
+def _iv_client(files: dict, dates: dict | None = None):
+    """base-images@production sahte client'ı: yol → içerik; okunamayan → istisna."""
+    def get_file_content(repo, path, branch=None, project=None):
+        assert repo == "base-images" and branch == "production" and project == "FLODevOps", (repo, branch, project)
+        if path not in files:
+            raise FileNotFoundError(path)
+        return files[path]
+
+    def get_last_commit_date(repo, path, branch, project=None):
+        return (dates or {}).get(path, "")
+    return SimpleNamespace(get_file_content=get_file_content, get_last_commit_date=get_last_commit_date)
+
+
+def test_image_vuln_inventory():
+    """Taban imaj envanteri: kendi imaj → dayanak FROM (ARG çözümü), tekilleştirme, bölge, takma ad, hata."""
+    print("\n[taban imaj güvenliği: envanter]")
+    from agile_sdlc_crew.quality import image_vuln as iv
+    reg = "europe-west1-docker.pkg.dev/flo-prod-main/prod-ar"
+    files = {
+        "/php-8-4/Dockerfile": "ARG PHP_VERSION=8.4.27\nFROM php:${PHP_VERSION}-fpm-bookworm\nRUN x\n",
+        "/php-8-2/dockerfile": "FROM php:8.4.27-fpm-bookworm\n",           # küçük harf; aynı dayanak
+        "/python-3-13-7/Dockerfile": "FROM python:3.13.7-slim-bookworm\n",
+        "/node-20-17/Dockerfile": "FROM node:20.17.0-bookworm\n",
+        "/noarg-1/Dockerfile": "ARG V\nFROM php:${V}-fpm\n",                  # varsayılansız ARG
+        "/evil-1/Dockerfile": "FROM php:8.4;rm\n",
+    }
+    client = _iv_client(files, {"/php-8-4": "2026-10-21T08:00:00Z", "/php-8-2": "2026-09-01T00:00:00Z"})
+    index = {
+        "channel": [{"src": "anatolia/build/channel", "images": [f"{reg}/php-8-4:1.0", "base", "builder"]},
+                    {"src": "global/build/channel", "images": [f"{reg}/php-8-2:1.0"]}],
+        "core": [{"src": "russia/build/core", "images": ["10.131.167.220:5000/prod-ar/php-8-4:1.0"]}],
+        "gocrons": [{"src": "anatolia/build/gocrons", "images": ["golang:1.24.4", "debian:12"]}],
+        "py": [{"src": "anatolia/build/py", "images": [f"{reg}/python-3-13-7:1.0", "python:3.11-slim",
+                                                       "huggingface_hub"]}],
+        "web": [{"src": "anatolia/build/web", "images": [f"{reg}/node-20-17:1.0",
+                                                         "node:${NODE_VERSION}-alpine3.24"]}],
+        "bad": [{"src": "global/build/bad", "images": [f"{reg}/noarg-1:1.0", f"{reg}/missing-9:1.0",
+                                                       f"{reg}/evil-1:1.0"]}],
+    }
+    recs = {r["image"]: r for r in iv.inventory(client, index)}
+    php = recs.get("php:8.4.27-fpm-bookworm")
+    check("ARG çözülür; iki dizin + üç bölge tek kayıt", bool(php) and php["via"] == ["php-8-2", "php-8-4"]
+          and php["lang"] == "php" and php["version"] == "8.4.27" and not php["error"], str(php))
+    check("bölge başına kullanıcılar (registry farklı olsa da)",
+          php["users"] == {"anatolia": ["build/channel"], "global": ["build/channel"], "russia": ["build/core"]},
+          str(php and php["users"]))
+    check("etkilenen kod repoları: repo → bölge → derleme dizinleri",
+          php["repos"] == {"channel": {"anatolia": ["build/channel"], "global": ["build/channel"]},
+                           "core": {"russia": ["build/core"]}}
+          and recs["golang:1.24.4"]["repos"] == {"gocrons": {"anatolia": ["build/gocrons"]}},
+          str(php and php.get("repos")))
+    check("touched: dizinlere son dokunulan en yeni tarih", php["touched"] == "2026-10-21", php["touched"])
+    check("küçük harfli dockerfile okunur (php-8-2 dayanağa katıldı)", "php-8-2" in php["via"])
+    check("takma ad / etiketsiz ad atlanır", "base" not in recs and "builder" not in recs
+          and "huggingface_hub" not in recs)
+    check("python / node / go dil ve sürümü",
+          recs["python:3.13.7-slim-bookworm"]["lang"] == "python" and recs["python:3.13.7-slim-bookworm"]["version"] == "3.13.7"
+          and recs["node:20.17.0-bookworm"]["lang"] == "node" and recs["node:20.17.0-bookworm"]["version"] == "20.17.0"
+          and recs["golang:1.24.4"]["lang"] == "go" and recs["golang:1.24.4"]["version"] == "1.24.4"
+          and recs["python:3.11-slim"]["version"] == "3.11")
+    check("dil olmayan imaj da envanterde (lang boş)", recs["debian:12"]["lang"] == "" and not recs["debian:12"]["error"])
+    check("genel imajda via boş", recs["golang:1.24.4"]["via"] == [])
+    check("ARG'ı kullanıcı Dockerfile'ında olan imaj → error, özgün ad",
+          "node:${NODE_VERSION}-alpine3.24" in recs and recs["node:${NODE_VERSION}-alpine3.24"]["error"] != "")
+    na = recs.get(f"{reg}/noarg-1:1.0")
+    check("varsayılansız ARG → error, özgün ad", bool(na) and "ARG" in na["error"], str(na))
+    check("okunamayan taban dizin → error", recs[f"{reg}/missing-9:1.0"]["error"] != "")
+    check("kötü niyetli FROM → error (alt sürece gidecek ad olmaz)",
+          recs[f"{reg}/evil-1:1.0"]["error"] != "" and "php:8.4;rm" not in recs)
+    check("hatalı kayıtta lang boş", recs[f"{reg}/noarg-1:1.0"]["lang"] == "")
+    good = ["php:8.4.27-fpm-bookworm", "golang:1.24.4", "registry.example/prod-ar/php-8-4:1.0", "debian"]
+    bad = ["", "-php:8", "--flag", "php:8.4; rm -rf /", "php 8", "$(id)", "php:${V}", "PHP:8", "a" * 201,
+           "node:20\nx", "ünicode:1", "a@sha256:abc"]
+    check("valid_image iyi adlar", all(iv.valid_image(x) for x in good), str([x for x in good if not iv.valid_image(x)]))
+    check("valid_image kötü girdiler", not any(iv.valid_image(x) for x in bad), str([x for x in bad if iv.valid_image(x)]))
+    check("valid_image str olmayan", not iv.valid_image(None) and not iv.valid_image(5))
+
+
+def _iv_trivy_json(vulns, *, os_name="12.15"):
+    return json.dumps({"ArtifactName": "x", "Metadata": {"OS": {"Family": "debian", "Name": os_name},
+                                                          "ImageConfig": {"created": "2026-11-05T07:25:52Z"}},
+                       "Results": [{"Target": "t", "Type": "debian", "Vulnerabilities": vulns}]})
+
+
+def test_image_vuln_signals():
+    """Trivy sonucu, yama geride, destek bitmiş, seviye tablosu ve önbellek (run/fetch/resolver enjekte)."""
+    print("\n[taban imaj güvenliği: işaretler ve önbellek]")
+    import os as _os
+    import subprocess as sp
+    from datetime import date
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import image_vuln as iv
+    from agile_sdlc_crew.quality import upgrade_registry as ur
+    saved_cmd = iv.trivy_cmd
+    iv.trivy_cmd = lambda **kw: ["trivy"]
+    try:
+        def v(cve, pkg, sev, fixed="1.2", inst="1.1"):
+            d = {"VulnerabilityID": cve, "PkgName": pkg, "InstalledVersion": inst, "Severity": sev, "Status": "fixed"}
+            if fixed is not None:
+                d["FixedVersion"] = fixed
+            return d
+        calls: list = []
+
+        def run_ok(cmd, timeout):
+            calls.append(cmd)
+            return 0, _iv_trivy_json([
+                v("CVE-1", "curl", "HIGH"), v("CVE-2", "curl", "CRITICAL", "1.3"), v("CVE-3", "zlib", "HIGH"),
+                v("CVE-4", "nofix", "CRITICAL", fixed=None), v("CVE-5", "empty", "HIGH", fixed=""),
+                v("CVE-6", "curl", "HIGH"), v("CVE-7", "curl", "HIGH"), v("CVE-8", "curl", "HIGH"),
+                v("CVE-9", "curl", "HIGH"), v("CVE-10", "curl", "HIGH")])
+        s = iv.scan_image("php:8.4.27-fpm-bookworm", run=run_ok)
+        check("tarama tamam; yalnız düzeltmeli sayılır (düzeltmesiz / boş FixedVersion hariç)",
+              s["state"] == "tamam" and s["critical"] == 1 and s["high"] == 7, str(s))
+        pk = {p["name"]: p for p in s["packages"]}
+        check("paket başına en yüksek önem; düzeltmesizler listede yok",
+              set(pk) == {"curl", "zlib"} and pk["curl"]["severity"] == "CRITICAL" and pk["curl"]["fixed"] == "1.3"
+              and s["packages"][0]["name"] == "curl", str(s["packages"]))
+        check("paket başına CVE ≤ 5", len(pk["curl"]["cves"]) == 5)
+        check("os + imaj tarihi", s["os"] == "debian 12.15" and s["created"] == "2026-11-05")
+        cmd = calls[0]
+        check("komut: liste biçimi, sabit bayraklar, imaj en sonda",
+              cmd[:1] == ["trivy"] and cmd[1:] == ["image", "--quiet", "--timeout", "585s", "--platform", "linux/amd64", "--scanners", "vuln",
+                                                   "--severity", "HIGH,CRITICAL", "--format", "json",
+                                                   "php:8.4.27-fpm-bookworm"], str(cmd))
+        n = iv.scan_image("x:1", run=lambda c, t: (0, json.dumps({"Results": [{"Vulnerabilities": None}]})))
+        check("Vulnerabilities: null → 0 bulgu", n["state"] == "tamam" and n["critical"] == n["high"] == 0, str(n))
+        check("Results yok / boş nesne → 0 bulgu, çökme yok",
+              iv.scan_image("x:1", run=lambda c, t: (0, "{}"))["state"] == "tamam"
+              and iv.scan_image("x:1", run=lambda c, t: (0, '{"Results": null}'))["state"] == "tamam")
+        check("dönüş kodu 1 → tarama başarısız", iv.scan_image("x:1", run=lambda c, t: (1, "{}"))["state"] == "tarama başarısız")
+        check("bozuk / boş JSON → tarama başarısız (sessizce temiz değil)",
+              iv.scan_image("x:1", run=lambda c, t: (0, "not json"))["state"] == "tarama başarısız"
+              and iv.scan_image("x:1", run=lambda c, t: (0, ""))["state"] == "tarama başarısız")
+
+        def boom(c, t):
+            raise sp.TimeoutExpired(c, t)
+        check("zaman aşımı", iv.scan_image("x:1", run=boom)["state"] == "zaman aşımı")
+        check("run istisnası → tarama başarısız",
+              iv.scan_image("x:1", run=lambda c, t: (_ for _ in ()).throw(OSError("x")))["state"] == "tarama başarısız")
+        spy: list = []
+        for bad in ("php:8.4; rm -rf /", "--flag", "-v", "a b", "$(id)", ""):
+            r = iv.scan_image(bad, run=lambda c, t: spy.append(c) or (0, "{}"))
+            assert r["state"] == "geçersiz imaj", (bad, r)
+        check("geçersiz imajda run hiç çağrılmaz", not spy)
+        iv.trivy_cmd = lambda **kw: None
+        spy2: list = []
+        check("tarayıcı yok", iv.scan_image("x:1", run=lambda c, t: spy2.append(c))["state"] == "tarayıcı yok" and not spy2)
+        iv.trivy_cmd = saved_cmd
+        saved_env = _os.environ.get("CREW_TRIVY_BIN")
+        with tempfile.TemporaryDirectory() as td:
+            ok = Path(td) / "trivy-0.60"
+            ok.write_text("#!/bin/sh\n"); ok.chmod(0o755)
+            wrong = Path(td) / "evil"
+            wrong.write_text("#!/bin/sh\n"); wrong.chmod(0o755)
+            try:
+                _os.environ["CREW_TRIVY_BIN"] = str(ok)
+                check("CREW_TRIVY_BIN geçerli → [bin]", iv.trivy_cmd(which=lambda n: None) == [str(ok)])
+                _os.environ["CREW_TRIVY_BIN"] = str(wrong)
+                check("CREW_TRIVY_BIN adı trivy… değil → yok sayılır", iv.trivy_cmd(which=lambda n: None) is None)
+                _os.environ["CREW_TRIVY_BIN"] = "trivy"
+                check("CREW_TRIVY_BIN göreli yol → yok sayılır", iv.trivy_cmd(which=lambda n: None) is None)
+                _os.environ.pop("CREW_TRIVY_BIN")
+                check("PATH'te trivy", iv.trivy_cmd(which=lambda n: "/x/trivy" if n == "trivy" else None) == ["/x/trivy"])
+                dk = iv.trivy_cmd(which=lambda n: "/x/docker" if n == "docker" else None)
+                check("docker yedeği: önbellek repo dışı, imaj sabit",
+                      bool(dk) and dk[:4] == ["/x/docker", "run", "--rm", "--name"] and dk[-1] == iv.trivy_image()
+                      and re.fullmatch(r"tempo-trivy-[0-9a-f]{12}", dk[4]) and dk[5] == "-v"
+                      and ".cache/tempo-trivy:/root/.cache/" in dk[6] and "crewai" not in dk[6], str(dk))
+                check("trivy_cmd her çağrıda benzersiz kap adı",
+                      iv.trivy_cmd(which=lambda n: "/x/docker" if n == "docker" else None)[4] != dk[4])
+                check("hiçbiri yok → None", iv.trivy_cmd(which=lambda n: None) is None)
+            finally:
+                if saved_env is None:
+                    _os.environ.pop("CREW_TRIVY_BIN", None)
+                else:
+                    _os.environ["CREW_TRIVY_BIN"] = saved_env
+        check("CREW_TRIVY_BIN pipeline_config'e kayıtlı DEĞİL (env-only)",
+              not any(f["key"] == "CREW_TRIVY_BIN" for f in pc.SCHEMA))
+        iv.trivy_cmd = lambda **kw: ["trivy"]
+
+        # patch_lag
+        hub = ur.Resolver(fetch=_fake_hub({"php": ["8.4.27", "8.4.30", "8.4.5"], "golang": ["1.24.4", "1.24.9"],
+                                           "node": ["20.17.0", "20.17.3"], "python": ["3.13.7"]}))
+        check("yama geride: php", iv.patch_lag("php", "8.4.27", resolver=hub) == {"latest": "8.4.30"})
+        check("yama geride: go → golang Hub adı", iv.patch_lag("go", "1.24.4", resolver=hub) == {"latest": "1.24.9"})
+        check("yama geride: node", iv.patch_lag("node", "20.17.0", resolver=hub) == {"latest": "20.17.3"})
+        check("güncel / bilinmeyen / iki parçalı / dilsiz → None",
+              iv.patch_lag("python", "3.13.7", resolver=hub) is None and iv.patch_lag("php", "8.4.30", resolver=hub) is None
+              and iv.patch_lag("php", "8.4", resolver=hub) is None and iv.patch_lag("node", "20", resolver=hub) is None
+              and iv.patch_lag("", "1.2.3", resolver=hub) is None and iv.patch_lag("php", "8.9.1", resolver=hub) is None)
+        check("Hub çökerse None (uyarı değil)",
+              iv.patch_lag("php", "8.4.27", resolver=ur.Resolver(fetch=_fake_hub({}, down=True))) is None)
+
+        # eol
+        rows = {"php": [{"cycle": "8.4", "eol": "2028-12-31", "latest": "8.4.30"},
+                        {"cycle": "7.4", "eol": "2022-11-28"}, {"cycle": "9.0", "eol": False}, {"cycle": "5.6", "eol": True}],
+                "nodejs": [{"cycle": "20", "eol": "2026-04-30"}]}
+        urls: list = []
+
+        def fetch(url):
+            urls.append(url)
+            return rows[url.rsplit("/", 1)[1][:-5]]
+        iv._EOL_CACHE.clear(); iv._EOL_DOWN.clear()
+        today = date(2026, 11, 18)
+        check("eol geçmiş → tarih", iv.eol("php", "7.4.33", fetch=fetch, today=today) == {"eol": "2022-11-28"})
+        check("eol gelecek → None", iv.eol("php", "8.4.27", fetch=fetch, today=today) is None)
+        check("eol false → None", iv.eol("php", "9.0.1", fetch=fetch, today=today) is None)
+        check("eol true → destek bitti (tarihsiz)", iv.eol("php", "5.6.1", fetch=fetch, today=today) == {"eol": ""})
+        check("node döngüsü yalnız majör", iv.eol("node", "20.17.0", fetch=fetch, today=today) == {"eol": "2026-04-30"})
+        check("bilinmeyen döngü → None", iv.eol("php", "8.1.2", fetch=fetch, today=today) is None)
+        check("ürün adları ve tek istek (24 sa bellek)",
+              urls == ["https://endoflife.date/api/php.json", "https://endoflife.date/api/nodejs.json"], str(urls))
+        iv._EOL_CACHE.clear(); iv._EOL_DOWN.clear()
+
+        def down(url):
+            raise OSError("ağ yok")
+        check("okunamadı → None", iv.eol("php", "7.4.33", fetch=down, today=today) is None)
+        check("beklenmedik biçim → None",
+              iv.eol("php", "7.4.33", fetch=lambda u: {"x": 1}, today=today) is None)
+        iv._EOL_CACHE.clear(); iv._EOL_DOWN.clear()
+        check("geçersiz tarih → None",
+              iv.eol("php", "7.4.33", fetch=lambda u: [{"cycle": "7.4", "eol": "yarın"}], today=today) is None)
+        iv._EOL_CACHE.clear(); iv._EOL_DOWN.clear()
+
+        # report: seviye tablosu + önbellek
+        reg = "r.example/prod-ar"
+        files = {"/lvl-crit/Dockerfile": "FROM php:8.4.27-fpm\n", "/lvl-high/Dockerfile": "FROM php:8.3.1\n",
+                 "/lvl-eol/Dockerfile": "FROM php:7.4.33\n", "/lvl-clean/Dockerfile": "FROM php:8.4.30\n",
+                 "/lvl-unk/Dockerfile": "FROM debian:12\n"}
+        client = _iv_client(files)
+        index = {"a": [{"src": "anatolia/build/a", "images": [f"{reg}/lvl-crit:1", f"{reg}/lvl-high:1",
+                                                              f"{reg}/lvl-eol:1", f"{reg}/lvl-clean:1",
+                                                              f"{reg}/lvl-unk:1"]},
+                       {"src": "russia/build/a", "images": [f"{reg}/lvl-clean:1"]}]}
+        scans = {"php:8.4.27-fpm": {"critical": 1, "high": 0}, "php:8.3.1": {"critical": 0, "high": 2},
+                 "php:7.4.33": {"critical": 0, "high": 0}, "php:8.4.30": {"critical": 0, "high": 0},
+                 "debian:12": None}
+        ran: list = []
+
+        def scan_fn(image):
+            ran.append(image)
+            s = scans[image]
+            if s is None:
+                return {"state": "tarama başarısız", "critical": 0, "high": 0, "packages": [], "os": "", "created": ""}
+            return {"state": "tamam", "packages": [], "os": "debian 12", "created": "2026-11-05", **s}
+        hub2 = ur.Resolver(fetch=_fake_hub({"php": ["8.4.30", "8.3.9"]}))
+        rows["php"] = [{"cycle": "7.4", "eol": "2022-11-28"}, {"cycle": "8.4", "eol": "2028-12-31"},
+                       {"cycle": "8.3", "eol": "2027-12-31"}]
+        eol_fn = lambda lang, ver, **kw: iv.eol(lang, ver, fetch=fetch, today=today)  # noqa: E731
+        with tempfile.TemporaryDirectory() as td:
+            kw = dict(index=index, scan_fn=scan_fn, resolver=hub2, eol_fn=eol_fn, cache_dir=Path(td), ttl_h=24, now=1000.0)
+            rep = iv.report(client, **kw)
+            lv = {r["image"]: r for r in rep["images"]}
+            check("kritik: düzeltmeli CRITICAL", lv["php:8.4.27-fpm"]["level"] == "kritik"
+                  and "taban imaj yeniden üretilmeli (DevOps, bölge bayrakları)" in lv["php:8.4.27-fpm"]["actions"]
+                  and "yama sürümünü yükselt (8.4.30)" in lv["php:8.4.27-fpm"]["actions"], str(lv["php:8.4.27-fpm"]))
+            check("yüksek: düzeltmeli HIGH (ve yama geride 8.3.1 → 8.3.9)", lv["php:8.3.1"]["level"] == "yüksek")
+            check("kritik: destek bitmiş (taramada bulgu yok)", lv["php:7.4.33"]["level"] == "kritik"
+                  and any("destek 2022-11-28'de bitti" in a for a in lv["php:7.4.33"]["actions"]))
+            check("temiz: tarama tamam, işaret yok", lv["php:8.4.30"]["level"] == "temiz" and lv["php:8.4.30"]["actions"] == [])
+            check("bilinmiyor: tarama yapılamadı, başka işaret yok", lv["debian:12"]["level"] == "bilinmiyor")
+            check("sıralama: kritik → yüksek → bilinmiyor → temiz",
+                  [r["level"] for r in rep["images"]] == ["kritik", "kritik", "yüksek", "bilinmiyor", "temiz"],
+                  str([r["level"] for r in rep["images"]]))
+            check("rapor alanları", rep["scanner"] is True and rep["note"] and rep["scanned_at"])
+            check("her imaj bir kez tarandı", sorted(ran) == sorted(scans), str(ran))
+            n = len(ran)
+            iv.report(client, **kw)
+            check("ikinci çağrı önbellekten; başarısız tarama yeniden denenir", ran[n:] == ["debian:12"], str(ran[n:]))
+            n = len(ran)
+            iv.report(client, force=True, **kw)
+            check("force önbelleği atlar", len(ran) - n == 5)
+            n = len(ran)
+            iv.report(client, **{**kw, "now": 1000.0 + 25 * 3600})
+            check("TTL dolunca yeniden taranır", len(ran) - n == 5)
+            names = sorted(p.name for p in Path(td).iterdir())
+            check("önbellek dosya adı imaj adından türetilmiş hash (ham ad yol olmaz)",
+                  bool(names) and all(re.fullmatch(r"[0-9a-f]{40}\.json", f) for f in names), str(names))
+            p = iv._cache_path(Path(td), "php:8.3.1")
+            doc = json.loads(p.read_text())
+            doc["notified"] = "abc"
+            p.write_text(json.dumps(doc))
+            iv.report(client, force=True, **kw)
+            check("yeniden yazımda notified korunur", json.loads(p.read_text()).get("notified") == "abc")
+            idx2 = {"a": [{"src": "global/build/a", "images": [f"{reg}/nope-1:1"]}]}
+            r2 = iv.report(client, **{**kw, "index": idx2})
+            check("dayanak çözülemedi → bilinmiyor, neden scan'de, tarama yok",
+                  r2["images"][0]["level"] == "bilinmiyor" and r2["images"][0]["scan"]["state"] == "dayanak çözülemedi"
+                  and r2["images"][0]["scan"]["reason"] and f"{reg}/nope-1:1" not in ran,
+                  str(r2["images"][0]))
+    finally:
+        iv.trivy_cmd = saved_cmd
+        iv._EOL_CACHE.clear(); iv._EOL_DOWN.clear()
+
+
+def test_image_vuln_hardening():
+    """Fix round 1: güvenilmez önbellek, harici kayıt deposu, bayrak belirteci, bilgi seviyesi, eol bellek, kap temizliği."""
+    print("\n[taban imaj güvenliği: sertleştirme]")
+    import subprocess as sp
+    from datetime import date
+    from agile_sdlc_crew.quality import image_vuln as iv
+    from agile_sdlc_crew.quality import upgrade_registry as ur
+    saved_cmd = iv.trivy_cmd
+    iv.trivy_cmd = lambda **kw: ["trivy"]
+    try:
+        spy: list = []
+        hosts = ["evil.example.com/x:1", "169.254.169.254/a:1", "10.0.0.5/a", "localhost/a:1", "localhost:5000/a",
+                 "reg:5000/a:1", "docker.io/library/php:8.4"]
+        for h in hosts:
+            r = iv.scan_image(h, run=lambda c, t: spy.append(c) or (0, "{}"))
+            check(f"harici kayıt deposu taranmaz: {h}", r["state"] in ("harici kayıt deposu", "geçersiz imaj"), r["state"])
+        check("harici kayıt deposunda run hiç çağrılmaz", not spy)
+        check("harici kayıt deposu durumu adıyla döner",
+              iv.scan_image("evil.example.com/x:1", run=lambda c, t: (0, "{}"))["state"] == "harici kayıt deposu")
+        check("Docker Hub adları argv'ye ulaşır",
+              all(iv.scan_image(n, run=lambda c, t: (0, "{}"))["state"] == "tamam" for n in ("php:8.4", "library/php", "org/x:1")))
+        check("evil/php:8.4 php sayılmaz; library/php sayılır",
+              iv._lang_version("evil/php:8.4.1") == ("", "") and iv._lang_version("library/php:8.4.1") == ("php", "8.4.1")
+              and iv._lang_version("evil.example.com/php:8.4.1") == ("", "") and iv._lang_version("php:8.4.1") == ("php", "8.4.1"))
+        reg = "r.example/prod-ar"
+        client = _iv_client({"/h-1/Dockerfile": "FROM evil.example.com/php:8.4.27\n",
+                             "/h-2/Dockerfile": "FROM php@sha256:abcd\n"})
+        index = {"a": [{"src": "global/build/a", "images": [f"{reg}/h-1:1", f"{reg}/h-2:1", "10.0.0.5/a:1",
+                                                           "--platform=$BUILDPLATFORM", "debian", "scratch", "base",
+                                                           "php@sha256:abcd", "node:${V}-alpine"]}]}
+        recs = {r["image"]: r for r in iv.inventory(client, index)}
+        check("bayrak belirteci kayıt olmaz", not any(k.startswith("-") for k in recs))
+        check("etiketsiz resmî ad envantere girer, scratch / takma ad girmez",
+              "debian" in recs and recs["debian"]["lang"] == "" and "scratch" not in recs and "base" not in recs)
+        check("özet sabitlemeli imaj: özel neden", "özetle sabitlenmiş" in recs["php@sha256:abcd"]["error"]
+              and "özetle sabitlenmiş" in recs[f"{reg}/h-2:1"]["error"], str(recs.get("php@sha256:abcd")))
+        check("ARG çözülemeyen imaj: özel neden", "ARG varsayılanı yok" in recs["node:${V}-alpine"]["error"])
+        scans: list = []
+        eol_fn = lambda *a, **k: None  # noqa: E731
+        hub500 = ur.Resolver(fetch=lambda u: (500, None))
+        ok_scan = {"state": "tamam", "critical": 0, "high": 0, "packages": [], "os": "", "created": ""}
+        rp = iv.report(client, index=index, scan_fn=lambda i: scans.append(i) or {**ok_scan},
+                       resolver=hub500, eol_fn=eol_fn, cache_dir=Path(tempfile.mkdtemp()), ttl_h=24, now=1.0)
+        by = {r["image"]: r for r in rp["images"]}
+        ext = by.get("10.0.0.5/a:1")
+        check("rapor: harici kayıt deposu → bilinmiyor + neden, tarama çağrılmaz",
+              bool(ext) and ext["level"] == "bilinmiyor" and ext["scan"]["state"] == "harici kayıt deposu"
+              and bool(ext["scan"]["reason"]) and "10.0.0.5/a:1" not in scans, str(ext))
+        e2 = by.get("evil.example.com/php:8.4.27")
+        check("harici kayıt deposundaki üretim dayanağı da taranmaz, dil sayılmaz",
+              bool(e2) and e2["scan"]["state"] == "harici kayıt deposu" and "evil.example.com/php:8.4.27" not in scans
+              and e2["lang"] == "", str(e2))
+
+        with tempfile.TemporaryDirectory() as td:
+            cd = Path(td)
+            path = iv._cache_path(cd, "php:8.4.27")
+            variants = {
+                "built_at metin": {"image": "php:8.4.27", "built_at": "x", "scan": ok_scan},
+                "scan eksik anahtar": {"image": "php:8.4.27", "built_at": 1000.0, "scan": {"state": "tamam"}},
+                "critical metin": {"image": "php:8.4.27", "built_at": 1000.0, "scan": {**ok_scan, "critical": "3"}},
+                "packages liste değil": {"image": "php:8.4.27", "built_at": 1000.0, "scan": {**ok_scan, "packages": "x"}},
+                "state tamam değil": {"image": "php:8.4.27", "built_at": 1000.0, "scan": {**ok_scan, "state": "zaman aşımı"}},
+                "scan dict değil": {"image": "php:8.4.27", "built_at": 1000.0, "scan": [1]},
+                "kök liste": [1, 2],
+                "başka imaj": {"image": "x:1", "built_at": 1000.0, "scan": ok_scan},
+            }
+            for name, doc in variants.items():
+                path.write_text(json.dumps(doc))
+                check(f"bozuk önbellek → yeniden tara: {name}", iv._cache_read(cd, "php:8.4.27", 24, 1001.0) is None)
+            path.write_text('{"image": "php:8.4.27", "built_at": 10')
+            check("kesik JSON → yeniden tara", iv._cache_read(cd, "php:8.4.27", 24, 1001.0) is None)
+            path.write_text(json.dumps({"image": "php:8.4.27", "built_at": 1000.0, "scan": ok_scan}))
+            check("geçerli önbellek okunur", (iv._cache_read(cd, "php:8.4.27", 24, 1001.0) or {}).get("state") == "tamam")
+            c2 = _iv_client({"/p-1/Dockerfile": "FROM php:8.4.30\n"})
+            idx = {"a": [{"src": "global/build/a", "images": [f"{reg}/p-1:1"]}]}
+            iv._cache_path(cd, "php:8.4.30").write_text(
+                json.dumps({"image": "php:8.4.30", "built_at": "x", "scan": {"critical": "3"}}))
+            ran: list = []
+            rr = iv.report(c2, index=idx, scan_fn=lambda i: ran.append(i) or {**ok_scan}, resolver=hub500,
+                           eol_fn=eol_fn, cache_dir=cd, ttl_h=24, now=1001.0)
+            check("bozuk önbellekle report çökmez, yeniden tarar", ran == ["php:8.4.30"] and rr["images"][0]["level"] == "temiz")
+
+        c3 = _iv_client({"/q-1/Dockerfile": "FROM python:3.11-slim\n", "/q-2/Dockerfile": "FROM python:3.13.7-slim\n"})
+        idx = {"a": [{"src": "global/build/a", "images": [f"{reg}/q-1:1", f"{reg}/q-2:1"]}]}
+        r3 = iv.report(c3, index=idx, scan_fn=lambda i: {**ok_scan}, resolver=hub500,
+                       eol_fn=eol_fn, cache_dir=Path(tempfile.mkdtemp()), ttl_h=24, now=1.0)
+        b3 = {r["image"]: r for r in r3["images"]}
+        check("iki parçalı etiket, temiz tarama → bilgi (temiz değil), not eylemde",
+              b3["python:3.11-slim"]["level"] == "bilgi" and any("belirsiz" in a for a in b3["python:3.11-slim"]["actions"]))
+        check("üç parçalı etiket, temiz tarama → temiz", b3["python:3.13.7-slim"]["level"] == "temiz")
+
+        iv._EOL_CACHE.clear(); iv._EOL_DOWN.clear()
+        getattr(iv, "_EOL_DOWN", {}).clear()
+        now = [100.0]
+        n: list = []
+
+        def down(u):
+            n.append(u)
+            raise OSError("x")
+        d = date(2026, 11, 18)
+        for _ in range(3):
+            iv.eol("php", "7.4.1", fetch=down, today=d, clock=lambda: now[0])
+        check("eol başarısız → 5 dk yeniden denenmez", len(n) == 1, str(len(n)))
+        now[0] += 301
+        iv.eol("php", "7.4.1", fetch=down, today=d, clock=lambda: now[0])
+        check("süre dolunca yeniden denenir", len(n) == 2)
+        iv._EOL_CACHE.clear(); iv._EOL_DOWN.clear()
+        getattr(iv, "_EOL_DOWN", {}).clear()
+
+        saved_run = iv.subprocess.run
+        seen: list = []
+        iv.subprocess.run = lambda cmd, **kw: seen.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr="")
+        try:
+            iv.trivy_cmd = lambda **kw: ["/x/docker", "run", "--rm", "--name", "tempo-trivy-0123456789ab", "-v",
+                                         "/nonexistent-tempo-test:/root/.cache/", "aquasec/trivy:latest"]
+
+            def boom(c, t):
+                raise sp.TimeoutExpired(c, t)
+            r = iv.scan_image("php:8.4", run=boom)
+            check("zaman aşımı: kap silinir (liste argv)", r["state"] == "zaman aşımı"
+                  and seen == [["/x/docker", "rm", "-f", "tempo-trivy-0123456789ab"]], str(seen))
+            seen.clear()
+            iv.trivy_cmd = lambda **kw: ["trivy"]
+            iv.scan_image("php:8.4", run=boom)
+            check("docker olmayan tarayıcıda kap silme çağrılmaz", not seen)
+        finally:
+            iv.subprocess.run = saved_run
+    finally:
+        iv.trivy_cmd = saved_cmd
+        iv._EOL_CACHE.clear(); iv._EOL_DOWN.clear()
+        getattr(iv, "_EOL_DOWN", {}).clear()
+
+
+def test_image_vuln_settings():
+    """Dört ayar pipeline_config'te, varsayılan değerleriyle."""
+    print("\n[taban imaj güvenliği: ayarlar]")
+    from agile_sdlc_crew import pipeline_config as pc
+    by = {f["key"]: f for f in pc.SCHEMA}
+    check("_IMAGE_VULN / _TASK / _NOTIFY kapalı bool",
+          all(by.get(k, {}).get("type") == "bool" and by[k]["default"] is False
+              for k in ("CREW_TECHDEBT_IMAGE_VULN", "CREW_TECHDEBT_IMAGE_VULN_TASK", "CREW_TECHDEBT_IMAGE_VULN_NOTIFY")))
+    check("_SCAN_H int 24, min 1", by.get("CREW_TECHDEBT_IMAGE_VULN_SCAN_H", {}).get("type") == "int"
+          and by["CREW_TECHDEBT_IMAGE_VULN_SCAN_H"]["default"] == 24 and by["CREW_TECHDEBT_IMAGE_VULN_SCAN_H"].get("min") == 1)
+
+
+def _iv_rec(image, level="kritik", *, crit=1, eol=None, users=1, patch=None, actions=None, pkgs=None):
+    return {"image": image, "lang": "php", "version": "8.4.27", "via": [], "touched": "",
+            "users": {"anatolia": [f"build/s{i}" for i in range(users)]}, "error": "",
+            "scan": {"state": "tamam", "critical": crit, "high": 3, "packages": pkgs or [], "os": "debian 12",
+                     "created": "2026-11-05", "ignored": {"critical": 0, "high": 0, "packages": []}},
+            "patch": patch, "eol": eol, "level": level,
+            "actions": actions if actions is not None else ["yeniden üret"]}
+
+
+def test_image_vuln_alerts():
+    """Uç, yoklayıcı, uyarı (iş + Telegram özeti, tavan), yok sayılan paketler. Ağ / Docker / Azure / Telegram yok."""
+    print("\n[taban imaj güvenliği: uç, yoklayıcı, uyarı]")
+    import inspect
+    import threading
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import daily
+    from agile_sdlc_crew.quality import image_vuln as iv, render
+
+    knobs = {"CREW_TECHDEBT_IMAGE_VULN_TASK": True, "CREW_TECHDEBT_IMAGE_VULN_NOTIFY": True,
+             "CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS": 3}
+    _get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+    _tg = daily.telegram_configured
+    try:
+        # ── alert: iş açma, tavan, sıra ──────────────────────────────────
+        board: dict = {}
+        opened: list = []
+
+        def open_fn(client, rec, *, team, deps):
+            opened.append(rec["image"])
+            board[f"image_vuln:{rec['image']}"] = {"wi": 900 + len(opened), "state": "New", "closed_at": 0.0}
+            return {"id": 900 + len(opened), "url": "https://x/_workitems/edit/%d" % (900 + len(opened))}
+        deps = SimpleNamespace(board=lambda c: board, now=lambda: 1000.0)
+        rep = {"images": [_iv_rec("golang:1.24.4", crit=23, eol={"eol": "2026-02-10"}, users=3),
+                          _iv_rec("php:7.4.33-fpm", crit=18, eol={"eol": "2022-11-28"}, users=2),
+                          _iv_rec("php:8.4.27", crit=5, users=11),
+                          _iv_rec("python:3.12", crit=9, users=1),
+                          _iv_rec("node:20.17.0", crit=9, users=4),
+                          _iv_rec("debian:12", level="yüksek", crit=0)]}
+        with tempfile.TemporaryDirectory() as td:
+            kw = dict(team="T", deps=deps, open_fn=open_fn, notify_fn=lambda t: True, cache_dir=Path(td))
+            knobs["CREW_TECHDEBT_IMAGE_VULN_TASK"] = False
+            out = iv.alert(None, rep, **kw)
+            check("_TASK kapalı → hiç iş açılmaz", opened == [] and not any(r.get("state") == "açıldı" for r in out))
+            knobs["CREW_TECHDEBT_IMAGE_VULN_TASK"] = True
+            iv.alert(None, rep, **{**kw, "team": ""})
+            check("takım yoksa iş açılmaz (yazma yolu kapalı)", opened == [])
+            out = iv.alert(None, rep, **kw)
+            check("tavan 3: destek bitmişler önce, sonra düzeltmeli kritik sayısı, sonra servis sayısı",
+                  opened == ["golang:1.24.4", "php:7.4.33-fpm", "node:20.17.0"], str(opened))
+            st = {r["image"]: r["state"] for r in out}
+            check("kalanlar 'sırada', yüksek seviyeli imaj listede yok",
+                  st.get("php:8.4.27") == "sırada" and st.get("python:3.12") == "sırada" and "debian:12" not in st
+                  and st["golang:1.24.4"] == "açıldı", str(st))
+            n = len(opened)
+            out = iv.alert(None, rep, **kw)
+            st = {r["image"]: r["state"] for r in out}
+            check("ikinci çağrı: açık işi olana ikinci iş açılmaz; açık iş tavana sayılmaz",
+                  st["golang:1.24.4"] == "açık iş" and len(opened) - n == 2 and opened[n:] == ["python:3.12", "php:8.4.27"],
+                  f"{st} {opened[n:]}")
+            out = iv.alert(None, rep, **kw)
+            check("üçüncü çağrı: hepsinin işi var → yeni iş yok",
+                  len(opened) == n + 2 and all(r["state"] == "açık iş" for r in out))
+            # dedup durumları: Canceled bastırılır; Done + eski (grace dışı) yeniden açılır; Done + yeni açık sayılır
+            b2 = {"image_vuln:golang:1.24.4": {"wi": 7, "state": "Canceled", "closed_at": 0.0},
+                  "image_vuln:php:7.4.33-fpm": {"wi": 8, "state": "Done", "closed_at": 1000.0 - 10 * 86400},
+                  "image_vuln:php:8.4.27": {"wi": 9, "state": "Done", "closed_at": 1000.0 - 86400}}
+            opened.clear()
+            d2 = SimpleNamespace(board=lambda c: b2, now=lambda: 1000.0)
+            out = iv.alert(None, {"images": rep["images"][:3]}, **{**kw, "deps": d2})
+            st = {r["image"]: r["state"] for r in out}
+            check("Canceled (suppressed) → 'bastırıldı', açık iş etiketi değil",
+                  st["golang:1.24.4"] == "bastırıldı" and "golang:1.24.4" not in opened, str(st))
+            check("Done + eski (grace dışı) → yeni iş açılır (recurring)",
+                  st["php:7.4.33-fpm"] == "açıldı" and opened == ["php:7.4.33-fpm"], f"{st} {opened}")
+            check("Done + yeni (grace içi) → iş açılmaz", st["php:8.4.27"] == "açık iş")
+            knobs["CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS"] = 1
+            board.clear(); opened.clear()
+            iv.alert(None, rep, **kw)
+            check("tavan ayardan okunur (1)", len(opened) == 1)
+
+            # ── alert: Telegram özeti ───────────────────────────────────
+            msgs: list = []
+            nkw = {**kw, "notify_fn": lambda t: msgs.append(t) or True, "cache_dir": Path(td) / "n"}
+            knobs["CREW_TECHDEBT_IMAGE_VULN_TASK"] = False
+            iv.alert(None, rep, **nkw)
+            check("tek özet mesaj (imaj başına değil), seviye sayıları + imaj + eylem",
+                  len(msgs) == 1 and "golang:1.24.4" in msgs[0] and "yeniden üret" in msgs[0]
+                  and "kritik" in msgs[0].lower() and "5" in msgs[0], str(msgs))
+            iv.alert(None, rep, **nkw)
+            check("aynı (imaj, işaret) kümesi → tekrar gönderilmez", len(msgs) == 1)
+            rep2 = {"images": [dict(r) for r in rep["images"]]}
+            rep2["images"][2] = _iv_rec("php:8.4.27", crit=5, users=11, patch={"latest": "8.4.30"})
+            iv.alert(None, rep2, **nkw)
+            check("işaret kümesi değişince yeniden gönderilir", len(msgs) == 2)
+            iv.alert(None, {"images": [_iv_rec("a:1", level="temiz", crit=0)]}, **nkw)
+            check("kritik yokken mesaj yok", len(msgs) == 2)
+            fail_msgs: list = []
+            fkw = {**nkw, "cache_dir": Path(td) / "f", "notify_fn": lambda t: fail_msgs.append(t) and False}
+            iv.alert(None, rep, **fkw)
+            iv.alert(None, rep, **fkw)
+            check("gönderilemeyen mesaj kaydedilmez (sonraki turda yeniden denenir)", len(fail_msgs) == 2)
+            m2: list = []
+            cdir = Path(td) / "cor"
+            cdir.mkdir()
+            ckw2 = {**nkw, "notify_fn": lambda t: m2.append(t) or True, "cache_dir": cdir}
+            (cdir / "notified.json").write_text("{bozuk json")
+            iv.alert(None, rep, **ckw2)
+            check("bozuk notified.json → 'hiçbir şey gönderilmedi' sayılır, çökmez, özet gider", len(m2) == 1)
+            (cdir / "notified.json").write_text("[1, 2]")
+            iv.alert(None, rep, **ckw2)
+            check("beklenmedik biçimli notified.json de aynı şekilde ele alınır", len(m2) == 2)
+            knobs["CREW_TECHDEBT_IMAGE_VULN_NOTIFY"] = False
+            iv.alert(None, rep2, **{**nkw, "cache_dir": Path(td) / "off"})
+            check("_NOTIFY kapalı → mesaj yok", len(msgs) == 2)
+            knobs["CREW_TECHDEBT_IMAGE_VULN_NOTIFY"] = True
+            daily.telegram_configured = lambda: False
+            iv.alert(None, rep, **{**nkw, "notify_fn": None, "cache_dir": Path(td) / "noc"})
+            check("Telegram ayarı yoksa sessizce atlanır (çökmez)", True)
+    finally:
+        pc.get = _get
+        daily.telegram_configured = _tg
+
+    # ── iş metni ve Task alanları ───────────────────────────────────────
+    pkgs = [{"name": f"pkg{i}", "installed": "1", "fixed": "2", "severity": "CRITICAL", "cves": ["CVE-2026-0001"]}
+            for i in range(20)]
+    pkgs[0]["name"] = "<img src=x onerror=alert(1)>"
+    rec = _iv_rec("golang:1.24.4", crit=23, eol={"eol": "2026-02-10"}, users=2, pkgs=pkgs,
+                  patch={"latest": "1.24.13"}, actions=["yeniden üret", "sürüm yükselt (destek 2026-02-10'da bitti)"])
+    rec["users"]["russia"] = ["build/core"]
+    rec["repos"] = {"gocrons": {"anatolia": ["build/s0"]}, "<b>core": {"russia": ["build/core"]}}
+    pkgs[1]["published"] = {"CVE-2026-0001": "2026-11-01"}
+    pkgs[2]["cves"] = ['x"><script>', "GHSA-abcd-1234-wxyz"]
+    pkgs[2]["published"] = {"GHSA-abcd-1234-wxyz": "2099-01-01"}
+    from datetime import date as _d
+    body = iv.task_body(rec, today=_d(2026, 11, 19))
+    check("gövde: CVE bağlantısı + duyuru tarihi ve gün sayısı; tanınmayan kimlik bağlantısız ve kaçışlı",
+          '<a href="https://nvd.nist.gov/vuln/detail/CVE-2026-0001">CVE-2026-0001</a> — duyuru 2026-11-01, 18 gün önce' in body
+          and '<a href="https://github.com/advisories/GHSA-abcd-1234-wxyz">' in body and "2099-01-01" not in body
+          and "<script>" not in body and iv.cve_url("CVE-2026-1/../x") == "" and iv.cve_url("javascript:x") == ""
+          and iv.cve_age("bozuk") is None and iv.cve_age("2026-11-19", _d(2026, 11, 19)) == 0, body[:900])
+    ps = iv._parse_scan({"Results": [{"Vulnerabilities": [
+        {"Severity": "HIGH", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": "CVE-2026-1111",
+         "PublishedDate": "2026-03-01T10:00:00Z"},
+        {"Severity": "HIGH", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": "CVE-2026-2222", "PublishedDate": "<x>"}]}]})
+    check("tarama: duyuru tarihi CVE başına saklanır, bozuk tarih alınmaz",
+          ps["packages"][0]["published"] == {"CVE-2026-1111": "2026-03-01"}, str(ps["packages"]))
+    check("gövde: etkilenen repolar listesi (bölgeleriyle, kaçışlı)",
+          "Etkilenen repolar" in body and "<b>gocrons</b>: anatolia" in body and "&lt;b&gt;core" in body
+          and "Etkilenen repolar" not in iv.task_body(_iv_rec("golang:1.24.4")), body[:400])
+    check("gövde: sınır cümlesi aynen",
+          "Yayınlanmış imaj değil, dayandığı resmî imaj tarandı; kendi eklediğimiz katmanlar ve derleme anında "
+          "kurulan yamalar görülmez — sonuç alt sınırdır." in body)
+    check("gövde: paket adı kaçışlı, ham HTML yok", "<img" not in body and "&lt;img" in body)
+    check("gövde: yalnız ilk 15 paket", "pkg14" in body and "pkg15" not in body and "pkg19" not in body)
+    check("gövde: bölge başına servisler + eylem", "anatolia" in body and "russia" in body and "build/core" in body
+          and "yeniden üret" in body)
+    g = iv.task_group(rec)
+    check("Task: güvenlik uyarısı en yüksek öncelik (1)", g.priority == 1, str(g.priority))
+    desc = render.task_description(g)
+    tags = render.task_tags(g, lane="techdebt").split("; ")
+    check("Task: etiketler", all(t in tags for t in ("tempo-quality", "tempo-techdebt", "tech-debt", "tempo-image-vuln", "needs-human")),
+          str(tags))
+    check("Task: parmak izi image_vuln:<imaj>", g.fingerprints == ["image_vuln:golang:1.24.4"]
+          and "tempo-fp: image_vuln:golang:1.24.4" in desc and g.needs_human)
+    check("Task: güvenilmez içerik notu korunur (paket / CVE adı üçüncü taraf metni), gövdeden ÖNCE",
+          render.UNTRUSTED_NOTE in desc and desc.index(render.UNTRUSTED_NOTE) < desc.index("Taban imaj:"))
+    check("Task: başlık", "Taban imaj güvenliği: golang:1.24.4" in render.task_title(g))
+    # eylem metni: kendi taban imajı ↔ genel imaj
+    base_rec = {"scan": {"state": "tamam", "critical": 1, "high": 0}, "patch": None, "eol": None, "version": "3.11",
+                "lang": "python"}
+    _l, own_acts = iv._judge({**base_rec, "via": ["php-8-4"]})
+    _l, pub_acts = iv._judge({**base_rec, "via": []})
+    check("eylem: kendi taban imajı → DevOps yeniden üretir (bölge bayrakları)",
+          "taban imaj yeniden üretilmeli (DevOps, bölge bayrakları)" in own_acts, str(own_acts))
+    check("eylem: genel imaj → servis yeniden yayınlanır, DevOps'a yönlendirmez",
+          pub_acts == ["servis imajı yeniden derlendiğinde taze taban çekilir — servisi yeniden yayınla"], str(pub_acts))
+    check("Task: kabul/davranış metni kalite (NR) metni değil",
+          "New Relic" not in desc and render.acceptance_block(g) and "hata sınıfı" not in render.acceptance_block(g))
+    from agile_sdlc_crew.quality import dedup
+    check("Task: pano dedup bu satırı okur", render.parse_fingerprints(desc) == ["image_vuln:golang:1.24.4"]
+          and "image_vuln:golang:1.24.4" in dedup.index_board([{"id": 7, "fields": {"System.State": "New", "System.Description": desc}}]))
+
+    # ── yok sayılan paketler ────────────────────────────────────────────
+    with tempfile.TemporaryDirectory() as td:
+        y = Path(td) / "image_vuln.yaml"
+        y.write_text("ignore_packages: [linux-libc-dev]\n")
+        check("yaml okunur", iv.load_ignore(y) == {"linux-libc-dev"})
+        y.write_text("ignore_packages: [unclosed\n  - : :\n")
+        check("bozuk yaml → yok sayma yok, çökme yok", iv.load_ignore(y) == set())
+        y.write_text("ignore_packages: 5\n")
+        check("beklenmedik biçim → yok sayma yok", iv.load_ignore(y) == set())
+        check("dosya yok → yok sayma yok", iv.load_ignore(Path(td) / "nope.yaml") == set())
+        check("depodaki yaml linux-libc-dev'i yok sayar", "linux-libc-dev" in iv.load_ignore())
+
+        libc = {"name": "linux-libc-dev", "installed": "1", "fixed": "2", "severity": "CRITICAL", "cves": [],
+                "critical": 1, "high": 4}
+        ssl = {"name": "libssl3", "installed": "1", "fixed": "2", "severity": "HIGH", "cves": [], "critical": 0, "high": 2}
+        raw = {"state": "tamam", "critical": 1, "high": 6, "packages": [libc, ssl], "os": "debian 12", "created": ""}
+        f = iv.apply_ignore(raw, {"linux-libc-dev"})
+        check("yok sayılan paket sayıma girmez, gizlenmez",
+              f["critical"] == 0 and f["high"] == 2 and [p["name"] for p in f["packages"]] == ["libssl3"]
+              and f["ignored"] == {"critical": 1, "high": 4, "packages": ["linux-libc-dev"]}, str(f))
+        check("ham tarama değişmez", raw["critical"] == 1 and len(raw["packages"]) == 2 and "ignored" not in raw)
+
+        client = _iv_client({})
+        index = {"a": [{"src": "anatolia/build/a", "images": ["php:8.4.27-fpm-bookworm"]}]}
+        ran: list = []
+
+        def scan_fn(image):
+            ran.append(image)
+            return {**raw, "critical": 1, "high": 4, "packages": [dict(libc)]}
+        hub = SimpleNamespace(latest_patch=lambda n, m: None)
+        kw = dict(index=index, scan_fn=scan_fn, resolver=hub, eol_fn=lambda *a, **k: None, cache_dir=Path(td) / "c",
+                  ttl_h=24, now=1000.0)
+        r1 = iv.report(client, ignore_packages={"linux-libc-dev"}, **kw)
+        im = r1["images"][0]
+        check("yalnız yok sayılan pakette bulgu → seviye kritik değil",
+              im["level"] != "kritik" and im["scan"]["critical"] == 0 and im["scan"]["ignored"]["critical"] == 1, str(im["scan"]))
+        r2 = iv.report(client, ignore_packages=set(), **kw)
+        check("önbellek ham tarama tutar: yaml değişince yeniden tarama olmadan etki eder",
+              r2["images"][0]["level"] == "kritik" and r2["images"][0]["scan"]["critical"] == 1 and len(ran) == 1, f"{len(ran)}")
+        # eski biçimli önbellek (paket başına sayım yok): yok sayılan pakette doğru sayım için yeniden taranır
+        old = {"state": "tamam", "critical": 1, "high": 4, "os": "", "created": "",
+               "packages": [{"name": "linux-libc-dev", "installed": "1", "fixed": "2", "severity": "CRITICAL", "cves": []}]}
+        iv._cache_write(Path(td) / "c", "php:8.4.27-fpm-bookworm", old, 1000.0)
+        n = len(ran)
+        iv.report(client, ignore_packages={"linux-libc-dev"}, **kw)
+        check("paket başına sayımı olmayan eski önbellek yok sayılan pakette yeniden taranır", len(ran) == n + 1)
+
+    # ── uç: önbellek / tarama ───────────────────────────────────────────
+    with tempfile.TemporaryDirectory() as td:
+        client = _iv_client({})
+        index = {"a": [{"src": "anatolia/build/a", "images": ["php:8.4.27-fpm-bookworm", "golang:1.24.4"]}]}
+        ran = []
+
+        def scan_fn2(image):
+            ran.append(image)
+            return {"state": "tamam", "critical": 0, "high": 0, "packages": [], "os": "", "created": ""}
+        skw = dict(index=index, scan_fn=scan_fn2, resolver=hub, eol_fn=lambda *a, **k: None,
+                   cache_dir=Path(td), ttl_h=24, now=1000.0, ignore_packages=set())
+        spawned: list = []
+        clk = [1000.0]
+        ckw = dict(spawn=spawned.append, clock=lambda: clk[0])
+        iv._reset_state()
+        res = iv.serve(client, **ckw, **skw)
+        check("önbellek boş → scanning true + eldeki kısım, tarama bu çağrıda koşmaz",
+              res["scanning"] is True and len(spawned) == 1 and ran == [] and len(res["images"]) == 2
+              and all(r["scan"]["state"] == "bekliyor" for r in res["images"]), str(res)[:300])
+        res = iv.serve(client, **ckw, **skw)
+        check("tarama sürerken ikinci istek ikinci tarama başlatmaz (kilit)", res["scanning"] is True and len(spawned) == 1)
+        spawned[0]()
+        check("arka plan taraması tüm imajları taradı, kilit bırakıldı", sorted(ran) == ["golang:1.24.4", "php:8.4.27-fpm-bookworm"]
+              and iv._RUN["running"] is False)
+        res = iv.serve(client, **ckw, **skw)
+        check("önbellek dolu → scanning false, images, yeni tarama yok",
+              res["scanning"] is False and len(res["images"]) == 2 and len(spawned) == 1 and len(ran) == 2
+              and all(r["scan"]["state"] == "tamam" for r in res["images"]))
+        res = iv.serve(client, force=True, **ckw, **skw)
+        check("GET'te force yok sayılır: tarama başlamaz, çökmez", res["scanning"] is False and len(spawned) == 1
+              and len(ran) == 2)
+        # POST (rescan): bekleme süresi
+        res = iv.rescan(client, **ckw, **skw)
+        check("rescan: son tarama 5 dk içinde bitti → başlamaz, kalan süre + Türkçe neden, eldeki sonuç döner",
+              res["scanning"] is False and len(spawned) == 1 and 0 < res["cooldown"] <= 300
+              and "sonra" in res["message"] and len(res["images"]) == 2, str(res)[:300])
+        clk[0] += 301
+        res = iv.rescan(client, **ckw, **skw)
+        check("rescan: bekleme geçince TAM BİR tarama başlar", res["scanning"] is True and len(spawned) == 2)
+        res = iv.rescan(client, **ckw, **skw)
+        check("rescan: tarama sürerken ikincisi başlamaz", len(spawned) == 2 and res["scanning"] is True)
+        spawned[1]()
+        check("rescan taraması önbelleği atladı", len(ran) == 4)
+        res = iv.rescan(client, **ckw, **skw)
+        check("rescan: biter bitmez yeniden istek bekleme süresine takılır", len(spawned) == 2 and res["cooldown"] > 0)
+        # tarayıcı yok: sonuç önbelleğe girmez → her GET yeni tarama başlatmasın
+        with tempfile.TemporaryDirectory() as td2:
+            def noscan(image):
+                return {"state": "tarayıcı yok", "critical": 0, "high": 0, "packages": [], "os": "", "created": ""}
+            nkw2 = {**skw, "scan_fn": noscan, "cache_dir": Path(td2)}
+            iv._reset_state()
+            clk[0] = 1000.0
+            sp2: list = []
+            k2 = dict(spawn=sp2.append, clock=lambda: clk[0])
+            iv.serve(client, **k2, **nkw2)
+            sp2[0]()
+            res = iv.serve(client, **k2, **nkw2)
+            check("taranamayan imaj sonsuz yeniden tarama döngüsü kurmaz (son sonuç döner)",
+                  len(sp2) == 1 and res["scanning"] is False
+                  and {r["scan"]["state"] for r in res["images"]} == {"tarayıcı yok"}, str(res)[:200])
+            clk[0] += 301
+            iv.serve(client, **k2, **nkw2)
+            check("bekleme süresi dolunca otomatik ilk tarama yeniden denenebilir", len(sp2) == 2)
+        # çöken arka plan taraması: bayrak temizlenir, hata kaydı tutulur, hemen yeniden doğmaz
+        with tempfile.TemporaryDirectory() as td3:
+            def boom(image):
+                raise RuntimeError("docker çöktü")
+            bkw = {**skw, "scan_fn": boom, "cache_dir": Path(td3)}
+            iv._reset_state()
+            clk[0] = 1000.0
+            sp3: list = []
+            k3 = dict(spawn=sp3.append, clock=lambda: clk[0])
+            iv.serve(client, **k3, **bkw)
+            sp3[0]()
+            res = iv.serve(client, **k3, **bkw)
+            check("çöken tarama: bayrak temizlendi, GET 500 vermez, bekleme içinde yeniden doğmaz",
+                  iv._RUN["running"] is False and len(sp3) == 1 and res["scanning"] is False
+                  and len(res["images"]) == 2, str(res)[:200])
+            clk[0] += 301
+            iv.serve(client, **k3, **bkw)
+            check("çöküşten sonra bekleme dolunca yeniden denenir", len(sp3) == 2)
+        # bellek anlık görüntüsü: 60 sn içinde Azure okuması yok
+        with tempfile.TemporaryDirectory() as td4:
+            cnt = {"n": 0, "dec": 0}
+            mc = _iv_client({"/php-9-9/Dockerfile": "FROM php:8.4.27\n"})
+            _gfc = mc.get_file_content
+
+            def counting(*a, **k):
+                cnt["n"] += 1
+                return _gfc(*a, **k)
+            mc.get_file_content = counting
+            midx = {"a": [{"src": "anatolia/build/a", "images": ["r.example/prod-ar/php-9-9:1"]}]}
+            mkw = {**skw, "index": midx, "cache_dir": Path(td4)}
+
+            def dec(rep):
+                cnt["dec"] += 1
+                return rep
+            iv._reset_state()
+            clk[0] = 5000.0
+            m1: list = []
+            km = dict(spawn=m1.append, clock=lambda: clk[0], decorate=dec)
+            iv.serve(mc, **km, **mkw)
+            n1, d1 = cnt["n"], cnt["dec"]
+            clk[0] += 30
+            iv.serve(mc, **km, **mkw)
+            iv.serve(mc, **km, **mkw)
+            check("60 sn içindeki GET'ler bellekten döner: Azure okuması ve giderme planı yeniden kurulmaz",
+                  n1 > 0 and cnt["n"] == n1 and cnt["dec"] == d1 == 1, f"{n1} {cnt}")
+            clk[0] += 40
+            iv.serve(mc, **km, **mkw)
+            check("60 sn geçince anlık görüntü yeniden kurulur", cnt["n"] > n1 and cnt["dec"] == 2, str(cnt))
+            m1[0]()
+            n2 = cnt["n"]
+            iv.serve(mc, **km, **mkw)
+            check("arka plan taraması bitince anlık görüntü hemen yenilenir (60 sn beklenmez)", cnt["n"] > n2, str(cnt))
+        iv._reset_state()
+
+    # ── uç: sunucu işleyicisi ───────────────────────────────────────────
+    import asyncio
+    from agile_sdlc_crew import server
+    _get2 = pc.get
+    _serve, _resc, _cl = iv.serve, iv.rescan, server.AzureDevOpsClient
+    try:
+        knobs2 = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": False}
+        pc.get = lambda k: knobs2[k] if k in knobs2 else _get2(k)
+        server.AzureDevOpsClient = lambda: object()
+        got_kw: list = []
+        iv.serve = lambda client, **kw: got_kw.append(kw) or {"scanning": False, "images": [{"image": "x"}]}
+        iv.rescan = lambda client, **kw: got_kw.append(("rescan", kw)) or {"scanning": True, "images": [{"image": "x"}]}
+        r = asyncio.run(server.techdebt_images())
+        check("ayar kapalı → 403 Türkçe neden", r.status_code == 403 and "taban imaj" in json.loads(r.body)["error"].lower())
+        check("rescan: ayar kapalı → 403", asyncio.run(server.techdebt_images_rescan()).status_code == 403)
+        knobs2["CREW_TECHDEBT"] = False
+        knobs2["CREW_TECHDEBT_IMAGE_VULN"] = True
+        check("CREW_TECHDEBT kapalı → 403", asyncio.run(server.techdebt_images()).status_code == 403)
+        knobs2["CREW_TECHDEBT"] = True
+        r = asyncio.run(server.techdebt_images())
+        body = json.loads(r.body)
+        check("ayar açık → 200 + images; GET tarama zorlamaz, giderme planı anlık görüntüyle kurulur",
+              r.status_code == 200 and body["images"] and "force" not in got_kw[-1] and callable(got_kw[-1].get("decorate")))
+        check("GET işleyicisi force parametresi almaz (yan etkili GET yok)",
+              "force" not in inspect.signature(server.techdebt_images).parameters)
+        r = asyncio.run(server.techdebt_images_rescan())
+        check("rescan (POST) → 200, iv.rescan çağrılır",
+              r.status_code == 200 and json.loads(r.body)["scanning"] is True and got_kw[-1][0] == "rescan")
+        check("rescan POST rotası kayıtlı",
+              any(getattr(rt, "path", "") == "/api/techdebt/images/rescan" and "POST" in getattr(rt, "methods", set())
+                  for rt in server.app.routes))
+        iv.serve = lambda client, **kw: (_ for _ in ()).throw(ValueError("kötü"))
+        check("hata Türkçe JSON'a çevrilir (400)", asyncio.run(server.techdebt_images()).status_code == 400)
+    finally:
+        pc.get = _get2
+        iv.serve, iv.rescan, server.AzureDevOpsClient = _serve, _resc, _cl
+
+    # ── yoklayıcı ───────────────────────────────────────────────────────
+    iv._POLLER = None
+    calls: list = []
+    sleeps: list = []
+    stop = threading.Event()
+    done = threading.Event()
+
+    def tick(get_client):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("Azure düştü")
+        stop.set()
+        done.set()
+    th = iv.start_poller(lambda: None, interval_h=lambda: 6, sleep=lambda s: sleeps.append(s), tick=tick, stop_event=stop)
+    done.wait(5)
+    th.join(5)
+    check("yoklayıcı: ilk tur bir aralık sonra, aralık saat → saniye", sleeps and sleeps[0] == 6 * 3600, str(sleeps))
+    check("yoklayıcı: istisna döngüyü durdurmaz (ikinci tur koştu)", len(calls) == 2, str(calls))
+    check("yoklayıcı: daemon thread", th.daemon)
+    iv._POLLER = None
+    # _tick: ayarlar kapalıysa Azure'a gidilmez; açıksa rapor + uyarı sırayla
+    seen: list = []
+    from agile_sdlc_crew.quality import modern as _mdl
+    _rep, _alert, _get3, _bi3 = iv.report, iv.alert, pc.get, _mdl.build_index
+    _mdl.build_index = lambda c, **kw: {}
+    try:
+        knobs3 = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": False}
+        pc.get = lambda k: knobs3[k] if k in knobs3 else _get3(k)
+        iv.report = lambda client, **kw: seen.append(("report", kw.get("force"))) or {"images": []}
+        iv.alert = lambda client, rep, **kw: seen.append(("alert", kw.get("team"))) or []
+        cl = SimpleNamespace(team="Ekip")
+        iv._tick(lambda: cl)
+        check("_tick: ayar kapalı → hiçbir şey yapmaz", seen == [])
+        knobs3["CREW_TECHDEBT_IMAGE_VULN"] = True
+        iv._tick(lambda: cl)
+        check("_tick: force=True rapor sonra uyarı (istemcinin takımıyla)", seen == [("report", True), ("alert", "Ekip")], str(seen))
+        flags: list = []
+        _a2 = iv.alert
+        iv.alert = lambda client, rep, **kw: flags.append(iv._RUN["running"]) or []
+        iv._tick(lambda: cl)
+        iv.alert = _a2
+        check("_tick: alert / giderme çalışırken tarama bayrağı bırakılmıştır (kart 'Taranıyor' demez)", flags == [False], str(flags))
+        iv._RUN["running"] = True
+        seen.clear()
+        iv._tick(lambda: cl, sleep=lambda s: None, max_wait_s=60, step_s=30)
+        check("_tick: başka tarama sürerken (bekleme süresi dolunca) atlanır", seen == [])
+        iv._RUN["running"] = False
+    finally:
+        iv.report, iv.alert, pc.get, _mdl.build_index = _rep, _alert, _get3, _bi3
+
+    # ── varsayılan iş açma yolu: teknik borç hikâyesi + needs-human Task (sahte client, yazma yok) ──
+    from agile_sdlc_crew.quality import intake
+
+    class _FC:
+        org_url, project = "https://dev.azure.com/o", "P"
+
+        def __init__(self):
+            self.created, self.updates = [], []
+
+        def list_iterations(self, team=""):
+            return [{"name": "Sprint 42", "path": "P\\Sprint 42", "attributes": {"timeFrame": "current"}}]
+
+        def query_work_items(self, wiql, limit=0):
+            return []
+
+        def get_team_area_path(self, team=""):
+            return "P\\Team"
+
+        def get_authenticated_user(self):
+            return {"uniqueName": "me@flo.com.tr"}
+
+        def create_work_item(self, type_name, fields, parent_id=None):
+            self.created.append((type_name, fields, parent_id))
+            return {"id": 2000 + len(self.created) - 1, "fields": fields}
+
+        def update_work_item(self, wid, ops):
+            self.updates.append((wid, ops))
+            return {}
+    fc, recorded, queued = _FC(), [], []
+    ideps = intake.Deps(gather=None, board=lambda c: {}, repo_ok=lambda r: True,
+                        queue=lambda wid, title: queued.append(wid), record=lambda **kw: recorded.append(kw),
+                        now=lambda: 2e9, cfg=lambda: {"task_fields": {}, "sonar_url": "", "nr_days": 7})
+    got = iv._open_task(fc, rec, team="Team", deps=ideps)
+    tasks = [x for x in fc.created if x[0] == "Task"]
+    check("varsayılan yol: bir Task, needs-human, kuyruğa alınmaz, parmak izi kaydı",
+          got["id"] == 2001 and len(tasks) == 1 and "needs-human" in tasks[0][1]["System.Tags"]
+          and "tempo-image-vuln" in tasks[0][1]["System.Tags"] and queued == []
+          and recorded and recorded[0]["fingerprint"] == "image_vuln:golang:1.24.4" and recorded[0]["needs_human"] is True,
+          str(tasks)[:300])
+    check("varsayılan yol: Task öncelik alanı 1 yazılır",
+          tasks[0][1].get("Microsoft.VSTS.Common.Priority") == 1, str(sorted(tasks[0][1])))
+    check("varsayılan yol: Task açıklamasında kaçışlı gövde + sınır cümlesi",
+          "&lt;img" in tasks[0][1]["System.Description"] and "sonuç alt sınırdır" in tasks[0][1]["System.Description"])
+
+    html_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    seg = html_src[html_src.index("async function loadImageVuln"):html_src.index("function renderImageVuln")
+                   + html_src[html_src.index("function renderImageVuln"):].index("\n}\n")]
+    check("kart: uç, 403'te gizlenir, yeniden tara, yok sayılan satırı, bölge sayıları",
+          "/api/techdebt/images" in seg and "resp.status===403" in seg and 'id="tdImgCard"' in html_src
+          and "yok sayılan:" in html_src and "loadImageVuln(true)" in html_src and "u[k]||[]).length" in seg)
+    check("kart: etkilenen repolar görünür liste; yüklenirken kart gösterilir; sekmenin son kartı",
+          "Etkilenen repolar" in seg and "x.repos" in seg and "_tdLoad(" in seg and "_tdOff('img')" in seg
+          and html_src.index('id="tdImgCard"') > html_src.index('id="tdModernCard"'))
+    check("kart: açığı olan imajlar listenin tepesinde ayrı bölüm (kritik + yüksek > 0), kalanı 'Diğer imajlar'",
+          "Güvenlik açığı olan imajlar" in seg and "Diğer imajlar" in seg
+          and seg.index("Güvenlik açığı olan imajlar") < seg.index("Diğer imajlar")
+          and "(c.critical||0)+(c.high||0))>0" in seg)
+    check("kart: CVE bağlantıları + duyuru tarihi / gün sayısı; adres yalnız tam kalıba uyan kimlikten",
+          "_ivCves(p)" in html_src and "nvd.nist.gov/vuln/detail/" in html_src and "_ivOldestDays(" in seg
+          and "gün önce" in html_src and "/^CVE-\\d{4}-\\d{4,}$/" in html_src)
+    det = html_src[html_src.index("function _ivCveTable"):html_src.index("function closeIvDetail")]
+    check("kart: satır özet, ayrıntı pencerede (kritik açıklar tablosu, repolar, eylem, giderme düğmesi)",
+          "openIvDetail(this.dataset.image)" in seg and "<details" not in seg
+          and "event.stopPropagation();fixImageVuln(this)" in seg and "_ivKindLabel(a)" in seg
+          and "'taban-taşıma':'Taşıma PR" in html_src and "'yok':'başlatılmadı'" in html_src
+          and 'id="ivModal"' in html_src and "Kritik açıklar" in det and "Yüksek açıklar" in det
+          and "_ivCveTable(pk,'CRITICAL')" in det and "ivFixBtn" in det and "Etkilenen repolar" in det
+          and "${x.image}" not in det and "${p.name}" not in det and "${e.cve}" not in det)
+    psv = iv._parse_scan({"Results": [{"Vulnerabilities": (
+        [{"Severity": "HIGH", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": f"CVE-2026-10{i:02d}"} for i in range(6)]
+        + [{"Severity": "CRITICAL", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": f"CVE-2026-20{i:02d}",
+            "PublishedDate": "2026-01-02T00:00:00Z"} for i in range(7)])}]})["packages"][0]
+    check("tarama: kimlik başına önem; kritikler sınıra takılmaz ve önce gelir, yüksekler yalnız boş yeri doldurur",
+          psv["cves"] == [f"CVE-2026-20{i:02d}" for i in range(7)] and set(psv["sev"].values()) == {"CRITICAL"}
+          and psv["critical"] == 7 and psv["high"] == 6 and len(psv["published"]) == 7, str(psv))
+    psh = iv._parse_scan({"Results": [{"Vulnerabilities": [
+        {"Severity": "HIGH", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": "CVE-2026-1000"},
+        {"Severity": "CRITICAL", "FixedVersion": "2", "PkgName": "a", "VulnerabilityID": "CVE-2026-2000"}]}]})["packages"][0]
+    check("tarama: kritik + yüksek karışık → kritik önce, önem eşlemesi doğru",
+          psh["cves"] == ["CVE-2026-2000", "CVE-2026-1000"]
+          and psh["sev"] == {"CVE-2026-2000": "CRITICAL", "CVE-2026-1000": "HIGH"}, str(psh))
+    check("kart: her aralanan metin escHtml'den geçer (ham ${x.image} / ${p.name} yok)",
+          "${x.image}" not in seg and "${p.name}" not in seg and "_ivE=s=>escHtml(" in html_src)
+
+    by = {f["key"]: f for f in pc.SCHEMA}
+    mt = by.get("CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS", {})
+    check("_MAX_TASKS int, varsayılan 3, min 1", mt.get("type") == "int" and mt.get("default") == 3 and mt.get("min") == 1, str(mt))
+
+
+class _FixClient(_FakeBaseImages):
+    """base-images (staging) + bölge repoları (production Dockerfile'ları); yazma çağrıları `calls`ta."""
+
+    def __init__(self, dockerfiles=None, region_prs=None, **kw):
+        super().__init__(**kw)
+        self.docker = dict(dockerfiles or {})
+        self.region_prs = dict(region_prs or {})
+
+    def get_file_content(self, repo, path, branch=None, project=None):
+        if repo == "base-images":
+            data = self.files[branch].get(path)
+        else:
+            assert branch == "production" and project == "FLODevOps", (repo, branch, project)
+            data = self.docker.get((repo, path))
+        if data is None:
+            raise FileNotFoundError(path)
+        return data.decode() if isinstance(data, bytes) else data
+
+    def find_pull_request(self, repo, branch, project=None):
+        if repo == "base-images":
+            return self.prs.get(branch)
+        return self.region_prs.get((repo, branch))
+
+
+class _PromoClient(_FixClient):
+    """base-images'ta üç dal (staging / preprod / production) + dallar arası PR araması."""
+
+    def __init__(self, dockerfiles=None, branches=None, between=None, **kw):
+        super().__init__(dockerfiles, **kw)
+        self.files = {b: dict(f) for b, f in (branches or {}).items()}
+        self.between = dict(between or {})
+        self.diff_fail = False
+        self.commits: dict = {}             # commit → {yol: bayt} (eski PR'ın taşıdığı içerik)
+
+    def get_file_bytes(self, repo, path, branch=None, project=None, version=None, version_type=None, **kw):
+        assert version and version_type == "commit", (version, version_type)
+        return self.commits[version].get(path)
+
+    def find_pull_request_between(self, repo, src, dst, project=None):
+        assert repo == "base-images" and project == "FLODevOps", (repo, project)
+        return self.between.get((src, dst))
+
+    def get_commit_diff_paths(self, repo, base, target):
+        if self.diff_fail:
+            raise OSError("diff okunamadı")
+        return ["/php-8-4/Dockerfile", "/php-8-4/tag.txt", "/x`y/Dockerfile"]
+
+
+def test_image_fix_promote_tag():
+    """Taşıma PR'ı (base-images dalları arası) ve bölge repolarında etiket yükseltme. Ağ / Azure / MySQL yok."""
+    print("\n[taban imaj güvenliği: taşıma ve etiket]")
+    from agile_sdlc_crew.quality import image_fix as fx, image_vuln as iv
+    from agile_sdlc_crew.quality import upgrade_bump as bump, upgrade_image as ui, upgrade_registry as ur
+    knobs = {"CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE_BUMP": True,
+             "CREW_TECHDEBT_IMAGE_VULN_PROMOTE": True}
+    reg, ru = "europe-west1-docker.pkg.dev/flo-prod-main/prod-ar", "10.131.167.220:5000/prod-ar"
+    res = ur.Resolver(fetch=_fake_hub({"php": ["8.4.28", "8.4.28-fpm-trixie", "8.4.28-fpm-bookworm"]}))
+    NEW = {"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.28\nFROM php:${PHP_VERSION}-fpm-trixie\n", "/php-8-4/tag.txt": b"1.1"}
+    OLD = {"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.27\nFROM php:${PHP_VERSION}-fpm-bookworm\n", "/php-8-4/tag.txt": b"1.0"}
+    index = {"channel": [{"src": "anatolia/build/channel", "images": [f"{reg}/php-8-4:1.0", "builder"]}],
+             "core": [{"src": "russia/build/core", "images": [f"{ru}/php-8-4:1.0"]}],
+             "fresh": [{"src": "global/build/fresh", "images": [f"{reg}/php-8-4:1.1"]}]}
+    DF = {("anatolia", "/build/channel/Dockerfile"): f"FROM {reg}/php-8-4:1.0 AS base\nRUN x\nFROM builder\n",
+          ("russia", "/build/core/Dockerfile"): f"FROM {ru}/php-8-4:1.0\n"}
+
+    def rec(**kw):
+        r = {"image": "php:8.4.27-fpm-bookworm", "lang": "php", "version": "8.4.27", "via": ["php-8-4"], "touched": "",
+             "error": "", "users": {"anatolia": ["build/channel"], "russia": ["build/core"]}, "tag_lag": {},
+             "scan": {"state": "tamam", "critical": 0, "high": 0, "packages": [], "os": "", "created": "",
+                      "ignored": {"critical": 0, "high": 0, "packages": []}},
+             "patch": {"latest": "8.4.28"}, "eol": None, "level": "yüksek", "actions": []}
+        r.update(kw)
+        return r
+
+    def kind(acts, k):
+        return next((a for a in acts if a["kind"] == k), None)
+
+    def never(*a, **k):
+        raise AssertionError("yazma çağrılmamalıydı")
+
+    with _fix_env(knobs):
+        # ── taşıma: plan ──────────────────────────────────────────────────
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        acts = fx.plan(c, rec(), index=index, resolver=res)
+        a = kind(acts, "taban-taşıma")
+        check("taşıma: staging = preprod, production eski → preprod → production önerilir",
+              kind(acts, "taban-yama")["state"] == "güncel" and a and a["state"] == "yok"
+              and (a["src"], a["dst"]) == ("preprod", "production") and a["dir"] == "php-8-4", str(a))
+        check("taşıma: plan yazmaz", c.calls == [], str(c.calls))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": OLD, "production": OLD})
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: preprod da eski → önce staging → preprod", a["state"] == "yok" and (a["src"], a["dst"]) == ("staging", "preprod"), str(a))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": NEW})
+        check("taşıma: üç dal aynı → eylem yok", kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma") is None)
+        c = _PromoClient(DF, {"staging": OLD, "preprod": OLD, "production": OLD})
+        acts = fx.plan(c, rec(), index=index, resolver=res)
+        check("taşıma: düzeltme staging'de değilken önerilmez (önce yama PR'ı)",
+              kind(acts, "taban-yama")["state"] == "yok" and kind(acts, "taban-taşıma") is None, str(acts))
+        pr = {"id": 9, "status": "active", "url": "https://dev.azure.com/org/FLODevOps/_git/base-images/pullrequest/9",
+              "source_commit": "abc1234"}
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD}, between={("preprod", "production"): pr})
+        c.commits = {"abc1234": NEW, "def5678": OLD}
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: açık PR varsa (kim açmış olursa olsun) 'pr açık'", a["state"] == "pr açık" and a["pr"]["id"] == 9, str(a))
+        c.between[("preprod", "production")] = dict(pr, status="abandoned")
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: aynı içerik reddedilmişse yeniden açılmaz", a["state"] == "pr reddedildi", str(a))
+        c.oids["preprod"] = "0000aaaa"      # paylaşılan dala ilgisiz bir commit geldi: dal başı değişti, dizin aynı
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: dal başı ilerlese de dizin içeriği aynıysa reddedilen PR yeniden açılmaz", a["state"] == "pr reddedildi", str(a))
+        c.between[("preprod", "production")] = dict(pr, status="abandoned", source_commit="def5678")
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: reddedilen PR bu dizinin BAŞKA içeriğini taşıyorduysa yeni içerik önerilir", a["state"] == "yok", str(a))
+        c.between[("preprod", "production")] = dict(pr, status="completed")
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: aynı içerik tamamlanmış PR'la taşınmış ama hedef hâlâ farklı → yeniden açılmaz (pr kapandı)",
+              a["state"] == "pr kapandı" and "elle" in a["reason"], str(a))
+        c.between[("preprod", "production")] = dict(pr, status="completed", source_commit="def5678")
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: eski içeriği taşımış tamamlanmış PR engel değil", a["state"] == "yok", str(a))
+        c.between[("preprod", "production")] = dict(pr, status="abandoned", source_commit="")
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: önceki PR'ın içeriği okunamıyorsa belirsiz (yazılmaz)", a["state"] == "belirsiz", str(a))
+        # yön: hedef dal ileride / ayrışmışsa taşıma önerilmez
+        AHEAD = {"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.29\nFROM php:${PHP_VERSION}-fpm-trixie\n", "/php-8-4/tag.txt": b"1.2"}
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": AHEAD})
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: production ilerideyse (kendi düzeltmesi var) önerilmez → elle", a["state"] == "elle" and "geride değil" in a["reason"], str(a))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": AHEAD, "production": OLD})
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: preprod staging'den ilerideyse staging → preprod açılmaz → elle", a["state"] == "elle", str(a))
+        SAMEV = {"/php-8-4/Dockerfile": NEW["/php-8-4/Dockerfile"] + b"RUN hotfix\n", "/php-8-4/tag.txt": b"1.1"}
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": SAMEV})
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: sürüm ve etiket aynı, içerik ayrışmış → elle", a["state"] == "elle", str(a))
+        CRLF = {"/php-8-4/Dockerfile": NEW["/php-8-4/Dockerfile"].replace(b"\n", b"\r\n"), "/php-8-4/tag.txt": b"1.1\n"}
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": CRLF})
+        check("taşıma: yalnız satır sonu / sondaki boşluk farkı taşıma sayılmaz",
+              kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma") is None)
+        two = rec(via=["php-8-4", "php-8-2"])
+        B2 = {"/php-8-2/Dockerfile": b"ARG PHP_VERSION=8.4.28\nFROM php:${PHP_VERSION}-fpm-trixie\n", "/php-8-2/tag.txt": b"1.1"}
+        O2 = {"/php-8-2/Dockerfile": b"ARG PHP_VERSION=8.4.27\nFROM php:${PHP_VERSION}-fpm-trixie\n", "/php-8-2/tag.txt": b"1.0"}
+        c = _PromoClient(DF, {"staging": {**NEW, **B2}, "preprod": {**NEW, **B2}, "production": {**OLD, **O2}})
+        acts = fx.plan(c, two, index=index, resolver=res)
+        check("taşıma: iki dizin aynı dal çiftini isterse tek eylem",
+              len([x for x in acts if x["kind"] == "taban-taşıma"]) == 1, str([(x["kind"], x["state"]) for x in acts]))
+        for bad in (["staging"], ["preprod", "production"], ["staging", "pre prod"], ["staging", "staging"], "staging"):
+            cfg = dict(ui.load_cfg(), flow=bad)
+            c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+            a = kind(fx.plan(c, rec(), index=index, resolver=res, cfg=cfg), "taban-taşıma")
+            check(f"taşıma: geçersiz flow {bad!r} → elle, yazılmaz", a and a["state"] == "elle", str(a))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW})
+        a = kind(fx.plan(c, rec(), index=index, resolver=res), "taban-taşıma")
+        check("taşıma: hedef dal okunamıyorsa belirsiz (yazılmaz)", a and a["state"] == "belirsiz", str(a))
+        knobs["CREW_TECHDEBT_IMAGE_VULN_PROMOTE"] = False
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        acts = fx.plan(c, rec(tag_lag={"php-8-4": {"have": ["1.0"], "latest": "1.1"}}), index=index, resolver=res)
+        check("taşıma / etiket anahtarı kapalıyken (varsayılan) ikisi de hiç planlanmaz; yama eylemi eskisi gibi 'güncel'",
+              [(x["kind"], x["state"]) for x in acts] == [("taban-yama", "güncel")], str(acts))
+        out = fx.apply(c, rec(tag_lag={"php-8-4": {"have": ["1.0"], "latest": "1.1"}}), team="T", index=index, resolver=res,
+                       push_fn=never, open_pr_fn=never, start_fn=never)
+        check("anahtar kapalıyken uygula hiçbir şey yazmaz", c.calls == [] and not any(x["ran"] for x in out), str(c.calls))
+        knobs["CREW_TECHDEBT_IMAGE_VULN_PROMOTE"] = True
+        from agile_sdlc_crew import pipeline_config as _pcx
+        check("ayar: CREW_TECHDEBT_IMAGE_VULN_PROMOTE varsayılan kapalı",
+              next(d for d in _pcx.SCHEMA if d["key"] == "CREW_TECHDEBT_IMAGE_VULN_PROMOTE")["default"] is False)
+
+        # ── taşıma: uygula ────────────────────────────────────────────────
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        out = fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+        a = kind(out, "taban-taşıma")
+        prs = [x for x in c.calls if x[0] == "pr"]
+        check("taşıma uygula: tek taslak PR preprod → production; dal / push yok",
+              a["state"] == "açıldı" and a["ran"] is True and len(c.calls) == 1 and len(prs) == 1
+              and prs[0][1:3] == ("preprod", "production") and prs[0][5] is True and prs[0][6] == "FLODevOps", str(c.calls)[:400])
+        body = prs[0][4]
+        check("taşıma gövdesi: dalın tamamını taşıdığını, değişen dosyaları ve RU bayrağını söyler",
+              "TAMAMINI" in body and "/php-8-4/tag.txt" in body and "yandexLocation" in body and "russia" in body
+              and "x`y" not in body and len(body) <= 4000, body)
+        check("taşıma: web PR bağlantısı", a["pr"] == {"id": 77, "url": "https://dev.azure.com/org/FLODevOps/_git/base-images/pullrequest/77"}, str(a["pr"]))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        c.diff_fail = True
+        out = fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+        check("taşıma: dosya listesi okunamazsa PR yine açılır, gövde söyler",
+              kind(out, "taban-taşıma")["state"] == "açıldı" and "okunamadı" in [x for x in c.calls if x[0] == "pr"][0][4])
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD}, fail_at="pr")
+        a = kind(fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never), "taban-taşıma")
+        check("taşıma: PR açılamazsa hata, ran False (sıra harcanmaz)", a["state"] == "hata" and a["ran"] is False, str(a))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        c.create_pull_request = lambda *a_, **k: c._deny()
+        a = kind(fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never), "taban-taşıma")
+        check("taşıma: 401/403 → elle, ran False", a["state"] == "elle" and a["ran"] is False, str(a))
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": OLD})
+        c.pr_response = {}
+        a = kind(fx.apply(c, rec(), team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never), "taban-taşıma")
+        check("taşıma: yanıt okunamazsa belirsiz ama ran True (PR açılmış olabilir)", a["state"] == "belirsiz" and a["ran"] is True, str(a))
+
+        # ── etiket: envanter işareti ──────────────────────────────────────
+        check("etiket karşılaştırması sayısal", iv.tag_newer("1.0", "1.1") and iv.tag_newer("1.9", "1.10")
+              and not iv.tag_newer("1.0", "1.0.0") and not iv.tag_newer("1", "1.1")
+              and not iv.tag_newer("1.1", "1.1") and not iv.tag_newer("1.2", "1.1") and not iv.tag_newer("latest", "1.1")
+              and not iv.tag_newer("1.0", "1.1;rm"))
+        files = {"/php-8-4/Dockerfile": NEW["/php-8-4/Dockerfile"].decode(), "/php-8-4/tag.txt": "1.1\n"}
+        recs = {r["image"]: r for r in iv.inventory(_iv_client({}), index, read=files.get)}
+        p = recs["php:8.4.28-fpm-trixie"]
+        check("envanter: üretim etiketi 1.1, bölgeler 1.0 çekiyor → tag_lag (güncel bölge sayılmaz)",
+              p["tag_lag"] == {"php-8-4": {"have": ["1.0"], "latest": "1.1"}}, str(p["tag_lag"]))
+        p.update(scan={"state": "tamam", "critical": 0, "high": 0, "packages": []}, patch=None, eol=None)
+        lvl, actions = iv._judge(p)
+        check("etiket geride → en az 'yüksek' + eylem metni", lvl == "yüksek"
+              and "bölge repolarında imaj etiketini yükselt (php-8-4:1.1)" in actions, f"{lvl} {actions}")
+        files["/php-8-4/tag.txt"] = "1.0"
+        p0 = {r["image"]: r for r in iv.inventory(_iv_client({}), index, read=files.get)}["php:8.4.28-fpm-trixie"]
+        check("envanter: etiket aynıyken işaret yok", p0["tag_lag"] == {}, str(p0["tag_lag"]))
+
+        # ── kullanılmayan taban dizinleri (php-8-5): envantere girer, güncel tutulur ──
+        P85 = {"/php-8-5/Dockerfile": b"ARG PHP_VERSION=8.5.12\nFROM php:${PHP_VERSION}-fpm-trixie\n", "/php-8-5/tag.txt": b"1.0"}
+        c = _PromoClient(DF, {"staging": {**NEW, **P85, "/docs/README.md": b"x", "/misc/Dockerfile": b"FROM evil.example/x:1\n"},
+                              "preprod": {**NEW, **P85}, "production": OLD})
+        dirs = iv.own_dirs(c)
+        check("own_dirs: üretimde olan üretimden, yalnız erken dalda olan üretime en yakın daldan",
+              dirs.get("php-8-4") == "production" and dirs.get("php-8-5") == "preprod" and dirs.get("misc") == "staging", str(dirs))
+        inv = {r["image"]: r for r in iv.inventory(c, index, dirs=dirs,
+                                                   read=lambda p: (c.files["production"].get(p) or b"").decode() or None)}
+        u85 = inv.get("php:8.5.12-fpm-trixie")
+        check("envanter: kullanılmayan php-8-5 kayda girer (unused, kullanan yok, okunan dal)",
+              bool(u85) and u85["unused"] is True and u85["via"] == ["php-8-5"] and u85["users"] == {} and u85["repos"] == {}
+              and u85["unused_dirs"] == {"php-8-5": "preprod"} and u85["lang"] == "php" and u85["version"] == "8.5.12", str(u85))
+        check("envanter: taban imaj olmayan / harici kayıt deposlu dizin eklenmez; kullanılan kayıt unused değil",
+              not any("evil" in k for k in inv) and len([r for r in inv.values() if r.get("unused")]) == 1
+              and not inv["php:8.4.27-fpm-bookworm"].get("unused"), str(sorted(inv)))
+        check("envanter: read enjekte + dirs yok → kullanılmayan aranmaz (eski davranış)",
+              not any(r.get("unused") for r in iv.inventory(_iv_client({}), index, read={}.get)))
+        u85.update(scan={"state": "tamam", "critical": 3, "high": 1, "packages": []}, patch={"latest": "8.5.14"}, eol=None)
+        lvl, _acts = iv._judge(u85)
+        check("kullanılmayan imaj kritik uyarı üretmez (en çok 'yüksek'), temizse 'temiz'", lvl == "yüksek"
+              and iv._judge({**u85, "scan": {"state": "tamam", "critical": 0, "high": 0, "packages": []}, "patch": None})[0] == "temiz", lvl)
+        res85 = ur.Resolver(fetch=_fake_hub({"php": ["8.5.14", "8.5.14-fpm-trixie"]}))
+        acts = fx.plan(c, u85, index=index, resolver=res85)
+        a = kind(acts, "taban-yama")
+        check("kullanılmayan imaj: staging'de yama PR'ı planlanır (8.5.12 → 8.5.14), bölge bilinmiyor diye reddedilmez",
+              a and a["state"] == "yok" and a["sites"][0]["path"] == "/php-8-5/Dockerfile"
+              and (a["sites"][0]["old"], a["sites"][0]["new"]) == ("8.5.12", "8.5.14"), str(acts))
+        body = fx._body_own(u85, a, ui.load_cfg())
+        check("kullanılmayan imaj: PR gövdesi kullanan servis olmadığını söyler", "kullanan servis yok" in body, body)
+        u85b = {**u85, "patch": {"latest": "8.5.12"}}
+        a = kind(fx.plan(c, u85b, index=index, resolver=res85), "taban-taşıma")
+        check("kullanılmayan imaj: staging güncelse taşıma da önerilir (üretimde dizin yok → preprod → production)",
+              a and a["state"] == "yok" and (a["src"], a["dst"]) == ("preprod", "production"), str(a))
+
+        # ── etiket: plan ──────────────────────────────────────────────────
+        lagrec = rec(image="php:8.4.28-fpm-trixie", version="8.4.28", patch=None, tag_lag={"php-8-4": {"have": ["1.0"], "latest": "1.1"}})
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": NEW})
+        acts = fx.plan(c, lagrec, index=index, resolver=res)
+        a = kind(acts, "taban-etiket")
+        check("etiket plan: yalnız etiket eylemi, bölge başına birim, sabit dal adı",
+              [x["kind"] for x in acts] == ["taban-etiket"] and a["state"] == "yok"
+              and all(re.fullmatch(r"tempo/image-tag-php-8-4-1\.1-[0-9a-f]{8}", u["branch"]) for u in a["repos"])
+              and [u["repo"] for u in a["repos"]] == ["anatolia", "russia"] and a["target"] == "php-8-4:1.1", str(a))
+        br_a = a["repos"][0]["branch"]
+        sa, sr = a["repos"][0]["sites"], a["repos"][1]["sites"]
+        check("etiket plan: her bölgede kendi kayıt deposu adıyla yalnız etiket değişir (güncel bölgeye dokunulmaz)",
+              len(sa) == 1 and sa[0]["old"] == f"{reg}/php-8-4:1.0" and sa[0]["new"] == f"{reg}/php-8-4:1.1" and sa[0]["line"] == 1
+              and sa[0]["branch"] == "production" and sr[0]["old"] == f"{ru}/php-8-4:1.0" and sr[0]["new"] == f"{ru}/php-8-4:1.1"
+              and all(bump.pushable(s) for s in sa + sr), f"{sa} {sr}")
+        try:
+            bump._validate(sa, br_a)
+            bump._validate(sr, a["repos"][1]["branch"])
+            check("etiket: siteler ve dal adı push_sites doğrulamasından geçer", True)
+        except ValueError as e:
+            check("etiket: siteler ve dal adı push_sites doğrulamasından geçer", False, str(e))
+        for bad in ("tempo/image-tag-php-8-4-", "tempo/image-tag-php-8-4-1.1", "tempo/image-tag-php-8-4-1.1-abcdef12/x",
+                    "tempo/image-tag-../x-1.1-abcdef12", "tempo/image-tag-PHP-1.1-abcdef12", "production",
+                    "tempo/image-tag-php-8-4-1.1.1.1.1-abcdef12", "tempo/image-tag-php-8-4-1.1-ABCDEF12"):
+            try:
+                bump._validate_branch(bad, {"production"})
+                check(f"dal adı reddedilir: {bad}", False)
+            except ValueError:
+                check(f"dal adı reddedilir: {bad}", True)
+        check("etiket plan yazmaz", c.calls == [])
+        c = _PromoClient(DF, {"production": dict(NEW, **{"/php-8-4/tag.txt": b"1.1;rm"})})
+        a = kind(fx.plan(c, lagrec, index=index, resolver=res), "taban-etiket")
+        check("etiket plan: üretim etiketi sayısal değilse elle", a["state"] == "elle", str(a))
+        c = _PromoClient(DF, {"production": OLD})
+        check("etiket plan: taze okunan üretim etiketi geride değilse eylem yok (rapor bayatmış)",
+              kind(fx.plan(c, lagrec, index=index, resolver=res), "taban-etiket") is None)
+        DF2 = dict(DF)
+        DF2[("russia", "/build/core/Dockerfile")] = f"FROM {ru}/php-8-4:1.0@sha256:{'a' * 64}\n"
+        c = _PromoClient(DF2, {"production": NEW})
+        a = kind(fx.plan(c, lagrec, index=index, resolver=res), "taban-etiket")
+        check("etiket plan: bir bölgede satır bulunamıyorsa / özetle sabitse hiçbiri yazılmaz (elle)", a["state"] == "elle" and "russia" in a["reason"], str(a))
+        c = _PromoClient(DF, {"production": NEW}, region_prs={("anatolia", br_a): {"id": 4, "status": "active", "url": "https://x/4"}})
+        a = kind(fx.plan(c, lagrec, index=index, resolver=res), "taban-etiket")
+        check("etiket plan: bir bölgede PR açık, ötekinde yok → açılabilir (yok); açık olan yeniden açılmaz",
+              a["state"] == "yok" and a["repos"][0]["state"] == "pr açık" and a["repos"][1]["state"] == "yok", str(a))
+        # tamamlanan PR'dan sonra eski etikette yeni bir servis çıkarsa: yeni satır kümesi → yeni dal → yeniden açılabilir
+        index2 = dict(index, late=[{"src": "anatolia/build/late", "images": [f"{reg}/php-8-4:1.0"]}])
+        DF3 = dict(DF)
+        DF3[("anatolia", "/build/late/Dockerfile")] = f"FROM {reg}/php-8-4:1.0\n"
+        c = _PromoClient(DF3, {"production": NEW}, region_prs={("anatolia", br_a): {"id": 4, "status": "completed", "url": "https://x/4"}})
+        a = kind(fx.plan(c, lagrec, index=index2, resolver=res), "taban-etiket")
+        check("etiket plan: kapanmış PR sonradan çıkan servisi engellemez (dal adı satır kümesini taşır)",
+              a["repos"][0]["state"] == "yok" and a["repos"][0]["branch"] != br_a and len(a["repos"][0]["sites"]) == 2, str(a["repos"][0]))
+        c = _PromoClient(DF3, {"production": NEW}, region_prs={("anatolia", br_a): {"id": 4, "status": "active", "url": "https://x/4"}})
+        c.files["anatolia-branches"] = {}
+        _lb = c.list_branches
+        c.list_branches = lambda repo, project=None: (_lb(repo, project) + [{"name": f"refs/heads/{br_a}", "objectId": "x"}])
+        a = kind(fx.plan(c, lagrec, index=index2, resolver=res), "taban-etiket")
+        check("etiket plan: aynı etiket için açık PR varken satır kümesi değişirse ikinci PR açılmaz (önce o kapanmalı)",
+              a["repos"][0]["state"] == "pr açık" and "önce o kapanmalı" in a["repos"][0]["reason"], str(a["repos"][0]))
+        evil = rec(image="php:8.4.28-fpm-trixie", patch=None, via=["php_8"], tag_lag={"php_8": {"have": ["1.0"], "latest": "1.1"}})
+        a = kind(fx.plan(_PromoClient(DF, {"production": NEW}), evil, index=index, resolver=res), "taban-etiket")
+        check("etiket plan: dal adına çevrilemeyen dizin → elle", a["state"] == "elle", str(a))
+
+        # ── etiket: uygula ────────────────────────────────────────────────
+        pushed = []
+
+        def push_ok(client, sites, **kw):
+            pushed.append((sites[0]["repo"], kw["branch"], kw["title"], kw["body"], [(s["old"], s["new"]) for s in sites]))
+            return {"prs": [{"repo": sites[0]["repo"], "id": 5, "url": "https://x/5"}], "fallback": [], "errors": []}
+        c = _PromoClient(DF, {"staging": NEW, "preprod": NEW, "production": NEW})
+        out = fx.apply(c, lagrec, team="T", index=index, resolver=res, push_fn=push_ok, open_pr_fn=never, start_fn=never)
+        a = kind(out, "taban-etiket")
+        check("etiket uygula: bölge başına bir PR (anatolia + russia), ran True",
+              a["state"] == "açıldı" and a["ran"] is True and [x[0] for x in pushed] == ["anatolia", "russia"]
+              and all(re.fullmatch(r"tempo/image-tag-php-8-4-1\.1-[0-9a-f]{8}", x[1]) for x in pushed)
+              and pushed[0][1] != pushed[1][1], str(pushed)[:300])
+        check("etiket gövdesi: imaj kayıt deposuna basılmadan birleştirilmemeli + RU notu",
+              "basılmadan birleştirmeyin" in pushed[0][3] and "RU (VK)" in pushed[0][3] and "çakışır" in pushed[0][3]
+              and len(pushed[0][3]) <= 4000, pushed[0][3])
+        knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = False
+        out = fx.apply(_PromoClient(DF, {"production": NEW}), lagrec, team="T", index=index, resolver=res, push_fn=never,
+                       open_pr_fn=never, start_fn=never)
+        check("PR anahtarı kapalıyken etiket PR'ı açılmaz", kind(out, "taban-etiket")["state"] == "elle")
+        knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = True
+
+    html_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    cseg = html_src[html_src.index("function _ivFixConfirm"):html_src.index("function fixImageVuln")]
+    check("kart: onay metni taşıma ve etiket eylemlerini de sayar; etiket geride işareti",
+          "taban-taşıma" in cseg and "taban-etiket" in cseg and "etiket geride" in html_src and "x.tag_lag" in html_src)
+
+
+def test_image_fix():
+    from agile_sdlc_crew import pipeline_config as pc
+    knobs = {"CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE_BUMP": True}
+    _get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+    from agile_sdlc_crew.quality import image_fix as _fx
+    _cur = getattr(_fx, "_repo_current", None)
+    _fx._repo_current = lambda *a, **k: None          # gerçek klonlara gidilmesin
+    try:
+        with _fix_env(knobs):
+            _image_fix_body()
+    finally:
+        pc.get = _get
+        if _cur is not None:
+            _fx._repo_current = _cur
+
+
+def _image_fix_body():
+    """Giderme: uyarıyla birlikte sürüm çalışması. Sahte client / resolver / enjekte fonksiyonlar; ağ, Azure, MySQL yok."""
+    print("\n[taban imaj güvenliği: giderme]")
+    import asyncio
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import server
+    from agile_sdlc_crew.quality import image_fix as fx, image_vuln as iv, modern, upgrade as up
+    from agile_sdlc_crew.quality import upgrade_bump as bump, upgrade_image as ui, upgrade_registry as ur
+
+    reg = "europe-west1-docker.pkg.dev/flo-prod-main/prod-ar"
+    hub = {"php": ["8.4.30", "8.4.30-fpm-trixie", "8.2.36", "8.2.36-fpm-trixie"],
+           "python": ["3.13.18", "3.13.18-slim-bookworm"],
+           "golang": ["1.24.13", "1.24.13-alpine", "1.25.5", "1.25.14"]}
+    res = ur.Resolver(fetch=_fake_hub(hub))
+    index = {
+        "alf": [{"src": f"{r}/build/alf", "images": ["golang:1.24.4"]} for r in ("anatolia", "global", "russia")],
+        "sortify": [{"src": "anatolia/build/sortify", "images": ["golang:1.25.5"]}],
+        "channel": [{"src": "anatolia/build/channel", "images": [f"{reg}/php-8-4:1.1", "builder"]}],
+        "core": [{"src": "russia/build/core", "images": ["10.131.167.220:5000/prod-ar/php-8-4:1.1"]}],
+        "py": [{"src": "anatolia/build/py", "images": [f"{reg}/python-3-13-7:1.0"]}],
+        "legacy": [{"src": "anatolia/build/legacy", "images": [f"{reg}/php-7-4:1.0"]},
+                   {"src": "russia/build/legacy", "images": [f"{reg}/php-7-4:1.0"]}],
+        "oldjs": [{"src": "anatolia/build/oldjs", "images": ["node:14.21.3-bullseye-slim"]}],
+    }
+
+    def rec(image, lang, version, *, via=(), users=None, patch=None, eol=None, crit=0, high=0, level="kritik"):
+        return {"image": image, "lang": lang, "version": version, "via": list(via), "touched": "", "error": "",
+                "users": users if users is not None else {"anatolia": ["build/x"]},
+                "scan": {"state": "tamam", "critical": crit, "high": high, "packages": [], "os": "", "created": "",
+                         "ignored": {"critical": 0, "high": 0, "packages": []}},
+                "patch": patch, "eol": eol, "level": level, "actions": []}
+    DF = {(r, "/build/alf/Dockerfile"): "FROM golang:1.24.4\nWORKDIR /app\nRUN go build\n" for r in ("anatolia", "global", "russia")}
+    go = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"},
+             users={"anatolia": ["build/alf"], "global": ["build/alf"], "russia": ["build/alf"]})
+    php84 = rec("php:8.4.27-fpm-bookworm", "php", "8.4.27", via=["php-8-4"], patch={"latest": "8.4.30"},
+                users={"anatolia": ["build/channel"], "russia": ["build/core"]})
+
+    def kind(acts, k):
+        return next((a for a in acts if a["kind"] == k), None)
+
+    def cl(**kw):
+        return _FixClient(DF, **kw)
+
+    # ── plan: taban-yama (iki parçalı kendi dizin) ───────────────────────
+    acts = fx.plan(cl(), php84, index=index, resolver=res)
+    a = kind(acts, "taban-yama")
+    s = (a or {}).get("sites") or [{}]
+    check("plan taban-yama: staging'deki tek sürüm satırı, 8.4.27 → 8.4.30",
+          a and a["state"] == "yok" and len(s) == 1 and s[0]["repo"] == "base-images" and s[0]["branch"] == "staging"
+          and s[0]["project"] == "FLODevOps" and s[0]["path"] == "/php-8-4/Dockerfile" and s[0]["line"] == 1
+          and s[0]["old"] == "8.4.27" and s[0]["new"] == "8.4.30" and bump.pushable(s[0]), str(a))
+    check("plan taban-yama: sabit dal adı", a["branch"] == "tempo/image-patch-php-8-4-8.4.27-8.4.30")
+    check("plan: yalnız yama işareti → başka eylem yok (yükseltme / yeniden üretme yok)", [x["kind"] for x in acts] == ["taban-yama"])
+    c2 = _FixClient(DF, files={"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.30\nFROM php:${PHP_VERSION}-fpm-trixie\n"})
+    a = kind(fx.plan(c2, php84, index=index, resolver=res), "taban-yama")
+    check("plan taban-yama: staging güncel → 'güncel', yazılacak site yok",
+          a["state"] == "güncel" and "staging'de güncel — DevOps üretip taşımalı" in a["reason"] and not a.get("sites"), str(a))
+    c3 = _FixClient(DF, files={"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.1\nARG PHP_VERSION=8.4.2\nFROM php:${PHP_VERSION}-fpm-trixie\n"})
+    a = kind(fx.plan(c3, php84, index=index, resolver=res), "taban-yama")
+    check("plan taban-yama: sürüm satırı tek değil → elle", a["state"] == "elle" and a["reason"], str(a))
+    c4 = _FixClient(DF, files={"/php-8-2/dockerfile": b"ARG PHP_VERSION=8.2.35\nFROM php:${PHP_VERSION}-fpm-trixie\n"})
+    p82 = rec("php:8.2.35-fpm", "php", "8.2.35", via=["php-8-2"], patch={"latest": "8.2.36"})
+    a = kind(fx.plan(c4, p82, index=index, resolver=res), "taban-yama")
+    check("plan taban-yama: küçük harfli dockerfile yolu aynen", a["state"] == "yok" and a["sites"][0]["path"] == "/php-8-2/dockerfile", str(a))
+    c5 = _FixClient(DF, files={"/php-8-4/Dockerfile": b"ARG PHP_VERSION=8.4.27\nFROM php:${PHP_VERSION}-fpm-trixie\n"})
+    nohub = ur.Resolver(fetch=_fake_hub({"php": ["8.4.30"]}))
+    a = kind(fx.plan(c5, php84, index=index, resolver=nohub), "taban-yama")
+    check("plan taban-yama: etiket Hub'da yok → elle", a["state"] == "elle" and "8.4.30-fpm-trixie" in a["reason"], str(a))
+    for status, want in (("active", "pr açık"), ("abandoned", "pr reddedildi")):
+        cp = _FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.27-8.4.30": {"id": 9, "status": status, "url": "https://x/9"}})
+        a = kind(fx.plan(cp, php84, index=index, resolver=res), "taban-yama")
+        check(f"plan taban-yama: PR {status} → {want}", a["state"] == want and a["pr"]["id"] == 9, str(a))
+
+    # ── plan: taban-dizin (üç parçalı kendi dizin) ───────────────────────
+    py = rec("python:3.13.7-slim-bookworm", "python", "3.13.7", via=["python-3-13-7"], patch={"latest": "3.13.18"},
+             users={"anatolia": ["build/py"]})
+    a = kind(fx.plan(cl(), py, index=index, resolver=res), "taban-dizin")
+    check("plan taban-dizin: dizin staging'de zaten var → 'şablon var', PR yok",
+          a["state"] == "şablon var" and a["dir"] == "python-3-13-18" and not a["pr"], str(a))
+    stg = {"/python-3-13-7/Dockerfile": b"FROM python:3.13.7-slim-bookworm", "/python-3-13-7/tag.txt": b"1.0"}
+    a = kind(fx.plan(_FixClient(DF, files=stg), py, index=index, resolver=res), "taban-dizin")
+    check("plan taban-dizin: yok → açılabilir, yeni dizin <ad>-A-B-<yama>, etiket servisten",
+          a["state"] == "yok" and a["dir"] == "python-3-13-18" and a["entry"]["tag"] == "1.0" and a["to"] == "3.13", str(a))
+    a = kind(fx.plan(_FixClient(DF, files=stg, prs={"tempo/base-image-python-3-13-18": {"id": 4, "status": "active", "url": "u"}}),
+                     py, index=index, resolver=res), "taban-dizin")
+    check("plan taban-dizin: açık PR → pr açık", a["state"] == "pr açık" and a["pr"]["id"] == 4)
+    ce = ui.build(_FixClient(DF, files=stg), "python", "3.13", {"dir": "python-3-13-18", "tag": "1.0"}, resolver=res)
+    check("build: üç parçalı hedefte aynı minörün küçük yaması kaynak olur",
+          ce["source"] == "python-3-13-7" and ce["files"]["/python-3-13-18/Dockerfile"] == b"FROM python:3.13.18-slim-bookworm", str(ce["source"]))
+    try:
+        ui.build(_FixClient(DF, files={"/python-3-13-20/Dockerfile": b"FROM python:3.13.20", "/python-3-13-20/tag.txt": b"1"}),
+                 "python", "3.13", {"dir": "python-3-13-18", "tag": "1.0"}, resolver=res)
+        check("build: aynı minörün BÜYÜK yaması kaynak olmaz", False)
+    except ui.ImageTemplateError as ex:
+        check("build: aynı minörün BÜYÜK yaması kaynak olmaz", "Kaynak dizin bulunamadı" in str(ex), str(ex))
+
+    # ── plan: imaj-yama (genel üç parçalı imaj) ──────────────────────────
+    a = kind(fx.plan(cl(), go, index=index, resolver=res), "imaj-yama")
+    us = {u["repo"]: u for u in a["repos"]}
+    check("plan imaj-yama: üç bölge (russia dahil), FROM satırı, yalnız rakam değişir",
+          set(us) == {"anatolia", "global", "russia"} and all(u["state"] == "yok" for u in us.values())
+          and us["russia"]["sites"][0] == {"where": "devops", "repo": "russia", "project": "FLODevOps", "branch": "production",
+                                          "path": "/build/alf/Dockerfile", "line": 1, "old": "golang:1.24.4",
+                                          "new": "golang:1.24.13", "blocked": ""} and a["state"] == "yok", str(a)[:400])
+    check("plan imaj-yama: sabit dal adı, hedef imaj", a["branch"] == "tempo/image-patch-golang-1.24.4-1.24.13" and a["target"] == "golang:1.24.13")
+    ga = rec("golang:1.24.4-alpine", "go", "1.24.4", patch={"latest": "1.24.13"}, users={"anatolia": ["build/alf"]})
+    alp = {("anatolia", "/build/alf/Dockerfile"): "FROM golang:1.24.4-alpine AS build\nRUN x\n"}
+    ia = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4-alpine"]}]}
+    a = kind(fx.plan(_FixClient(alp), ga, index=ia, resolver=res), "imaj-yama")
+    check("plan imaj-yama: etiket soneki korunur, dal adı soneki taşır",
+          a["repos"][0]["sites"][0]["new"] == "golang:1.24.13-alpine" and a["branch"] == "tempo/image-patch-golang-1.24.4-alpine-1.24.13", str(a)[:300])
+    a = kind(fx.plan(cl(), go, index=index, resolver=ur.Resolver(fetch=_fake_hub({"golang": ["1.24.4"]}))), "imaj-yama")
+    check("plan imaj-yama: yeni etiket Hub'da yok → elle, site yok",
+          a["state"] == "elle" and not any(u.get("sites") for u in a.get("repos") or []), str(a)[:300])
+    a = kind(fx.plan(cl(), go, index=index, resolver=ur.Resolver(fetch=lambda u: (500, None))), "imaj-yama")
+    check("plan imaj-yama: Hub okunamadı → elle", a["state"] == "elle")
+    pin = dict(DF)
+    pin[("russia", "/build/alf/Dockerfile")] = "FROM golang:1.24.4@sha256:" + "a" * 64 + "\n"
+    a = kind(fx.plan(_FixClient(pin), go, index=index, resolver=res), "imaj-yama")
+    check("plan imaj-yama: özetle sabitlenmiş satır → bütün eylem elle",
+          a["state"] == "elle" and {u["repo"]: u["state"] for u in a["repos"]}["russia"] == "elle", str(a)[:300])
+    nof = dict(DF)
+    nof[("global", "/build/alf/Dockerfile")] = "FROM golang:1.23.0\n"
+    a = kind(fx.plan(_FixClient(nof), go, index=index, resolver=res), "imaj-yama")
+    check("plan imaj-yama: FROM satırı bulunamadı → elle", a["state"] == "elle"
+          and {u["repo"]: u["state"] for u in a["repos"]}["global"] == "elle", str(a)[:300])
+    stale = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"}, users={"anatolia": ["build/ESKI"], "russia": ["build/alf"]})
+    a = kind(fx.plan(cl(), stale, index=index, resolver=res), "imaj-yama")
+    check("plan imaj-yama: yollar raporun önbelleğinden değil taze index'ten (build/ESKI yazılmaz)",
+          all(s["path"] == "/build/alf/Dockerfile" for u in a["repos"] for s in u.get("sites") or []), str(a)[:300])
+    odd = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"}, users={"evil-repo": ["build/x"]})
+    a = kind(fx.plan(cl(), odd, index=index, resolver=res), "imaj-yama")
+    check("plan imaj-yama: bölge repoları dışındaki ad hiçbir zaman yazılmaz", a["state"] == "elle")
+    cg = _FixClient(DF, region_prs={("russia", "tempo/image-patch-golang-1.24.4-1.24.13"): {"id": 3, "status": "active", "url": "https://x/3"},
+                                    ("global", "tempo/image-patch-golang-1.24.4-1.24.13"): {"id": 5, "status": "abandoned", "url": "https://x/5"}})
+    a = kind(fx.plan(cg, go, index=index, resolver=res), "imaj-yama")
+    us = {u["repo"]: u for u in a["repos"]}
+    check("plan imaj-yama: bölge başına PR durumu (açık / terk / yok)",
+          us["russia"]["state"] == "pr açık" and us["global"]["state"] == "pr reddedildi" and us["anatolia"]["state"] == "yok", str(us)[:300])
+
+    # ── plan: yükseltme / yeniden-üret ───────────────────────────────────
+    goeol = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"}, eol={"eol": "2026-02-10"},
+                users={"anatolia": ["build/alf"], "global": ["build/alf"], "russia": ["build/alf"]})
+    acts = fx.plan(cl(), goeol, index=index, resolver=res, find_open_fn=lambda c, lang, repo: None)
+    k = {x["kind"] for x in acts}
+    a = kind(acts, "yükseltme")
+    want_to = up.known_versions("go")[-1]
+    check("plan: go eol + yama → hem imaj-yama hem yükseltme", k == {"imaj-yama", "yükseltme"}, str(k))
+    check("plan yükseltme: imajı kullanan repo, default_target", a["state"] == "yok" and [u["repo"] for u in a["repos"]] == ["alf"]
+          and a["repos"][0]["to"] == want_to, str(a)[:300])
+    a = kind(fx.plan(cl(), goeol, index=index, resolver=res, find_open_fn=lambda c, lang, repo: {"id": 55, "lang": lang, "repo": repo, "to": "1.27"}),
+             "yükseltme")
+    check("plan yükseltme: açık izleme işi → izleniyor", a["state"] == "izleniyor" and a["repos"][0]["wi"] == 55, str(a)[:300])
+    gx = rec("golang:1.99.0", "go", "1.99.0", eol={"eol": "2020-01-01"}, users={"anatolia": ["build/alf"]})
+    ix = {"zz": [{"src": "anatolia/build/zz", "images": ["golang:1.99.0"]}]}
+    a = kind(fx.plan(cl(), gx, index=ix, resolver=res, find_open_fn=lambda *x: None), "yükseltme")
+    check("plan yükseltme: hedefi olmayan repo reason ile listelenir, açılabilir değil",
+          a["state"] == "hedef yok" and a["repos"][0]["to"] is None and a["repos"][0]["reason"], str(a)[:300])
+    nd = rec("node:14.21.3-bullseye-slim", "node", "14.21.3", eol={"eol": "2023-04-30"}, users={"anatolia": ["build/oldjs"]})
+    a = kind(fx.plan(cl(), nd, index=index, resolver=res, find_open_fn=lambda *x: None), "yükseltme")
+    check("plan yükseltme: Node izlenmiyor → elle, izleme açılmaz", a["state"] == "elle" and "Node sürümü izlenmiyor — elle" in a["reason"], str(a))
+    p74 = rec("php:7.4.33-fpm-bullseye", "php", "7.4.33", via=["php-7-4"], eol={"eol": "2022-11-28"}, crit=18,
+              users={"anatolia": ["build/legacy"], "russia": ["build/legacy"]})
+    acts = fx.plan(cl(), p74, index=index, resolver=res, find_open_fn=lambda *x: None)
+    a = kind(acts, "yükseltme")
+    check("plan: php-7-4 eol → yalnız yükseltme (iki servis, repo bir kez)", [x["kind"] for x in acts] == ["yükseltme"]
+          and [u["repo"] for u in a["repos"]] == ["legacy"], str(acts)[:300])
+    os_only = rec("php:8.4.27-fpm-bookworm", "php", "8.4.27", via=["php-8-4"], crit=1, high=123,
+                  users={"anatolia": ["build/channel"], "russia": ["build/core"]})
+    acts = fx.plan(cl(), os_only, index=index, resolver=res)
+    a = kind(acts, "yeniden-üret")
+    check("plan yeniden-üret: yalnız işletim sistemi bulgusu → devops, bölge bayrakları, yazma yok",
+          [x["kind"] for x in acts] == ["yeniden-üret"] and a["state"] == "devops" and "mainLocation" in a["reason"]
+          and "yandexLocation" in a["reason"] and "globalLocation" not in a["reason"] and not a.get("sites"), str(a))
+    check("plan: işaret yoksa eylem yok", fx.plan(cl(), rec("debian:12", "", "", level="temiz"), index=index, resolver=res) == [])
+
+    # ── apply: taban-yama ────────────────────────────────────────────────
+    pushes: list = []
+
+    def push_fn(client, sites, *, branch, title, body, wi_id):
+        pushes.append({"sites": sites, "branch": branch, "title": title, "body": body, "wi_id": wi_id})
+        return {"prs": [{"repo": sites[0]["repo"], "id": 100 + len(pushes), "url": f"https://x/pr/{100 + len(pushes)}"}],
+                "fallback": [], "errors": []}
+
+    def never(*a, **k):
+        raise AssertionError("yazma yapılmamalıydı")
+    c = cl()
+    out = fx.apply(c, php84, team="T", index=index, resolver=res, push_fn=push_fn, open_pr_fn=never, start_fn=never)
+    a = kind(out, "taban-yama")
+    text = c.files["staging"]["/php-8-4/Dockerfile"].decode()
+    new_text = bump.apply_site(text, pushes[0]["sites"][0])
+    d = [i for i, (x, y) in enumerate(zip(text.splitlines(), new_text.splitlines())) if x != y]
+    check("apply taban-yama: tek push_fn çağrısı, taslak PR sonucu işlenir",
+          len(pushes) == 1 and a["state"] == "açıldı" and a["pr"]["id"] == 101 and a["ran"] is True
+          and pushes[0]["branch"] == "tempo/image-patch-php-8-4-8.4.27-8.4.30" and pushes[0]["wi_id"] is None, str(out)[:300])
+    check("apply taban-yama: site yalnız rakamlarda ayrışır, tek satır değişir",
+          d == [0] and re.sub(r"\d+", "#", text.splitlines()[0]) == re.sub(r"\d+", "#", new_text.splitlines()[0])
+          and new_text.splitlines()[0] == "ARG PHP_VERSION=8.4.30", str((d, new_text[:40])))
+    check("apply taban-yama: PR metni Türkçe, işareti ve bayrakları söyler",
+          "yama geride" in pushes[0]["body"] and "mainLocation" in pushes[0]["body"] and "yandexLocation" in pushes[0]["body"]
+          and "8.4.27" in pushes[0]["title"] and "8.4.30" in pushes[0]["title"], pushes[0]["body"][:300])
+    pushes.clear()
+    ao = fx.apply(_FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.27-8.4.30": {"id": 9, "status": "active", "url": "u"}}),
+                  php84, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+    check("apply: açık PR varken hiç yazma yok", kind(ao, "taban-yama")["state"] == "pr açık" and kind(ao, "taban-yama")["ran"] is False)
+    ab = fx.apply(_FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.27-8.4.30": {"id": 9, "status": "abandoned", "url": "u"}}),
+                  php84, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+    check("apply: terk edilmiş PR yeniden açılmaz", kind(ab, "taban-yama")["state"] == "pr reddedildi" and kind(ab, "taban-yama")["ran"] is False)
+    ag = fx.apply(c2, php84, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+    check("apply: staging güncel → yazma yok", kind(ag, "taban-yama")["state"] == "güncel")
+
+    # ── apply: imaj-yama (bölge başına bir PR) ───────────────────────────
+    out = fx.apply(cl(), go, team="T", index=index, resolver=res, push_fn=push_fn, open_pr_fn=never, start_fn=never)
+    a = kind(out, "imaj-yama")
+    check("apply imaj-yama: üç bölge → üç push_fn çağrısı (russia dahil), aynı dal adı",
+          [p["sites"][0]["repo"] for p in pushes] == ["anatolia", "global", "russia"]
+          and {p["branch"] for p in pushes} == {"tempo/image-patch-golang-1.24.4-1.24.13"} and a["state"] == "açıldı"
+          and all(len(p["sites"]) == 1 for p in pushes), str([(p["sites"][0]["repo"], p["branch"]) for p in pushes]))
+    check("apply imaj-yama: PR metni bütün bölgeleri ve tetikleyen işareti yazar",
+          all(r in pushes[0]["body"] for r in ("anatolia", "global", "russia")) and "yama geride" in pushes[0]["body"]
+          and "golang:1.24.4" in pushes[0]["body"] and "golang:1.24.13" in pushes[0]["body"], pushes[0]["body"][:400])
+    pushes.clear()
+    cg2 = _FixClient(DF, region_prs={("russia", "tempo/image-patch-golang-1.24.4-1.24.13"): {"id": 3, "status": "active", "url": "https://x/3"}})
+    fx.apply(cg2, go, team="T", index=index, resolver=res, push_fn=push_fn, open_pr_fn=never, start_fn=never)
+    check("apply imaj-yama: açık PR'ı olan bölgeye yazılmaz, kalanlara yazılır",
+          [p["sites"][0]["repo"] for p in pushes] == ["anatolia", "global"])
+    pushes.clear()
+    pin2 = fx.apply(_FixClient(pin), go, team="T", index=index, resolver=res, push_fn=push_fn, open_pr_fn=never, start_fn=never)
+    check("apply imaj-yama: bir bölge elle ise hiçbir bölgeye yazılmaz", pushes == [] and kind(pin2, "imaj-yama")["state"] == "elle")
+
+    def flaky(client, sites, **kw):
+        if sites[0]["repo"] == "global":
+            raise ValueError("Azure düştü")
+        return push_fn(client, sites, **kw)
+    pushes.clear()
+    out = fx.apply(cl(), go, team="T", index=index, resolver=res, push_fn=flaky, open_pr_fn=never, start_fn=never)
+    us = {u["repo"]: u for u in kind(out, "imaj-yama")["repos"]}
+    check("apply imaj-yama: bir bölgenin hatası ötekileri durdurmaz, hata Türkçe nedenle işaretlenir",
+          us["anatolia"]["state"] == "açıldı" and us["russia"]["state"] == "açıldı" and us["global"]["state"] == "hata"
+          and kind(out, "imaj-yama")["state"] == "hata", str(us)[:400])
+    out = fx.apply(cl(), go, team="T", index=index, resolver=res,
+                   push_fn=lambda c, s, **kw: {"prs": [], "fallback": [{"repo": s[0]["repo"], "diff": "d"}], "errors": []},
+                   open_pr_fn=never, start_fn=never)
+    check("apply: yazma yetkisi yok (fallback) → 'elle', PR sayılmaz", kind(out, "imaj-yama")["state"] == "elle")
+
+    # ── apply: taban-dizin ───────────────────────────────────────────────
+    opened: list = []
+
+    def open_pr_fn(client, lang, to, entry, **kw):
+        opened.append((lang, to, entry["dir"], entry["tag"]))
+        return {"state": "pr açık", "pr": {"id": 31, "url": "https://x/31"}, "notes": []}
+    out = fx.apply(_FixClient(DF, files=stg), py, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=open_pr_fn, start_fn=never)
+    a = kind(out, "taban-dizin")
+    check("apply taban-dizin: upgrade_image.open_pr yoluyla, dizin / etiket doğru",
+          opened == [("python", "3.13", "python-3-13-18", "1.0")] and a["state"] == "açıldı" and a["pr"]["id"] == 31, str(out)[:300])
+    opened.clear()
+    fx.apply(cl(), py, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=open_pr_fn, start_fn=never)
+    check("apply taban-dizin: dizin zaten varsa PR açılmaz", opened == [])
+
+    # ── apply: yükseltme ─────────────────────────────────────────────────
+    started: list = []
+
+    def start_fn(client, repo, lang, **kw):
+        started.append((repo, lang, kw.get("to"), kw.get("team")))
+        return {"id": 700 + len(started), "created": True, "lang": lang, "repo": repo, "to": kw.get("to")}
+    ev = rec("golang:1.99.0", "go", "1.24.4", eol={"eol": "2020-01-01"}, users={"anatolia": ["build/a"]})
+    mi = {"a": [{"src": "anatolia/build/a", "images": ["golang:1.99.0"]}], "b": [{"src": "global/build/b", "images": ["golang:1.99.0"]}],
+          "c": [{"src": "russia/build/c", "images": ["golang:1.99.0"]}]}
+
+    def fo(c, lang, repo):
+        return {"id": 55, "lang": lang, "repo": repo, "to": "1.27"} if repo == "b" else None
+    out = fx.apply(cl(), ev, team="Ekip", index=mi, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn, find_open_fn=fo)
+    a = kind(out, "yükseltme")
+    to = up.default_target("go", "1.24", mi)
+    check("apply yükseltme: izlemesi olan repo atlanır, olmayanlar için start çağrılır (takımla)",
+          to and [s[0] for s in started] == ["a", "c"] and all(s[3] == "Ekip" and s[2] == to for s in started), str(started))
+    st = {u["repo"]: u["state"] for u in a["repos"]}
+    check("apply yükseltme: durumlar açıldı / izleniyor", st == {"a": "açıldı", "b": "izleniyor", "c": "açıldı"} and a["state"] == "açıldı", str(st))
+    started.clear()
+    out = fx.apply(cl(), ev, team="Ekip", index=mi, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=lambda *x: None, max_open=1)
+    st = {u["repo"]: u["state"] for u in kind(out, "yükseltme")["repos"]}
+    check("apply yükseltme: max_open aşımı → kalanlar 'sırada'", len(started) == 1 and sorted(st.values()) == ["açıldı", "sırada", "sırada"], str(st))
+    started.clear()
+    out = fx.apply(cl(), ev, team="", index=mi, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn, find_open_fn=lambda *x: None)
+    check("apply yükseltme: takım yoksa izleme açılmaz", started == [] and kind(out, "yükseltme")["state"] == "hata")
+    out = fx.apply(cl(), nd, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never, find_open_fn=lambda *x: None)
+    check("apply: Node eol → izleme açılmaz (start çağrılsa AssertionError)", kind(out, "yükseltme")["state"] == "elle")
+
+    # ── apply: bir eylemin istisnası ötekileri durdurmaz ─────────────────
+    both = rec("php:8.4.27-fpm-bookworm", "php", "8.2.27", via=["php-8-4"], patch={"latest": "8.4.30"}, eol={"eol": "2020-01-01"},
+               users={"anatolia": ["build/channel"]})
+    started.clear()
+
+    def boom(*a, **k):
+        raise RuntimeError("push patladı")
+    out = fx.apply(cl(), both, team="T", index=index, resolver=res, find_open_fn=lambda *x: None,
+                   push_fn=boom, open_pr_fn=never, start_fn=start_fn)
+    check("apply: push istisnası → 'hata', yükseltme eylemi yine de yürür",
+          kind(out, "taban-yama")["state"] == "hata" and "push patladı" in kind(out, "taban-yama")["reason"]
+          and kind(out, "yükseltme")["state"] == "açıldı" and [x[0] for x in started] == ["channel", "core"], str(out)[:400])
+
+    # ── gerçek push_sites ile uçtan uca (sahte client) ───────────────────
+    c = cl()
+    out = fx.apply(c, php84, team="T", index=index, resolver=res, open_pr_fn=never, start_fn=never)
+    kinds = [x[0] for x in c.calls]
+    check("uçtan uca: dal + push + taslak PR, PR base-images → staging",
+          kinds == ["branch", "push", "pr"] and c.calls[2][2] == "staging" and c.calls[2][5] is True
+          and kind(out, "taban-yama")["state"] == "açıldı", str(c.calls)[:300])
+    pushed = c.files["tempo/image-patch-php-8-4-8.4.27-8.4.30"]["/php-8-4/Dockerfile"].decode()
+    check("uçtan uca: dalda yalnız birinci satır değişti", pushed.startswith("ARG PHP_VERSION=8.4.30\n")
+          and pushed.splitlines()[1:] == c.files["staging"]["/php-8-4/Dockerfile"].decode().splitlines()[1:])
+    out = fx.apply(c, php84, team="T", index=index, resolver=res, open_pr_fn=never, start_fn=never)
+    check("uçtan uca: ikinci çalıştırma yeni yazma yapmaz (açık PR)", len(c.calls) == 3 and kind(out, "taban-yama")["state"] == "pr açık")
+
+    # ── dal adı doğrulaması ──────────────────────────────────────────────
+    for n in ["tempo/image-patch-php-8-4-8.4.27-8.4.30", "tempo/image-patch-golang-1.24.4-alpine-1.24.13", "tempo/upgrade-php-core-8.4"]:
+        try:
+            bump._validate_branch(n, {"staging"})
+            check(f"dal kabul: {n}", True)
+        except ValueError as ex:
+            check(f"dal kabul: {n}", False, str(ex))
+    for n in ["tempo/image-patch-x", "tempo/image-patch-php-8.4", "tempo/other-php-8.4.30", "tempo/image-patch--x-1.2.3",
+              "tempo/image-patch-a..b-1.2.3", "image-patch-php-8.4.30", "tempo/image-patch-php-8-4-8.4.30/x",
+              "refs/heads/tempo/image-patch-a-1.2.3", "tempo/image-patch-a-1.2.3 "]:
+        try:
+            bump._validate_branch(n, {"staging"})
+            check(f"dal red: {n}", False, "kabul edildi")
+        except ValueError:
+            check(f"dal red: {n}", True)
+    try:
+        bump._validate_branch("tempo/image-patch-php-8-4-8.4.27-8.4.30", {"tempo/image-patch-php-8-4-8.4.27-8.4.30"})
+        check("dal red: hedef dal", False)
+    except ValueError as ex:
+        check("dal red: hedef dal", "hedef dal" in str(ex))
+    try:
+        bump._validate_branch("main", set())
+    except ValueError as ex:
+        check("hata metni iki deseni de söyler", "tempo/upgrade-" in str(ex) and "tempo/image-patch-" in str(ex), str(ex))
+
+    # ── yoklayıcı turu ───────────────────────────────────────────────────
+    comments: list = []
+    pcl = SimpleNamespace(team="Ekip", add_comment=lambda wid, text: comments.append((wid, text)))
+    rep = {"images": [dict(php84, level="kritik"), dict(go, level="yüksek"), dict(os_only, level="bilgi")]}
+    called: list = []
+
+    def apply_fn(client, r, **kw):
+        called.append(r["image"])
+        if r["image"].startswith("php"):
+            return [{"kind": "taban-yama", "state": "açıldı", "ran": True, "reason": "", "pr": {"id": 8, "url": "https://x/8"}},
+                    {"kind": "imaj-yama", "state": "pr açık", "ran": False, "reason": "", "pr": {"id": 9, "url": "javascript:alert(1)"}}]
+        raise RuntimeError("Azure düştü")
+    results = [{"image": "php:8.4.27-fpm-bookworm", "state": "açıldı", "wi": 901}, {"image": "golang:1.24.4", "state": "açık iş", "wi": 902}]
+    out = iv._fix_round(pcl, rep, results, team="Ekip", index={}, resolver=res, apply_fn=apply_fn)
+    check("yoklayıcı giderme: yalnız kritik / yüksek imajlar; bir imajın hatası ötekini durdurmaz",
+          called == ["golang:1.24.4", "php:8.4.27-fpm-bookworm"] and len(out) == 1, str(called))
+    check("yoklayıcı giderme: sonuç uyarı işine yorum (yalnız yürüyen eylem varsa), https olmayan bağlantı yok",
+          len(comments) == 1 and comments[0][0] == 901 and "https://x/8" in comments[0][1]
+          and "javascript:" not in comments[0][1], str(comments)[:300])
+    comments.clear()
+    iv._fix_round(pcl, rep, [], team="Ekip", index={}, resolver=res,
+                  apply_fn=lambda c, r, **kw: [{"kind": "yeniden-üret", "state": "devops", "ran": False, "reason": "x", "pr": None}])
+    check("yoklayıcı giderme: yürüyen eylem yoksa yorum yok", comments == [])
+    seen: list = []
+    _rep, _alert, _fr, _get, _bi0 = iv.report, iv.alert, iv._fix_round, pc.get, modern.build_index
+    try:
+        knobs = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": True, "CREW_TECHDEBT_IMAGE_VULN_FIX": False}
+        pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+        modern.build_index = lambda c, **kw: {}
+        iv.report = lambda client, **kw: {"images": []}
+        iv.alert = lambda client, rep, **kw: seen.append("alert") or []
+        iv._fix_round = lambda client, rep, results, **kw: seen.append("fix") or []
+        iv._tick(lambda: pcl)
+        check("_tick: _FIX kapalı → giderme çalışmaz", seen == ["alert"], str(seen))
+        knobs["CREW_TECHDEBT_IMAGE_VULN_FIX"] = True
+        seen.clear()
+        iv._tick(lambda: pcl)
+        check("_tick: _FIX açık → uyarıdan SONRA giderme", seen == ["alert", "fix"], str(seen))
+
+        def fix_boom(*a, **k):
+            raise RuntimeError("giderme çöktü")
+        iv._fix_round = fix_boom
+        seen.clear()
+        iv._tick(lambda: pcl)
+        check("_tick: giderme hatası turu düşürmez, uyarı yapılmıştı", seen == ["alert"], str(seen))
+    finally:
+        iv.report, iv.alert, iv._fix_round, pc.get, modern.build_index = _rep, _alert, _fr, _get, _bi0
+
+    # ── rapor kaydına fix (yazmasız) ─────────────────────────────────────
+    r2 = {"images": [dict(php84), dict(os_only, image="x:1"), {"image": "boş"}]}
+    c = cl()
+    iv.attach_fix(c, r2, index=index, resolver=res)
+    check("attach_fix: kayıtlara yazmasız plan eklenir, iç alanlar dışarı çıkmaz",
+          r2["images"][0]["fix"][0]["kind"] == "taban-yama" and "entry" not in r2["images"][0]["fix"][0]
+          and r2["images"][2]["fix"] == [] and c.calls == [])
+    r3 = {"images": [dict(php84)]}
+    bad = _FixClient(DF)
+    bad.get_file_content = lambda *a, **k: (_ for _ in ()).throw(OSError("ağ yok"))
+    iv.attach_fix(bad, r3, index=index, resolver=res)
+    check("attach_fix: okuma hatası çökertmez (belirsiz eylem)", r3["images"][0]["fix"][0]["state"] == "belirsiz")
+
+    # ── ayar ve uç ───────────────────────────────────────────────────────
+    by = {f["key"]: f for f in pc.SCHEMA}
+    f = by.get("CREW_TECHDEBT_IMAGE_VULN_FIX", {})
+    check("_FIX bool, varsayılan kapalı, açıklama Türkçe", f.get("type") == "bool" and f.get("default") is False
+          and "gidermeyi" in f.get("desc", "").lower() and f.get("label"), str(f))
+    _get2 = pc.get
+    _cl, _report, _bi, _apply, _def = server.AzureDevOpsClient, iv.report, modern.build_index, fx.apply, ur.default
+    knobs2 = {"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": True}
+    try:
+        pc.get = lambda k: knobs2[k] if k in knobs2 else _get2(k)
+        server.AzureDevOpsClient = lambda: object()
+        modern.build_index = lambda c, **kw: index
+        ur.default = lambda: res
+        iv.report = lambda c, **kw: {"images": [php84, go]}
+        runs: list = []
+        fx.apply = lambda c, r, **kw: runs.append((r["image"], kw.get("team"))) or [
+            {"kind": "taban-yama", "state": "açıldı", "ran": True, "reason": "", "pr": {"id": 1, "url": "https://x/1"}, "entry": {"secret": 1}}]
+
+        def body(**k):
+            return server.TechdebtImageFixRequest(**k)
+        r = asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip")))
+        j = json.loads(r.body)
+        check("uç: 200, eylemler, takım iletilir, iç alan sızmaz",
+              r.status_code == 200 and j["actions"][0]["state"] == "açıldı" and runs == [("php:8.4.27-fpm-bookworm", "Ekip")]
+              and "entry" not in j["actions"][0], str(j))
+        r = asyncio.run(server.techdebt_images_fix(body(image="../../etc/passwd", team="Ekip")))
+        check("uç: bilinmeyen imaj → 404, yol / dal / sorgu olarak hiç kullanılmaz", r.status_code == 404 and len(runs) == 1, str(r.body))
+        r = asyncio.run(server.techdebt_images_fix(body(image="", team="Ekip")))
+        check("uç: imaj boş → 400", r.status_code == 400)
+        fx.apply = lambda c, r, **kw: [{"kind": "taban-yama", "state": "güncel", "ran": False,
+                                        "reason": "staging'de güncel — DevOps üretip taşımalı", "pr": None}]
+        r = asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip")))
+        j = json.loads(r.body)
+        check("uç: yürüyecek eylem yok → 409 + nedenler", r.status_code == 409 and "staging'de güncel" in json.dumps(j, ensure_ascii=False), str(j))
+
+        def apply_boom(c, r, **kw):
+            raise RuntimeError("Authorization: Basic abc123 patladı")
+        fx.apply = apply_boom
+        r = asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip")))
+        j = json.loads(r.body)
+        check("uç: beklenmeyen hata → 502 Türkçe neden, 500 / traceback / sır yok", r.status_code == 502
+              and "Traceback" not in json.dumps(j) and "giderme" in j["error"].lower() and "abc123" not in j["error"], str(j))
+
+        def bi_boom(c, **kw):
+            raise OSError("ağ")
+        modern.build_index = bi_boom
+        r = asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip")))
+        check("uç: index okunamadı → 502", r.status_code == 502)
+        modern.build_index = lambda c, **kw: index
+        knobs2["CREW_TECHDEBT_IMAGE_VULN"] = False
+        r = asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip")))
+        check("uç: _IMAGE_VULN kapalı → 403", r.status_code == 403)
+        knobs2["CREW_TECHDEBT_IMAGE_VULN"] = True
+        knobs2["CREW_TECHDEBT_IMAGE_VULN_FIX"] = False
+        fx.apply = lambda c, r, **kw: [{"kind": "x", "state": "açıldı", "ran": True, "reason": "", "pr": None}]
+        r = asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip")))
+        check("uç: düğme _FIX kapalıyken de çalışır (yalnız _IMAGE_VULN şart)", r.status_code == 200)
+    finally:
+        pc.get = _get2
+        server.AzureDevOpsClient, iv.report, modern.build_index, fx.apply, ur.default = _cl, _report, _bi, _apply, _def
+
+    # ── kart ─────────────────────────────────────────────────────────────
+    html_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    seg = html_src[html_src.index("function renderImageVuln"):]
+    seg = seg[:seg.index("\n}\n")]
+    cfseg = html_src[html_src.index("function fixImageVuln"):html_src.index("async function runImageFix")]
+    check("kart: onay sayfa içi pencerede (tarayıcı confirm() kutusu bastırılabilir, tıklama sessiz kalır)",
+          "confirm(" not in cfseg.replace("_ivFixConfirm(", "") and "_ivFixConfirm(image" in cfseg
+          and "runImageFix(image)" in cfseg and "classList.add('open')" in cfseg)
+    fseg = html_src[html_src.index("async function runImageFix"):]
+    fseg = fseg[:fseg.index("\n}\n")]
+    lseg = html_src[html_src.index("function _ivLink"):]
+    lseg = lseg[:lseg.index("\n")]
+    dseg = html_src[html_src.index("function openIvDetail"):html_src.index("function closeIvDetail")]
+    check("kart: satırda giderme durumu; eylem satırları ve 'Gidermeyi başlat' düğmesi detay penceresinde",
+          "x.fix" in seg and "Gidermeyi başlat" in dseg and "_ivFixRows(x.fix)" in dseg and "fixImageVuln(" in dseg
+          and "${a.reason}" not in dseg and "${a.state}" not in dseg)
+    check("kart: uç, bekleme göstergesi, düğme istek boyunca kapalı, sonra yenile",
+          "/api/techdebt/images/fix" in fseg and "_tdLoad(" in fseg and "disabled=true" in fseg and "loadImageVuln(" in fseg)
+    check("kart: aralanan metin escHtml'den geçer, yalnız https bağlantı", "${a.reason}" not in seg and "${a.state}" not in seg
+          and "^https:" in lseg)
+
+
+class _RegionFake:
+    """Bölge repoları (production) için repo başına depolu sahte client; gerçek `push_sites` ile koşar."""
+    org_url = "https://dev.azure.com/org"
+    project = "FLODevOps"
+
+    def __init__(self, dockerfiles, fail_repos=()):
+        self.br = {}
+        for (repo, path), text in dockerfiles.items():
+            self.br.setdefault((repo, "production"), {})[path] = text.encode()
+        self.prs, self.calls, self.fail_repos = {}, [], set(fail_repos)
+
+    def list_branches(self, repo, project=None):
+        return [{"name": f"refs/heads/{b}", "objectId": f"oid-{b}"} for (r, b) in self.br if r == repo]
+
+    def get_file_content(self, repo, path, branch=None, project=None):
+        data = self.br.get((repo, branch), {}).get(path)
+        if data is None:
+            raise FileNotFoundError(path)
+        return data.decode()
+
+    def get_file_bytes(self, repo, path, branch=None, project=None, version=None, version_type=None, **kw):
+        if version:
+            branch = version[len("oid-"):]
+        return self.br.get((repo, branch), {}).get(path)
+
+    def create_branch(self, repo, name, source, project=None, source_object_id=None):
+        if repo in self.fail_repos:
+            raise OSError("Azure düştü")
+        self.calls.append(("branch", repo, name))
+        self.br[(repo, name)] = dict(self.br[(repo, source)])
+        return {"value": [{"success": True}]}
+
+    def push_changes(self, repo, branch, changes, msg, project=None, old_object_id=None):
+        import base64 as _b64
+        self.calls.append(("push", repo, branch))
+        for c in changes:
+            self.br[(repo, branch)][c["path"]] = _b64.b64decode(c["content"])
+        return {}
+
+    def create_pull_request(self, repo, src, tgt="main", title="", description="", work_item_ids=None, draft=False,
+                            project=None):
+        self.calls.append(("pr", repo, src))
+        self.prs[(repo, src)] = {"id": 50 + len(self.prs), "status": "active", "url": "https://x/pr", "target": tgt,
+                                 "created_by": "me"}
+        return {"pullRequestId": self.prs[(repo, src)]["id"], "repository": {"name": repo, "project": {"name": "FLODevOps"}}}
+
+    def find_pull_request(self, repo, branch, project=None):
+        return self.prs.get((repo, branch))
+
+    def get_authenticated_user(self):
+        return {"id": "me"}
+
+
+def test_image_fix_round1():
+    """Giderme düzeltme turu 1: durdurulan izleme yeniden açılmaz, taze index, tur başına sınır, anahtarlara uyum."""
+    print("\n[taban imaj güvenliği: giderme — düzeltme turu 1]")
+    from agile_sdlc_crew import pipeline_config as pc
+    knobs = {"CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE_BUMP": True,
+             "CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS": 3, "CREW_TECHDEBT_UPGRADE_MAX_OPEN": 3}
+    _get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+    from agile_sdlc_crew.quality import image_fix as _fx
+    _cur = getattr(_fx, "_repo_current", None)
+    _fx._repo_current = lambda *a, **k: None
+    try:
+        with _fix_env(knobs):
+            _image_fix_round1_body(knobs)
+    finally:
+        pc.get = _get
+        if _cur is not None:
+            _fx._repo_current = _cur
+
+
+def _image_fix_round1_body(knobs):
+    import functools
+    from agile_sdlc_crew.quality import image_fix as fx, image_vuln as iv, modern
+    from agile_sdlc_crew.quality import upgrade_bump as bump, upgrade_registry as ur, upgrade_track as ut
+    from agile_sdlc_crew import pipeline_config as pc
+
+    hub = {"php": ["8.4.30", "8.4.30-fpm-trixie"], "golang": ["1.24.13", "1.24.13-alpine", "1.25.14"],
+           "python": ["3.13.18", "3.13.18-slim-bookworm"]}
+    res = ur.Resolver(fetch=_fake_hub(hub))
+
+    def rec(image, lang, version, *, via=(), users=None, patch=None, eol=None, crit=0, high=0, level="kritik"):
+        return {"image": image, "lang": lang, "version": version, "via": list(via), "touched": "", "error": "",
+                "users": users if users is not None else {"anatolia": ["build/alf"]},
+                "scan": {"state": "tamam", "critical": crit, "high": high, "packages": [], "os": "", "created": "",
+                         "ignored": {"critical": 0, "high": 0, "packages": []}},
+                "patch": patch, "eol": eol, "level": level, "actions": []}
+
+    def kind(acts, k):
+        return next((a for a in acts if a["kind"] == k), None)
+
+    def never(*a, **k):
+        raise AssertionError("yazma yapılmamalıydı")
+    DF = {(r, "/build/alf/Dockerfile"): "FROM golang:1.24.4\nRUN go build\n" for r in ("anatolia", "global", "russia")}
+    idx = {"alf": [{"src": f"{r}/build/alf", "images": ["golang:1.24.4"]} for r in ("anatolia", "global", "russia")]}
+    go = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"},
+             users={"anatolia": ["build/alf"], "global": ["build/alf"], "russia": ["build/alf"]})
+    ev = rec("golang:1.99.0", "go", "1.24.4", eol={"eol": "2020-01-01"})
+    mi = {"a": [{"src": "anatolia/build/a", "images": ["golang:1.99.0"]}], "b": [{"src": "global/build/b", "images": ["golang:1.99.0"]}],
+          "c": [{"src": "russia/build/c", "images": ["golang:1.99.0"]}]}
+    started: list = []
+
+    def start_fn(client, repo, lang, **kw):
+        started.append(repo)
+        return {"id": 700 + len(started), "created": True}
+
+    # ── C1: durdurulan izleme yoklayıcıda yeniden açılmaz ───────────────
+    from types import SimpleNamespace as NS
+    rows = [{"id": 5, "fields": {"System.State": "Closed", "System.Tags": "tempo-upgrade-track",
+                                 "System.Description": "<p>tempo-upgrade-key: go:alf:1.27</p>"}},
+            {"id": 6, "fields": {"System.State": "New", "System.Tags": "tempo-upgrade-track",
+                                 "System.Description": "<p>tempo-upgrade-key: go:live:1.27</p>"}}]
+    tc = NS(query_work_items=lambda q, **kw: rows)
+    check("find_open kapalı izleme işini görmez, find_any görür",
+          ut.find_open(tc, "go", "alf") is None and (ut.find_any(tc, "go", "alf") or {}).get("id") == 5
+          and ut.find_any(tc, "go", "alf", to="1.28") is None and ut.find_any(tc, "go", "nope") is None)
+    mi1 = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.99.0"]}]}
+    fo, fa = (lambda c, lang, repo: None), (lambda c, lang, repo, to=None: {"id": 5})
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi1, resolver=res, find_open_fn=fo, find_any_fn=fa, auto=True), "yükseltme")
+    check("plan auto: daha önce kapatılmış izleme → durduruldu, açılabilir değil",
+          a["state"] == "durduruldu" and a["repos"][0]["state"] == "durduruldu" and "karttan" in a["repos"][0]["reason"], str(a)[:300])
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=fo, find_any_fn=fa, auto=True)
+    check("apply auto: durdurulan izleme için start çağrılmaz", started == [] and kind(out, "yükseltme")["ran"] is False)
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=fo, find_any_fn=fa, auto=False)
+    check("apply düğme (auto=False): kapatılmış izleme yeniden başlatılabilir", started == ["alf"] and kind(out, "yükseltme")["state"] == "açıldı")
+    started.clear()
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=fo, find_any_fn=lambda *a: None, auto=True)
+    check("apply auto: hiç izlemesi olmayan repo başlar", started == ["alf"])
+    started.clear()
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=fo, auto=True, find_any_fn=lambda *a: (_ for _ in ()).throw(OSError("ağ")))
+    check("apply auto: izleme geçmişi okunamazsa açılmaz", started == [] and kind(out, "yükseltme")["state"] == "belirsiz")
+
+    # ── I3 / I6: anahtarlar ──────────────────────────────────────────────
+    knobs["CREW_TECHDEBT_UPGRADE"] = False
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi1, resolver=res, find_open_fn=fo), "yükseltme")
+    check("yükseltme: CREW_TECHDEBT_UPGRADE kapalı → elle, neden ayarı söyler",
+          a["state"] == "elle" and "CREW_TECHDEBT_UPGRADE" in a["reason"], str(a))
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never, find_open_fn=fo)
+    check("yükseltme: anahtar kapalıyken start asla çağrılmaz", kind(out, "yükseltme")["state"] == "elle")
+    knobs["CREW_TECHDEBT_UPGRADE"] = True
+    knobs["CREW_TECHDEBT_PHP_MODERN"] = False
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi1, resolver=res, find_open_fn=fo), "yükseltme")
+    check("yükseltme: CREW_TECHDEBT_PHP_MODERN kapalı → elle", a["state"] == "elle" and "PHP_MODERN" in a["reason"], str(a))
+    knobs["CREW_TECHDEBT_PHP_MODERN"] = True
+    knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = False
+    p84 = rec("php:8.4.27-fpm-bookworm", "php", "8.4.27", via=["php-8-4"], patch={"latest": "8.4.30"})
+    py = rec("python:3.13.7-slim-bookworm", "python", "3.13.7", via=["python-3-13-7"], patch={"latest": "3.13.18"})
+    for r_, k_ in ((p84, "taban-yama"), (py, "taban-dizin"), (go, "imaj-yama")):
+        a = kind(fx.plan(_FixClient(DF), r_, index=idx, resolver=res), k_)
+        check(f"{k_}: _BUMP kapalı → elle, neden ayarı söyler", a["state"] == "elle" and "CREW_TECHDEBT_UPGRADE_BUMP" in a["reason"], str(a))
+    out = fx.apply(_FixClient(DF), go, team="T", index=idx, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+    check("imaj-yama: _BUMP kapalıyken hiç yazma yok", kind(out, "imaj-yama")["state"] == "elle")
+    knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = True
+
+    # ── I4: dal adı eski etiketi taşır ───────────────────────────────────
+    g5 = rec("golang:1.24.5", "go", "1.24.5", patch={"latest": "1.24.13"}, users={"anatolia": ["build/alf"]})
+    i5 = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4", "golang:1.24.5"]}]}
+    df5 = {("anatolia", "/build/alf/Dockerfile"): "FROM golang:1.24.4\nFROM golang:1.24.5\n"}
+    pr4 = {("anatolia", "tempo/image-patch-golang-1.24.4-1.24.13"): {"id": 3, "status": "active", "url": "https://x/3"}}
+    g4 = dict(go, users={"anatolia": ["build/alf"]})
+    a4 = kind(fx.plan(_FixClient(df5, region_prs=pr4), g4, index=i5, resolver=res), "imaj-yama")
+    a5 = kind(fx.plan(_FixClient(df5, region_prs=pr4), g5, index=i5, resolver=res), "imaj-yama")
+    check("dal adı: eski etiket dahil, iki eski sürüm aynı dalı paylaşmaz; birinin PR'ı ötekini kapsamaz",
+          a4["branch"] == "tempo/image-patch-golang-1.24.4-1.24.13" and a5["branch"] == "tempo/image-patch-golang-1.24.5-1.24.13"
+          and a4["state"] == "pr açık" and a5["state"] == "yok", f"{a4['branch']} {a4['state']} {a5['branch']} {a5['state']}")
+    lib = rec("library/golang:1.24.4-alpine", "go", "1.24.4", patch={"latest": "1.24.13"}, users={"anatolia": ["build/alf"]})
+    il = {"alf": [{"src": "anatolia/build/alf", "images": ["library/golang:1.24.4-alpine"]}]}
+    al = kind(fx.plan(_FixClient({("anatolia", "/build/alf/Dockerfile"): "FROM library/golang:1.24.4-alpine\n"}), lib,
+                      index=il, resolver=res), "imaj-yama")
+    check("dal adı: library/ adın parçası (golang ile çakışmaz), sonek slug'a girer, tek ek desene uyar",
+          al["branch"] == "tempo/image-patch-library-golang-1.24.4-alpine-1.24.13" and bump._BRANCH_IMAGE.fullmatch(al["branch"])
+          and al["state"] == "yok", str(al)[:300])
+    ao = kind(fx.plan(_FixClient(DF), p84, index=idx, resolver=res), "taban-yama")
+    check("taban-yama dalı da eski → yeni çiftini taşır ve desene uyar",
+          ao["branch"] == "tempo/image-patch-php-8-4-8.4.27-8.4.30" and bump._BRANCH_IMAGE.fullmatch(ao["branch"]), str(ao)[:200])
+
+    # ── küçük: kuru çalıştırma, dizin dili, metinler ─────────────────────
+    dup = dict(DF)
+    dup[("global", "/build/alf/Dockerfile")] = "FROM golang:1.24.4 # eski golang:1.24.4\n"
+    a = kind(fx.plan(_FixClient(dup), go, index=idx, resolver=res), "imaj-yama")
+    check("kuru çalıştırma: satırda eski imaj iki kez → bütün eylem elle, hiçbir bölge yazılmaz",
+          a["state"] == "elle" and {u["repo"]: u["state"] for u in a["repos"]}["global"] == "elle", str(a)[:300])
+    out = fx.apply(_FixClient(dup), go, team="T", index=idx, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never)
+    check("kuru çalıştırma: apply hiçbir bölgeye yazmaz", kind(out, "imaj-yama")["ran"] is False)
+    for via, why in ((["python-8-4"], "dili"), (["foo-8-4"], "dizin")):
+        a = kind(fx.plan(_FixClient(DF), rec("php:8.4.27", "php", "8.4.27", via=via, patch={"latest": "8.4.30"}),
+                         index=idx, resolver=res), "taban-yama")
+        check(f"_plan_own: dizin adı / dili uyuşmuyor ({via[0]}) → elle", a["state"] == "elle", str(a)[:200])
+    html_ = fx.comment_html([{"kind": "x", "state": "açıldı", "reason": "a" * 299 + "<b>", "pr": None}])
+    ital = html_[html_.index("<i>"):html_.index("</i>")]
+    check("comment_html: önce keser sonra kaçışlar (yarım varlık yok)", "&lt;" in ital and not re.findall(r"&[a-z]+(?![a-z;])", ital), ital[-30:])
+    pub = kind(fx.plan(_FixClient(DF), rec("python:3.11", "python", "3.11", crit=2, high=5), index=idx, resolver=res), "yeniden-üret")
+    own = kind(fx.plan(_FixClient(DF), rec("php:8.4.27", "php", "8.4.27", via=["php-8-4"], crit=2, high=5), index=idx, resolver=res), "yeniden-üret")
+    check("yeniden-üret: genel imaj → servisi yeniden yayınla; kendi imajımız → DevOps + bayraklar",
+          "servisi yeniden yayınla" in pub["reason"] and "DevOps" not in pub["reason"]
+          and "DevOps üretmeli" in own["reason"] and "mainLocation" in own["reason"], f"{pub['reason']} | {own['reason']}")
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi, resolver=res, find_open_fn=lambda *x: None), "yükseltme")
+    check("yükseltme eylemi sınırı (cap) taşır", a["cap"] == 3, str(a)[:200])
+
+    # ── I1: yoklayıcı tek taze index ─────────────────────────────────────
+    seen: dict = {"bi": [], "report": None, "fix": None}
+    IDX = {"fresh": []}
+    _bi, _rep, _alert, _fr = modern.build_index, iv.report, iv.alert, iv._fix_round
+    try:
+        knobs.update({"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": True, "CREW_TECHDEBT_IMAGE_VULN_FIX": True})
+        modern.build_index = lambda c, **kw: seen["bi"].append(kw.get("max_age_h")) or IDX
+        iv.report = lambda c, **kw: seen.update(report=kw.get("index")) or {"images": []}
+        iv.alert = lambda c, rep, **kw: []
+        iv._fix_round = lambda c, rep, results, **kw: seen.update(fix=kw.get("index")) or []
+        iv._reset_state()
+        iv._tick(lambda: NS(team="Ekip"))
+        check("_tick: tek taze index (max_age_h=0) hem rapora hem gidermeye verilir",
+              seen["bi"] == [0] and seen["report"] is IDX and seen["fix"] is IDX, str(seen["bi"]))
+    finally:
+        modern.build_index, iv.report, iv.alert, iv._fix_round = _bi, _rep, _alert, _fr
+        knobs.pop("CREW_TECHDEBT_IMAGE_VULN_FIX", None)
+
+    # ── I2: tur başına sınır, tek bütçe ──────────────────────────────────
+    recs = [rec("a:1", "go", "1.24.4", eol={"eol": "2020"}, crit=5, users={"anatolia": ["x"]}),
+            rec("b:1", "go", "1.24.4", eol={"eol": "2020"}, crit=9, users={"anatolia": ["x"]}),
+            rec("c:1", "go", "1.24.4", crit=50, users={"anatolia": ["x"]}),
+            rec("d:1", "go", "1.24.4", crit=40, users={"anatolia": ["x"]}),
+            rec("e:1", "go", "1.24.4", crit=30, users={"anatolia": ["x"]}),
+            rec("f:1", "go", "1.24.4", crit=20, users={"anatolia": ["x"]}),
+            rec("g:1", "go", "1.24.4", crit=10, users={"anatolia": ["x"]})]
+    touched: list = []
+    pcl = NS(team="Ekip", add_comment=lambda wid, text: touched.append(("comment", wid)))
+
+    def apply_fn(client, r, **kw):
+        touched.append(r["image"])
+        return [{"kind": "taban-yama", "state": "açıldı", "ran": True, "reason": "", "pr": {"id": 1, "url": "https://x/1"}}]
+    out = iv._fix_round(pcl, {"images": recs}, [{"image": "b:1", "state": "açıldı", "wi": 41}], team="Ekip", index={}, resolver=res,
+                        apply_fn=apply_fn)
+    check("tur başına sınır: 7 kritik imajdan yalnız 3'ü (destek bitmiş önce, sonra kritik sayısı) işlenir",
+          [t for t in touched if isinstance(t, str)] == ["b:1", "a:1", "c:1"], str(touched))
+    check("sınırı aşan imajlar 'sırada' sonucu taşır", sorted(o["image"] for o in out if o.get("state") == "sırada") == ["d:1", "e:1", "f:1", "g:1"], str(out)[:300])
+    check("alert işi olan imaja yorum yazılır", ("comment", 41) in touched)
+    knobs["CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS"] = 5
+    touched.clear()
+    iv._fix_round(pcl, {"images": recs}, [], team="Ekip", index={}, resolver=res, apply_fn=apply_fn)
+    check("sınır ayardan okunur (5)", len([t for t in touched if isinstance(t, str)]) == 5)
+    knobs["CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS"] = 3
+
+    def three(images):
+        return [rec(i, "go", "1.24.4", eol={"eol": "2020"}, crit=9 - n) for n, i in enumerate(images)]
+    mi3 = {"a": [{"src": "anatolia/build/a", "images": ["golang:1.90.0"]}], "b": [{"src": "global/build/b", "images": ["golang:1.91.0"]}],
+           "c": [{"src": "russia/build/c", "images": ["golang:1.92.0"]}]}
+    recs3 = three(["golang:1.90.0", "golang:1.91.0", "golang:1.92.0"])
+    real = functools.partial(fx.apply, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                             find_open_fn=lambda *a: None, find_any_fn=lambda *a: None)
+    knobs["CREW_TECHDEBT_UPGRADE_MAX_OPEN"] = 2
+    started.clear()
+    out = iv._fix_round(pcl, {"images": recs3}, [], team="Ekip", index=mi3, resolver=res, apply_fn=real)
+    st = [u["state"] for o in out for a in o["actions"] for u in a.get("repos") or []]
+    check("tek izleme bütçesi tüm tur için: 3 imajdan yalnız 2 başlatma, üçüncüsü 'sırada'",
+          started == ["a", "b"] and sorted(st) == ["açıldı", "açıldı", "sırada"], f"{started} {st}")
+
+    def flaky(client, repo, lang, **kw):
+        if repo == "a":
+            raise OSError("Azure düştü")
+        return start_fn(client, repo, lang, **kw)
+    started.clear()
+    real2 = functools.partial(fx.apply, push_fn=never, open_pr_fn=never, start_fn=flaky,
+                              find_open_fn=lambda *a: None, find_any_fn=lambda *a: None)
+    out = iv._fix_round(pcl, {"images": recs3}, [], team="Ekip", index=mi3, resolver=res, apply_fn=real2)
+    st = {u["repo"]: u["state"] for o in out for a in o["actions"] for u in a.get("repos") or []}
+    check("başarısız başlatma bütçeyi tüketmez (a hata, b ve c başlar)", started == ["b", "c"] and st["a"] == "hata", f"{started} {st}")
+
+    def existing(client, repo, lang, **kw):
+        started.append(repo)
+        return {"id": 1, "created": False}
+    started.clear()
+    real3 = functools.partial(fx.apply, push_fn=never, open_pr_fn=never, start_fn=existing,
+                              find_open_fn=lambda *a: None, find_any_fn=lambda *a: None)
+    iv._fix_round(pcl, {"images": recs3}, [], team="Ekip", index=mi3, resolver=res, apply_fn=real3)
+    check("created=False bütçeyi tüketmez (üçü de denenir)", started == ["a", "b", "c"], str(started))
+    knobs["CREW_TECHDEBT_UPGRADE_MAX_OPEN"] = 3
+
+    # ── I5: plan anlık görüntü başına en çok bir kez, bir hata ötekini düşürmez ──
+    calls: list = []
+    real_plan = fx.plan
+
+    def counting(client, entry, **kw):
+        calls.append(entry["image"])
+        if entry["image"] == "golang:1.24.4":
+            raise RuntimeError("plan patladı")
+        return real_plan(client, entry, **kw)
+    idx5 = {"a": [{"src": "anatolia/build/a", "images": ["golang:1.24.4", "php:8.4.27-fpm-bookworm", "python:3.11"]}]}
+    fx.plan = counting
+    try:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            clk = [1000.0]
+            skw = dict(index=idx5, resolver=res, eol_fn=lambda *a, **k: None, cache_dir=Path(td), ttl_h=24, now=1000.0,
+                       ignore_packages=set())
+            fc = _FixClient(DF)
+            fc.get_items_in_path = lambda *a, **k: []      # kullanılmayan taban dizini yok: yalnız üç kullanılan imaj sayılır
+            dec = lambda rep: iv.attach_fix(fc, rep, index=idx5, resolver=res)
+            iv._reset_state()
+            s1 = iv._snapshot(fc, lambda: clk[0], dec, skw)
+            n1 = len(calls)
+            clk[0] += 30
+            iv._snapshot(fc, lambda: clk[0], dec, skw)
+            iv._snapshot(fc, lambda: clk[0], dec, skw)
+            check("plan: imaj başına anlık görüntü başına bir kez; bellekten sunulan GET'lerde hiç", n1 == 3 and len(calls) == 3, str(calls))
+            clk[0] += 40
+            iv._snapshot(fc, lambda: clk[0], dec, skw)
+            check("plan: 60 sn geçince yeni anlık görüntüde yeniden (3 daha)", len(calls) == 6, str(calls))
+            fixed = {r["image"]: r.get("fix") for r in s1["images"]}
+            check("bir imajın planı patlayınca ötekilerin planı düşmez",
+                  "fix" not in next(r for r in s1["images"] if r["image"] == "golang:1.24.4")
+                  and all("fix" in r for r in s1["images"] if r["image"] != "golang:1.24.4"), str(fixed)[:200])
+            iv._reset_state()
+    finally:
+        fx.plan = real_plan
+
+    # ── gerçek push_sites: kısmi imaj-yama sonrası yeniden deneme ────────
+    multi = {("anatolia", "/build/alf/Dockerfile"): ("FROM --platform=linux/amd64 golang:1.24.4 AS builder\nRUN x\n"
+                                                     "from golang:1.24.4 AS other\nFROM scratch\n"),
+             ("global", "/build/alf/Dockerfile"): "FROM golang:1.24.4\n",
+             ("russia", "/build/alf/Dockerfile"): "FROM golang:1.24.4\n"}
+    a = kind(fx.plan(_RegionFake(multi), go, index=idx, resolver=res), "imaj-yama")
+    ana = next(u for u in a["repos"] if u["repo"] == "anatolia")
+    check("çok FROM'lu Dockerfile: --platform / küçük harfli from / AS ile her eşleşen satır bir site",
+          [(s["line"], s["old"], s["new"]) for s in ana["sites"]] == [(1, "golang:1.24.4", "golang:1.24.13"), (3, "golang:1.24.4", "golang:1.24.13")],
+          str(ana["sites"]))
+    rf = _RegionFake(multi, fail_repos={"global"})
+    out = fx.apply(rf, go, team="T", index=idx, resolver=res, open_pr_fn=never, start_fn=never)
+    us = {u["repo"]: u["state"] for u in kind(out, "imaj-yama")["repos"]}
+    check("kısmi imaj-yama (gerçek push_sites): anatolia / russia açıldı, global hata",
+          us == {"anatolia": "açıldı", "global": "hata", "russia": "açıldı"}, str(us))
+    pushed = rf.br[("anatolia", a["branch"])]["/build/alf/Dockerfile"].decode()
+    check("çok FROM'lu dosyada yalnız eşleşen iki satır değişti",
+          pushed == ("FROM --platform=linux/amd64 golang:1.24.13 AS builder\nRUN x\nfrom golang:1.24.13 AS other\nFROM scratch\n"), pushed)
+    rf.fail_repos.clear()
+    rf.calls.clear()
+    out = fx.apply(rf, go, team="T", index=idx, resolver=res, open_pr_fn=never, start_fn=never)
+    prs = [c for c in rf.calls if c[0] == "pr"]
+    check("yeniden deneme: yalnız global için PR açılır, başarılı bölgelerde ikinci PR yok",
+          [c[1] for c in prs] == ["global"] and not any(c[1] in ("anatolia", "russia") for c in rf.calls), str(rf.calls))
+    us = {u["repo"]: u["state"] for u in kind(out, "imaj-yama")["repos"]}
+    check("yeniden deneme sonucu: anatolia / russia 'pr açık', global 'açıldı'",
+          us == {"anatolia": "pr açık", "global": "açıldı", "russia": "pr açık"}, str(us))
+
+    # ── kart: onay metni sınırı ve yeniden okuma uyarısı ─────────────────
+    html_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
+    seg = html_src[html_src.index("function _ivFixConfirm"):]
+    seg = seg[:seg.index("\n}\n")]
+    check("onay metni: izleme sayısı sınırı yansıtır, yolların uygulamada yeniden okunduğunu söyler",
+          "en çok" in seg and "a.cap" in seg and "yeniden okun" in seg, seg[:300])
+
+
+def test_image_fix_round2():
+    """Giderme düzeltme turu 2: tur sınırı yalnız yazılan imajı sayar, güncel repo / bastırılan uyarı atlanır."""
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import image_fix as fx
+    knobs = {"CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE_BUMP": True,
+             "CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS": 3, "CREW_TECHDEBT_UPGRADE_MAX_OPEN": 3}
+    _get, _cur = pc.get, fx._repo_current if hasattr(fx, "_repo_current") else None
+    pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+    fx._repo_current = lambda *a, **k: None          # gerçek klonlara / index'e gidilmesin
+    try:
+        with _fix_env(knobs):
+            _image_fix_round2_body(knobs)
+    finally:
+        pc.get = _get
+        if _cur is not None:
+            fx._repo_current = _cur
+
+
+def _image_fix_round2_body(knobs):
+    import functools
+    import logging
+    from types import SimpleNamespace as NS
+    from agile_sdlc_crew.quality import image_fix as fx, image_vuln as iv
+    from agile_sdlc_crew.quality import upgrade as up, upgrade_bump as bump, upgrade_registry as ur
+
+    hub = {"php": ["8.4.30", "8.4.30-fpm-trixie"], "golang": ["1.24.13", "1.24.13-alpine"]}
+    res = ur.Resolver(fetch=_fake_hub(hub))
+
+    def rec(image, lang, version, *, via=(), users=None, patch=None, eol=None, crit=0, level="kritik"):
+        return {"image": image, "lang": lang, "version": version, "via": list(via), "touched": "", "error": "",
+                "users": users if users is not None else {"anatolia": ["build/alf"]},
+                "scan": {"state": "tamam", "critical": crit, "high": 0, "packages": [], "os": "", "created": "",
+                         "ignored": {"critical": 0, "high": 0, "packages": []}},
+                "patch": patch, "eol": eol, "level": level, "actions": []}
+
+    def kind(acts, k):
+        return next((a for a in acts if a["kind"] == k), None)
+
+    def never(*a, **k):
+        raise AssertionError("yazma yapılmamalıydı")
+    DF = {("anatolia", "/build/alf/Dockerfile"): "FROM golang:1.24.4\n"}
+    want_to = up.known_versions("go")[-1]
+    ev = rec("golang:1.99.0", "go", "1.24.4", eol={"eol": "2020-01-01"})
+    mi1 = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.99.0"]}]}
+    fo = lambda c, lang, repo: None
+    fa = lambda c, lang, repo, to=None: None
+
+    # ── 1: tur sınırı yalnız yazılan imajı sayar ─────────────────────────
+    ran_acts = [{"kind": "taban-yama", "state": "açıldı", "ran": True, "reason": "", "pr": {"id": 1, "url": "https://x/1"}}]
+    idle_acts = [{"kind": "yükseltme", "state": "izleniyor", "ran": False, "reason": "", "pr": None}]
+    recs = [rec(f"i{n}:1", "go", "1.24.4", eol={"eol": "2020"}, crit=9 - n, users={"anatolia": ["x"]}) for n in range(3)]
+    recs.append(rec("p:1", "php", "8.4.27", crit=1, users={"anatolia": ["x"]}))
+    called: list = []
+
+    def apply_idle(client, r, **kw):
+        called.append(r["image"])
+        return ran_acts if r["image"] == "p:1" else idle_acts
+    comments: list = []
+    pcl = NS(team="Ekip", add_comment=lambda wid, text: comments.append(wid))
+    out = iv._fix_round(pcl, {"images": recs}, [{"image": "p:1", "state": "açıldı", "wi": 77}], team="Ekip", index={},
+                        resolver=res, apply_fn=apply_idle)
+    check("tur sınırı: yazılacak işi olmayan 3 imaj slot yemez, 4. imaj işlenir",
+          called == ["i0:1", "i1:1", "i2:1", "p:1"] and not any(o.get("state") == "sırada" for o in out) and comments == [77],
+          f"{called} {out}")
+    five = [rec(f"j{n}:1", "go", "1.24.4", crit=9 - n, users={"anatolia": ["x"]}) for n in range(5)]
+    called.clear()
+
+    def apply_ran(client, r, **kw):
+        called.append(r["image"])
+        return ran_acts
+    out = iv._fix_round(pcl, {"images": five}, [], team="Ekip", index={}, resolver=res, apply_fn=apply_ran)
+    check("tur sınırı: 5 imajın hepsinde iş varsa yalnız 3'ü çalışır, 2'si 'sırada'",
+          len(called) == 3 and sorted(o["image"] for o in out if o.get("state") == "sırada") == ["j3:1", "j4:1"], f"{called} {out}")
+
+    # ── 2: repo zaten hedef sürümde ──────────────────────────────────────
+    started: list = []
+
+    def start_fn(client, repo, lang, **kw):
+        started.append((repo, kw.get("index")))
+        return {"id": 700, "created": True}
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi1, resolver=res, find_open_fn=fo, find_any_fn=fa,
+                     current_fn=lambda c, repo, lang, index: want_to), "yükseltme")
+    check("plan: repo zaten hedef sürümde → 'güncel', neden Türkçe, açılabilir değil",
+          a["state"] == "güncel" and a["repos"][0]["state"] == "güncel" and "repo zaten hedef sürümde" in a["repos"][0]["reason"], str(a)[:300])
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=fo, find_any_fn=fa, current_fn=lambda c, repo, lang, index: want_to)
+    check("apply: güncel repo için start çağrılmaz, ran False", started == [] and kind(out, "yükseltme")["ran"] is False)
+    comments.clear()
+    real = functools.partial(fx.apply, push_fn=never, open_pr_fn=never, start_fn=start_fn, find_open_fn=fo, find_any_fn=fa,
+                             current_fn=lambda c, repo, lang, index: want_to)
+    iv._fix_round(pcl, {"images": [ev | {"level": "kritik"}]}, [{"image": "golang:1.99.0", "state": "açıldı", "wi": 5}],
+                  team="Ekip", index=mi1, resolver=res, apply_fn=real)
+    check("tur: güncel repo için uyarı işine yorum düşmez", comments == [])
+
+    def at_target(client, repo, lang, **kw):
+        raise ValueError("Hedef sürüm seçilemez: '1.27'")
+    budget = [1]
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=at_target,
+                   find_open_fn=fo, find_any_fn=fa, budget=budget)
+    a = kind(out, "yükseltme")
+    check("start ValueError (yazmadan red): hata nedeni korunur, ran False, bütçe tüketilmez [sözleşme: ran = yazıldı]",
+          a["repos"][0]["state"] == "hata" and a["ran"] is False and budget == [1], str(a)[:300])
+
+    def other_err(client, repo, lang, **kw):
+        raise ValueError("Şimdiki Go sürümü bilinmiyor")
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=other_err,
+                   find_open_fn=fo, find_any_fn=fa)
+    check("başka bir start ValueError'ı 'hata' kalır; yazma olmadığı için ran False [sözleşme: ran = yazıldı]",
+          kind(out, "yükseltme")["state"] == "hata" and kind(out, "yükseltme")["ran"] is False)
+
+    # ── 7: taze index start'a iletilir ───────────────────────────────────
+    started.clear()
+    fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+             find_open_fn=fo, find_any_fn=fa)
+    check("start'a aynı taze index verilir", started and started[0][1] is mi1, str(started))
+
+    # ── 3: bastırılmış uyarıya yoklayıcı dokunmaz ────────────────────────
+    called.clear()
+    comments.clear()
+    two = [rec("s:1", "go", "1.24.4", eol={"eol": "2020"}, crit=9, users={"anatolia": ["x"]}),
+           rec("t:1", "go", "1.24.4", crit=1, users={"anatolia": ["x"]})]
+    sup_deps = SimpleNamespace(board=lambda c: {iv._fp("s:1"): {"wi": 91, "state": "Canceled", "closed_at": 0.0}},
+                               now=lambda: 1000.0)
+    out = iv._fix_round(pcl, {"images": two}, [{"image": "t:1", "state": "açıldı", "wi": 92}], team="Ekip", index={},
+                        resolver=res, apply_fn=apply_ran, deps=sup_deps)
+    check("bastırılan uyarı: remediation yok, kapalı işe yorum yok, durum 'bastırıldı'; ötekisi işlenir",
+          called == ["t:1"] and comments == [92]
+          and next(o for o in out if o["image"] == "s:1")["state"] == "bastırıldı", f"{called} {comments} {out}")
+
+    # ── 4: belirsiz sonuç tek uyarı satırı ───────────────────────────────
+    records: list = []
+
+    class _H(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+    h = _H(level=logging.INFO)
+    lg = logging.getLogger("pipeline")
+    lg.addHandler(h)
+    try:
+        def apply_unsure(client, r, **kw):
+            return [{"kind": "yükseltme", "state": "yok", "ran": False, "reason": "", "pr": None,
+                     "repos": [{"repo": "a", "state": "belirsiz", "reason": "izleme geçmişi okunamadı: ağ"},
+                               {"repo": "b", "state": "belirsiz", "reason": "izleme geçmişi okunamadı: ağ"}]},
+                    {"kind": "taban-yama", "state": "belirsiz", "ran": False, "reason": "okunamadı: Azure", "pr": None}]
+        comments.clear()
+        iv._fix_round(pcl, {"images": [two[1]]}, [{"image": "t:1", "state": "açıldı", "wi": 92}], team="Ekip", index={},
+                      resolver=res, apply_fn=apply_unsure)
+    finally:
+        lg.removeHandler(h)
+    warns = [r for r in records if r.levelno == logging.WARNING and "t:1" in r.getMessage()]
+    check("belirsiz eylem: imaj başına TEK uyarı satırı, nedenleri taşır, iş yorumu yok",
+          len(warns) == 1 and "izleme geçmişi okunamadı" in warns[0].getMessage() and "okunamadı: Azure" in warns[0].getMessage()
+          and comments == [], str([r.getMessage() for r in records])[:300])
+
+    # ── 5: library/golang aynı dalı paylaşmaz ────────────────────────────
+    g1 = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"})
+    g2 = rec("library/golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"})
+    i2 = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4", "library/golang:1.24.4"]}]}
+    df2 = {("anatolia", "/build/alf/Dockerfile"): "FROM golang:1.24.4\nFROM library/golang:1.24.4\n"}
+    pr1 = {("anatolia", "tempo/image-patch-golang-1.24.4-1.24.13"): {"id": 3, "status": "active", "url": "https://x/3"}}
+    a1 = kind(fx.plan(_FixClient(df2, region_prs=pr1), g1, index=i2, resolver=res), "imaj-yama")
+    a2 = kind(fx.plan(_FixClient(df2, region_prs=pr1), g2, index=i2, resolver=res), "imaj-yama")
+    check("library/golang ve golang aynı dalı paylaşmaz; birinin PR'ı ötekini kapsamaz",
+          a1["branch"] != a2["branch"] and a1["state"] == "pr açık" and a2["state"] == "yok"
+          and bump._BRANCH_IMAGE.fullmatch(a2["branch"]), f"{a1['branch']} {a2['branch']} {a2['state']}")
+
+    # ── 6: ASCII dışı rakam ──────────────────────────────────────────────
+    p84 = rec("php:8.4.27-fpm-bookworm", "php", "8.4.27", via=["php-8-4"], patch={"latest": "8.4.30"})
+    uni = _FixClient(DF, files={"/php-8-4/Dockerfile": "ARG PHP_VERSION=8.4.２７\nFROM php:${PHP_VERSION}-fpm-trixie\n".encode()})
+    a = kind(fx.plan(uni, p84, index=mi1, resolver=res), "taban-yama")
+    check("plan: ASCII dışı rakamlı sürüm satırı → elle (push anında patlamaz)", a["state"] == "elle", str(a)[:250])
+    _vb = bump._validate_branch
+    bump._validate_branch = lambda b, t: (_ for _ in ()).throw(ValueError("Geçersiz dal adı: x"))
+    try:
+        a = kind(fx.plan(_FixClient(DF), p84, index=mi1, resolver=res), "taban-yama")
+        ag = kind(fx.plan(_FixClient(DF), rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"},
+                                              users={"anatolia": ["build/alf"]}),
+                          index={"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4"]}]}, resolver=res), "imaj-yama")
+    finally:
+        bump._validate_branch = _vb
+    check("plan: hesaplanan dal adı _validate_branch'ten geçmezse elle (taban-yama ve imaj-yama)",
+          a["state"] == "elle" and "dal adı" in a["reason"].lower() and ag["state"] == "elle", f"{a['reason']} | {ag['state']}")
+
+    # ── 8: eski yama PR'ı hâlâ açıkken ikincisi açılmaz ──────────────────
+    c = _FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.27-8.4.29": {"id": 12, "status": "active", "url": "https://x/12"}})
+    c.files["tempo/image-patch-php-8-4-8.4.27-8.4.29"] = {}
+    a = kind(fx.plan(c, p84, index=mi1, resolver=res), "taban-yama")
+    check("eski yama PR'ı açık → 'pr açık', neden numarayı söyler",
+          a["state"] == "pr açık" and "önceki yama PR'ı açık: #12" in a["reason"], str(a)[:300])
+    c = _FixClient(DF, prs={"tempo/image-patch-php-8-4-8.4.27-8.4.29": {"id": 12, "status": "abandoned", "url": "https://x/12"}})
+    c.files["tempo/image-patch-php-8-4-8.4.27-8.4.29"] = {}
+    a = kind(fx.plan(c, p84, index=mi1, resolver=res), "taban-yama")
+    check("eski yama PR'ı terk edilmişse engellemez", a["state"] == "yok", str(a)[:200])
+    gm = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"}, users={"anatolia": ["build/alf"]})
+    ix = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4"]}]}
+    rf = _RegionFake({("anatolia", "/build/alf/Dockerfile"): "FROM golang:1.24.4\n"})
+    rf.br[("anatolia", "tempo/image-patch-golang-1.24.4-1.24.12")] = {}
+    rf.prs[("anatolia", "tempo/image-patch-golang-1.24.4-1.24.12")] = {"id": 8, "status": "active", "url": "https://x/8",
+                                                                      "target": "production", "created_by": "me"}
+    a = kind(fx.plan(rf, gm, index=ix, resolver=res), "imaj-yama")
+    check("imaj-yama: bölgede eski yama PR'ı açık → 'pr açık' (ikinci çakışan PR açılmaz)",
+          a["repos"][0]["state"] == "pr açık" and "önceki yama PR'ı açık: #8" in a["repos"][0]["reason"], str(a)[:300])
+    out = fx.apply(rf, gm, team="T", index=ix, resolver=res, open_pr_fn=never, start_fn=never)
+    check("eski PR açıkken apply hiçbir şey yazmaz", not [x for x in rf.calls if x[0] in ("branch", "push", "pr")], str(rf.calls))
+
+
+import contextlib
+
+
+_FX_REAL_CURRENT = [None]
+
+
+@contextlib.contextmanager
+def _fix_env(knobs):
+    """Giderme testleri için ortak ortam: ayarlar, gerçek klona gitmeyen `_repo_current`, sahte pano, geçici önbellek."""
+    import tempfile
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import image_fix as fx, image_vuln as iv
+    _get, _cur = pc.get, getattr(fx, "_repo_current", None)
+    _dd, _cd = getattr(iv, "_default_deps", None), iv.CACHE_DIR
+    _FX_REAL_CURRENT[0] = _cur
+    with tempfile.TemporaryDirectory() as td:
+        pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+        fx._repo_current = lambda *a, **k: None
+        iv._default_deps = lambda: SimpleNamespace(board=lambda c: {}, now=lambda: 1000.0)
+        iv.CACHE_DIR = Path(td)
+        try:
+            yield
+        finally:
+            pc.get = _get
+            if _cur is not None:
+                fx._repo_current = _cur
+            if _dd is not None:
+                iv._default_deps = _dd
+            elif hasattr(iv, "_default_deps"):
+                del iv._default_deps
+            iv.CACHE_DIR = _cd
+
+
+def test_image_fix_final():
+    """Son düzeltme dalgası: yazılmayan deneme sıra harcamaz, bastırma kapalı kalır, yama PR'ı yükseltme PR'ıyla çakışmaz."""
+    print("\n[taban imaj güvenliği: giderme — son düzeltme dalgası]")
+    knobs = {"CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True, "CREW_TECHDEBT_UPGRADE_BUMP": True,
+             "CREW_TECHDEBT_IMAGE_VULN_MAX_TASKS": 3, "CREW_TECHDEBT_UPGRADE_MAX_OPEN": 3}
+    with _fix_env(knobs):
+        _image_fix_final_body(knobs)
+
+
+def _image_fix_final_body(knobs):
+    import functools
+    import inspect
+    import logging
+    import tempfile
+    from types import SimpleNamespace as NS
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import image_fix as fx, image_vuln as iv, modern, php_modern as pmod
+    from agile_sdlc_crew.quality import upgrade_bump as bump, upgrade_image as ui, upgrade_registry as ur, upgrade_track as ut
+
+    hub = {"php": ["8.4.30", "8.4.30-fpm-trixie"], "golang": ["1.24.13", "1.24.13-alpine"],
+           "python": ["3.13.18", "3.13.18-slim-bookworm"]}
+    res = ur.Resolver(fetch=_fake_hub(hub))
+
+    def rec(image, lang, version, *, via=(), users=None, patch=None, eol=None, crit=0, level="kritik"):
+        return {"image": image, "lang": lang, "version": version, "via": list(via), "touched": "", "error": "",
+                "users": users if users is not None else {"anatolia": ["build/alf"]},
+                "scan": {"state": "tamam", "critical": crit, "high": 0, "packages": [], "os": "", "created": "",
+                         "ignored": {"critical": 0, "high": 0, "packages": []}},
+                "patch": patch, "eol": eol, "level": level, "actions": []}
+
+    def kind(acts, k):
+        return next((a for a in acts if a["kind"] == k), None)
+
+    def never(*a, **k):
+        raise AssertionError("yazma yapılmamalıydı")
+    DF = {(r, "/build/alf/Dockerfile"): "FROM golang:1.24.4\n" for r in ("anatolia", "global", "russia")}
+    idx = {"alf": [{"src": f"{r}/build/alf", "images": ["golang:1.24.4"]} for r in ("anatolia", "global", "russia")]}
+    go = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"},
+             users={"anatolia": ["build/alf"], "global": ["build/alf"], "russia": ["build/alf"]})
+    p84 = rec("php:8.4.27-fpm-bookworm", "php", "8.4.27", via=["php-8-4"], patch={"latest": "8.4.30"},
+              users={"anatolia": ["build/channel"], "russia": ["build/core"]})
+    fo = lambda *a: None
+    pcl_comments: list = []
+    pcl = NS(team="Ekip", add_comment=lambda wid, text: pcl_comments.append((wid, text)))
+    fcl = _FixClient(DF)
+    fcl.add_comment = pcl.add_comment
+
+    # ── I1: yazılmayan deneme ran=False, sıra harcamaz, hata yorumu bir kez ──
+    def leftover(client, sites, **kw):
+        raise ValueError("kalan: dal var, PR'ı yok ve hedef dalla aynı commit'te değil")
+    out = fx.apply(_FixClient(DF), go, team="T", index=idx, resolver=res, push_fn=leftover, open_pr_fn=never, start_fn=never)
+    a = kind(out, "imaj-yama")
+    check("kalan dal reddi: yazma yok → ran False, hata nedeni korunur",
+          a["ran"] is False and a["state"] == "hata" and "dal var" in a["reason"], str(a)[:300])
+    real = functools.partial(fx.apply, push_fn=leftover, open_pr_fn=never, start_fn=never, find_open_fn=fo,
+                             find_any_fn=fo)
+    gk = dict(go, level="kritik")
+    rounds = [{"images": [gk]}]
+    res_wi = [{"image": go["image"], "state": "açık iş", "wi": 50}]
+    pcl_comments.clear()
+    for _ in range(2):
+        iv._fix_round(fcl, rounds[0], res_wi, team="Ekip", index=idx, resolver=res, apply_fn=real)
+    check("aynı hata ardışık iki turda: uyarı işine TEK yorum", len(pcl_comments) == 1, str(pcl_comments)[:200])
+
+    def leftover2(client, sites, **kw):
+        raise ValueError("başka bir red nedeni")
+    real2 = functools.partial(fx.apply, push_fn=leftover2, open_pr_fn=never, start_fn=never, find_open_fn=fo, find_any_fn=fo)
+    iv._fix_round(fcl, rounds[0], res_wi, team="Ekip", index=idx, resolver=res, apply_fn=real2)
+    check("neden değişince yeniden yorum yazılır", len(pcl_comments) == 2, str(len(pcl_comments)))
+    called: list = []
+
+    def fake_apply(client, r, **kw):
+        called.append(r["image"])
+        if r["image"] == "d:1":
+            return [{"kind": "imaj-yama", "state": "açıldı", "ran": True, "reason": "", "pr": {"id": 1, "url": "https://x/1"}}]
+        return [{"kind": "imaj-yama", "state": "hata", "ran": False, "reason": "red", "pr": None}]
+    four = [rec(f"{c}:1", "go", "1.24.4", eol={"eol": "2020"}, crit=9 - n, users={"anatolia": ["x"]})
+            for n, c in enumerate("abcd")]
+    out = iv._fix_round(pcl, {"images": four}, [], team="Ekip", index={}, resolver=res, apply_fn=fake_apply)
+    check("üç reddeden imaj + dördüncü yazılabilir: dördüncü de işlenir (slot yemez)",
+          called == ["a:1", "b:1", "c:1", "d:1"] and not any(o.get("state") == "sırada" for o in out), f"{called} {out}")
+
+    ev = rec("golang:1.99.0", "go", "1.24.4", eol={"eol": "2020-01-01"})
+    mi1 = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.99.0"]}]}
+
+    def start_value_error(client, repo, lang, **kw):
+        raise ValueError("Repo yerelde yok ya da adı geçersiz: 'alf'")
+    budget = [2]
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never,
+                   start_fn=start_value_error, find_open_fn=fo, find_any_fn=fo, budget=budget)
+    a = kind(out, "yükseltme")
+    check("start ValueError: denenmedi sayılır (ran False), bütçe harcanmaz, neden korunur",
+          a["ran"] is False and a["state"] == "hata" and "Repo yerelde yok" in a["reason"] and budget == [2], str(a)[:300])
+
+    def start_select_error(client, repo, lang, **kw):
+        raise ValueError("Hedef sürüm seçilemez: '1.27'")
+    out = fx.apply(_FixClient(DF), ev, team="T", index=mi1, resolver=res, push_fn=never, open_pr_fn=never,
+                   start_fn=start_select_error, find_open_fn=fo, find_any_fn=fo, budget=[1])
+    check("M2: açık hedefle start 'Hedef sürüm seçilemez' derse 'hata' + ran False (ölü eşleme yok)",
+          kind(out, "yükseltme")["ran"] is False and kind(out, "yükseltme")["state"] == "hata")
+    py = rec("python:3.13.7-slim-bookworm", "python", "3.13.7", via=["python-3-13-7"], patch={"latest": "3.13.18"},
+             users={"anatolia": ["build/py"]})
+    ipy = {"py": [{"src": "anatolia/build/py", "images": ["r.example/prod-ar/python-3-13-7:1.0"]}]}
+    stg = {"/python-3-13-7/Dockerfile": b"FROM python:3.13.7-slim-bookworm", "/python-3-13-7/tag.txt": b"1.0"}
+    ipy = {"py": [{"src": "anatolia/build/py", "images": ["europe-west1-docker.pkg.dev/flo-prod-main/prod-ar/python-3-13-7:1.0"]}]}
+
+    def tmpl_refuse(client, lang, to, entry, **kw):
+        raise ui.ImageTemplateError("Hub'da etiket yok. Push yapılmadı.")
+
+    def tmpl_partial(client, lang, to, entry, **kw):
+        raise ui.ImageTemplateError("'tempo/base-image-x' dalı, PR oluşturma aşamasında hata: x. Push yapıldı.", wrote=True)
+
+    def tmpl_ready_no_pr(client, lang, to, entry, **kw):
+        # dal önceki denemeden hazır, bu çağrı yalnız PR açmayı denedi: metin "Push yapıldı" der ama yazma yok
+        raise ui.ImageTemplateError("'tempo/base-image-x' dalı, PR oluşturma aşamasında hata: x. Push yapıldı.")
+    o1 = fx.apply(_FixClient(DF, files=stg), py, team="T", index=ipy, resolver=res, push_fn=never, open_pr_fn=tmpl_refuse, start_fn=never)
+    o2 = fx.apply(_FixClient(DF, files=stg), py, team="T", index=ipy, resolver=res, push_fn=never, open_pr_fn=tmpl_partial, start_fn=never)
+    check("open_pr yazmadan reddederse ran False; push yapıldıktan sonra hata verirse ran True",
+          kind(o1, "taban-dizin")["ran"] is False and kind(o1, "taban-dizin")["state"] == "hata"
+          and kind(o2, "taban-dizin")["ran"] is True, f"{kind(o1, 'taban-dizin')} {kind(o2, 'taban-dizin')}")
+    o3 = fx.apply(_FixClient(DF, files=stg), py, team="T", index=ipy, resolver=res, push_fn=never, open_pr_fn=tmpl_ready_no_pr, start_fn=never)
+    check("dal hazırken yalnız PR açılamıyorsa ran False (metne değil hatanın wrote alanına bakılır; her gece sıra yanmaz)",
+          kind(o3, "taban-dizin")["ran"] is False and kind(o3, "taban-dizin")["state"] == "hata", str(kind(o3, "taban-dizin")))
+
+    def push_res(res_):
+        return lambda client, sites, **kw: res_
+    cases = [({"prs": [{"repo": "base-images", "id": 3, "url": "https://x/3", "reused": True}], "fallback": [], "errors": []}, False, "pr açık"),
+             ({"prs": [], "fallback": [{"repo": "base-images", "diff": "d", "branch_written": False}], "errors": []}, False, "elle"),
+             ({"prs": [], "fallback": [], "errors": [{"repo": "base-images", "error": "x", "branch_written": True, "stage": "pr"}]}, True, "hata"),
+             ({"prs": [], "fallback": [], "errors": [{"repo": "base-images", "error": "x", "branch_written": False, "stage": "create"}]}, False, "hata"),
+             ({"prs": [{"repo": "base-images", "id": 4, "url": "https://x/4"}], "fallback": [], "errors": []}, True, "açıldı")]
+    for r_, want_ran, want_state in cases:
+        a = kind(fx.apply(_FixClient(DF), p84, team="T", index=idx, resolver=res, push_fn=push_res(r_), open_pr_fn=never, start_fn=never),
+                 "taban-yama")
+        check(f"push sonucu → ran {want_ran}, durum {want_state}", a["ran"] is want_ran and a["state"] == want_state, str(a)[:240])
+
+    # ── I2: öneki tam eşleşme (kardeş sonekler karışmaz) ─────────────────
+    ix = {"alf": [{"src": "anatolia/build/alf", "images": ["golang:1.24.4"]}]}
+    gm = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"}, users={"anatolia": ["build/alf"]})
+    rf = _RegionFake({("anatolia", "/build/alf/Dockerfile"): "FROM golang:1.24.4\n"})
+    for sib in ("alpine", "bookworm"):
+        b = f"tempo/image-patch-golang-1.24.4-{sib}-1.24.13"
+        rf.br[("anatolia", b)] = {}
+        rf.prs[("anatolia", b)] = {"id": 21, "status": "active", "url": "https://x/21", "target": "production", "created_by": "me"}
+    a = kind(fx.plan(rf, gm, index=ix, resolver=res), "imaj-yama")
+    check("kardeş sonekli (-alpine / -bookworm) etkin PR bu imajı engellemez", a["repos"][0]["state"] == "yok", str(a)[:300])
+    rf.br[("anatolia", "tempo/image-patch-golang-1.24.4-1.24.12")] = {}
+    rf.prs[("anatolia", "tempo/image-patch-golang-1.24.4-1.24.12")] = {"id": 22, "status": "active", "url": "https://x/22",
+                                                                       "target": "production", "created_by": "me"}
+    a = kind(fx.plan(rf, gm, index=ix, resolver=res), "imaj-yama")
+    check("aynı imajın daha eski yamasına giden açık PR engeller", a["repos"][0]["state"] == "pr açık"
+          and "#22" in a["repos"][0]["reason"], str(a)[:300])
+
+    # ── I3(a): yama PR'ı gövdesi yükseltme uyarısını taşır ───────────────
+    bodies: list = []
+
+    def cap_push(client, sites, **kw):
+        bodies.append(kw["body"])
+        return {"prs": [{"repo": sites[0]["repo"], "id": 9, "url": "https://x/9"}], "fallback": [], "errors": []}
+    started: list = []
+
+    def start_ok(client, repo, lang, **kw):
+        started.append(repo)
+        return {"id": 700, "created": True}
+    goeol = rec("golang:1.24.4", "go", "1.24.4", patch={"latest": "1.24.13"}, eol={"eol": "2026-02-10"},
+                users={"anatolia": ["build/alf"], "global": ["build/alf"], "russia": ["build/alf"]})
+    fx.apply(_FixClient(DF), goeol, team="T", index=idx, resolver=res, push_fn=cap_push, open_pr_fn=never, start_fn=start_ok,
+             find_open_fn=fo, find_any_fn=fo)
+    note = "Bu imajı kullanan repolar için sürüm yükseltme izlemesi de var; yükseltme PR'ı aynı satırı değiştirir — bu PR önce birleştirilmeli ya da kapatılmalı."
+    check("eol + yama: yama PR gövdesi yükseltme uyarısını taşır", bodies and all(note in b for b in bodies), str(bodies)[:300])
+    bodies.clear()
+    fx.apply(_FixClient(DF), go, team="T", index=idx, resolver=res, push_fn=cap_push, open_pr_fn=never, start_fn=never)
+    check("yalnız yama: uyarı yok", bodies and not any("sürüm yükseltme izlemesi de var" in b for b in bodies))
+
+    # ── I3(b): yükseltme prod adımı açık yama PR'ı varken hazır değil ────
+    pr_ok = {"id": 31, "status": "active", "url": "https://x/31", "target": "production", "created_by": "me"}
+    dvs = [{"where": "devops", "repo": r, "project": "FLODevOps", "branch": "production", "path": "/build/alf/Dockerfile",
+            "line": 1, "old": "golang:1.24.4", "new": "golang:1.27.4", "blocked": ""} for r in ("anatolia", "russia")]
+    spy = _UpFake(branches={("FLODevOps", "anatolia"): ["main", "production", "tempo/image-patch-golang-1.24.4-1.24.13"]},
+                  prs={("FLODevOps", "anatolia", "tempo/image-patch-golang-1.24.4-1.24.13"): pr_ok})
+    knobs["CREW_TECHDEBT_IMAGE_VULN"] = False
+    calls_before = len(spy.wiql)
+    check("_patch_pr_block: ayar kapalı → boş, Azure çağrısı yok",
+          ut._patch_pr_block(NS(list_branches=never, find_pull_request=never), dvs) == "")
+    knobs["CREW_TECHDEBT_IMAGE_VULN"] = True
+    why = ut._patch_pr_block(spy, dvs)
+    check("açık yama PR'ı → neden numarayı söyler", "aynı satırı değiştiren yama PR'ı açık: #31" in why and "önce o kapanmalı" in why, why)
+    for st_ in ("abandoned", "completed"):
+        spy2 = _UpFake(branches={("FLODevOps", "anatolia"): ["main", "production", "tempo/image-patch-golang-1.24.4-1.24.13"]},
+                       prs={("FLODevOps", "anatolia", "tempo/image-patch-golang-1.24.4-1.24.13"): dict(pr_ok, status=st_)})
+        check(f"{st_} yama PR'ı engellemez", ut._patch_pr_block(spy2, dvs) == "")
+    own = [dict(dvs[0], old="eu/php-8-2:1.0", new="eu/php-8-4:1.0")]
+    check("kendi imajımızın sitesi (üç parçalı genel etiket değil) sorgulanmaz",
+          ut._patch_pr_block(NS(list_branches=never, find_pull_request=never), own) == "")
+
+    class _Boom(_UpFake):
+        def list_branches(self, repo, project=None):
+            raise OSError("ağ")
+    why = ut._patch_pr_block(_Boom(), dvs)
+    check("ayar açıkken arama hatası → hazır değil (bilinmeyen)", why and "okunamadı" in why, why)
+    src = inspect.getsource(ut._status)
+    check("_status prod adımından önce _patch_pr_block'a bakar", "_patch_pr_block(" in src)
+
+    # ── I4: bastırma kapalı kalır ────────────────────────────────────────
+    tk = rec("t:1", "go", "1.24.4", crit=1, users={"anatolia": ["x"]})
+    board = {iv._fp("t:1"): {"wi": 9, "state": "Canceled", "closed_at": 0.0}}
+    deps = NS(board=lambda c: board, now=lambda: 1000.0)
+    called.clear()
+
+    def fa(client, r, **kw):
+        called.append(r["image"])
+        return [{"kind": "imaj-yama", "state": "açıldı", "ran": True, "reason": "", "pr": None}]
+    out = iv._fix_round(pcl, {"images": [tk]}, [], team="Ekip", index={}, resolver=res, apply_fn=fa, deps=deps)
+    check("_TASK kapalı (sonuç yok) + panoda iptal edilmiş iş → bastırıldı, hiç yazma yok",
+          called == [] and out and out[0]["state"] == "bastırıldı", f"{called} {out}")
+
+    def bad_board(c):
+        raise OSError("pano okunamadı")
+    called.clear()
+    out = iv._fix_round(pcl, {"images": [tk]}, [], team="Ekip", index={}, resolver=res, apply_fn=fa,
+                        deps=NS(board=bad_board, now=lambda: 1000.0))
+    check("pano okunamazsa tur HİÇBİR şey yapmaz", called == [] and out == [])
+    ok_board = {iv._fp("t:1"): {"wi": 9, "state": "New", "closed_at": 0.0}}
+    called.clear()
+    pcl_comments.clear()
+    iv._fix_round(pcl, {"images": [tk]}, [], team="Ekip", index={}, resolver=res, apply_fn=fa,
+                  deps=NS(board=lambda c: ok_board, now=lambda: 1000.0))
+    check("açık iş varsa işlenir; yorum panodaki işe (sonuç listesi olmasa da) yazılır",
+          called == ["t:1"] and [c[0] for c in pcl_comments] == [9], f"{called} {pcl_comments}")
+
+    # ── M1: durdurulan ↔ tamamlanan izleme ───────────────────────────────
+    def row(wid, to, state="Closed"):
+        return {"id": wid, "fields": {"System.State": state, "System.Tags": "tempo-upgrade-track", "System.AreaPath": "P\\T",
+                                      "System.Description": f"<p>tempo-upgrade-key: go:alf:{to}</p>"}}
+    done_c = [{"metin": "<p><b>Yükseltme tamamlandı:</b> alf üretimde 1.26 sürümünde.</p>", "tarih": "2026-11-01T10:00:00Z"}]
+    stop_c = [{"metin": "<p>Yükseltme izlemesi durduruldu (T).</p>", "tarih": "2026-11-01T10:00:00Z"}]
+    cm = {5: done_c, 6: stop_c}
+    tc = NS(query_work_items=lambda q, **kw: rows_[0], get_work_item_comments=lambda wid: cm.get(wid, []))
+    rows_ = [[row(5, "1.26")]]
+    check("tamamlanmış (eski hedef) izleme yeni hedefi engellemez", ut.find_stopped(tc, "go", "alf", "1.27") is None)
+    check("tamamlanmış izleme aynı hedefi engeller", (ut.find_stopped(tc, "go", "alf", "1.26") or {}).get("id") == 5)
+    rows_[0] = [row(5, "1.26"), row(6, "1.25")]
+    check("insanın durdurduğu (tamamlanma notu yok) izleme HER hedef için engeller",
+          (ut.find_stopped(tc, "go", "alf", "1.27") or {}).get("id") == 6)
+    rows_[0] = [row(7, "1.26", state="New")]
+    check("açık izleme find_stopped'a girmez", ut.find_stopped(tc, "go", "alf", "1.27") is None)
+    seen_to: list = []
+    a = kind(fx.plan(_FixClient(DF), ev, index=mi1, resolver=res, find_open_fn=fo, auto=True,
+                     find_any_fn=lambda c, lang, repo, to: seen_to.append(to) or None), "yükseltme")
+    check("plan geçmiş sorgusuna hedefi geçirir", seen_to == [a["repos"][0]["to"]] and seen_to[0], str(seen_to))
+
+    # ── M3: bilinmeyen bölge '?' basmaz ──────────────────────────────────
+    mars = dict(p84, users={"mars": ["build/x"]})
+    a = kind(fx.plan(_FixClient(DF), mars, index=idx, resolver=res), "taban-yama")
+    check("taban-yama: bilinmeyen bölge → elle, '?' yok", a["state"] == "elle" and "bilinmeyen bölge: mars" in a["reason"]
+          and "?" not in a["reason"], str(a)[:240])
+    osm = dict(rec("php:8.4.27", "php", "8.4.27", crit=1, users={"mars": ["x"]}))
+    a = kind(fx.plan(_FixClient(DF), osm, index=idx, resolver=res), "yeniden-üret")
+    check("yeniden-üret: bilinmeyen bölge → elle", a["state"] == "elle" and "bilinmeyen bölge" in a["reason"], str(a)[:200])
+    imars = {"py": [{"src": "mars/build/py", "images": ["europe-west1-docker.pkg.dev/flo-prod-main/prod-ar/python-3-13-7:1.0"]}]}
+    a = kind(fx.plan(_FixClient(DF, files=stg), py, index=imars, resolver=res), "taban-dizin")
+    check("taban-dizin: bilinmeyen bölge → elle", a["state"] == "elle" and "bilinmeyen bölge" in a["reason"], str(a)[:240])
+
+    # ── M4: günlük tur çalışan taramayı bekler ───────────────────────────
+    knobs.update({"CREW_TECHDEBT": True, "CREW_TECHDEBT_IMAGE_VULN": True, "CREW_TECHDEBT_IMAGE_VULN_FIX": False})
+    seen: dict = {"force": None, "alert": 0}
+    sleeps: list = []
+    _bi, _rep, _alert = modern.build_index, iv.report, iv.alert
+    try:
+        modern.build_index = lambda c, **kw: {}
+        iv.report = lambda c, **kw: seen.update(force=kw.get("force")) or {"images": []}
+        iv.alert = lambda c, rep, **kw: seen.update(alert=seen["alert"] + 1) or []
+        iv._reset_state()
+        iv._RUN["running"] = True
+
+        def free_after_two(s):
+            sleeps.append(s)
+            if len(sleeps) == 2:
+                iv._end(None)
+        iv._tick(lambda: NS(team="Ekip"), sleep=free_after_two, max_wait_s=300, step_s=30)
+        check("_tick: çalışan taramayı bekler, bitince koşar; biten taramanın önbelleğini yeniden kullanır (force yok)",
+              seen["alert"] == 1 and seen["force"] is False and len(sleeps) == 2, f"{seen} {sleeps}")
+        records: list = []
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+        h = _H(level=logging.INFO)
+        logging.getLogger("pipeline").addHandler(h)
+        try:
+            seen.update(alert=0)
+            iv._reset_state()
+            iv._RUN["running"] = True
+            sleeps.clear()
+            iv._tick(lambda: NS(team="Ekip"), sleep=lambda s: sleeps.append(s), max_wait_s=90, step_s=30)
+        finally:
+            logging.getLogger("pipeline").removeHandler(h)
+            iv._reset_state()
+        check("_tick: sınırlı bekleme sonunda hâlâ meşgulse uyarı logu, koşmaz",
+              seen["alert"] == 0 and any(r.levelno == logging.WARNING and "atlandı" in r.getMessage() for r in records)
+              and len(sleeps) == 3, f"{sleeps} {[r.getMessage() for r in records]}")
+    finally:
+        modern.build_index, iv.report, iv.alert = _bi, _rep, _alert
+        iv._reset_state()
+
+    # ── M6: Trivy imajı sabit ────────────────────────────────────────────
+    pinned = "aquasec/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb"
+    with tempfile.TemporaryDirectory() as td:
+        y = Path(td) / "image_vuln.yaml"
+        check("trivy_image: yaml yoksa sabit varsayılan", iv.trivy_image(Path(td) / "yok.yaml") == pinned == iv.DEFAULT_TRIVY_IMAGE)
+        for good in ("aquasec/trivy:0.58.1", "aquasec/trivy@sha256:" + "a" * 64):
+            y.write_text(f"trivy_image: {good}\n")
+            check(f"trivy_image: geçerli değer kabul ({good[:30]}…)", iv.trivy_image(y) == good)
+        for bad in ("evil/trivy:latest", "aquasec/trivy:latest; rm -rf /", "aquasec/trivy@sha256:abc", "aquasec/trivy", "-v x",
+                    "aquasec/trivy:ta g", "http://x/aquasec/trivy:1", "5"):
+            y.write_text(f"trivy_image: '{bad}'\n")
+            check(f"trivy_image: geçersiz değer ({bad[:24]!r}) → sabit varsayılan", iv.trivy_image(y) == pinned)
+        y.write_text("trivy_image: [a, b]\n")
+        check("trivy_image: yanlış tür → sabit varsayılan", iv.trivy_image(y) == pinned)
+    cmd = iv.trivy_cmd(which=lambda n: "/x/docker" if n == "docker" else None)
+    check("trivy_cmd: docker yolu sabitlenmiş imajı kullanır, :latest değil", cmd and cmd[-1] == iv.trivy_image() and ":latest" not in " ".join(cmd), str(cmd))
+    check("yaml'da trivy_image anahtarı sabit imajla duruyor", iv.trivy_image(iv.IGNORE_PATH) == pinned
+          and "trivy_image:" in iv.IGNORE_PATH.read_text(encoding="utf-8"))
+
+    # ── M9 / M10: ayar açıklamaları ──────────────────────────────────────
+    by = {f["key"]: f for f in pc.SCHEMA}
+    mo, vu = by["CREW_TECHDEBT_UPGRADE_MAX_OPEN"]["desc"], by["CREW_TECHDEBT_IMAGE_VULN"]["desc"]
+    check("MAX_OPEN açıklaması imaj gidermesindeki ikinci kullanımı söyler", "taban imaj" in mo.lower() and "izleme" in mo.lower(), mo)
+    check("IMAGE_VULN açıklaması: düğme _FIX kapalıyken de PR / izleme açar, anahtarlar", "Gidermeyi başlat" in vu
+          and "CREW_TECHDEBT_UPGRADE_BUMP" in vu and "CREW_TECHDEBT_UPGRADE_IMAGE" in vu and "CREW_TECHDEBT_UPGRADE_PATCH" in vu
+          and "CREW_TECHDEBT_IMAGE_VULN_FIX" in vu, vu)
+
+    # ── Gerçek `_repo_current`: ~/.crew_repos/<repo> düzeninde geçici dizin ──
+    real_cur = _FX_REAL_CURRENT[0]
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "alf").mkdir()
+        (Path(td) / "alf" / "go.mod").write_text("module example.com/alf\n\ngo 1.24.4\n", encoding="utf-8")
+        _dd = pmod.default_deps
+        pmod.default_deps = lambda: NS(cfg=lambda: {"repos_dir": td}, repo_ok=lambda r: True)
+        try:
+            got = real_cur(None, "alf", "go", {})
+            try:
+                gone = real_cur(None, "yok-repo", "go", {})
+            except ValueError as e:
+                gone = str(e)
+        finally:
+            pmod.default_deps = _dd
+    check("gerçek _repo_current: yerel klonun go.mod'undan 1.24 okur (ağ yok)", got == "1.24", str(got))
+    check("gerçek _repo_current: klon yoksa istisna (plan bunu None sayar)", gone is not None and gone != "1.24", str(gone))
 
 
 def main():
@@ -7665,6 +15368,10 @@ def main():
               test_quality_sources,
               test_quality_intake,
               test_quality_endpoints,
+              test_upgrade_api_surface,
+              test_upgrade_card,
+              test_upgrade_bump_expect_step,
+              test_upgrade_advance,
               test_quality_review_fixes,
               test_quality_readiness,
               test_repo_ctx_cross_thread,
@@ -7710,7 +15417,20 @@ def main():
               test_devops_requests,
               test_modern_multilang,
               test_modern_sp,
-              test_php_modern_82_84,
+              test_upgrade_rules,
+              test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
+              test_upgrade_registry, test_upgrade_patch_sites, test_upgrade_image_template,
+              test_upgrade_image_wiring,
+              test_image_vuln_inventory, test_image_vuln_signals, test_image_vuln_hardening, test_image_vuln_settings, test_image_vuln_alerts, test_image_fix, test_image_fix_round1, test_image_fix_round2, test_image_fix_final, test_image_fix_promote_tag,
+              test_upgrade_scan_take,
+              test_upgrade_bump_sites,
+              test_upgrade_client_find_pr_and_bytes,
+              test_upgrade_bump_round2,
+              test_upgrade_status_and_steps,
+              test_upgrade_fix_round1,
+              test_upgrade_fix_round2,
+              test_upgrade_fix_round3,
+              test_upgrade_final_f2_three_part, test_upgrade_final_f3_published, test_upgrade_final_f6_ci_parse, test_upgrade_final_f1_pipeline_source, test_upgrade_final_f7_push_clock, test_upgrade_final_f8_pinned_read, test_upgrade_final_f5_resolved_blocks, test_upgrade_final_f9_retry_guard, test_upgrade_final_f10_catalog_flag,
               test_php_rector_fix,
               test_tool_review_diff_context,
               test_tool_fix_leftovers,

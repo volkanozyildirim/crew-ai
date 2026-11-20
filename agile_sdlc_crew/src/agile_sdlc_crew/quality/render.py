@@ -46,6 +46,7 @@ def task_tags(g: Group, lane: str = "quality") -> str:
     tags.append(src_tag(g.source))
     if g.needs_human:
         tags.append(HUMAN_TAG)
+    tags += [t for t in g.extra_tags if t not in tags]
     return "; ".join(tags)
 
 
@@ -256,7 +257,11 @@ LOC_PER_FILE = 5    # dosya başına en çok satır — her dosya en az bir kez 
 def _modern_rule(g: Group):
     from agile_sdlc_crew.quality import modern
     key = g.findings[0].rule if g.findings else ""
-    return next((r for r in modern.rules_for(g.source) if r.key == key), None)
+    r = next((r for r in modern.rules_for(g.source) if r.key == key), None)
+    if r is None:  # dilin yükseltme kataloğu (Python'da ayrı dosya)
+        from agile_sdlc_crew.quality import upgrade
+        r = next((r for r in upgrade.catalog(modern.SOURCE_LANG.get(g.source, "php")) if r.key == key), None)
+    return r
 
 
 def _modern_locations(g: Group) -> list[tuple[str, int, str]]:
@@ -345,6 +350,12 @@ def expected_behavior(g: Group) -> list[str]:
     'eksik anahtarda ne olmalı / hangi dosya / nasıl doğrulanır' soruları
     kalite işlerinde hep aynı cevaba sahip — her seferinde insana sormak
     yerine burada sabitlenir."""
+    if g.source == "image_vuln":
+        return ["Kendi taban imajımızsa DevOps yeniden üretir; genel imajsa (ör. python:3.11) servis imajı yeniden "
+                "derlenip yayınlanınca taze taban çekilir. Gerekirse desteklenen sürüme alınır; Tempo imaj üretmez "
+                "veya yayınlamaz. Karar ve takvim insanındır.",
+                "Yeniden üretim sonrası tarama tekrarlandığında bu imajda düzeltmesi yayınlanmış kritik açık ve "
+                "destek bitişi kalmaz; kapanış bu kontrolle doğrulanır."]
     if g.source in MODERN_SOURCES:
         if g.needs_human:
             return ["Bu bir tasarım kararıdır: kapsamı (hangi sınıflar, hangi sırayla, hangi dış API korunacak) "
@@ -415,6 +426,8 @@ def acceptance_block(g: Group) -> str:
 def acceptance_criteria(g: Group) -> str:
     """Açıklamaya VE AcceptanceCriteria alanına yazılır: alan boşsa hazırlık
     kapısı (flow._readiness_score) her kalite işinden 15 puan düşer."""
+    if g.source == "image_vuln":
+        return "İmaj yeniden üretilir / desteklenen sürüme alınır; sonraki taramada kritik seviyeden çıkar."
     if g.source == "newrelic":
         return "Bu action'da bu hata sınıfı/mesajı bir daha üretilmez; mevcut davranış korunur."
     if g.source in MODERN_SOURCES:
@@ -451,7 +464,9 @@ def task_description(g: Group, *, sonar_url: str = "", nr_days: int = 7, php_tar
     if g.needs_human:
         parts.append(f"<p><b>Neden insan:</b> {_e(g.human_reason)}</p>")
     parts.append(UNTRUSTED_NOTE)
-    if g.source == "newrelic":
+    if g.body_html:
+        parts.append(g.body_html)
+    elif g.source == "newrelic":
         parts += _nr_body(g, nr_days)
     elif g.source in MODERN_SOURCES:
         parts += _modern_body(g, php_target)

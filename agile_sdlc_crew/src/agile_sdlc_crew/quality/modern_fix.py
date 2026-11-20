@@ -62,6 +62,46 @@ def load_scope(payload: str, base_dir: Path) -> tuple[str, str, dict[str, list[s
     return lang, repo, clean, root
 
 
+_UPGRADE_TO = re.compile(r"^\d+\.\d+$")
+
+
+def upgrade_target(payload: str) -> str:
+    """Yükseltme taramasından açılan işin hedef sürümü (kayıttaki `upgrade_to`), yoksa "". Geçersiz
+    biçim yok sayılır. load_scope'tan ayrı okunur: kapsamın 4'lü dönüşü başka çağıranlarca kullanılıyor."""
+    try:
+        v = (json.loads(payload or "") or {}).get("upgrade_to")
+    except (ValueError, AttributeError):
+        return ""
+    return v if isinstance(v, str) and _UPGRADE_TO.match(v) else ""
+
+
+def _upgrade_drops(root: Path, lang: str, version: str, upgrade_to: str, changed: list[str], *,
+                   probe=None) -> dict[str, str]:
+    """Değişen dosyaları HEDEF sürümün aracıyla da denetle (upgrade.probe, files=): hedefte hata veren
+    dosya → {dosya: neden}; bu dosya PR'a girmez. Uyarı (probe:deprecation) düşürmez; araç yoksa
+    (ran=False) denetim yapılmamıştır, hiçbir dosya düşmez. Kod şimdiki sürümle yazılır (Rector
+    withPhpVersion = üretim sürümü); bu yalnız hedefte kırılmadığını doğrular."""
+    from agile_sdlc_crew.quality import upgrade
+    # Yalnız dosya bazlı probe'lar (php -l / compile()): Go probe'u HEAD'den geçici worktree açıp derler,
+    # değişen dosyaları görmez — orada main'in hatası değişen dosyayı haksız yere düşürürdü.
+    if not upgrade_to or not changed or lang not in ("php", "python"):
+        return {}
+    try:
+        hits, st = (probe or upgrade.probe)(root, lang, version, upgrade_to, files=list(changed))
+    except Exception as e:  # noqa: BLE001 — ek güvenlik ağı: hatası işi düşürmez (fail-open)
+        log.warning(f"  ⚠️ Hedef {upgrade_to} aracıyla denetim hata verdi — atlandı, dosya düşürülmedi: {str(e)[:200]}")
+        return {}
+    if not st.get("ran"):
+        log.info(f"  🔭 Hedef {upgrade_to} aracıyla denetlenemedi: {st.get('reason') or 'araç yok'}")
+        return {}
+    out: dict[str, str] = {}
+    for h in hits:
+        f = str(h.get("file") or "")
+        if h.get("rule") == "probe:error" and f in changed and f not in out:
+            out[f] = f"hedef {upgrade_to} aracında hata: {str(h.get('message') or '')[:160]}"
+    return out
+
+
 def _git(root: Path, *args, check: bool = False) -> subprocess.CompletedProcess:
     r = subprocess.run(["git", *args], cwd=str(root), capture_output=True, text=True, timeout=120)
     if check and r.returncode != 0:
@@ -323,13 +363,17 @@ def window_fix(root: Path, rel: str, lines: list[int], instruction: str, *, radi
     return batch_window_fix(root, [(rel, lines, instruction)], radius=radius, ask=ask)
 
 
-def _rule_instruction(r, version: str) -> str:
-    return (f"Apply ONE mechanical PHP {version} modernization rule. Rule: {r.title}.\n"
+def _rule_instruction(r, version: str, upgrade_to: str = "") -> str:
+    text = (f"Apply ONE mechanical PHP {version} modernization rule. Rule: {r.title}.\n"
             f"Before:\n{r.before}\nAfter:\n{r.after}\n"
             "Keep behaviour identical. Do not reformat, rename or touch anything else.")
+    if upgrade_to:  # sürüm yükseltme hazırlığı: düzeltme bugünkü üretimde de çalışmalı
+        text += (f"\nThe code must keep working on PHP {version} as well as on {upgrade_to}; "
+                 f"do not use syntax or functions that only exist in {upgrade_to}.")
+    return text
 
 
-def fix_leftovers(root: Path, scope: dict[str, list[str]], version: str, *, ask=None) -> dict:
+def fix_leftovers(root: Path, scope: dict[str, list[str]], version: str, *, ask=None, upgrade_to: str = "") -> dict:
     """Araçtan sonra kapsam dosyalarını yeniden tara; satır-yerel kuralların kalan yerlerini pencereyle
     düzelt. {"fixed": pencere, "remaining": [(dosya, satır, kural)], "skipped": [...satır-yerel olmayan]}"""
     from agile_sdlc_crew import pipeline_config as pc
@@ -349,7 +393,7 @@ def fix_leftovers(root: Path, scope: dict[str, list[str]], version: str, *, ask=
         by: dict[tuple[str, str], list[int]] = {}
         for h in local:
             by.setdefault((h["file"], h["rule"]), []).append(int(h.get("line") or 0))
-        fixed = batch_window_fix(root, [(rel, lns, _rule_instruction(rules[rule], version))
+        fixed = batch_window_fix(root, [(rel, lns, _rule_instruction(rules[rule], version, upgrade_to))
                                         for (rel, rule), lns in by.items()], radius=LEFTOVER_RADIUS, ask=ask)
         log.info(f"  🧰 Araç {len(local)} yeri kaçırdı → {fixed} pencere LLM'le düzeltildi")
         hits = left()
@@ -612,7 +656,7 @@ def run(job_id: int, work_item_id: str) -> dict:
             try:
                 return _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _acct,
                                    job_id, work_item_id, title, lang, repo, scope, root, version, files_all,
-                                   lifecycle, sig)
+                                   lifecycle, sig, upgrade_to=upgrade_target(job.get("job_payload") or ""))
             finally:
                 _acct.set_toolless(False)
     except Exception as e:
@@ -628,21 +672,31 @@ def run(job_id: int, work_item_id: str) -> dict:
 
 
 def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _acct,
-                job_id, work_item_id, title, lang, repo, scope, root, version, files_all, lifecycle, sig) -> dict:
+                job_id, work_item_id, title, lang, repo, scope, root, version, files_all, lifecycle, sig,
+                upgrade_to: str = "") -> dict:
     from agile_sdlc_crew.flow import NeedsHumanReview
     from agile_sdlc_crew.pr_review import run_pr_review
     left = {"fixed": 0, "remaining": [], "skipped": []}
     with _detached(root):
+        # Sürüm yükseltme hazırlığında da araç ŞİMDİKİ üretim sürümüyle çalışır (çıktı bugün de çalışmalı)
         apply_tool(root, lang, scope, version)
         if lang == "php":
-            left = fix_leftovers(root, scope, version)
+            left = fix_leftovers(root, scope, version, upgrade_to=upgrade_to)
         changed = _changed_in_scope(root, files_all)
         contents = {f: (root / f).read_text(encoding="utf-8") for f in changed}
         # İnceleme TÜM dosyaların diff'ini görsün (pr_review.tool_diff_context) — eski hâl origin/main
         originals = {f: _git(root, "show", f"origin/main:{f}").stdout for f in changed}
         res = verify.verify(root, changed) if changed else {"ok": True, "ran": [], "issues": [], "skipped": []}
+        up_bad = _upgrade_drops(root, lang, version, upgrade_to, changed) if upgrade_to else {}
     dropped: list[str] = []
     dropped_why: dict[str, str] = {}
+    for f, why in up_bad.items():
+        changed.remove(f)
+        contents.pop(f, None)
+        dropped.append(f)
+        dropped_why[f] = why
+    if up_bad:
+        log.info(f"  🔭 {len(up_bad)} dosya hedef {upgrade_to} aracında hata verdi — PR'a alınmadı")
     for f in list(changed) if lang == "php" else []:
         lost = lost_property_defaults(originals.get(f, ""), contents[f])
         if lost:
@@ -674,6 +728,8 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
             f"Kurallar: {', '.join(scope)}\n\nDeğişen dosyalar ({len(changed)}):\n"
             + "\n".join(f"- `{f}`" for f in changed)
             + f"\n\nDoğrulama: {', '.join(res['ran']) or 'doğrulayıcı yok'} geçti." + notes
+            + (f"\n\nSürüm yükseltme hazırlığı ({version} → {upgrade_to}): düzeltme {version} ile uygulandı, "
+               f"{version} sürümünde de çalışır." if upgrade_to else "")
             + (f"\n\n{branch_note}" if branch_note else "")
             + sig)
     # Kullanıcı kararı (2026-11-04): "repoda tanımlıysa unit test çalıştırıp doğrulamadan PR açma".
@@ -754,7 +810,8 @@ def _run_scoped(client, db, pipeline, verify, pc, wl, modern, _add_wi_comment, _
                 (root / f).write_text(c, encoding="utf-8")
             n = fix_review_issues(root, fixable, set(contents))
             if lang == "php":
-                more = fix_leftovers(root, {k: [f for f in v if f in contents] for k, v in scope.items()}, version)
+                more = fix_leftovers(root, {k: [f for f in v if f in contents] for k, v in scope.items()}, version,
+                                     upgrade_to=upgrade_to)
                 left = {**more, "fixed": left["fixed"] + more["fixed"]}
             new = {f: (root / f).read_text(encoding="utf-8") for f in _changed_in_scope(root, list(contents))}
             fix_res = verify.verify(root, list(new)) if new else {"ok": True}
