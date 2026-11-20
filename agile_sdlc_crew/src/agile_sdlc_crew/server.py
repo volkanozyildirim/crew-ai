@@ -193,7 +193,8 @@ class QualityTakeRequest(BaseModel):
 
 @app.get("/")
 async def dashboard():
-    return FileResponse(str(WEB_DIR / "index.html"))
+    # no-cache: tarayıcı her açılışta doğrular; yoksa güncelleme sonrası eski sayfa (eski düğme kodu) çalışmaya devam eder
+    return FileResponse(str(WEB_DIR / "index.html"), headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/health")

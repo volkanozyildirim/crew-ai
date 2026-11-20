@@ -1294,7 +1294,7 @@ function renderImageVuln(r){
         <td style="text-align:right;white-space:nowrap">${go}<button class="sm-btn ghost small" data-image="${_ivE(x.image)}" onclick="event.stopPropagation();openIvDetail(this.dataset.image)">Detay</button></td></tr>`}).join('')).join('')+'</table>';
   _ivFixAll={};_ivRows={};rows.forEach(x=>{_ivFixAll[x.image]=x.fix||[];_ivRows[x.image]=x});
   // açık pencere varsa (yoklama / giderme sonrası) taze veriyle yeniden çizilir
-  const m=document.getElementById('ivModal');if(m&&m.classList.contains('open')&&_ivRows[m.dataset.image])openIvDetail(m.dataset.image);
+  const m=document.getElementById('ivModal');if(m&&m.classList.contains('open')&&m.dataset.mode!=='fix'&&_ivRows[m.dataset.image])openIvDetail(m.dataset.image);
 }
 let _ivRows={};
 function _ivSignals(x){
@@ -1322,7 +1322,7 @@ function _ivCveTable(pk,sev){
 }
 function openIvDetail(image){
   const x=_ivRows[image];if(!x)return;
-  const m=document.getElementById('ivModal');m.dataset.image=image;
+  const m=document.getElementById('ivModal');m.dataset.image=image;m.dataset.mode='';
   const sc=x.scan||{},ok=sc.state==='tamam',pk=sc.packages||[],ig=sc.ignored||{},lv=_ivLevel[x.level]||['dim',x.level];
   const h=t=>`<h3 class="ivh">${t}</h3>`;
   document.getElementById('ivModalTitle').innerHTML=`<code>${_ivE(x.image)}</code>`;
@@ -1391,19 +1391,36 @@ function _ivFixConfirm(image,fix){
   });
   return `${image} için giderme başlatılacak:\n\n- ${lines.join('\n- ')}\n\nDosya yolları ve satırlar uygulama anında yeniden okunur; kart verisinden yazılmaz.\n\nDevam?`;
 }
-async function fixImageVuln(btn){
+// Onay ve sonuç sayfa içi pencerede gösterilir: tarayıcının confirm() kutusu bastırılabilir (o zaman tıklama sessizce
+// hiçbir şey yapmaz) ve kartın altındaki mesaj satırı ekran dışında kalabilir.
+function fixImageVuln(btn){
   const image=btn.dataset.image||'';
-  if(!image||!confirm(_ivFixConfirm(image,_ivFixAll[image])))return;
-  const msg=document.getElementById('tdImgFixMsg');
+  if(!image)return;
+  const m=document.getElementById('ivModal');m.dataset.image=image;m.dataset.mode='fix';
+  document.getElementById('ivModalTitle').innerHTML=`Gidermeyi başlat: <code>${_ivE(image)}</code>`;
+  document.getElementById('ivModalMeta').innerHTML='';
+  document.getElementById('ivModalBody').innerHTML=`<div style="white-space:pre-wrap;font-size:13px;line-height:1.55">${_ivE(_ivFixConfirm(image,_ivFixAll[image]))}</div>`
+    +`<div id="ivFixRun" style="margin-top:14px"><button class="sm-btn small" id="ivFixGo">Başlat</button> <button class="sm-btn ghost small" onclick="closeIvDetail()">Vazgeç</button></div>`;
+  document.getElementById('ivFixGo').onclick=()=>runImageFix(image);
+  m.classList.add('open');
+}
+async function runImageFix(image){
+  const box=document.getElementById('ivFixRun'),msg=document.getElementById('tdImgFixMsg');
   const btns=[...document.querySelectorAll('.ivFixBtn')];
-  btns.forEach(b=>b.disabled=true);msg.textContent='Giderme başlatılıyor…';
+  btns.forEach(b=>b.disabled=true);
+  const wait=_tdLoad('Giderme başlatılıyor… Repolar yeniden okunuyor, 1 dakikayı bulabilir.');
+  if(box)box.innerHTML=wait;msg.innerHTML=wait;
+  let html;
   try{
     const resp=await fetch('/api/techdebt/images/fix',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image,team:_tdTeam()})});
     const r=await resp.json().catch(()=>({}));
-    if(!resp.ok)msg.innerHTML=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;
-    else msg.innerHTML=`Giderme başlatıldı (${_ivE(image)}): `+(r.actions||[]).map(a=>`${_ivE(a.kind)} — ${_ivE(a.state)}${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}`).join('; ');
-  }catch(e){msg.textContent=String(e)}
-  finally{btns.forEach(b=>{if(b.isConnected)b.disabled=false});closeIvDetail();loadImageVuln(false)}
+    if(!resp.ok)html=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;
+    else html=`Giderme başlatıldı (${_ivE(image)}): `+(r.actions||[]).map(a=>`${_ivE(_ivKindLabel(a))} — ${_ivE(_ivStateLabel(a.state))}${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${a.reason?' ('+_ivE(a.reason)+')':''}`).join('; ');
+  }catch(e){html=`<span style="color:var(--danger)">${_ivE(String(e))}</span>`}
+  finally{btns.forEach(b=>{if(b.isConnected)b.disabled=false})}
+  msg.innerHTML=html;
+  if(box&&box.isConnected)box.innerHTML=`<div style="font-size:13px;line-height:1.55">${html}</div><div style="margin-top:12px"><button class="sm-btn small" onclick="closeIvDetail()">Kapat</button></div>`;
+  loadImageVuln(false);
 }
 
 // ── Maliyet analizi (salt okunur; /api/costs) ──

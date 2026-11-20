@@ -13867,7 +13867,7 @@ def test_image_fix_promote_tag():
         knobs["CREW_TECHDEBT_UPGRADE_BUMP"] = True
 
     html_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
-    cseg = html_src[html_src.index("function _ivFixConfirm"):html_src.index("async function fixImageVuln")]
+    cseg = html_src[html_src.index("function _ivFixConfirm"):html_src.index("function fixImageVuln")]
     check("kart: onay metni taşıma ve etiket eylemlerini de sayar; etiket geride işareti",
           "taban-taşıma" in cseg and "taban-etiket" in cseg and "etiket geride" in html_src and "x.tag_lag" in html_src)
 
@@ -14355,7 +14355,11 @@ def _image_fix_body():
     html_src = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text()
     seg = html_src[html_src.index("function renderImageVuln"):]
     seg = seg[:seg.index("\n}\n")]
-    fseg = html_src[html_src.index("async function fixImageVuln"):]
+    cfseg = html_src[html_src.index("function fixImageVuln"):html_src.index("async function runImageFix")]
+    check("kart: onay sayfa içi pencerede (tarayıcı confirm() kutusu bastırılabilir, tıklama sessiz kalır)",
+          "confirm(" not in cfseg.replace("_ivFixConfirm(", "") and "_ivFixConfirm(image" in cfseg
+          and "runImageFix(image)" in cfseg and "classList.add('open')" in cfseg)
+    fseg = html_src[html_src.index("async function runImageFix"):]
     fseg = fseg[:fseg.index("\n}\n")]
     lseg = html_src[html_src.index("function _ivLink"):]
     lseg = lseg[:lseg.index("\n")]
@@ -14363,8 +14367,8 @@ def _image_fix_body():
     check("kart: satırda giderme durumu; eylem satırları ve 'Gidermeyi başlat' düğmesi detay penceresinde",
           "x.fix" in seg and "Gidermeyi başlat" in dseg and "_ivFixRows(x.fix)" in dseg and "fixImageVuln(" in dseg
           and "${a.reason}" not in dseg and "${a.state}" not in dseg)
-    check("kart: uç, onay kutusu, düğme istek boyunca kapalı, sonra yenile",
-          "/api/techdebt/images/fix" in fseg and "confirm(" in fseg and "disabled=true" in fseg and "loadImageVuln(" in fseg)
+    check("kart: uç, bekleme göstergesi, düğme istek boyunca kapalı, sonra yenile",
+          "/api/techdebt/images/fix" in fseg and "_tdLoad(" in fseg and "disabled=true" in fseg and "loadImageVuln(" in fseg)
     check("kart: aralanan metin escHtml'den geçer, yalnız https bağlantı", "${a.reason}" not in seg and "${a.state}" not in seg
           and "^https:" in lseg)
 
