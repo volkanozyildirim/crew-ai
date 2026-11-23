@@ -33,6 +33,12 @@ log = logging.getLogger("pipeline")
 
 _LOCK = threading.Lock()
 TRACKED_LANGS = ("php", "python", "go")           # Tempo'nun sürüm yükseltmesini izlediği diller
+
+
+def _tracked() -> tuple[str, ...]:
+    """İzlenen diller; Node yalnız CREW_TECHDEBT_UPGRADE_NODE açıkken (varsayılan kapalı)."""
+    from agile_sdlc_crew.quality import modern
+    return TRACKED_LANGS + (("node",) if modern.node_on() else ())
 _OWN_NAMES = {"php": "php", "python": "python"}   # taban imaj şablonu olan diller (Go'nun taban imajı yok)
 _DIR_RE = re.compile(_UI_DIR_RE.pattern, re.ASCII)   # ASCII dışı rakamlı ad (`８`) int()'e girmesin, dal adını bozmasın
 _THREE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$", re.ASCII)
@@ -452,7 +458,7 @@ def _plan_upgrade(client, entry: dict, index: dict, find_open_fn, find_any_fn=No
     üretimdeki minörünün üstünde olmalıdır (`default_target`); yükseltme özelliği kapalıyken hiç planlanmaz."""
     from agile_sdlc_crew.quality import intake, upgrade, upgrade_track
     kind, lang = "yükseltme", entry.get("lang") or ""
-    if lang not in TRACKED_LANGS:
+    if lang not in _tracked():
         label = "Node" if lang == "node" else (lang or "Bu dilin")
         return _act(kind, "elle", f"{label} sürümü izlenmiyor — elle")
     off = next((k for k in ("CREW_TECHDEBT_UPGRADE", "CREW_TECHDEBT_PHP_MODERN") if not _on(k)), None)

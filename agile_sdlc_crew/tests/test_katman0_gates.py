@@ -12203,6 +12203,263 @@ def test_upgrade_patch_sites():
           and not upgrade.is_library_image("myreg.io/library/golang:1.24.4", "go"))
 
 
+def test_upgrade_node():
+    """Node.js izlenen dil: ayar kapalıyken görünmez; açıkken hedef majör, üretim imajı kanıtı, CI / kod siteleri,
+    bağımlılık engelleri, katalog ve giderme planı. Ağ, Azure, MySQL yok."""
+    print("\n[upgrade: Node.js sürüm izlemesi]")
+    import json
+    import tempfile
+    from pathlib import Path
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import image_fix as fx, intake, modern, upgrade, upgrade_bump as bump
+    from agile_sdlc_crew.quality import upgrade_registry as ur
+    knobs = {"CREW_TECHDEBT_UPGRADE_NODE": False, "CREW_TECHDEBT_UPGRADE": True, "CREW_TECHDEBT_PHP_MODERN": True}
+    _get = pc.get
+    pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+
+            def repo(name, pkg=None, **files):
+                r = base / name
+                r.mkdir()
+                if pkg is not None:
+                    (r / "package.json").write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+                for fn, body in files.items():
+                    (r / fn.replace("__", ".").replace("_slash_", "/")).write_text(body, encoding="utf-8")
+                return r
+            js = repo("oldjs", {"name": "oldjs", "dependencies": {"node-sass": "^7.0.1", "webpack": "^4.46.0",
+                                                               "react": "^17.0.2"}})
+            (js / "src").mkdir()
+            (js / "src" / "a.js").write_text(
+                "const fs = require('fs')\nconst util = require('util')\n"
+                "fs.rmdirSync(dir, { recursive: true })\n// fs.rmdirSync(x, { recursive: true })\n"
+                "if (util.isString(v)) util.log('x')\nif (util.isArray(v)) {}\n"
+                "const c = crypto.createCipher('aes-256-cbc', pw)\nconst d = crypto.createCipheriv('aes-256-cbc', k, iv)\n"
+                "fs.accessSync(p, fs.R_OK)\n", encoding="utf-8")
+            (js / "package-lock.json").write_text('{\n  "name": "oldjs",\n  "lockfileVersion": 1\n}\n', encoding="utf-8")
+            php = repo("phpapp", {"name": "assets"}, composer__json='{"require": {"php": "^8.2"}}')
+            pinned = repo("phppin", {"name": "x", "engines": {"node": ">=14"}}, composer__json='{"require": {"php": "^8.2"}}')
+            nx = repo("nextapp", {"name": "n", "dependencies": {"next": "15.0.0"}})
+
+            # ── ayar kapalı: hiçbir yerde görünmez ──
+            check("kapalı: Node algılanmaz (saf JS repo dahil)", modern.detect_langs(js) == [] and "node" not in modern.detect_langs(nx),
+                  str(modern.detect_langs(js)))
+            check("kapalı: izlenen diller değişmez", fx._tracked() == ("php", "python", "go"))
+            deps = intake.Deps(gather=None, board=None, repo_ok=lambda r: True, queue=None, record=None, now=None,
+                               cfg=lambda: {"repos_dir": str(base)})
+            try:
+                upgrade._prepare("oldjs", "node", deps, None)
+                check("kapalı: tarama reddedilir", False)
+            except ValueError as e:
+                check("kapalı: tarama reddedilir", "Node.js reposu değil" in str(e), str(e))
+
+            # ── ayar açık ──
+            knobs["CREW_TECHDEBT_UPGRADE_NODE"] = True
+            check("açık: saf JS repo Node'dur", modern.detect_langs(js) == ["node"], str(modern.detect_langs(js)))
+            check("açık: PHP reposunun package.json'ı Node saydırmaz", modern.detect_langs(php) == ["php"],
+                  str(modern.detect_langs(php)))
+            check("açık: sürümünü bildiren PHP reposu Node'dur (engines.node)", modern.detect_langs(pinned) == ["php", "node"],
+                  str(modern.detect_langs(pinned)))
+            check("açık: Next.js reposu iki eksen", modern.detect_langs(nx) == ["nextjs", "node"], str(modern.detect_langs(nx)))
+            check("açık: izlenen dillere eklenir", fx._tracked()[-1] == "node")
+
+            # imaj sürümü
+            iv = modern.node_image_version
+            check("imaj sürümü: majör / minör / kendi dizinimiz",
+                  iv("node:14-alpine") == (14, 0) and iv("node:14.21.3-bullseye-slim") == (14, 21)
+                  and iv("eu/prod-ar/node-14-21:1.0") == (14, 21) and iv("10.1.1.1:5000/prod-ar/node-24-22-3:1.0") == (24, 22))
+            check("imaj sürümü: okunamayan / başka imaj",
+                  iv("node:${NODE_VERSION}-alpine3.24") is None and iv("node:lts") is None and iv("prom/node-exporter:1.8") is None
+                  and iv("eu/nodejs-app:14.2") is None)
+            check("Node imajı mı: ad kalıbı (alt dize değil)",
+                  modern.is_node_image("node:lts") and modern.is_node_image("node:${NODE_VERSION}-alpine")
+                  and modern.is_node_image("eu/prod-ar/node-14-21:1.0") and not modern.is_node_image("prom/node-exporter:1.8")
+                  and not modern.is_node_image("eu/nodejs-app:1"))
+            fv = modern.node_file_version
+            check(".nvmrc biçimleri", fv("24\n") == (24, 0) and fv("v24.21.0") == (24, 21) and fv("# x\n20.17\n") == (20, 17)
+                  and fv("lts/fermium") == (14, 0) and fv("lts/*") is None and fv("latest") is None)
+
+            # şimdiki sürüm: üretim → Dockerfile → .nvmrc → engines
+            idx = {"oldjs": [{"src": "anatolia/build/oldjs", "images": ["eu/prod-ar/node-14-21:1.0"]},
+                             {"src": "russia/build/oldjs", "images": ["10.1.1.1:5000/prod-ar/node-14-21:1.0"]}],
+                   "newjs": [{"src": "anatolia/build/newjs", "images": ["eu/prod-ar/node-24-21-0:1.0",
+                                                                         "eu/prod-ar/node-24-22-3:1.1"]}]}
+            t = modern.target(None, "oldjs", js, "node", index=idx)
+            check("şimdiki sürüm: FLODevOps imajlarının en düşüğü", t["version"] == "14.21" and t["source"] == "flodevops", str(t))
+            t = modern.target(None, "phppin", pinned, "node", index={})
+            check("şimdiki sürüm: engines.node", t["version"] == "14.0" and t["source"] == "package.json", str(t))
+            (pinned / ".nvmrc").write_text("v20.17.0\n", encoding="utf-8")
+            t = modern.target(None, "phppin", pinned, "node", index={})
+            check("şimdiki sürüm: .nvmrc engines'ten önce", t["version"] == "20.17" and t["source"] == ".nvmrc", str(t))
+            check("şimdiki sürüm: hiçbir kaynak yok → None", modern.target(None, "phpapp", php, "node", index={})["version"] is None)
+
+            # hedef: listenin sonuncusu (majör), yayınlanmış olması aranmaz
+            kv = upgrade.known_versions("node")
+            check("hedef listesi majör yazılır (N.0)", kv and all(v.endswith(".0") for v in kv), str(kv))
+            check("varsayılan hedef: listenin sonuncusu", upgrade.default_target("node", "14.21", idx) == kv[-1])
+            check("hedefteki repo için hedef yok", upgrade.default_target("node", f"{kv[-1].split('.')[0]}.5", idx) is None)
+            to = "24.0"
+
+            # üretim imajı: aynı bölgede, aynı önekle kullanılan hedef majörün en yeni imajı
+            regions = upgrade._region_images(idx)
+            new, blk = upgrade._prod_image(regions["anatolia"], "eu/prod-ar/node-14-21:1.0", "node", to)
+            check("üretim: bölgede kullanılan Node 24 imajı (en yenisi, etiketiyle)", (new, blk) == ("eu/prod-ar/node-24-22-3:1.1", ""),
+                  str((new, blk)))
+            new, blk = upgrade._prod_image(regions["russia"], "10.1.1.1:5000/prod-ar/node-14-21:1.0", "node", to)
+            check("üretim: bölgede Node 24 yok → imaj yayınlanmamış, dizin adı uydurulmaz",
+                  new == "10.1.1.1:5000/prod-ar/node-14-21:1.0" and blk == upgrade.UNPUBLISHED, str((new, blk)))
+            new, blk = upgrade._prod_image({"other/prod-ar/node-24-22-3:1.1"}, "eu/prod-ar/node-14-21:1.0", "node", to)
+            check("üretim: başka kayıt önekindeki imaj kanıt değil", blk == upgrade.UNPUBLISHED, str((new, blk)))
+            new, blk = upgrade._prod_image(regions["anatolia"], "eu/prod-ar/node-14-21:1.0@sha256:" + "a" * 64, "node", to)
+            check("üretim: özetle sabitlenmiş imaj yazılmaz", blk == upgrade.CI_HAND and "@sha256:" in new)
+            hub = ur.Resolver(fetch=_fake_hub({"node": ["24.22.3", "24.22.3-alpine", "24.22-alpine", "24-alpine", "24",
+                                                         "24.21.0", "22.20.1", "24.22.3-bookworm-slim"]}))
+            check("çözücü: majörün en yeni tam sürümü", hub.latest_in_major("node", 24) == "24.22.3"
+                  and hub.latest_in_major("node", 22) == "22.20.1" and hub.latest_in_major("node", 26) is None
+                  and hub.latest_in_major("ruby", 24) is None and hub.latest_in_major("node", True) is None)
+            pinr = ur.Resolver(fetch=_fake_hub({}), patches={"node": {"24.0": "24.9.1", "22.0": "24.1.1"}})
+            check("çözücü: elle sabitleme (yanlış majör yok sayılır)", pinr.latest_in_major("node", 24) == "24.9.1"
+                  and pinr.latest_in_major("node", 22) is None)
+            ni = lambda img, r=None, prod=False: upgrade._node_image(None, img, to, r, prod=prod)
+            check("genel imaj: yalnız majör etiketi majörle yazılır", ni("node:14-alpine") == ("node:24-alpine", "")
+                  and ni("node:14") == ("node:24", "") and ni("docker.io/library/node:14-slim") == ("docker.io/library/node:24-slim", ""))
+            check("genel imaj: üretimde kanıt yoksa yayınlanmamış", ni("node:14-alpine", prod=True) == ("node:24-alpine", upgrade.UNPUBLISHED))
+            check("genel imaj: dağıtım kod adlı ek kanıtsız yazılmaz", ni("node:14-bullseye") == ("node:14-bullseye", upgrade.CI_HAND))
+            check("genel imaj: minör / yama etiketi çözücüsüz elle",
+                  ni("node:14.21.3-alpine")[1] == upgrade.CI_HAND and ni("node:14.21-alpine")[1] == upgrade.CI_HAND)
+            check("genel imaj: çözücüyle majörün en yeni sürümü, etiket Hub'da varsa",
+                  ni("node:14.21.3-alpine", hub) == ("node:24.22.3-alpine", "") and ni("node:14.21-alpine", hub) == ("node:24.22-alpine", "")
+                  and ni("node:14.21.3-bullseye-slim", hub)[1] == upgrade.CI_HAND
+                  and ni("node:14.21.3-bookworm-slim", hub, prod=True) == ("node:24.22.3-bookworm-slim", ""),
+                  str(ni("node:14.21.3-alpine", hub)))
+            check("genel imaj: Hub'da olmayan etiket yazılmaz", ni("node:14-buster", hub)[1] == upgrade.CI_HAND)
+            check("başka kayıttaki node imajı elle", ni("mirror.local/node:14")[1] == upgrade.CI_HAND)
+
+            # plan + siteler
+            read = lambda d, p: ("FROM 10.1.1.1:5000/prod-ar/node-14-21:1.0\n" if d == "russia"
+                                 else "FROM eu/prod-ar/node-14-21:1.0 AS build\nFROM nginx:1.27\n")
+            (js / ".nvmrc").write_text("14\n", encoding="utf-8")
+            pkg = json.loads((js / "package.json").read_text())
+            pkg["engines"] = {"node": "^14.21.0"}
+            (js / "package.json").write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+            (js / "Dockerfile").write_text("FROM node:14-alpine\nFROM node:14.21.3-bullseye-slim\n", encoding="utf-8")
+            yml = {"Test Pipelines/oldjs.yml": "resources:\n  repositories:\n    - repository: s\n      name: EcomBackend/oldjs\n"
+                                               "steps:\n  - task: NodeTool@0\n    inputs:\n      versionSource: 'spec'\n"
+                                               "      versionSpec: '14.x'\n  - task: UseNode@1\n    inputs:\n      version: 16.20.2\n"
+                                               "  - script: npm ci\n"}
+            pl = upgrade.plan(None, "oldjs", "node", deps=deps, index=idx, read=read, yml_files=yml)
+            check("plan: 14.21 → 24.0, seçilebilir sürümler listeden", pl["current"] == "14.21" and pl["target"] == "24.0"
+                  and [x["version"] for x in pl["selectable"]] == kv and not pl["up_to_date"], str(pl)[:300])
+            sel = {x["version"]: x for x in pl["selectable"]}
+            check("seçilebilir: russia'da Node 24 yok → yayınlanmamış; katalog var; araç yok",
+                  sel["24.0"]["published"] is False and sel["24.0"]["catalog"] is True and sel["24.0"]["tool"] is False, str(sel))
+            dv = {x["repo"]: x for x in pl["sites"] if x["where"] == "devops"}
+            check("üretim sitesi: anatolia açık, russia engelli",
+                  dv["anatolia"]["new"] == "eu/prod-ar/node-24-22-3:1.1" and dv["anatolia"]["blocked"] == "" and dv["anatolia"]["line"] == 1
+                  and dv["russia"]["blocked"] == upgrade.UNPUBLISHED, str(dv))
+            check("iki parçalı → üç parçalı dizin: rakam biçimi değişir, otomatik yazılmaz (elle)",
+                  not bump.pushable(dv["anatolia"]))
+            ci = [x for x in pl["sites"] if x["where"] == "ci"]
+            check("CI: NodeTool `14.x` majörle yazılır, UseNode tam sürümü çözücüsüz elle",
+                  [(x["line"], x["old"], x["new"], x["blocked"]) for x in ci]
+                  == [(9, "'14.x'", "'24.x'", ""), (12, "16.20.2", "16.20.2", upgrade.CI_HAND)], str(ci))
+            check("CI sabitlemeleri okunur (`14.x` okunamayan sayılmaz)",
+                  [(p_["line"], p_["version"]) for p_ in pl["ci_pins"]] == [(9, "14.0"), (12, "16.20")], str(pl["ci_pins"]))
+            check("CI: yazılabilir satır rakam-dizisi kuralından geçer", bump.pushable(ci[0]) and not bump.pushable(ci[1]))
+            cs = [(x["path"], x["line"], x["old"], x["new"], x["blocked"]) for x in pl["sites"] if x["where"] == "code"]
+            check("kod siteleri: .nvmrc, engines, Dockerfile", cs == [
+                (".nvmrc", 1, "14", "24", ""),
+                ("package.json", 9, "^14.21.0", "^24.0.0", ""),
+                ("Dockerfile", 1, "node:14-alpine", "node:24-alpine", ""),
+                ("Dockerfile", 2, "node:14.21.3-bullseye-slim", "node:14.21.3-bullseye-slim", upgrade.CI_HAND)], str(cs))
+            pr = upgrade.plan(None, "oldjs", "node", deps=deps, index=idx, read=read, yml_files=yml, resolver=hub)
+            cir = [x for x in pr["sites"] if x["where"] == "ci"]
+            check("çözücüyle: UseNode tam sürümü majörün en yenisine", cir[1]["new"] == "24.22.3" and cir[1]["blocked"] == "", str(cir[1]))
+            for cons, want in ((">=14 <17", None), ("14 || 16", None), ("14.x", "24.x"), (">=14.17", ">=24.0"),
+                               ("14.21.3", None), ("~14.21.0", None)):
+                pkg["engines"] = {"node": cons}
+                (js / "package.json").write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+                e = [x for x in upgrade._code_sites("oldjs", js, "node", to) if x["path"] == "package.json"]
+                ok = (len(e) == 1 and ((want is None and e[0]["new"] == cons and e[0]["blocked"] == upgrade.RANGE_BLOCK)
+                                       or (want is not None and e[0]["new"] == want and e[0]["blocked"] == "")))
+                check(f"engines.node {cons!r} → {want or 'elle'}", ok, str(e))
+            pkg["engines"] = {"node": ">=24"}
+            (js / "package.json").write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+            check("engines.node hedefte → site yok",
+                  not [x for x in upgrade._code_sites("oldjs", js, "node", to) if x["path"] == "package.json"])
+            (js / ".nvmrc").write_text("lts/fermium\n", encoding="utf-8")
+            nv = [x for x in upgrade._code_sites("oldjs", js, "node", to) if x["path"] == ".nvmrc"]
+            check(".nvmrc LTS kod adı elle", len(nv) == 1 and nv[0]["blocked"] == upgrade.CI_HAND, str(nv))
+            up = upgrade.plan(None, "newjs", "node", deps=intake.Deps(
+                gather=None, board=None, repo_ok=lambda r: True, queue=None, record=None, now=None,
+                cfg=lambda: {"repos_dir": str(base)}), index=idx, root=js, read=read, yml_files={})
+            check("hedef majördeki repo güncel (24.21 ≥ 24.0)", up["current"] == "24.21" and up["up_to_date"] is True, str(up)[:200])
+
+            # bağımlılık engelleri
+            bl = {b["name"]: b["detail"] for b in upgrade.blockers(js, "node", "24.0")}
+            check("engel: node-sass Node 24'te hiç çalışmaz, webpack 4 OpenSSL 3", set(bl) == {"node-sass", "webpack"}
+                  and "çalışmaz" in bl["node-sass"] and "en az webpack 5.0" in bl["webpack"], str(bl))
+            pkg["dependencies"].update({"node-sass": "^9.0.0", "webpack": "^5.70.0", "fibers": "git+https://x/y.git"})
+            (js / "package.json").write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+            b20 = [b["name"] for b in upgrade.blockers(js, "node", "20.0")]
+            check("engel: node-sass 9 Node 20'de engel değil; fibers 16+ her sürümde engel", b20 == ["fibers"], str(b20))
+            pkg["dependencies"]["node-sass"] = "^7.0.1"
+            (js / "package.json").write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
+            b18 = {b["name"]: b["detail"] for b in upgrade.blockers(js, "node", "18.0")}
+            check("engel: node-sass 7, Node 18 için en az 8.0", "en az node-sass 8.0" in b18.get("node-sass", ""), str(b18))
+            check("engel: bozuk package.json düşürmez", upgrade.blockers(php, "node", "bad") == []
+                  and upgrade.blockers(base / "yok", "node", "24.0") == [])
+
+            # katalog + bulgular
+            rules = upgrade.catalog("node")
+            check("katalog: her kural yükseltme kuralı, breaks dolu, fix_min PHP varsayılanı değil",
+                  rules and all(r.upgrade_catalog and r.breaks for r in rules)
+                  and all(r.fix_min in ((0, 0), (14, 14), (18, 20)) for r in rules),
+                  str([(r.key, r.fix_min) for r in rules if r.fix_min not in ((0, 0), (14, 14), (18, 20))]))
+            check("katalog: desenler derlenir", all(re.compile(r["pattern"]) for r in modern._raw_rules("node") if r.get("pattern")))
+            hits, urules, meta = upgrade._collect("oldjs", "node", js, "14.21", "24.0", {}, force=True,
+                                                  head_sha_fn=lambda r: "sha1")
+            by = {}
+            for h in hits:
+                by.setdefault(h["rule"], []).append((h["file"], h["line"]))
+            check("bulgular: rmdir recursive (yorum satırı atlanır)", by.get("fs_rmdir_recursive") == [("src/a.js", 3)], str(by))
+            check("bulgular: util.isString + util.log kaldırıldı; isArray ayrı (uyarı)",
+                  by.get("util_is_removed") == [("src/a.js", 5), ("src/a.js", 5)] and by.get("util_deprecated_22") == [("src/a.js", 6)], str(by))
+            check("bulgular: createCipher (createCipheriv değil)", by.get("crypto_create_cipher") == [("src/a.js", 7)], str(by))
+            check("bulgular: fs.R_OK", by.get("fs_access_constants") == [("src/a.js", 9)], str(by))
+            check("bulgular: kök dosya kuralı (package-lock lockfileVersion 1)", by.get("node15_npm7_lockfile") == [("package-lock.json", 3)], str(by))
+            check("bulgular: taranamayan davranış kuralları package.json'a iliştirilir",
+                  by.get("node15_unhandled_rejections") == [("package.json", 1)] and by.get("node17_dns_order") == [("package.json", 1)], str(by))
+            check("hedef araç yok: probe çalışmadı", meta["probe"]["ran"] is False)
+            h22, r22, _m = upgrade._collect("oldjs", "node", js, "14.21", "22.0", {}, force=True, head_sha_fn=lambda r: "sha1")
+            check("hedef 22: 23/24 kuralları önerilmez", not {h["rule"] for h in h22} & {"util_is_removed", "fs_access_constants"}
+                  and "crypto_create_cipher" in {h["rule"] for h in h22})
+            h20, _r, _m = upgrade._collect("oldjs", "node", js, "20.17", "24.0", {}, force=True, head_sha_fn=lambda r: "sha1")
+            check("şimdiki 20: 15–20 kuralları önerilmez", not {h["rule"] for h in h20} & {"fs_rmdir_recursive", "node15_npm7_lockfile",
+                                                                                         "node15_unhandled_rejections"})
+            # Next.js taraması Node kurallarından etkilenmez
+            check("Next.js gezgini değişmedi (kök dosya / rapor süzgeci yalnız Node'da)",
+                  {r["key"] for r in modern._raw_rules("nextjs") if r.get("root_file")} == set())
+
+            # giderme planı: desteği biten Node imajı → izleme
+            ent = {"image": "node:14.21.3-bullseye-slim", "lang": "node", "version": "14.21.3", "via": ["node-14-21"],
+                   "users": {"anatolia": ["build/oldjs"], "russia": ["build/oldjs"]}, "eol": {"eol": "2023-04-30"}}
+            a = fx._plan_upgrade(None, ent, idx, lambda c, lang, r: None, lambda *x: None, False, lambda *x: "14.21")
+            check("giderme: Node imajı için izleme planlanır (hedef listenin sonuncusu)",
+                  a["kind"] == "yükseltme" and a["state"] == "yok" and [(u["repo"], u["to"]) for u in a["repos"]] == [("oldjs", kv[-1])], str(a)[:300])
+            a = fx._plan_upgrade(None, ent, idx, lambda c, lang, r: None, lambda *x: None, False, lambda *x: "24.3")
+            check("giderme: repo hedef majördeyse güncel", a["state"] == "güncel", str(a)[:200])
+            knobs["CREW_TECHDEBT_UPGRADE_NODE"] = False
+            a = fx._plan_upgrade(None, ent, idx, lambda c, lang, r: None, lambda *x: None, False, lambda *x: "14.21")
+            check("giderme: ayar kapalıyken eski davranış (elle)", a["state"] == "elle" and "Node sürümü izlenmiyor" in a["reason"], str(a))
+    finally:
+        pc.get = _get
+    # ayar tanımı
+    spec = pc._SCHEMA_BY_KEY.get("CREW_TECHDEBT_UPGRADE_NODE") or {}
+    check("ayar: şemada, bool, varsayılan kapalı", spec.get("type") == "bool" and spec.get("default") is False, str(spec))
+
+
 def test_upgrade_scan_take():
     """Yükseltme taraması ve alımı: mevcut modernleştirme yolunu (build_groups, board dedup,
     _open_tasks, Rector kuyruğu) yeniden kullanır; yalnız yükseltme kuralları + hedef araç
@@ -15421,6 +15678,7 @@ def main():
               test_php_modern_82_84, test_upgrade_php_rules, test_upgrade_plan_sites, test_upgrade_probe_and_blockers,
               test_upgrade_registry, test_upgrade_patch_sites, test_upgrade_image_template,
               test_upgrade_image_wiring,
+              test_upgrade_node,
               test_image_vuln_inventory, test_image_vuln_signals, test_image_vuln_hardening, test_image_vuln_settings, test_image_vuln_alerts, test_image_fix, test_image_fix_round1, test_image_fix_round2, test_image_fix_final, test_image_fix_promote_tag,
               test_upgrade_scan_take,
               test_upgrade_bump_sites,

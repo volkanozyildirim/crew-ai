@@ -38,7 +38,13 @@ LANGS = {
     "python": {"source": "py_modern", "label": "Python", "rules": _CONFIG / "modern_python_rules.yaml", "tool_fix": True},
     "nextjs": {"source": "next_modern", "label": "Next.js", "rules": _CONFIG / "modern_nextjs_rules.yaml",
                "tool_fix": False},
+    # Node.js ÇALIŞMA ZAMANI sürümü (Next.js çerçeve sürümünden ayrı eksen). Yalnız CREW_TECHDEBT_UPGRADE_NODE
+    # açıkken bir repoda algılanır (`detect_langs`); kapalıyken hiçbir listede / taramada görünmez.
+    "node": {"source": "node_modern", "label": "Node.js", "rules": _CONFIG / "modern_node_rules.yaml",
+             "tool_fix": False},
 }
+# Sürüm kapısını kataloğun `since`'i uygulayan diller (Go/Python'da kapıyı araç uygular).
+CATALOG_GATED = ("nextjs", "node")
 SOURCE_LANG = {v["source"]: k for k, v in LANGS.items()}
 BUILD_INDEX_CACHE = _CONFIG / "quality_build_index.yaml"
 SKIP_DIRS = {"node_modules", ".next", "dist", "build", "out", "vendor", ".git", ".venv", "venv", "public", "coverage"}
@@ -94,7 +100,97 @@ def detect_langs(root: Path) -> list[str]:
         out.append("nextjs")
     if any((root / f).is_file() for f in ("pyproject.toml", "requirements.txt", "setup.py", "setup.cfg")):
         out.append("python")
+    if node_on() and _is_node_repo(root, pkg, out):
+        out.append("node")
     return out
+
+
+def node_on() -> bool:
+    """Node.js sürüm izlemesi açık mı (CREW_TECHDEBT_UPGRADE_NODE, varsayılan kapalı; okunamazsa kapalı)."""
+    from agile_sdlc_crew import pipeline_config as pc
+    try:
+        return bool(pc.get("CREW_TECHDEBT_UPGRADE_NODE"))
+    except Exception:  # noqa: BLE001 — ayar okunamazsa yeni davranış kapalı
+        return False
+
+
+def _is_node_repo(root: Path, pkg: dict, others: list[str]) -> bool:
+    """Kökte package.json olan ve Node'un ÇALIŞMA ZAMANI olduğu repo: başka dili olmayan (ya da yalnız Next.js) saf
+    JS reposu, veya sürümünü kendisi bildiren repo (.nvmrc / .node-version / engines.node). PHP/Go/Python reposunun
+    varlık derlemesi için duran package.json'ı Node reposu saymaz — listede hedefi bilinmeyen satır olurdu."""
+    if not pkg:
+        return False
+    if any((root / f).is_file() for f in NODE_VERSION_FILES):
+        return True
+    if isinstance(pkg.get("engines"), dict) and pkg["engines"].get("node"):
+        return True
+    return not [x for x in others if x != "nextjs"]
+
+
+NODE_VERSION_FILES = (".nvmrc", ".node-version")
+# `node:14`, `node:14.21.3-bullseye-slim`, `…/prod-ar/node-14-21:1.0`, `…/node-24-22-3:1.0` (kendi taban imajımız).
+NODE_IMAGE = re.compile(r"(?:^|/)node(?:-(\d+)-(\d+)|:(\d+)(?:\.(\d+))?)", re.ASCII)
+# Node LTS kod adları (.nvmrc `lts/fermium`): ad → majör.
+NODE_LTS = {"argon": 4, "boron": 6, "carbon": 8, "dubnium": 10, "erbium": 12, "fermium": 14, "gallium": 16,
+            "hydrogen": 18, "iron": 20, "jod": 22, "krypton": 24}
+
+
+def node_image_version(image: str) -> tuple[int, int] | None:
+    """Node imajının (majör, minör) sürümü; yalnız majör etiketinde minör 0 (`node:14-alpine` → (14, 0))."""
+    m = NODE_IMAGE.search(image or "")
+    if not m:
+        return None
+    g = [x for x in m.groups() if x is not None]
+    return int(g[0]), int(g[1]) if len(g) > 1 else 0
+
+
+def is_node_image(image: str) -> bool:
+    """Ad olarak Node imajı mı (sürümü okunamasa da): `node:lts`, `node:${NODE_VERSION}-alpine`, `…/node-14-21:1.0`.
+    Alt dize araması `node-exporter` gibi imajları da Node sayardı."""
+    return re.search(r"(?:^|/)node(?::|-\d+-\d+|$)", image or "", re.ASCII) is not None
+
+
+def node_file_version(text: str) -> tuple[int, int] | None:
+    """`.nvmrc` / `.node-version` ilk satırı: `24`, `v24.21.0`, `24.21`, `lts/krypton`. Okunamazsa None."""
+    line = next((ln.strip() for ln in (text or "").splitlines() if ln.strip() and not ln.strip().startswith("#")), "")
+    m = re.fullmatch(r"v?(\d+)(?:\.(\d+))?(?:\.\d+)?", line, re.ASCII)
+    if m:
+        return int(m.group(1)), int(m.group(2) or 0)
+    name = line.lower().removeprefix("lts/")
+    return (NODE_LTS[name], 0) if line.lower().startswith("lts/") and name in NODE_LTS else None
+
+
+def _node_target(root: Path, images: list[str]) -> dict:
+    """Şimdiki Node sürümü: üretim (FLODevOps imajlarının EN DÜŞÜĞÜ) → repo Dockerfile → .nvmrc / .node-version →
+    package.json engines.node. Üretim kazanır: aynı kod en eski imajda da çalışmak zorunda."""
+    def low(imgs):
+        vs = [v for v in (node_image_version(i) for i in imgs) if v]
+        return min(vs) if vs else None
+
+    def hit(v, source):
+        return {"version": f"{v[0]}.{v[1]}", "source": source, "images": images}
+    v = low(images)
+    if v:
+        return hit(v, "flodevops")
+    try:
+        v = low(re.findall(r"(?im)^FROM\s+(?:--\S+\s+)?(\S+)", (root / "Dockerfile").read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError):
+        v = None
+    if v:
+        return hit(v, "Dockerfile")
+    for f in NODE_VERSION_FILES:
+        try:
+            v = node_file_version((root / f).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            v = None
+        if v:
+            return hit(v, f)
+    eng = (_package_json(root).get("engines") or {})
+    raw = str(eng.get("node") or "") if isinstance(eng, dict) else ""
+    m = re.search(r"(\d+)(?:\.(\d+))?", raw, re.ASCII)
+    if m:
+        return hit((int(m.group(1)), int(m.group(2) or 0)), "package.json")
+    return {"version": None, "source": None, "images": images}
 
 
 def _package_json(root: Path) -> dict:
@@ -176,6 +272,8 @@ def target(client, repo: str, root: Path, lang: str, *, index: dict | None = Non
             if m:
                 return {"version": f"{m.group(1)}.{m.group(2)}", "source": f, "images": images}
         return {"version": None, "source": None, "images": images}
+    if lang == "node":
+        return _node_target(root, images)
     if lang == "nextjs":
         pkg = _package_json(root)
         raw = str({**(pkg.get("devDependencies") or {}), **(pkg.get("dependencies") or {})}.get("next") or "")
@@ -268,11 +366,42 @@ def _js_files(root: Path):
                 yield Path(dirpath) / f
 
 
-def next_hits(root: Path) -> tuple[list[dict], list[str]]:
-    """Katalog desenleri (yorum satırları atlanır; çok satırlı desen tüm metinde aranır)."""
+ROOT_FILE_MAX = 200_000     # kök dosya kuralı (package-lock.json çok büyük olabilir): yalnız baştaki bu kadar bayt
+
+
+def node_hits(root: Path) -> tuple[list[dict], list[str]]:
+    """Node kataloğu: JS/TS dosyalarındaki desenler (`next_hits` ile aynı gezgin) + `root_file` kuralları
+    (package.json / package-lock.json gibi kökteki TEK dosyada aranan desen). Depo kodu çalıştırılmaz."""
+    root = Path(root)
+    hits, errors = next_hits(root, lang="node")
+    for r in _raw_rules("node"):
+        name = str(r.get("root_file") or "")
+        if not name or not r.get("pattern") or "/" in name or name.startswith("."):
+            continue
+        p = root / name
+        try:
+            if p.is_symlink() or not p.is_file():
+                continue
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read(ROOT_FILE_MAX)
+        except OSError:
+            continue
+        lines = text.splitlines()
+        for m in re.finditer(r["pattern"], text, re.S):
+            n = text.count("\n", 0, m.start()) + 1
+            hits.append({"rule": r["key"], "file": name, "line": n,
+                         "text": (lines[n - 1].strip() if n <= len(lines) else "")[:200], "message": ""})
+    return hits, errors
+
+
+def next_hits(root: Path, lang: str = "nextjs") -> tuple[list[dict], list[str]]:
+    """Katalog desenleri (yorum satırları atlanır; çok satırlı desen tüm metinde aranır). `root_file` kuralları
+    (Node) burada aranmaz."""
     root = Path(root)
     compiled = []
-    for r in _raw_rules("nextjs"):
+    for r in _raw_rules(lang):
+        if r.get("root_file") or (lang == "node" and not r.get("pattern")):
+            continue        # Node'un desensiz kuralı rapor kuralıdır (dosya taraması yok); Next.js'te desensiz = her dosya
         compiled.append((r["key"], re.compile(r["pattern"], re.S) if r.get("pattern") else None,
                          re.compile(r["file_pattern"]) if r.get("file_pattern") else None))
     hits = []
@@ -351,6 +480,8 @@ def _hits(root: Path, lang: str, version: str, force: bool) -> tuple[list[dict],
         hits, errors = go_hits(root)
     elif lang == "python":
         hits, errors = py_hits(root, version)
+    elif lang == "node":
+        hits, errors = node_hits(root)
     else:
         hits, errors = next_hits(root)
     for h in hits:
@@ -405,7 +536,7 @@ def scan(client, repo: str, lang: str, *, team: str = "", force: bool = False, d
     rules = _rules_with_generics(lang, hits)
     rules_by_key = {r.key: r for r in rules}
     # Go/Python'da sürüm kapısını araç uyguluyor; katalog `since`'i yalnız bilgi
-    version = tv["version"] if lang == "nextjs" else "99.0"
+    version = tv["version"] if lang in CATALOG_GATED else "99.0"
     groups, skipped, summary = php_modern.build_groups({"hits": hits}, rules, version, repo=repo,
                                                        board_index=deps.board(client), now=deps.now(), cfg=cfg,
                                                        source=LANGS[lang]["source"], tool_fix=LANGS[lang]["tool_fix"])
@@ -452,7 +583,7 @@ def take(client, repo: str, lang: str, group_ids: list[str], *, team: str = "", 
             raise ValueError(f"Hedef {LANGS[lang]['label']} sürümü bilinmiyor")
         hits, _e, _sha = _hits(root, lang, tv["version"], False)
         rules = _rules_with_generics(lang, hits)
-        version = tv["version"] if lang == "nextjs" else "99.0"
+        version = tv["version"] if lang in CATALOG_GATED else "99.0"
         groups, _s, _sum = php_modern.build_groups({"hits": hits}, rules, version, repo=repo,
                                                    board_index=deps.board(client), now=deps.now(), cfg=cfg,
                                                    source=LANGS[lang]["source"], tool_fix=LANGS[lang]["tool_fix"])

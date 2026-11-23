@@ -5,3 +5,26 @@ go: ["1.22", "1.23", "1.24", "1.25", "1.26", "1.27"]
 nextjs: ["13.0", "14.0", "15.0"]
 # Next.js majörünün desteklediği en düşük react sürümü (eş bağımlılık engeli için).
 nextjs_peer_react: {"13.0": "18.2", "14.0": "18.2", "15.0": "18.2"}
+# Node.js: uyumluluk hattı MAJÖRDÜR — sürümler "<majör>.0" yazılır ("24.0" = Node 24.x). Yalnız desteği süren LTS
+# hatları; varsayılan hedef listenin sonuncusudur. Node 26 (LTS 2026-10-28) taban imajı hazır olunca eklenir.
+node: ["22.0", "24.0"]
+# Hedef Node majöründe çalışmayan bağımlılıklar (package.json'da bildirilen sürüme bakılır; engel iş açmaz).
+#   min:  {"<Node majörü>.0": "<paketin en düşük sürümü>"} — hedefe kadarki en yüksek eşik uygulanır
+#   dead: bu Node sürümünden itibaren paketin HİÇBİR sürümü çalışmaz
+node_dep_blockers:
+  node-sass:
+    min: {"16.0": "6.0", "17.0": "7.0", "18.0": "8.0", "20.0": "9.0"}
+    dead: "21.0"
+    fix: "node-sass desteği bitti (Node 20'den sonrası yok); `sass` (Dart Sass) paketine geçilmeli"
+  fibers:
+    dead: "16.0"
+    fix: "fibers Node 16 ve sonrasıyla uyumsuz; async/await'e geçilmeli"
+  webpack:
+    min: {"17.0": "5.0"}
+    fix: "webpack 4, OpenSSL 3'te (Node 17+) md4 özetiyle ERR_OSSL_EVP_UNSUPPORTED verir; webpack 5'e geçilmeli"
+  react-scripts:
+    min: {"17.0": "5.0"}
+    fix: "react-scripts 4 webpack 4 kullanır (Node 17+ OpenSSL 3'te çalışmaz); react-scripts 5'e geçilmeli"
+  "@vue/cli-service":
+    min: {"17.0": "5.0"}
+    fix: "@vue/cli-service 4 webpack 4 kullanır (Node 17+ OpenSSL 3'te çalışmaz); 5'e geçilmeli"

@@ -84,6 +84,30 @@ class Resolver:
             self._cache[key] = (self._clock(), out)
         return out
 
+    def latest_in_major(self, name: str, major: int) -> str | None:
+        """`("node", 24) → "24.22.3"`: majörün en yeni tam sürümü (Node'da uyumluluk hattı majördür). Önce elle
+        sabitleme (`patch: {node: {"24.0": "24.22.3"}}`), sonra Hub'ın en yeni 100 etiketindeki en büyük
+        `<majör>.B.C` (çeşit ekli etiketler de sayılır: `24.22.3-alpine`). Okunamazsa None."""
+        if name not in _NAMES or isinstance(major, bool) or not isinstance(major, int) or not 0 < major < 1000:
+            return None
+        pinned = str((self._patches.get(name) or {}).get(f"{major}.0") or "")
+        if re.fullmatch(rf"{major}\.\d+\.\d+", pinned, re.ASCII):
+            return pinned
+        key = ("major", name, major)
+        hit, val = self._cached(key)
+        if hit:
+            return val
+        res = self._get(f"{HUB}/{name}/tags?name={major}.&page_size=100")
+        if not res or res[0] != 200 or res[1] is None:
+            return None
+        pat = re.compile(rf"^{major}\.(\d+)\.(\d+)(?:-|$)", re.ASCII)
+        vs = [(int(m.group(1)), int(m.group(2))) for r in (res[1].get("results") or []) if isinstance(r, dict)
+              and isinstance(r.get("name"), str) and (m := pat.match(r["name"]))]
+        out = f"{major}.{max(vs)[0]}.{max(vs)[1]}" if vs else None
+        if out:
+            self._cache[key] = (self._clock(), out)
+        return out
+
     def tag_exists(self, name: str, tag: str) -> bool | None:
         """200 → True, 404 → False, diğer / hata → None."""
         if name not in _NAMES or not isinstance(tag, str) or not _TAG_RE.fullmatch(tag):

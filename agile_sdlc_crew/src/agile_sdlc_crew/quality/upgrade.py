@@ -88,12 +88,25 @@ def known_versions(lang: str) -> list[str]:
 
 
 def _image_version(image: str, lang: str) -> tuple[int, int] | None:
+    if lang == "node":
+        from agile_sdlc_crew.quality import modern
+        return modern.node_image_version(image)
     rx = _IMG_RES.get(lang)
     m = rx.search(image or "") if rx else None
     if not m:
         return None
     g = [x for x in m.groups() if x is not None]
     return int(g[0]), int(g[1])
+
+
+def _lang_image(image: str, lang: str) -> bool:
+    """Sürümü okunamayan imaj yine de bu dilin imajı mı (kapı kapalı kalsın diye). Node'da ad kalıbı aranır:
+    alt dize `node-exporter`ı da Node sayardı."""
+    if lang == "node":
+        from agile_sdlc_crew.quality import modern
+        return modern.is_node_image(image)
+    name = _LANG_IMG_NAME.get(lang, "")
+    return bool(name) and name in (image or "")
 
 
 def _all_images(index: dict) -> list[str]:
@@ -230,11 +243,62 @@ def _library_tag_ok(new: str, lang: str, resolver) -> bool:
                 and resolver.tag_exists(name, _tag(new)) is True)
 
 
+_NODE_OWN = re.compile(r"((?:[^/\s@]+/)+)node-(\d+)-(\d+)(?:-(\d+))?(:[\w][\w.\-]*)?", re.ASCII)
+_NODE_LIB = re.compile(r"((?:docker\.io/)?(?:library/)?node:)(\d+)(?:\.(\d+))?(?:\.(\d+))?(-[\w.\-]+)?", re.ASCII)
+_NODE_PLAIN = ("", "-alpine", "-slim")   # dağıtım kod adı taşımayan ek: yeni majörde de var sayılabilir
+
+
+def _node_image(region_images, img: str, to: str, resolver=None, *, prod: bool) -> tuple[str, str]:
+    """(yeni imaj, engel) — Node'da hedef MAJÖRDÜR (`24.0` = 24.x).
+    Kendi taban imajımız (`…/node-14-21:1.0`): dizin adı tahmin edilmez (DevOps `node-24-22-3` gibi adlar veriyor);
+    yeni imaj, AYNI bölge reposunda AYNI kayıt önekiyle kullanılan hedef majörün en yeni imajıdır — yoksa
+    `imaj yayınlanmamış`. Genel imaj: yalnız majör etiketi (`node:14-alpine`) majörle yazılır; minör / yama taşıyan
+    etiket çözücüyle (majörün en yeni sürümü) yazılır, çözülemezse elle. Dağıtım kod adlı ek (`-bullseye-slim`) yeni
+    majörde olmayabilir: etiket Hub'da kanıtlanmadan yazılmaz. Özetle sabitlenmiş imaj hiçbir yolda yazılmaz."""
+    major = _v(to)[0]
+    hand = (img, CI_HAND)
+    if "@" in img:
+        return hand
+    own = _NODE_OWN.fullmatch(img)
+    if own:
+        best = None
+        for cand in region_images or ():
+            c = _NODE_OWN.fullmatch(cand)
+            if c and c.group(1) == own.group(1) and int(c.group(2)) == major:
+                key = (int(c.group(3)), int(c.group(4) or 0), cand)
+                best = key if best is None or key > best else best
+        if best:
+            return best[2], ""
+        return (img, UNPUBLISHED) if prod else hand
+    lib = _NODE_LIB.fullmatch(img)
+    if not lib:
+        return hand
+    head, suffix = lib.group(1), lib.group(5) or ""
+    if lib.group(3) is None:
+        ver = str(major)
+    else:
+        full = resolver.latest_in_major("node", major) if resolver else None
+        if not full:
+            return hand
+        ver = full if lib.group(4) is not None else full.rpartition(".")[0]
+    new = f"{head}{ver}{suffix}"
+    if prod and new in (region_images or set()):
+        return new, ""
+    exists = resolver.tag_exists("node", ver + suffix) if resolver else None
+    if exists is True:
+        return new, ""
+    if exists is False or lib.group(3) is not None or suffix not in _NODE_PLAIN:
+        return hand
+    return (new, UNPUBLISHED) if prod else (new, "")
+
+
 def _prod_image(region_images, img: str, lang: str, to: str, *, resolver=None) -> tuple[str, str]:
     """(yeni imaj, engel). Spec §2 imaj kanıtı: yeni imaj aynı bölge reposunda başka bir serviste kullanılıyor ya da
     genel imajsa Docker Hub'da var. Üç parçalı etiket yama sürümüyle (`resolver.latest_patch`) yazılır; çözülemezse
     ya da genel imajın etiketi yoksa elle (`CI_HAND`, yeni == eski). `_devops_sites` ve `selectable` aynı yüklemi
     kullanır."""
+    if lang == "node":
+        return _node_image(region_images, img, to, resolver, prod=True)
     name = _LANG_IMG_NAME.get(lang)
     if "@" in img:   # özetle (digest) sabitlenmiş: etiketi değişirse özet eski imaja kalır — hiçbir yolda (çözücüsüz de) yazılmaz
         return img, CI_HAND
@@ -264,7 +328,6 @@ def selectable(lang: str, current: str, index: dict, services: dict | None = Non
     (`_image_ok`); reponun FLODevOps servisi yoksa True. Verilmezse eski davranış (imaj sürümü görülmüş mü)."""
     pub = published(lang, index)
     regions = _region_images(index) if services is not None else {}
-    name = _LANG_IMG_NAME.get(lang, "")
 
     def ok(v: str) -> bool:
         if services is None:
@@ -274,7 +337,7 @@ def selectable(lang: str, current: str, index: dict, services: dict | None = Non
             for img in images:
                 iv = _image_version(img, lang)
                 if iv is None:
-                    if name and name in img:      # dil imajı ama sürümü okunamıyor: kanıtlanamaz
+                    if _lang_image(img, lang):    # dil imajı ama sürümü okunamıyor: kanıtlanamaz
                         return False
                     continue
                 if iv < _v(v) and not _image_ok(regions.get(region, set()), img, lang, v, resolver=resolver):
@@ -302,7 +365,7 @@ def _site(where, repo, project, branch, path, line, old, new, blocked="") -> dic
             "line": line, "old": old, "new": new, "blocked": blocked}
 
 
-_LANG_IMG_NAME = {"php": "php", "python": "python", "go": "golang"}
+_LANG_IMG_NAME = {"php": "php", "python": "python", "go": "golang", "node": "node"}
 RANGE_BLOCK = "sürüm kısıtı elle düzenlenmeli"
 CI_HAND = "sürüm satırı elle düzenlenmeli"
 NO_LINE = "Dockerfile satırı bulunamadı"
@@ -327,7 +390,6 @@ def _devops_sites(client, repo, lang, to, index, read, per_src=None, *, resolver
     from agile_sdlc_crew.quality import app_map as am
     by_devrepo = _region_images(index)
     rd = read or (lambda d, p: am._read(client, d, p))
-    name = _LANG_IMG_NAME.get(lang, "")
     out = []
     for src, images in sorted(_devops_services(repo, lang, index, per_src).items()):
         devrepo, _, rest = src.partition("/")
@@ -336,7 +398,7 @@ def _devops_sites(client, repo, lang, to, index, read, per_src=None, *, resolver
         for img in images:
             v = _image_version(img, lang)
             if v is None:
-                if name and name in img:  # dil imajı ama sürüm okunamıyor: hedefin altında olabilir
+                if _lang_image(img, lang):  # dil imajı ama sürüm okunamıyor: hedefin altında olabilir
                     out.append(_site("devops", devrepo, am.DEVOPS_PROJECT, am.DEVOPS_BRANCH, path, 0, img, img,
                                      "imaj sürümü okunamadı"))
                 continue
@@ -361,7 +423,7 @@ def _ci_sites(client, repo, lang, to, yml_files, *, resolver=None) -> list[dict]
 
 # Yalnız enjekte edilen `yml_files` yolu (testler): dosyaların hangi repoda durduğu verilmez, bu adla etiketlenir.
 _INJECTED_SRC = {"repo": "yml-files", "project": "EcomBackend", "branch": "main"}
-_CI_KEYS = {"php": "phpVersion", "python": "pythonVersion", "go": "goVersion"}
+_CI_KEYS = {"php": "phpVersion", "python": "pythonVersion", "go": "goVersion", "node": "nodeVersion"}
 
 
 def _ci_scan(client, repo, lang, to, yml_files, *, resolver=None) -> tuple[list[dict], list[dict] | None]:
@@ -554,9 +616,12 @@ def _parse_ci_file(text: str, path: str, lang: str, to: str, src: dict, *,
 # UsePythonVersion@0 versionSpec). Görev adı tırnaklı olabilir, satır sonunda yorum olabilir.
 _CI_TASKS = {"go": (re.compile(r"""^(\s*)-\s*task:\s*(['"]?)(GoTool@\d+)\2\s*(?:#.*)?$"""), "version"),
              "python": (re.compile(r"""^(\s*)-\s*task:\s*(['"]?)(UsePythonVersion@\d+)\2\s*(?:#.*)?$"""),
-                        "versionSpec")}
+                        "versionSpec"),
+             # NodeTool@0 `versionSpec`, UseNode@1 `version` (anahtar bir regex parçasıdır)
+             "node": (re.compile(r"""^(\s*)-\s*task:\s*(['"]?)((?:NodeTool|UseNode)@\d+)\2\s*(?:#.*)?$"""),
+                      "(?:versionSpec|version)")}
 _CI_IMAGE_KEY = re.compile(r"^\s*(?:-\s*)?(image|container)\s*:(.*)$")
-_CI_IMG_NAME = {"go": "golang", "python": "python"}
+_CI_IMG_NAME = {"go": "golang", "python": "python", "node": "node"}
 
 
 def _unquote(value: str) -> tuple[str, str, str]:
@@ -581,9 +646,46 @@ def _ci_pin(src: dict, path, line, **kw) -> dict:
     return {"repo": src["repo"], "project": src["project"], "branch": src["branch"], "path": path, "line": line, **kw}
 
 
+def _node_ver_text(inner: str, to: str, resolver) -> str | None:
+    """Node sürüm metninin hedef majördeki karşılığı (`14.x` → `24.x`, `v14` → `v24`, `14.21.3` → majörün en yeni
+    tam sürümü — çözücüyle). Yazılamıyorsa None (elle)."""
+    mm = re.fullmatch(r"(v?)(\d+)(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?", inner or "", re.ASCII)
+    if not mm:
+        return None
+    major = _v(to)[0]
+    a, b = mm.group(3), mm.group(4)
+    if a is None or not a.isdigit():
+        return f"{mm.group(1)}{major}" + (f".{a}" if a else "") + (f".{b}" if b else "")
+    full = resolver.latest_in_major("node", major) if resolver else None
+    if not full:
+        return None
+    p = full.split(".")
+    return f"{mm.group(1)}{p[0]}.{p[1]}" + (f".{p[2]}" if b and b.isdigit() else f".{b}" if b else "")
+
+
+def _node_ver(inner: str) -> tuple[int, int] | None:
+    """`14.x` → (14, 0), `v14.21.3` → (14, 21); okunamazsa None."""
+    mm = re.fullmatch(r"v?(\d+)(?:\.(\d+|[xX*]))?(?:\.(?:\d+|[xX*]))?", inner or "", re.ASCII)
+    if not mm:
+        return None
+    return int(mm.group(1)), int(mm.group(2)) if (mm.group(2) or "").isdigit() else 0
+
+
 def _ci_value_pin(out, pins, value, path, i, src, to, *, lang=None, resolver=None) -> None:
     """`phpVersion: '8.2'` / GoTool `version:` / `versionSpec:` değeri."""
     raw, q, inner = _unquote(value)
+    if lang == "node":
+        # Node'da `14.x` / `20` olağan yazımdır (majör hattı): okunamayan sayılmaz, majörle yazılır.
+        nv = _node_ver(inner)
+        if nv is None:
+            pins.append(_ci_pin(src, path, i, version="", unparsed=inner[:40]))
+            return
+        pins.append(_ci_pin(src, path, i, version=_fmt(nv)))
+        if nv < _v(to):
+            new = _node_ver_text(inner, to, resolver)
+            out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, raw,
+                             f"{q}{new}{q}" if new else raw, "" if new else CI_HAND))
+        return
     mm = re.fullmatch(r"(\d+)\.(\d+)(\.\d+)?", inner)
     if not mm:
         # `3.x`, `$(var)`, `8` …: sürüm okunamıyor — kapı kapalı kalır, satırı insan düzenler
@@ -618,6 +720,8 @@ def _ci_image_pin(out, pins, key, value, lang, path, i, src, to, *, resolver=Non
         tag = (m.group(1) or "").split("-")[0]
         tm = re.fullmatch(r"(\d+)\.(\d+)(\.\d+)?", tag)
         v = (int(tm.group(1)), int(tm.group(2))) if tm else None
+        if lang == "node":      # `node:14-alpine`: yalnız majör etiketi olağandır
+            v = _image_version(img, lang)
     if key == "container" and ":" not in img:
         return
     if not v:
@@ -626,6 +730,10 @@ def _ci_image_pin(out, pins, key, value, lang, path, i, src, to, *, resolver=Non
     ver = _fmt(v)
     pins.append(_ci_pin(src, path, i, version=ver))
     if v < _v(to):
+        if lang == "node":
+            new, blocked = _node_image(None, img, to, resolver, prod=False)
+            out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, new, blocked))
+            return
         new = image_for(img, lang, to)
         if "@" in img:   # özetle sabitlenmiş imaj hiçbir yolda yeniden yazılmaz (çözücüsüz de; bilinçli hata düzeltmesi)
             out.append(_site("ci", src["repo"], src["project"], src["branch"], path, i, img, img, CI_HAND))
@@ -696,6 +804,8 @@ def _code_sites(repo, root: Path, lang, to, *, resolver=None) -> list[dict]:
             m = re.match(r"^\s*(\d+\.\d+(?:\.\d+)?)\s*$", ln)
             if m and _v(m.group(1)) < _v(to):
                 add(".python-version", i, m.group(1), to)
+    elif lang == "node":
+        out += _node_code_sites(repo, rd, to, resolver)
     if lang in ("php", "python", "go"):
         for i, ln in enumerate(rd("Dockerfile").splitlines(), 1):
             m = re.match(r"(?i)\s*FROM\s+(?:--\S+\s+)?(\S+)", ln)
@@ -708,6 +818,59 @@ def _code_sites(repo, root: Path, lang, to, *, resolver=None) -> list[dict]:
                     add("Dockerfile", i, m.group(1), new or m.group(1), "" if new else CI_HAND)
                 else:
                     add("Dockerfile", i, m.group(1), image_for(m.group(1), lang, to))
+    return out
+
+
+def _node_code_sites(repo, rd, to: str, resolver) -> list[dict]:
+    """Kod reposunda Node sürümünün yazdığı yerler: `.nvmrc` / `.node-version`, package.json `engines.node` (ve aynı
+    değeri taşıyan `"node": "…"` satırları, ör. volta) ve repo Dockerfile'ı. Aralık / `||` kısıtı ve LTS kod adı
+    (`lts/fermium`) yeniden yazılmaz — elle."""
+    from agile_sdlc_crew.quality import modern
+    out = []
+
+    def add(path, line, old, new, blocked=""):
+        out.append(_site("code", repo, "", "", path, line, old, new, blocked))
+    for name in modern.NODE_VERSION_FILES:
+        for i, ln in enumerate(rd(name).splitlines(), 1):
+            raw = ln.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            fv = modern.node_file_version(raw)
+            if fv and fv < _v(to):
+                new = _node_ver_text(raw, to, resolver)
+                add(name, i, raw, new or raw, "" if new else CI_HAND)
+            break       # yalnız ilk anlamlı satır sürümdür
+    text = rd("package.json")
+    try:
+        doc = json.loads(text) or {}
+    except ValueError:
+        doc = {}
+    eng = doc.get("engines") if isinstance(doc, dict) else None
+    val = str(eng.get("node") or "") if isinstance(eng, dict) else ""
+    majors = [int(x) for x in re.findall(r"(?<![\d.])(\d+)(?:\.[\dxX*]+)*", val, re.ASCII)]
+    if val and majors and min(majors) < _v(to)[0]:
+        m = re.fullmatch(r"\s*(>=|\^|~|=)?\s*(v?\d+(?:\.(?:\d+|[xX*])){0,2})\s*", val, re.ASCII)
+        new = None
+        if m and not _range_hard(val):
+            tok = m.group(2)
+            if (m.group(1) or "") in (">=", "^"):
+                # alt sınır: majör hedefe, sonraki sayısal parçalar 0'a (`^14.21.0` → `^24.0.0`)
+                head, *rest = tok.lstrip("v").split(".")
+                bumped = ".".join([str(_v(to)[0])] + ["0" if p.isdigit() else p for p in rest])
+                new_tok = ("v" if tok.startswith("v") else "") + bumped
+            else:
+                new_tok = _node_ver_text(tok, to, resolver)
+            if new_tok:
+                new = val.replace(tok, new_tok, 1)
+        for i, ln in enumerate(text.splitlines(), 1):
+            if re.search(rf'"node"\s*:\s*"{re.escape(val)}"', ln) and ln.count(val) == 1:
+                add("package.json", i, val, new or val, "" if new else RANGE_BLOCK)
+    for i, ln in enumerate(rd("Dockerfile").splitlines(), 1):
+        m = re.match(r"(?i)\s*FROM\s+(?:--\S+\s+)?(\S+)", ln)
+        v = _image_version(m.group(1), "node") if m else None
+        if v and v < _v(to):
+            new, blocked = _node_image(None, m.group(1), to, resolver, prod=False)
+            add("Dockerfile", i, m.group(1), new, blocked)
     return out
 
 
@@ -1128,6 +1291,44 @@ def _nextjs_peer_blockers(root: Path, to: str) -> list[dict]:
     return out
 
 
+def _node_dep_blockers(root: Path, to: str) -> list[dict]:
+    """Hedef Node majöründe çalışmayan bağımlılıklar (`upgrade_targets.yaml` `node_dep_blockers`): package.json'da
+    BİLDİRİLEN sürüme bakılır (kilit dosyası değil — düzeltme de bildirimi değiştirir)."""
+    try:
+        data = yaml.safe_load(TARGETS_PATH.read_text(encoding="utf-8")) or {}
+        pkg = json.loads((root / "package.json").read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, yaml.YAMLError):
+        return []
+    table = data.get("node_dep_blockers") if isinstance(data, dict) else None
+    if not isinstance(table, dict) or not isinstance(pkg, dict):
+        return []
+    deps: dict = {}
+    for k in ("optionalDependencies", "devDependencies", "dependencies"):
+        if isinstance(pkg.get(k), dict):
+            deps.update(pkg[k])
+    major = _v(to)[0]
+    out = []
+    for name in sorted(table, key=str):
+        spec, declared = table[name], deps.get(name)
+        if not isinstance(spec, dict) or not isinstance(declared, str):
+            continue
+        fix = str(spec.get("fix") or "")
+        tail = f" — {fix}" if fix else ""
+        dead = str(spec.get("dead") or "")
+        if _VER_RE.match(dead) and _v(to) >= _v(dead):
+            out.append({"kind": "dependency", "name": str(name), "constraint": declared,
+                        "detail": f"{name} {declared}: Node {major} ile çalışmaz{tail}"})
+            continue
+        mins = spec.get("min") if isinstance(spec.get("min"), dict) else {}
+        need = max((_v(str(v)) for k, v in mins.items()
+                    if _VER_RE.match(str(k)) and _VER_RE.match(str(v)) and _v(str(k)) <= _v(to)), default=None)
+        m = re.match(r"[\^~>=<v\s]*(\d+)(?:\.(\d+))?", declared, re.ASCII)
+        if need and m and (int(m.group(1)), int(m.group(2) or 0)) < need:
+            out.append({"kind": "dependency", "name": str(name), "constraint": declared,
+                        "detail": f"{name} {declared}: Node {major} en az {name} {_fmt(need)} ister{tail}"})
+    return out
+
+
 def blockers(root: Path, lang: str, to: str) -> list[dict]:
     """Yükseltmeyi engelleyen bağımlılıklar (iş açmaz, hazır olmayı bekletir).
     PHP: `composer.lock` paketinin `require.php` kısıtı hedefi dışlıyorsa."""
@@ -1135,6 +1336,8 @@ def blockers(root: Path, lang: str, to: str) -> list[dict]:
         return []
     if lang == "nextjs":
         return _nextjs_peer_blockers(Path(root), to)
+    if lang == "node":
+        return _node_dep_blockers(Path(root), to)
     if lang != "php":
         return []
     try:
@@ -1270,6 +1473,24 @@ def _next_hits(root: Path, current: str, keys: set[str], force: bool) -> tuple[l
     return hits, errors
 
 
+def _node_hits(root: Path, current: str, rules: dict, force: bool) -> tuple[list[dict], list[str]]:
+    """Node katalog desenleri (modern._hits, önbellekli) + taranamayan davranış değişiklikleri: desensiz `report`
+    kuralları package.json'ın ilk satırına iliştirilir (kartta sayı; iş açılmaz — Go'nun go.mod kuralları gibi)."""
+    from agile_sdlc_crew.quality import modern
+    found, errors, _sha = modern._hits(root, "node", current, force)
+    hits = [dict(h) for h in found if h.get("rule") in rules]
+    scanned = {str(r.get("key")) for r in modern._raw_rules("node") if r.get("pattern")}
+    try:
+        with open(Path(root) / "package.json", encoding="utf-8", errors="replace") as f:
+            first = f.readline().strip()[:200]
+    except OSError:
+        return hits, errors
+    for k in sorted(rules):
+        if rules[k].kind == "report" and k not in scanned:
+            hits.append({"rule": k, "file": "package.json", "line": 1, "text": first, "module": "."})
+    return hits, errors
+
+
 def _probe_cached(repo: str, lang: str, root: Path, sha: str, current: str, to: str, force: bool,
                   probe_fn=None) -> tuple[list[dict], dict]:
     """Hedef araçla doğrulama, süreç içi önbellekli (repo × HEAD × hedef; *Yeniden tara* atlar)."""
@@ -1306,6 +1527,8 @@ def _collect(repo: str, lang: str, root: Path, current: str, to: str, cfg: dict,
             hits = python_hits(root, keys)
         elif lang == "nextjs":
             hits, errors = _next_hits(root, current, keys, force)
+        elif lang == "node":
+            hits, errors = _node_hits(root, current, {r.key: r for r in rules}, force)
         else:
             hits = _go_report_hits(root, {r.key for r in rules if r.kind == "report"})
         files = len({h["file"] for h in hits})
