@@ -210,6 +210,10 @@ def start(client, repo: str, lang: str, *, to: str | None = None, team: str, dep
         it = _root_iteration(client, team)
         if it:
             fields["System.IterationPath"] = it
+        # Org'un Task tipindeki zorunlu özel alanlar (Custom.ARGEType): onlarsız Azure 400 (TF401320) döner ve
+        # izleme hiç açılamaz — kırmızı build Task'ı (`_red_build_task`) ile aynı kaynak.
+        for k, v in (deps.cfg().get("task_fields") or {}).items():
+            fields.setdefault(k, v)
         wi = client.create_work_item("Task", fields)
     log.info(f"⬆️ Yükseltme izleme işi açıldı: #{wi['id']} ({key})")
     return {"id": int(wi["id"]), "created": True, "lang": lang, "repo": repo, "to": tgt}
