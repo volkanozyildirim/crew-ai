@@ -566,6 +566,13 @@ SCHEMA: list[dict] = [
         "desc": "Yayınlanmamış taban imaj için base-images reposuna şablon PR'ı açar (imajı üretmez; DevOps yayınlar).",
     },
     {
+        "key": "CREW_TECHDEBT_UPGRADE_NODE",
+        "label": "Yükseltme · Node.js sürümü de izlensin",
+        "type": "bool",
+        "default": False,
+        "desc": "Node.js çalışma zamanı sürümünü (Next.js çerçeve sürümünden ayrı) izlenen dillere ekler: saf JS repoları Sürüm yükseltme listesinde görünür, desteği biten Node imajı için 'Gidermeyi başlat' izleme açar. Hedef majördür (ör. 24.0 = Node 24.x); hedef sürümün aracıyla doğrulama yoktur, yalnız katalog ve bağımlılık engelleri.",
+    },
+    {
         "key": "CREW_TECHDEBT_IMAGE_VULN",
         "label": "Teknik borç · taban imaj güvenliği",
         "type": "bool",

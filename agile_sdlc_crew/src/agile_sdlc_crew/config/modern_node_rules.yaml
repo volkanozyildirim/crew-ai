@@ -1,0 +1,204 @@
+# Node.js sürüm yükseltme kataloğu — LLM'siz desen taraması (quality/modern.py `node_hits`).
+# Node'da uyumluluk hattı MAJÖRDÜR: since "22.0" = Node 22'de geldi. Hedef sürümler config/upgrade_targets.yaml `node`.
+# Bütün kurallar yükseltme dalının eklediği kurallardır (`upgrade_catalog: true`): modernleştirme hattında yalnız
+# CREW_TECHDEBT_UPGRADE açıkken görünür.
+# pattern: JS/TS dosyalarında (node_modules/dist/build hariç) aranan düzenli ifade; yorum satırları atlanır.
+# root_file: desen JS dosyalarında değil, repo kökündeki bu TEK dosyada aranır (ör. package-lock.json).
+# kind: report + desensiz kural: taranamayan davranış değişikliği — package.json'a iliştirilir, iş açmaz (kartta sayı).
+# Sürüm bilgileri nodejs.org/api/deprecations.html geçmiş tablolarından (2026-11-23'te doğrulandı).
+version: 1
+rules:
+  - key: node15_unhandled_rejections
+    upgrade_catalog: true
+    since: "15.0"
+    kind: report
+    breaks: behavior
+    sp_unit: 0
+    title: "Yakalanmayan promise reddi süreci sonlandırır (Node 15)"
+    summary: "Node 15'ten beri yakalanmayan promise reddi uyarı vermek yerine süreci sıfır olmayan kodla sonlandırır (DEP0018). `.catch` / try-catch olmadan bırakılan asenkron hata artık servisi düşürür."
+    advantages: ["Sessizce yutulan asenkron hatalar görünür olur."]
+    risks: ["Eksik `.catch` olan her yer bir çökme noktasıdır; `process.on('unhandledRejection')` işleyicisi ve hata izleme (New Relic) kayıtları gözden geçirilmeli."]
+    before: "fetchData().then(use)   // reddedilirse yalnız uyarı"
+    after: "fetchData().then(use).catch(handle)"
+    ref: "https://nodejs.org/api/deprecations.html#DEP0018"
+  - key: node15_npm7_lockfile
+    upgrade_catalog: true
+    since: "15.0"
+    kind: structural
+    breaks: behavior
+    auto: false
+    sp_unit: 2
+    root_file: "package-lock.json"
+    pattern: "\"lockfileVersion\"\\s*:\\s*1\\b"
+    title: "package-lock.json lockfileVersion 1 (npm 6) — npm 7+ ile yeniden üretilmeli"
+    summary: "Node 15 ve sonrası npm 7+ ile gelir: eş bağımlılıklar (peerDependencies) kendiliğinden kurulur ve çakışma `npm ci` / `npm install`'ı ERESOLVE ile durdurur. lockfileVersion 1 kilit dosyası eski npm'in çözümünü taşır."
+    advantages: ["Derleme hedef sürümün npm'iyle tekrarlanabilir olur; eş bağımlılık çakışmaları derlemede değil şimdi görülür."]
+    risks: ["Kilit dosyası yeniden üretilince geçişli bağımlılık sürümleri değişebilir; çakışma `--legacy-peer-deps` ile gizlenmemeli, bağımlılık yükseltilmeli."]
+    before: "\"lockfileVersion\": 1"
+    after: "\"lockfileVersion\": 3   // hedef Node'un npm'iyle `npm install`"
+    ref: "https://docs.npmjs.com/cli/v7/using-npm/changelog#v700-2020-10-12"
+  - key: fs_rmdir_recursive
+    upgrade_catalog: true
+    since: "16.0"
+    kind: deprecation
+    breaks: deprecation
+    auto: true
+    sp_unit: 1
+    fix_min: "14.14"
+    pattern: "\\brmdir(?:Sync)?\\s*\\([^()]*\\brecursive\\s*:\\s*true"
+    title: "fs.rmdir(…, { recursive: true }) → fs.rm"
+    summary: "`fs.rmdir`'in `recursive` seçeneği Node 16'da çalışma zamanı uyarısı verir, Node 25'te kaldırıldı (DEP0147). Yerine Node 14.14'te gelen `fs.rm` kullanılır."
+    advantages: ["Uyarı kalkar; ileriki majörde kırılma önlenir."]
+    risks: ["`fs.rm` olmayan yol için hata verir; eski davranış için `force: true` eklenmeli."]
+    before: "fs.rmdirSync(dir, { recursive: true })"
+    after: "fs.rmSync(dir, { recursive: true, force: true })"
+    ref: "https://nodejs.org/api/deprecations.html#DEP0147"
+  - key: crypto_md4_openssl3
+    upgrade_catalog: true
+    since: "17.0"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 2
+    pattern: "\\bcreateHash\\(\\s*['\"](?:md4|rmd160|ripemd160|whirlpool)['\"]"
+    title: "OpenSSL 3: md4 / ripemd160 / whirlpool özetleri kullanılamaz (Node 17)"
+    summary: "Node 17 OpenSSL 3'e geçti; eski (legacy) sağlayıcıdaki algoritmalar varsayılan olarak yüklenmez ve `createHash('md4')` ERR_OSSL_EVP_UNSUPPORTED hatası verir."
+    advantages: ["Kırık özet algoritmalarından kurtulunur."]
+    risks: ["Özetin kaydedildiği / karşı tarafla paylaşıldığı yerde algoritma değişikliği veri uyumunu bozar — kapsamı insan belirler. `--openssl-legacy-provider` yalnız geçici çözümdür."]
+    before: "crypto.createHash('md4')"
+    after: "crypto.createHash('sha256')"
+    ref: "https://nodejs.org/en/blog/release/v17.0.0#openssl-30"
+  - key: node17_dns_order
+    upgrade_catalog: true
+    since: "17.0"
+    kind: report
+    breaks: behavior
+    sp_unit: 0
+    title: "`localhost` IPv6'ya çözülebilir (Node 17 DNS sırası)"
+    summary: "Node 17'den beri `dns.lookup` adresleri işletim sisteminin verdiği sırada döndürür (IPv4 öne alınmaz). `localhost`'a bağlanan istemci `::1`'e gider; yalnız 127.0.0.1'i dinleyen servis ECONNREFUSED verir."
+    advantages: ["Çözümleme işletim sistemiyle tutarlı olur."]
+    risks: ["`localhost` adresli bağlantılar (veritabanı, önbellek, yerel servis, test) kontrol edilmeli; gerekirse `127.0.0.1` yazılmalı ya da `dns.setDefaultResultOrder('ipv4first')`."]
+    before: "http.get('http://localhost:3000')   // 127.0.0.1"
+    after: "http.get('http://127.0.0.1:3000')"
+    ref: "https://nodejs.org/api/dns.html#dnssetdefaultresultorderorder"
+  - key: punycode_builtin
+    upgrade_catalog: true
+    since: "21.0"
+    kind: structural
+    breaks: deprecation
+    auto: false
+    sp_unit: 1
+    pattern: "(?:require\\(\\s*|from\\s+)['\"](?:node:)?punycode['\"]"
+    title: "Yerleşik punycode modülü kullanımdan kalktı (Node 21)"
+    summary: "`require('punycode')` Node 21'den beri çalışma zamanı uyarısı verir (DEP0040). Yerine npm'deki `punycode` paketi (`punycode/`) ya da `url.domainToASCII` kullanılır."
+    advantages: ["Uyarı kalkar; ileride kaldırılacak modülden kurtulunur."]
+    risks: ["Uyarı çoğunlukla bir bağımlılıktan gelir; uygulama kodundaki kullanım npm paketine çevrilir (yeni bağımlılık)."]
+    before: "const punycode = require('punycode')"
+    after: "const punycode = require('punycode/')"
+    ref: "https://nodejs.org/api/deprecations.html#DEP0040"
+  - key: crypto_create_cipher
+    upgrade_catalog: true
+    since: "22.0"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 3
+    pattern: "\\bcreate(?:Cipher|Decipher)\\s*\\("
+    title: "crypto.createCipher / createDecipher kaldırıldı (Node 22)"
+    summary: "`crypto.createCipher` ve `createDecipher` Node 22'de kaldırıldı (DEP0106): anahtarı paroladan zayıf bir yolla türetiyor ve IV kullanmıyordu. Yerine `createCipheriv` / `createDecipheriv`."
+    advantages: ["Hedef sürümde çalışır; anahtar türetme ve IV açıkça yönetilir."]
+    risks: ["Eski yöntemle şifrelenmiş kayıtlı veri yeni çağrıyla çözülemez: aynı anahtar/IV türetmesi (EVP_BytesToKey, MD5) elle uygulanmalı ya da veri yeniden şifrelenmeli — kapsamı insan belirler."]
+    before: "crypto.createCipher('aes-256-cbc', password)"
+    after: "crypto.createCipheriv('aes-256-cbc', key, iv)"
+    ref: "https://nodejs.org/api/deprecations.html#DEP0106"
+  - key: import_assertions
+    upgrade_catalog: true
+    since: "22.0"
+    kind: mechanical
+    breaks: error
+    auto: true
+    sp_unit: 1
+    fix_min: "18.20"
+    pattern: "\\bassert\\s*\\{\\s*type\\s*:\\s*['\"]"
+    title: "import … assert { type } → with { type } (Node 22)"
+    summary: "İçe aktarma doğrulamaları (`assert { type: 'json' }`) Node 22'de kaldırıldı; yerine içe aktarma öznitelikleri (`with { type: 'json' }`) kullanılır. `with` yazımı Node 18.20 / 20.10 / 21.0'da geldi."
+    advantages: ["Hedef sürümde sözdizimi hatası önlenir."]
+    risks: ["`with` yazımı 18.20'den eski Node'da sözdizimi hatasıdır: düzeltme ancak üretim o sürüme geçince yazılabilir."]
+    before: "import data from './data.json' assert { type: 'json' }"
+    after: "import data from './data.json' with { type: 'json' }"
+    ref: "https://nodejs.org/api/esm.html#import-attributes"
+  - key: util_deprecated_22
+    upgrade_catalog: true
+    since: "22.0"
+    kind: deprecation
+    breaks: deprecation
+    auto: true
+    sp_unit: 1
+    pattern: "\\butil\\.(?:isArray|_extend)\\s*\\("
+    title: "util.isArray / util._extend → Array.isArray / Object.assign"
+    summary: "`util.isArray` (DEP0044) ve `util._extend` (DEP0060) Node 22'de çalışma zamanı uyarısı verir."
+    advantages: ["Uyarı kalkar; dilin kendi karşılıkları kullanılır."]
+    risks: ["`util._extend` yalnız kendi sayılabilir özellikleri kopyalar; `Object.assign` ile aynıdır."]
+    before: "util.isArray(x); util._extend(a, b)"
+    after: "Array.isArray(x); Object.assign(a, b)"
+    ref: "https://nodejs.org/api/deprecations.html#DEP0044"
+  - key: util_is_removed
+    upgrade_catalog: true
+    since: "23.0"
+    kind: mechanical
+    breaks: error
+    auto: true
+    sp_unit: 1
+    pattern: "\\butil\\.(?:is(?:Boolean|Buffer|Date|Error|Function|NullOrUndefined|Null|Number|Object|Primitive|RegExp|String|Symbol|Undefined)|log)\\s*\\("
+    title: "util.isString / isObject / … / util.log kaldırıldı (Node 23)"
+    summary: "`util.isBoolean`, `isBuffer`, `isDate`, `isError`, `isFunction`, `isNull`, `isNullOrUndefined`, `isNumber`, `isObject`, `isPrimitive`, `isRegExp`, `isString`, `isSymbol`, `isUndefined` (DEP0045–DEP0058) ve `util.log` (DEP0059) Node 23'te kaldırıldı; çağrı TypeError verir."
+    advantages: ["Hedef sürümde çalışır; dilin kendi denetimleri kullanılır."]
+    risks: ["`util.isObject(null)` false döner — `typeof x === 'object'` yazılırken `x !== null` eklenmeli; `util.isError` yerine `util.types.isNativeError` ya da `instanceof Error`."]
+    before: "if (util.isString(v)) …; util.log('başladı')"
+    after: "if (typeof v === 'string') …; console.log('başladı')"
+    ref: "https://nodejs.org/api/deprecations.html#DEP0056"
+  - key: fs_access_constants
+    upgrade_catalog: true
+    since: "24.0"
+    kind: deprecation
+    breaks: deprecation
+    auto: true
+    sp_unit: 1
+    pattern: "\\bfs\\.[FRWX]_OK\\b"
+    title: "fs.F_OK / R_OK / W_OK / X_OK → fs.constants.*"
+    summary: "`fs.F_OK`, `fs.R_OK`, `fs.W_OK`, `fs.X_OK` Node 24'te çalışma zamanı uyarısı verir, Node 25'te kaldırıldı (DEP0176). Aynı değerler `fs.constants` altındadır."
+    advantages: ["Uyarı kalkar; ileriki majörde kırılma önlenir."]
+    risks: ["Yok — değerler aynıdır."]
+    before: "fs.accessSync(p, fs.R_OK)"
+    after: "fs.accessSync(p, fs.constants.R_OK)"
+    ref: "https://nodejs.org/api/deprecations.html#DEP0176"
+  - key: url_parse_legacy
+    upgrade_catalog: true
+    since: "24.0"
+    kind: structural
+    breaks: deprecation
+    auto: false
+    sp_unit: 2
+    pattern: "\\burl\\.parse\\s*\\("
+    title: "url.parse() kullanımdan kalktı → new URL() (Node 24)"
+    summary: "`url.parse()` Node 24'te uygulama kodu için kullanımdan kalkma uyarısı verir (DEP0169): standart dışı ayrıştırması güvenlik açıklarına yol açtı ve bu açıklar için düzeltme yayınlanmıyor."
+    advantages: ["Tarayıcılarla aynı (WHATWG) ayrıştırma; ana makine adı sahteciliği sınıfı açıklar kapanır."]
+    risks: ["`new URL()` göreli adres için taban ister ve geçersiz adreste hata fırlatır; `query` nesnesi yerine `searchParams` gelir — her yer elle değerlendirilmeli."]
+    before: "const { pathname, query } = url.parse(req.url, true)"
+    after: "const u = new URL(req.url, 'http://localhost'); u.pathname; u.searchParams"
+    ref: "https://nodejs.org/api/deprecations.html#DEP0169"
+  - key: http_private_headers
+    upgrade_catalog: true
+    since: "24.0"
+    kind: structural
+    breaks: error
+    auto: false
+    sp_unit: 1
+    pattern: "\\.(?:_headers|_headerNames)\\b"
+    title: "res._headers / _headerNames kaldırıldı (Node 24)"
+    summary: "`OutgoingMessage.prototype._headers` ve `_headerNames` Node 24'te kaldırıldı (DEP0066); erişim undefined döner. Yerine `getHeaders()`, `getHeader()`, `getHeaderNames()`."
+    advantages: ["Hedef sürümde çalışır; belgelenmiş API kullanılır."]
+    risks: ["Desen başka nesnelerin `_headers` alanını da yakalayabilir — her yer bir http yanıtı/isteği mi diye bakılmalı."]
+    before: "const type = res._headers['content-type']"
+    after: "const type = res.getHeader('content-type')"
+    ref: "https://nodejs.org/api/deprecations.html#DEP0066"

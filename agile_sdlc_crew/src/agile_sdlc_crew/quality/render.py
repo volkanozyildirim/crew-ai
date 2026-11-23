@@ -18,10 +18,12 @@ TAG = "tempo-quality"
 HUMAN_TAG = "needs-human"
 FP_PREFIX = "tempo-fp:"
 SOURCE_LABEL = {"newrelic": "New Relic hataları", "sonar": "Sonar bulguları", "php_modern": "PHP modernleştirme",
-                "go_modern": "Go modernleştirme", "py_modern": "Python modernleştirme", "next_modern": "Next.js modernleştirme"}
+                "go_modern": "Go modernleştirme", "py_modern": "Python modernleştirme", "next_modern": "Next.js modernleştirme",
+                "node_modern": "Node.js modernleştirme"}
 # Dil sürümüne göre modernleştirme kaynakları (quality/modern.py) — aynı Task metni ve davranış
-MODERN_SOURCES = {"php_modern", "go_modern", "py_modern", "next_modern"}
-MODERN_LANG_LABEL = {"php_modern": "PHP", "go_modern": "Go", "py_modern": "Python", "next_modern": "Next.js"}
+MODERN_SOURCES = {"php_modern", "go_modern", "py_modern", "next_modern", "node_modern"}
+MODERN_LANG_LABEL = {"php_modern": "PHP", "go_modern": "Go", "py_modern": "Python", "next_modern": "Next.js",
+                     "node_modern": "Node.js"}
 # Hatlar: 'quality' kaynak başına story açar (Kalite: <kaynak> — <sprint>);
 # 'techdebt' sprint başına TEK story (Teknik borç — <sprint>). Teknik borç
 # Task'ları tempo-quality'yi de taşır: yalın akış / ucuz modeller / dar test
