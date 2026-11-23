@@ -50,6 +50,10 @@ BODY_MAX = 3900                                    # Azure PR açıklaması sın
 _RANK = ("hata", "sırada", "açıldı")
 
 
+class SelectionError(ValueError):
+    """Karttan gelen repo seçimi taze plandaki repolarla eşleşmiyor — hiçbir şey yazılmadan reddedilir."""
+
+
 def _act(kind: str, state: str, reason: str = "", **kw) -> dict:
     return {"kind": kind, "state": state, "reason": reason, "target": kw.pop("target", None), "pr": kw.pop("pr", None),
             "ran": False, **kw}
@@ -610,11 +614,16 @@ def _body_public(entry: dict, a: dict, upgrade_note: bool = False) -> str:
 
 def apply(client, entry: dict, *, team: str, index: dict, resolver, deps=None, push_fn=None, open_pr_fn=None,
           start_fn=None, max_open: int | None = None, cfg=None, find_open_fn=None, find_any_fn=None,
-          budget: list | None = None, auto: bool = False, current_fn=None) -> list[dict]:
+          budget: list | None = None, auto: bool = False, current_fn=None,
+          repos: list[str] | None = None) -> list[dict]:
     """Modül kilidi altında `plan` yeniden hesaplanır; yalnız `yok` durumundaki eylemler yürür. Bir eylemin (ya da
     bölgenin) hatası ötekilerini durdurmaz. Her eylem `ran` alanıyla döner (bu çağrıda yazma denendi mi).
     `budget`: izleme başlatma sayacı `[kalan]` (yoklayıcı turu tek sayacı paylaşır); yalnız BAŞARILI yeni başlatma
-    tüketir. `auto`: yoklayıcı — durdurulan izleme yeniden açılmaz."""
+    tüketir. `auto`: yoklayıcı — durdurulan izleme yeniden açılmaz.
+    `repos`: karttaki repo seçimi — verilirse sürüm yükseltme izlemesi YALNIZ bu repolar için açılır, ötekiler `yok`
+    kalır ("seçilmedi"; sonra ayrıca başlatılabilir). `None` = hepsi (yoklayıcı ve eski davranış). Seçim yalnız taze
+    plandaki repo adlarıyla eşleştirilir; planda olmayan ad `SelectionError` (yazma yok). Paylaşılan dosyaya PR açan
+    eylemler (base-images, bölge repoları) seçimden etkilenmez: onlar imaj düzeyindedir ve bölgeler birlikte yürür."""
     from agile_sdlc_crew.quality import upgrade_bump, upgrade_image, upgrade_track
     cfg = cfg or upgrade_image.load_cfg()
     push_fn = push_fn or upgrade_bump.push_sites
@@ -625,9 +634,15 @@ def apply(client, entry: dict, *, team: str, index: dict, resolver, deps=None, p
     with _LOCK:
         acts = plan(client, entry, index=index, resolver=resolver, cfg=cfg, find_open_fn=find_open_fn,
                     find_any_fn=find_any_fn, auto=auto, current_fn=current_fn)
+        pick = None if repos is None else {str(r) for r in repos}
+        if pick is not None:
+            known = {u["repo"] for a in acts if a["kind"] == "yükseltme" for u in a.get("repos") or []}
+            unknown = sorted(pick - known)
+            if unknown:
+                raise SelectionError("Seçilen repo bu imajın giderme planında yok: " + ", ".join(unknown)[:200])
         # Yama PR'ı ile aynı imajın yükseltme izlemesi birlikte planlıysa PR gövdesi çakışmayı söyler (I3).
-        upgrade_note = any(u["state"] in ("yok", "izleniyor") for a in acts if a["kind"] == "yükseltme"
-                           for u in a.get("repos") or [])
+        upgrade_note = any(u["state"] == "izleniyor" or (u["state"] == "yok" and (pick is None or u["repo"] in pick))
+                           for a in acts if a["kind"] == "yükseltme" for u in a.get("repos") or [])
         out = []
         for a in acts:
             if a["state"] != "yok":
@@ -645,7 +660,7 @@ def apply(client, entry: dict, *, team: str, index: dict, resolver, deps=None, p
                 elif a["kind"] == "taban-etiket":
                     _run_tag(client, entry, a, push_fn)
                 elif a["kind"] == "yükseltme":
-                    _run_upgrade(client, entry, a, team, deps, start_fn, budget, index)
+                    _run_upgrade(client, entry, a, team, deps, start_fn, budget, index, pick)
             except Exception as e:  # noqa: BLE001
                 log.warning(f"⚠️ image_fix: {a['kind']} başarısız: {_why(e)}")
                 a.update(state="hata", reason=_why(e))
@@ -687,10 +702,14 @@ def _run_public(client, entry: dict, a: dict, push_fn, upgrade_note: bool = Fals
     a["reason"] = "; ".join(f"{u['repo']}: {u['reason']}" for u in a["repos"] if u["state"] in ("hata", "elle") and u["reason"])
 
 
-def _run_upgrade(client, entry: dict, a: dict, team: str, deps, start_fn, budget: list, index: dict | None = None) -> None:
+def _run_upgrade(client, entry: dict, a: dict, team: str, deps, start_fn, budget: list, index: dict | None = None,
+                 pick: set | None = None) -> None:
     lang = entry.get("lang")
     for u in a["repos"]:
         if u["state"] != "yok":
+            continue
+        if pick is not None and u["repo"] not in pick:      # kartta seçilmedi: açılmaz, sınırı da tüketmez
+            u["reason"] = "seçilmedi"
             continue
         if not (team or "").strip():
             u.update(state="hata", reason="takım bilinmiyor — izleme açılamadı")
