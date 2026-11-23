@@ -14452,6 +14452,32 @@ def _image_fix_body():
     started.clear()
     out = fx.apply(cl(), ev, team="", index=mi, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn, find_open_fn=lambda *x: None)
     check("apply yükseltme: takım yoksa izleme açılmaz", started == [] and kind(out, "yükseltme")["state"] == "hata")
+    # ── apply yükseltme: karttaki repo seçimi ────────────────────────────
+    started.clear()
+    out = fx.apply(cl(), ev, team="Ekip", index=mi, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=lambda *x: None, repos=["c"], max_open=1)
+    a = kind(out, "yükseltme")
+    st = {u["repo"]: (u["state"], u["reason"]) for u in a["repos"]}
+    check("apply yükseltme: repo seçimi → yalnız seçilen açılır; seçilmeyen 'yok' kalır ve sınırı tüketmez",
+          [s_[0] for s_ in started] == ["c"] and st == {"a": ("yok", "seçilmedi"), "b": ("yok", "seçilmedi"), "c": ("açıldı", "")}
+          and a["state"] == "açıldı" and a["ran"] is True, str(st))
+    started.clear()
+    out = fx.apply(cl(), ev, team="Ekip", index=mi, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=lambda *x: None, repos=[])
+    a = kind(out, "yükseltme")
+    check("apply yükseltme: boş seçim → hiçbir izleme açılmaz, eylem 'yok' kalır", started == [] and a["state"] == "yok"
+          and not a.get("ran") and all(u["state"] == "yok" for u in a["repos"]), str(a))
+    try:
+        fx.apply(cl(), ev, team="Ekip", index=mi, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                 find_open_fn=lambda *x: None, repos=["c", "planda-yok"])
+        sel_err = ""
+    except fx.SelectionError as e:
+        sel_err = str(e)
+    check("apply yükseltme: planda olmayan repo seçimi reddedilir, hiçbir şey yazılmaz",
+          "planda-yok" in sel_err and started == [], sel_err)
+    out = fx.apply(cl(), ev, team="Ekip", index=mi, resolver=res, push_fn=never, open_pr_fn=never, start_fn=start_fn,
+                   find_open_fn=lambda *x: None)
+    check("apply yükseltme: seçim verilmezse hepsi (yoklayıcı ve eski davranış)", [s_[0] for s_ in started] == ["a", "b", "c"], str(started))
     out = fx.apply(cl(), nd, team="T", index=index, resolver=res, push_fn=never, open_pr_fn=never, start_fn=never, find_open_fn=lambda *x: None)
     check("apply: Node eol → izleme açılmaz (start çağrılsa AssertionError)", kind(out, "yükseltme")["state"] == "elle")
 
@@ -14592,6 +14618,24 @@ def _image_fix_body():
         check("uç: 200, eylemler, takım iletilir, iç alan sızmaz",
               r.status_code == 200 and j["actions"][0]["state"] == "açıldı" and runs == [("php:8.4.27-fpm-bookworm", "Ekip")]
               and "entry" not in j["actions"][0], str(j))
+        sel: list = []
+        _ap = fx.apply
+        fx.apply = lambda c, r, **kw: sel.append(kw.get("repos", "ALAN YOK")) or [
+            {"kind": "yükseltme", "state": "açıldı", "ran": True, "reason": "", "pr": None}]
+        asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip")))
+        r = asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip", repos=["b", " a ", "b"])))
+        check("uç: repo seçimi apply'a iletilir (kırpılmış, tekrarsız); seçim yoksa alan hiç geçmez",
+              r.status_code == 200 and sel == ["ALAN YOK", ["b", "a"]], str(sel))
+        codes = [asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip", repos=b_))).status_code
+                 for b_ in (["../x"], ["-rf"], ["a b"], [""], [f"r{i}" for i in range(51)])]
+        check("uç: geçersiz repo adı / çok uzun seçim → 400, apply çağrılmaz", codes == [400] * 5 and len(sel) == 2, str(codes))
+
+        def apply_sel(c, r, **kw):
+            raise fx.SelectionError("Seçilen repo bu imajın giderme planında yok: zzz")
+        fx.apply = apply_sel
+        r = asyncio.run(server.techdebt_images_fix(body(image="php:8.4.27-fpm-bookworm", team="Ekip", repos=["zzz"])))
+        check("uç: planda olmayan repo → 400 Türkçe neden", r.status_code == 400 and "planında yok" in json.loads(r.body)["error"], str(r.body))
+        fx.apply = _ap
         r = asyncio.run(server.techdebt_images_fix(body(image="../../etc/passwd", team="Ekip")))
         check("uç: bilinmeyen imaj → 404, yol / dal / sorgu olarak hiç kullanılmaz", r.status_code == 404 and len(runs) == 1, str(r.body))
         r = asyncio.run(server.techdebt_images_fix(body(image="", team="Ekip")))
@@ -14648,6 +14692,15 @@ def _image_fix_body():
           "/api/techdebt/images/fix" in fseg and "_tdLoad(" in fseg and "disabled=true" in fseg and "loadImageVuln(" in fseg)
     check("kart: aralanan metin escHtml'den geçer, yalnız https bağlantı", "${a.reason}" not in seg and "${a.state}" not in seg
           and "^https:" in lseg)
+    pseg = html_src[html_src.index("function _ivFixPick("):html_src.index("function fixImageVuln")]
+    check("kart: birden fazla repo etkileniyorsa repo seçilir (varsayılan seçili değil, ad escHtml'den geçer)",
+          "n.length<2" in pseg and 'class="ivFixRepo"' in pseg and "_ivE(u.repo)" in pseg and " checked" not in pseg
+          and "_ivFixPick(_ivFixAll[image])" in cfseg and "_ivFixPickSync()" in cfseg)
+    check("kart: hiçbir şey yürümeyecekse 'Başlat' kapalı; kaç iş kaydı açılacağı yazılır",
+          "go.disabled=!k&&!other" in pseg and "Azure iş kaydı açılır" in pseg)
+    check("kart: seçim isteğe eklenir; seçim kutusu yoksa alan gönderilmez (= hepsi)",
+          "team:_tdTeam(),repos})" in fseg and ":undefined" in fseg
+          and fseg.index("ivFixPick") < fseg.index("box.innerHTML=wait"))
 
 
 class _RegionFake:

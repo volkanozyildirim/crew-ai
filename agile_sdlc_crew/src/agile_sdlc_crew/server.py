@@ -2190,11 +2190,17 @@ async def techdebt_images_rescan():
 class TechdebtImageFixRequest(BaseModel):
     image: str = ""
     team: str = ""
+    repos: list[str] | None = None      # sürüm yükseltme izlemesi açılacak repolar; None = hepsi
 
 
-def _image_fix_run(image: str, team: str) -> tuple[int, dict]:
+_IMAGE_FIX_REPO_RE = _re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", _re.ASCII)
+_IMAGE_FIX_REPOS_MAX = 50
+
+
+def _image_fix_run(image: str, team: str, repos: list[str] | None = None) -> tuple[int, dict]:
     """Taze rapordaki kaydı bulur ve gidermeyi uygular. `image` yalnız o kayıtlarla eşleştirilir (yol / dal / sorgu
-    parçası olarak asla kullanılmaz). → (HTTP kodu, gövde)."""
+    parçası olarak asla kullanılmaz); `repos` (kartın repo seçimi) da yalnız taze plandaki repo adlarıyla.
+    → (HTTP kodu, gövde)."""
     from agile_sdlc_crew.quality import image_fix as _fx
     from agile_sdlc_crew.quality import image_vuln as _iv
     from agile_sdlc_crew.quality import modern as _md
@@ -2206,7 +2212,11 @@ def _image_fix_run(image: str, team: str) -> tuple[int, dict]:
     rec = next((r for r in rep.get("images") or [] if r.get("image") == image), None)
     if rec is None:
         return 404, {"error": "Bu imaj güncel raporda yok — kartı yenileyin."}
-    acts = _fx.apply(client, rec, team=team, index=index, resolver=_ur.default())
+    try:
+        acts = _fx.apply(client, rec, team=team, index=index, resolver=_ur.default(),
+                         **({} if repos is None else {"repos": repos}))
+    except _fx.SelectionError as e:
+        return 400, {"error": str(e)}
     if not any(a.get("ran") for a in acts):
         why = [{"kind": a.get("kind"), "state": a.get("state"), "reason": a.get("reason")} for a in acts]
         return 409, {"error": "Başlatılacak giderme yok — " + ("; ".join(
@@ -2229,8 +2239,13 @@ async def techdebt_images_fix(req: TechdebtImageFixRequest):
     image = (req.image or "").strip()
     if not image or len(image) > 200:
         return JSONResponse({"error": "imaj seçin"}, status_code=400)
+    repos = None
+    if req.repos is not None:
+        repos = list(dict.fromkeys((r or "").strip() for r in req.repos))
+        if len(repos) > _IMAGE_FIX_REPOS_MAX or not all(_IMAGE_FIX_REPO_RE.fullmatch(r) for r in repos):
+            return JSONResponse({"error": "Geçersiz repo seçimi"}, status_code=400)
     try:
-        code, body = await asyncio.to_thread(_image_fix_run, image, (req.team or "").strip())
+        code, body = await asyncio.to_thread(_image_fix_run, image, (req.team or "").strip(), repos)
         return JSONResponse(body, status_code=code)
     except Exception as e:  # noqa: BLE001 — traceback / sır sızmaz
         pipeline_log.warning(f"image_fix: giderme başlatılamadı: {_mask(str(e))[:300]}")
