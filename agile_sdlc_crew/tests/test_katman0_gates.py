@@ -27,6 +27,7 @@ Kapsanan hata sınıfları (hepsi 2026-07-27'de gerçekten yaşandı):
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -55,6 +56,17 @@ from agile_sdlc_crew.flow import (  # noqa: E402
     NeedsHumanReview,
     NeedsMoreInfo,
 )
+
+# Makinenin .env'i testlere sızmasın: sunucu / CLI modülleri kendi .env'lerini, venv'deki kütüphaneler de üst
+# dizinlerde bulduklarını yükler. Varsayılanı kapalı teknik borç anahtarları orada açıkken "ayar kapalı" davranışını
+# sınayan kontroller kırılıyordu (2026-11-23: .env'e CREW_TECHDEBT_UPGRADE_PATCH / _NODE eklenince 6 kontrol).
+# Yükleyiciler önce çalışsın diye modüller burada içe aktarılır, sonra anahtarlar ortamdan silinir; ayarı açık
+# isteyen test `pipeline_config.get`'i kendisi değiştirir.
+import agile_sdlc_crew.main  # noqa: E402,F401
+import agile_sdlc_crew.server  # noqa: E402,F401
+
+for _k in [k for k in os.environ if k.startswith(("CREW_TECHDEBT", "CREW_UPGRADE_"))]:
+    os.environ.pop(_k, None)
 
 PASS, FAIL, SKIP = [], [], []
 
@@ -7320,6 +7332,14 @@ def test_upgrade_status_and_steps():
               and f0.get("System.AreaPath") == "P\\T" and f0.get("System.IterationPath") == "P\\T"
               and "tempo-upgrade-key: php:core:8.4" in f0.get("System.Description", "")
               and "8.2 → 8.4" in f0.get("System.Description", ""), str(f0))
+        check("start: ayarda zorunlu alan yokken eklenmez", "Custom.ARGEType" not in f0, str(sorted(f0)))
+        c_tf = _UpFake()
+        deps_tf = deps._replace(cfg=lambda: {**deps.cfg(), "task_fields": {"Custom.ARGEType": "Geliştirme - GE",
+                                                                              "System.Tags": "ezilmemeli"}})
+        ut.start(c_tf, "core", "php", team="T", deps=deps_tf, **pkw)
+        f_tf = c_tf.wis[0] if c_tf.wis else {}
+        check("start: org'un zorunlu Task alanları eklenir (yoksa Azure 400 — izleme hiç açılamıyordu)",
+              f_tf.get("Custom.ARGEType") == "Geliştirme - GE" and f_tf.get("System.Tags") == "tempo-upgrade-track", str(f_tf)[:300])
         first_id = first["id"]
         check("ikinci start aynı izleme işini döner",
               ut.start(c, "core", "php", team="T", deps=deps, **pkw)["id"] == first_id and len(c.wis) == 1)

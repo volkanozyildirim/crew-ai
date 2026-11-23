@@ -265,6 +265,14 @@ class AzureDevOpsClient:
         url = f"{self._base_api_url}/wit/workitems/${quote(type_name)}"
         params = {"api-version": self.API_VERSION}
         resp = requests.post(url, headers=self._patch_headers, json=ops, params=params, timeout=30)
+        if resp.status_code >= 400:
+            # Azure'un nedeni (ör. TF401320 zorunlu alan) hataya girsin: çıplak "400 Bad Request" teşhis edilemiyor.
+            try:
+                detail = str((resp.json() or {}).get("message") or "")
+            except ValueError:
+                detail = ""
+            if detail:
+                raise requests.HTTPError(f"{resp.status_code} İş öğesi oluşturulamadı: {detail[:400]}", response=resp)
         resp.raise_for_status()
         return resp.json()
 
