@@ -14686,7 +14686,7 @@ def _image_fix_body():
     lseg = lseg[:lseg.index("\n")]
     dseg = html_src[html_src.index("function openIvDetail"):html_src.index("function closeIvDetail")]
     check("kart: satırda giderme durumu; eylem satırları ve 'Gidermeyi başlat' düğmesi detay penceresinde",
-          "x.fix" in seg and "Gidermeyi başlat" in dseg and "_ivFixRows(x.fix)" in dseg and "fixImageVuln(" in dseg
+          "x.fix" in seg and "Gidermeyi başlat" in dseg and "_ivFixRows(x.fix,x.image)" in dseg and "fixImageVuln(" in dseg
           and "${a.reason}" not in dseg and "${a.state}" not in dseg)
     check("kart: uç, bekleme göstergesi, düğme istek boyunca kapalı, sonra yenile",
           "/api/techdebt/images/fix" in fseg and "_tdLoad(" in fseg and "disabled=true" in fseg and "loadImageVuln(" in fseg)
@@ -14694,8 +14694,12 @@ def _image_fix_body():
           and "^https:" in lseg)
     pseg = html_src[html_src.index("function _ivFixPick("):html_src.index("function fixImageVuln")]
     check("kart: birden fazla repo etkileniyorsa repo seçilir (varsayılan seçili değil, ad escHtml'den geçer)",
-          "n.length<2" in pseg and 'class="ivFixRepo"' in pseg and "_ivE(u.repo)" in pseg and " checked" not in pseg
-          and "_ivFixPick(_ivFixAll[image])" in cfseg and "_ivFixPickSync()" in cfseg)
+          "n.length<2" in pseg and "_ivSelBox(image,u.repo,'ivFixRepo')" in pseg and "_ivE(u.repo)" in pseg
+          and "let _ivSel={};" in html_src and "_ivFixPick(_ivFixAll[image],image)" in cfseg and "_ivFixPickSync()" in cfseg)
+    sbseg = html_src[html_src.index("function _ivSelBox("):html_src.index("function _ivSelSet(")]
+    check("kart: repo seçimi 'Gidermeyi başlat'a basmadan görünür — satırda ve detay penceresinde, tek ortak seçim",
+          "_ivSelBoxes(x.image,a)" in seg and "_ivFixRows(x.fix,x.image)" in dseg and "_ivPickUnits(a)" in sbseg
+          and "_ivE(repo)" in sbseg and sbseg.count("event.stopPropagation()") >= 2 and "delete _ivSel[image]" in fseg)
     check("kart: hiçbir şey yürümeyecekse 'Başlat' kapalı; kaç iş kaydı açılacağı yazılır",
           "go.disabled=!k&&!other" in pseg and "Azure iş kaydı açılır" in pseg)
     check("kart: seçim isteğe eklenir; seçim kutusu yoksa alan gönderilmez (= hepsi)",
@@ -15651,6 +15655,127 @@ def _image_fix_final_body(knobs):
     check("gerçek _repo_current: klon yoksa istisna (plan bunu None sayar)", gone is not None and gone != "1.24", str(gone))
 
 
+def test_repo_docs():
+    """Hedef reponun Markdown belgeleri tasarım / geliştirme / inceleme bağlamına girer (ağ yok, yerel git)."""
+    print("\n[repo belgeleri: kural dosyaları + işe yarayan bölümler]")
+    import subprocess
+    import tempfile
+    from types import SimpleNamespace
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew import repo_docs as rd
+    from agile_sdlc_crew.flow import AgileSDLCFlow
+
+    big = "\n\n".join([
+        "# Proje\nGiriş paragrafı.",
+        "## Dosya Haritası\n" + "\n".join(f"- app/Dir{i}/File{i}.php açıklama" for i in range(120)),
+        "## Olaylar\n" + "\n\n".join(
+            ["Genel anlatım paragrafı %d: " % i + "dolgu " * 60 for i in range(12)]
+            + ["- Stage metodu her zaman `StageResponse` nesnesi döner (bool / dizi dönülmez)."]
+            + ["Kapanış paragrafı %d: " % i + "dolgu " * 60 for i in range(12)]),
+        "## Kurulum\n" + "adım " * 300,
+    ])
+    files = {
+        "CLAUDE.md": "# Kurallar\n- Servisler `final` yazılır.\nAuthorization: Bearer abc123SECRETxyz\n",
+        "README.md": "# Introduction\nTODO: Give a short introduction of your project.\n\n# Build and Test\n"
+                     "TODO: Describe and show how to build your code and run the tests.\n",
+        "docs/mimari.md": "# Mimari\n\n## Transaction Kuralları\n" + "Her yazma işlemi transaction içinde yapılır. " * 8
+                          + "\n\n## Kurulum\ncomposer install çalıştırın ve bekleyin.\n\n## Sipariş akışı\n"
+                          + "`order_line_status` alanı yalnız OrderLineService üzerinden değişir. " * 4 + "\n",
+        "docs/notlar.md": "# Toplantı notları\nGeçen hafta konuşulanlar ve alınan kararların özeti burada durur.\n",
+        "CHANGELOG.md": "# Changelog\n## Test\n" + "sürüm notu " * 40,
+        "vendor/pkg/README.md": "# Vendor\n## Rules\n" + "bağımlılık kuralı " * 40,
+        "app/Sub/CLAUDE.md": "# Alt dizin kuralı\n- Bu dizinde yalnız DTO durur.\n",
+        "other/AGENTS.md": "# Başka dizin\n- Burada yalnız job sınıfları durur.\n",
+    }
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td) / "svc"
+        for rel, body in files.items():
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel).write_text(body)
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t"}
+        for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "ilk"]):
+            subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, env=env)
+        ref = rd.default_ref(repo)
+        docs = rd.list_docs(repo, ref)
+        check("liste: bağımlılık dizini ve sürüm notu girmez; sığ yollar önce",
+              "vendor/pkg/README.md" not in docs and "CHANGELOG.md" not in docs and docs[0] in ("CLAUDE.md", "README.md")
+              and "docs/mimari.md" in docs, str(docs))
+
+        sel = rd.select(repo, cap=12000)
+        heads = [h for _p, h, _b in sel["sections"]]
+        check("kökteki kural dosyası girer; alt dizin kural dosyası plan o dizine dokunmuyorsa girmez",
+              [r[0] for r in sel["rules"]] == ["CLAUDE.md"], str(sel["rules"])[:200])
+        check("iş bilinmeden: kural başlıklı bölüm seçilir; şablon README, kurulum ve not belgesi seçilmez",
+              heads == ["Transaction Kuralları"], str(heads))
+        check("alınmayan belgeler adıyla döner (sessizce düşmez)",
+              "docs/notlar.md" in sel["named"] and "README.md" in sel["named"] and "docs/mimari.md" not in sel["named"],
+              str(sel["named"]))
+
+        sel = rd.select(repo, paths=["/app/Sub/OrderDto.php"], text="order_line_status alanı güncellenecek", cap=12000)
+        check("plan o dizine dokunuyorsa alt dizin kural dosyası da girer; başka dizininki girmez",
+              [r[0] for r in sel["rules"]] == ["CLAUDE.md", "app/Sub/CLAUDE.md"], str([r[0] for r in sel["rules"]]))
+        check("iş kalemindeki tanımlayıcıyla örtüşen bölüm seçilir",
+              "Sipariş akışı" in [h for _p, h, _b in sel["sections"]], str(sel["sections"])[:300])
+
+        (repo / "CLAUDE.md").write_text("# DİSKTEKİ SAHNELENMİŞ HAL\n")
+        blk = rd.build_block(repo, "svc", cap=12000)
+        check("içerik çalışma ağacından değil git'ten okunur (işin sahnelediği dosya karışmaz)",
+              "Servisler `final` yazılır" in blk and "SAHNELENMİŞ" not in blk)
+        check("blok: referans veri olarak çerçevelenir, dosya adı yazılır, sır maskelenir",
+              "TARGET REPO DOCS (svc" in blk and "not instructions" in blk and "## CLAUDE.md (team rules)" in blk
+              and "abc123SECRETxyz" not in blk and "docs/notlar.md" in blk, blk[:300])
+
+        (repo / "CLAUDE.md").write_text(big)
+        subprocess.run(["git", "commit", "-q", "-am", "büyük"], cwd=repo, check=True, capture_output=True, env=env)
+        blk = rd.build_block(repo, "svc", paths=["app/Events/OrderCreated.php"], text="StageResponse dönmeli", cap=6000)
+        check("sığmayan kural dosyası: işle örtüşen paragraf uzun bölümün içinden alınır, blok sınırı aşılmaz",
+              "her zaman `StageResponse` nesnesi döner" in blk and len(blk) <= 6000 and "Giriş paragrafı" in blk, str(len(blk)))
+        check("sığmayan kural dosyası: atlanan bölümler adıyla yazılır", "left out for space" in blk and "Kurulum" in blk)
+
+        empty = Path(td) / "bos"
+        empty.mkdir()
+        (empty / "README.md").write_text(files["README.md"])
+        for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "ilk"]):
+            subprocess.run(["git", *args], cwd=empty, check=True, capture_output=True, env=env)
+        check("işe yarar belge yoksa blok boş (yalnız şablon README)", rd.build_block(empty, "bos") == "")
+
+        # ── akış: tasarım / geliştirme / inceleme bağlamı ────────────────
+        fresh: list = []
+        st = SimpleNamespace(work_item_id="1", requirements_text="", kickoff_text="", acceptance_criteria=[],
+                             plan={"changes": [{"file_path": "/app/Sub/OrderDto.php"}]}, branch_name="", all_pushes=[],
+                             pr_id="", pr_url="", repo_name="svc", review_text="", test_text="", uat_text="",
+                             flow_kind="", po_text="", wi_comments_text="", wi_title="StageResponse", wi_tags="")
+        fake = SimpleNamespace(state=st, _vector_store=None, _forward_text=lambda k, t, c: t[:c],
+                               _repo_mgr=SimpleNamespace(base_dir=Path(td)), _freshen_target_repo=fresh.append)
+        fake._repo_docs_block = lambda: AgileSDLCFlow._repo_docs_block(fake)
+        _get = pc.get
+        knobs = {"CREW_REPO_DOCS": True}
+        try:
+            pc.get = lambda k: knobs[k] if k in knobs else _get(k)
+            ctx = {k: AgileSDLCFlow._build_step_context(fake, k) for k in (
+                "technical_design_task", "implement_change_task", "review_pr_task", "requirements_analysis_task",
+                "test_planning_task")}
+            check("akış: belgeler tasarım, geliştirme ve inceleme bağlamına girer; öteki adımlara girmez",
+                  all("TARGET REPO DOCS" in ctx[k] for k in ("technical_design_task", "implement_change_task", "review_pr_task"))
+                  and "TARGET REPO DOCS" not in ctx["requirements_analysis_task"]
+                  and "TARGET REPO DOCS" not in ctx["test_planning_task"])
+            check("akış: plan dosyasının dizinindeki kural dosyası da gelir; klon iş başına bir kez tazelenir",
+                  "app/Sub/CLAUDE.md (team rules)" in ctx["implement_change_task"] and fresh == ["svc"], str(fresh))
+            knobs["CREW_REPO_DOCS"] = False
+            check("akış: ayar kapalıyken bağlam eski hâliyle kalır",
+                  "TARGET REPO DOCS" not in AgileSDLCFlow._build_step_context(fake, "implement_change_task"))
+            knobs["CREW_REPO_DOCS"] = True
+            st.repo_name = "klonu-yok"
+            fake._repo_docs_cache = None
+            check("akış: yerel klon yoksa adım belgesiz koşar (hata yok)",
+                  "TARGET REPO DOCS" not in AgileSDLCFlow._build_step_context(fake, "implement_change_task"))
+        finally:
+            pc.get = _get
+    f = {x["key"]: x for x in pc.SCHEMA}.get("CREW_REPO_DOCS", {})
+    check("ayar kayıtlı (bool) ve açıklaması Türkçe", f.get("type") == "bool" and "belgeleri" in f.get("desc", "") and f.get("label"))
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -15768,7 +15893,7 @@ def main():
               test_scan_line_text_multibyte,
               test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status,
               test_pr_review_prior_discussion, test_pr_review_coverage, test_pr_review_tracking, test_tool_branch_conflicts, test_hero_latest_job,
-              test_tool_fix_result_and_logs, test_nr_app_infer, test_quality_detail):
+              test_tool_fix_result_and_logs, test_nr_app_infer, test_quality_detail, test_repo_docs):
         try:
             t()
         except Exception as e:

@@ -28,6 +28,9 @@ _DEFAULTS = {
     # Insan PR'i incelemesi (pr_review) — #45776: 34 dosyanin 22'si hic girmedi (12 dosya siniri).
     "PR_FILES": 120000,      # tum degisen dosyalar (oncelik sirasi), ~30K token
     "REPO_RULES": 12000,     # hedef reponun CLAUDE.md/AGENTS.md'si, ilgili bolumler
+    # Pipeline'in tasarim / gelistirme / inceleme adimlarina giren repo belgeleri (repo_docs): kural
+    # dosyalari + README / docs'tan isle ilgili bolumler. ~3K token.
+    "REPO_DOCS": 12000,
     "BASE_CONTRACTS": 16000, # PR'in extends/implements ettigi, degistirmedigi siniflar (hedef dal)
     "PR_BUILD": 3000,        # PR build hata ozeti
     "OTHER_REVIEW": 24000,   # PR'daki baska inceleme aracinin bulgulari (16000: #46052 33 bulgunun 17'si girmedi)

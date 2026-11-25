@@ -1283,7 +1283,7 @@ function renderImageVuln(r){
     +list.map(x=>{
       const sc=x.scan||{};const ok=sc.state==='tamam';
       const old=_ivOldestDays(sc.packages||[]);
-      const fx=(x.fix||[]).map(a=>`<div style="white-space:nowrap;font-size:11.5px">${_ivE(_ivKindLabel(a))} <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(_ivStateLabel(a.state))}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}</div>`).join('');
+      const fx=(x.fix||[]).map(a=>`<div style="white-space:nowrap;font-size:11.5px">${_ivE(_ivKindLabel(a))} <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(_ivStateLabel(a.state))}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}</div>${_ivSelBoxes(x.image,a)}`).join('');
       // başlatılabilir eylem varsa düğme satırda da durur: giderme panelden, pencereyi açmadan başlatılır
       const go=(x.fix||[]).some(_ivOpenable)?`<button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="event.stopPropagation();fixImageVuln(this)" title="Başlatılmamış eylemleri yürütür: taslak PR'lar ve izleme işleri. Önce ne açılacağını gösterir.">Gidermeyi başlat</button> `:'';
       return `<tr class="ivr" data-image="${_ivE(x.image)}" onclick="openIvDetail(this.dataset.image)" title="Detay için tıklayın">
@@ -1355,7 +1355,7 @@ function openIvDetail(image){
   }
   // eylem + giderme
   html+=h('Önerilen eylem')+((x.actions||[]).length?'<ul class="ivpk">'+x.actions.map(a=>`<li>${_ivE(a)}</li>`).join('')+'</ul>':'<div class="ivnote">—</div>');
-  if((x.fix||[]).length)html+=h('Giderme')+_ivFixRows(x.fix)
+  if((x.fix||[]).length)html+=h('Giderme')+_ivFixRows(x.fix,x.image)
     +((x.fix||[]).some(_ivOpenable)?`<div style="margin-top:10px"><button class="sm-btn small ivFixBtn" data-image="${_ivE(x.image)}" onclick="fixImageVuln(this)" title="Uyarıyı gideren çalışmayı başlatır: taslak PR'lar ve sürüm yükseltme izlemesi">Gidermeyi başlat</button></div>`:'');
   document.getElementById('ivModalBody').innerHTML=html;
   m.classList.add('open');
@@ -1364,6 +1364,19 @@ function closeIvDetail(){const m=document.getElementById('ivModal');if(m)m.class
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeIvDetail()});
 // Giderme eylemleri (sunucu `fix` alanı): tür, durum, PR / izleme bağlantıları. Bağlantı yalnız https; her metin escHtml'den geçer.
 let _ivFixAll={};
+// Repo seçimi (imaj → Set): satırda, detay penceresinde ve onay penceresinde AYNI seçim görünür. Başlangıçta boştur —
+// hiçbir repo ön seçili gelmez; başlatma bittiğinde o imajın seçimi silinir.
+let _ivSel={};
+// Seçilebilir repolar: birden fazla repo için izleme açılabiliyorsa o repolar, yoksa [].
+function _ivPickUnits(a){const n=a&&a.kind==='yükseltme'&&_ivOpenable(a)?(a.repos||[]).filter(u=>u.state==='yok'):[];return n.length>1?n:[]}
+function _ivSelBox(image,repo,cls){return `<input type="checkbox" class="${cls||'ivSelRepo'}" data-image="${_ivE(image)}" data-repo="${_ivE(repo)}" value="${_ivE(repo)}"${(_ivSel[image]&&_ivSel[image].has(repo))?' checked':''} onclick="event.stopPropagation()" onchange="_ivSelSet(this)" title="Giderme başlatılınca bu repo için izleme açılsın">`}
+function _ivSelBoxes(image,a){return _ivPickUnits(a).map(u=>`<label style="display:block;font-size:11.5px;white-space:nowrap;cursor:pointer" onclick="event.stopPropagation()">${_ivSelBox(image,u.repo)} ${_ivE(u.repo)}</label>`).join('')}
+function _ivSelSet(el){
+  const im=el.dataset.image,rp=el.dataset.repo,st=_ivSel[im]||(_ivSel[im]=new Set());
+  if(el.checked)st.add(rp);else st.delete(rp);
+  document.querySelectorAll('.ivSelRepo,.ivFixRepo').forEach(c=>{if(c!==el&&c.dataset.image===im&&c.dataset.repo===rp)c.checked=el.checked});
+  _ivFixPickSync();
+}
 function _ivLink(url,text){return /^https:\/\//.test(url||'')?`<a href="${_ivE(url)}" target="_blank" rel="noopener">${_ivE(text)}</a>`:_ivE(text)}
 const _ivOpenable=a=>a&&a.state==='yok';
 const _ivFixState={'yok':'dim','açıldı':'ok','pr açık':'run','izleniyor':'run','şablon var':'run','güncel':'ok','devops':'human','elle':'human','hata':'fail','belirsiz':'human','sırada':'dim','durduruldu':'dim','pr reddedildi':'dim','pr kapandı':'dim','hedef yok':'dim'};
@@ -1372,11 +1385,12 @@ const _ivKindName={'taban-yama':'Taban imaj yaması (base-images)','taban-dizin'
 const _ivStateName={'yok':'başlatılmadı','güncel':'hazır','devops':'DevOps\'ta','elle':'elle gerekli'};
 function _ivKindLabel(a){return (_ivKindName[a.kind]||a.kind)+(a.kind==='taban-taşıma'&&a.src?`: ${a.src} → ${a.dst}`:'')+(a.kind==='taban-etiket'&&a.target?`: ${a.target}`:'')}
 const _ivStateLabel=s=>_ivStateName[s]||s;
-function _ivFixRows(fix){
+function _ivFixRows(fix,image){
   if(!fix||!fix.length)return '';
   return '<div style="margin-top:6px;font-size:11.5px">'+fix.map(a=>{
-    const units=(a.repos||[]).map(u=>`<div style="margin-left:10px;color:var(--text-dim)">${_ivE(u.repo)}: ${_ivE(_ivStateLabel(u.state))}${u.pr?' '+_ivLink(u.pr.url,'PR #'+u.pr.id):''}${u.wi?' '+_ivLink(u.url,'izleme #'+u.wi):''}${u.reason?' — '+_ivE(u.reason):''}</div>`).join('');
-    return `<div style="margin-bottom:4px"><b>${_ivE(_ivKindLabel(a))}</b> <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(_ivStateLabel(a.state))}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${a.reason?`<div style="color:var(--text-dim)">${_ivE(a.reason)}</div>`:''}${units}</div>`}).join('')+'</div>';
+    const pk=new Set(image?_ivPickUnits(a).map(u=>u.repo):[]);
+    const units=(a.repos||[]).map(u=>`<div style="margin-left:10px;color:var(--text-dim)">${pk.has(u.repo)?_ivSelBox(image,u.repo)+' ':''}${_ivE(u.repo)}: ${_ivE(_ivStateLabel(u.state))}${u.pr?' '+_ivLink(u.pr.url,'PR #'+u.pr.id):''}${u.wi?' '+_ivLink(u.url,'izleme #'+u.wi):''}${u.reason?' — '+_ivE(u.reason):''}</div>`).join('');
+    return `<div style="margin-bottom:4px"><b>${_ivE(_ivKindLabel(a))}</b> <span class="chip ${_ivFixState[a.state]||'dim'}">${_ivE(_ivStateLabel(a.state))}</span>${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${a.reason?`<div style="color:var(--text-dim)">${_ivE(a.reason)}</div>`:''}${units}${pk.size?'<div style="margin-left:10px;margin-top:3px;color:var(--text-dim)">İzleme açılacak repoları işaretleyin; işaretlenen her repo için 1 Azure iş kaydı açılır.</div>':''}</div>`}).join('')+'</div>';
 }
 // Onay metni: hangi repolara hangi PR'ların / izleme işlerinin açılacağı, bölge başına.
 function _ivFixConfirm(image,fix){
@@ -1396,13 +1410,13 @@ function _ivFixConfirm(image,fix){
 }
 // Birden fazla repo etkileniyorsa izlemenin hangi repolar için açılacağı seçilir. Varsayılan: hiçbiri — her iş kaydı
 // bilerek açılır. PR eylemleri (base-images, bölge repoları) imaj düzeyindedir, seçime girmez.
-function _ivFixPick(fix){
+function _ivFixPick(fix,image){
   const a=(fix||[]).find(x=>x.kind==='yükseltme'&&_ivOpenable(x));
-  const n=a?(a.repos||[]).filter(u=>u.state==='yok'):[];
+  const n=_ivPickUnits(a);
   if(n.length<2)return '';
   const other=(fix||[]).filter(x=>_ivOpenable(x)&&x!==a).length;
   return `<div id="ivFixPick" data-other="${other}" data-cap="${a.cap==null?'':Number(a.cap)}" style="margin-top:12px;font-size:13px"><div style="font-weight:600;margin-bottom:6px">İzleme açılacak repolar</div>`
-    +n.map(u=>`<label style="display:block;margin:3px 0;cursor:pointer"><input type="checkbox" class="ivFixRepo" value="${_ivE(u.repo)}" onchange="_ivFixPickSync()"> <code>${_ivE(u.repo)}</code> → ${_ivE(u.to)}</label>`).join('')
+    +n.map(u=>`<label style="display:block;margin:3px 0;cursor:pointer">${_ivSelBox(image,u.repo,'ivFixRepo')} <code>${_ivE(u.repo)}</code> → ${_ivE(u.to)}</label>`).join('')
     +`<div id="ivFixPickNote" style="margin-top:6px;color:var(--text-dim);font-size:12px"></div></div>`;
 }
 function _ivFixPickSync(){
@@ -1422,7 +1436,7 @@ function fixImageVuln(btn){
   document.getElementById('ivModalTitle').innerHTML=`Gidermeyi başlat: <code>${_ivE(image)}</code>`;
   document.getElementById('ivModalMeta').innerHTML='';
   document.getElementById('ivModalBody').innerHTML=`<div style="white-space:pre-wrap;font-size:13px;line-height:1.55">${_ivE(_ivFixConfirm(image,_ivFixAll[image]))}</div>`
-    +_ivFixPick(_ivFixAll[image])
+    +_ivFixPick(_ivFixAll[image],image)
     +`<div id="ivFixRun" style="margin-top:14px"><button class="sm-btn small" id="ivFixGo">Başlat</button> <button class="sm-btn ghost small" onclick="closeIvDetail()">Vazgeç</button></div>`;
   document.getElementById('ivFixGo').onclick=()=>runImageFix(image);
   _ivFixPickSync();
@@ -1441,6 +1455,7 @@ async function runImageFix(image){
   try{
     const resp=await fetch('/api/techdebt/images/fix',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image,team:_tdTeam(),repos})});
     const r=await resp.json().catch(()=>({}));
+    if(resp.ok)delete _ivSel[image];      // başlatılanın seçimi kalmaz; kart yeniden çizilince kutular boş gelir
     if(!resp.ok)html=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;
     else html=`Giderme başlatıldı (${_ivE(image)}): `+(r.actions||[]).map(a=>`${_ivE(_ivKindLabel(a))} — ${_ivE(_ivStateLabel(a.state))}${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${(a.repos||[]).filter(u=>u.wi&&u.state==='açıldı').map(u=>' '+_ivLink(u.url,u.repo+' #'+u.wi)).join(',')}${a.reason?' ('+_ivE(a.reason)+')':''}`).join('; ');
   }catch(e){html=`<span style="color:var(--danger)">${_ivE(String(e))}</span>`}
