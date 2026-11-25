@@ -471,6 +471,13 @@ SCHEMA: list[dict] = [
         "desc": "Sabit kodlu kimlik bilgisi (Sonar S6437/S2068/secrets) işlerinde mimar, geliştirici ve reviewer bağlamına repodaki mevcut ortam değişkeni adları (.env.example + getenv/$_ENV kullanımları, yalnız adlar) ve 'yeni ad uydurma' kuralı eklenir. PR 45061: yalın akışta mimar yalnız parola satırını gördü ve ORKESTRA_RO_DB_PASSWORD'ü uydurdu; repo DB_ORKESTRA_PROD_PASS kullanıyordu. Birkaç KB, yalnız bu işlerde.",
     },
     {
+        "key": "CREW_REPO_DOCS",
+        "label": "Repo belgeleri · tasarım, geliştirme ve inceleme bağlamı",
+        "type": "bool",
+        "default": True,
+        "desc": "Hedef reponun kendi Markdown belgeleri teknik tasarım, geliştirme ve pipeline incelemesi adımlarına referans veri olarak girer: kökteki CLAUDE.md / AGENTS.md / copilot talimatları ve planın dokunduğu dizinlerin kural dosyaları önce; README, CONTRIBUTING ve docs/ altından yalnız işle örtüşen ya da kural / test / mimari başlıklı bölümler. Alınmayan belgeler adıyla listelenir. LLM yok, en çok ~12K karakter (context_budget REPO_DOCS). Önceden yalnız insan PR incelemesi reponun kural dosyasını okuyordu; kodu yazan adımlar okumuyordu. Kapatınca adımlar eski bağlamla koşar.",
+    },
+    {
         "key": "CREW_QUALITY_SONAR_SKIP_LANGS",
         "label": "Kalite · Sonar hariç kural dilleri",
         "type": "str",

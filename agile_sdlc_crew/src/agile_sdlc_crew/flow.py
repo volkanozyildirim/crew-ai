@@ -1674,6 +1674,14 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 env_ctx = ""
             if env_ctx:
                 tail.append(env_ctx)
+            # Reponun kendi belgeleri (CLAUDE.md / AGENTS.md + README / docs'tan ilgili bölümler): yazan da
+            # inceleyen de sahibi ekibin kurallarını görsün. Önceden yalnız insan PR incelemesi okuyordu.
+            try:
+                docs_ctx = self._repo_docs_block()
+            except Exception:  # noqa: BLE001 — belge okunamazsa adım belgesiz koşar
+                docs_ctx = ""
+            if docs_ctx:
+                tail.append(docs_ctx)
             if step_key == "technical_design_task":
                 try:
                     ev_ctx = self._quality_evidence_block()
@@ -7566,6 +7574,30 @@ class AgileSDLCFlow(Flow[PipelineState]):
                 return ""  # klon henüz yok — sonraki çağrı yeniden denesin
         self._quality_evidence_cache = block
         return block
+
+    def _repo_docs_block(self) -> str:
+        """Hedef reponun Markdown belgelerinden bu işe yarayanlar (`repo_docs.build_block`). Plan bilinmeden
+        (teknik tasarım) iş kalemindeki tanımlayıcılarla, plan belliyken dosya yollarıyla da seçilir; sonuç plan
+        dosya kümesi başına bir kez hesaplanır."""
+        from agile_sdlc_crew import pipeline_config as _pc
+        if not _pc.get("CREW_REPO_DOCS"):
+            return ""
+        s = self.state
+        repo = getattr(self, "_quality_repo", "") or s.repo_name or ""
+        base = getattr(getattr(self, "_repo_mgr", None), "base_dir", None)
+        if not (repo and base and (Path(base) / repo / ".git").exists()):
+            return ""               # klon henüz yok — sonraki çağrı yeniden denesin
+        paths = tuple(sorted({_norm_path(c.get("file_path")) for c in ((s.plan or {}).get("changes") or [])
+                              if c.get("file_path")}))
+        cache = getattr(self, "_repo_docs_cache", None)
+        if cache is None:
+            cache = self._repo_docs_cache = {}
+            self._freshen_target_repo(repo)     # belgeler bayat main'den okunmasın (iş başına bir kez)
+        if paths not in cache:
+            from agile_sdlc_crew import repo_docs as _rd
+            text = " ".join([s.wi_title or "", s.requirements_text or "", getattr(self, "_quality_desc", "") or ""])
+            cache[paths] = _rd.build_block(Path(base) / repo, repo, paths=paths, text=text, cap=_cb.cap("REPO_DOCS"))
+        return cache[paths]
 
     def _env_conventions_block(self) -> str:
         """Sabit kodlu kimlik bilgisi işi (Sonar S6437/S2068/secrets) ise repodaki env
