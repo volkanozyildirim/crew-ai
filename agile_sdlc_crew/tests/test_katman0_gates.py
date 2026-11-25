@@ -3824,9 +3824,9 @@ def test_upgrade_api_surface():
     finally:
         pc.get = orig
     html = (Path(__file__).resolve().parent.parent / "src/agile_sdlc_crew/web/index.html").read_text(encoding="utf-8")
-    check("kart yükseltme işlevleri ve mod anahtarı",
+    check("kart yükseltme işlevleri; kip sekmeden gelir (Sürüm & güvenlik → yükseltme)",
           all(n in html for n in ("function loadUpgradeRepos", "function upgradeScan", "function renderUpgrade",
-                                  "function upgradeTake", "tempo_modern_mode", "tempo_upgrade_to")))
+                                  "function upgradeTake", "function _tdmPlace", "_tdm.want==='up'", "tempo_upgrade_to")))
 
     def _fn(name):
         i = html.find("function " + name) if "async function " + name not in html else html.find("async function " + name)
@@ -4571,6 +4571,13 @@ def test_techdebt_ui():
     check("liste ve çoklu seçimle kuyruk var; elle giriş formu kaldırıldı",
           'id="tdList"' in pane and "/api/techdebt/queue" in html and "function loadTechdebt" in html
           and "name==='techdebt'" in html and 'id="tdForm"' not in html and "/api/techdebt/manual" not in html)
+    us = html.find('id="paneUpsec"')
+    upane = html[us:html.find("<section", us + 10)] if us >= 0 else ""
+    check("Sürüm & güvenlik ayrı sekme: imaj güvenliği kartı ve yükseltme yuvası orada, Teknik borç'ta değil",
+          'data-tab="upsec"' in html and 'id="tdImgCard"' in upane and 'id="upModernSlot"' in upane
+          and 'id="tdImgCard"' not in pane and 'id="tdModernSlot"' in pane
+          and "name==='upsec'&&typeof loadImageVuln" in html and "getElementById('paneUpsec')" in html
+          and "getElementById('tabUpsec')" in html)
 
 
 def test_techdebt_review_fixes():
@@ -4664,9 +4671,8 @@ def test_dashboard_readability():
     check("açık temada okunmayan sabit sarı/pembe yazı renkleri yok",
           not any(c in html for c in ("color:#fbbf24", "color:#fca5a5", "color:#f9c74f")))
     sb = _re.search(r'<button[^>]*onclick="openSettings\(\)"[^>]*>.*?</button>', html, _re.S).group(0)
-    tb = _re.search(r'<button[^>]*id="themeBtn"[^>]*>.*?</button>', html, _re.S).group(0)
-    check("ayarlar butonu etiketli ve dişli simgeli; tema butonundan ayırt edilir",
-          "Ayarlar" in sb and 'data-icon="gear"' in sb and 'data-icon="gear"' not in tb)
+    check("ayarlar butonu etiketli ve dişli simgeli",
+          "Ayarlar" in sb and 'data-icon="gear"' in sb)
     check("metin/sayı kutuları açılır liste gibi çizilmez (ok simgesi + kesilen değer)",
           not _re.search(r'<input[^>]*class="sprint-select"', html) and 'id="qSp"' in html
           and _re.search(r'<input class="ctl-input" id="qSp"', html) is not None)
@@ -4674,8 +4680,20 @@ def test_dashboard_readability():
           not any(c in html for c in ("background:#111", "background:#222", "background:#6c5ce7")))
     check("geçmiş iş taraması ilk açılışta boş siyah log/çubuk değil açıklama gösterir",
           'id="bfHint"' in html and "logEl.style.display" in html)
-    check("tema butonu güncel modu simgeyle gösterir (güneş / ay / ekran)",
+    check("tema seçenekleri simgeyle gösterilir (güneş / ay / ekran)",
           "THEME_ICONS" in html and all(k in html for k in ("light:", "dark:", "system:")))
+    hdr = html[html.index("<header>"):html.index("</header>")]
+    pv = html[html.index('id="cfgPanelView"'):html.index('id="cfgToast"')]
+    check("üst bar sade: iş öğesi no ile başlatma, sıfırlama ve tema düğmesi yok",
+          'id="wiInput"' not in html and "function triggerRun" not in html and "resetDashboard()" not in hdr
+          and 'id="themeBtn"' not in html and "toggleTheme" not in html)
+    check("Ayarlar › Görünüm sekmesi: üç tema seçeneği + durum panelini sıfırla",
+          "switchCfgTab('panel')" in html and all(f"setTheme('{k}')" in pv for k in ("system", "light", "dark"))
+          and "resetDashboard()" in pv and "function setTheme" in html and "else if(name==='panel')" in html)
+    bar = html[html.index('id="actionBar"'):]
+    bar = bar[:bar.index("</div>\n</div>")]
+    check("Dry run ve HAL board'un toplu kuyruk çubuğunda (kuyruğa alma onları okur)",
+          'id="dryRun"' in bar and 'id="halMode"' in bar and "getElementById('halMode')?.checked" in html)
 
 
 def test_human_label():
@@ -5420,7 +5438,10 @@ def test_php_modern_ui():
     check("403'te kart gizli, takım _tdTeam() ile, humanChip kullanılır", "status===403" in js and "_tdTeam()" in js and "humanChip(" in js)
     check("sürümü bilinmeyen repo seçilemez", "disabled" in js and "hedef sürüm bilinmiyor" in js)
     check("tema renkleri (sabit renk yok)", "var(--text" in js and not re.search(r"#[0-9a-fA-F]{6}\b", js), "sabit renk var")
-    check("sekme açılınca modern repolar yüklenir", "loadModernRepos()" in html[html.find("name==='techdebt'"):html.find("name==='techdebt'") + 200])
+    pl = html[html.find("function _tdmPlace"):]
+    check("sekme açılınca modern repolar yüklenir (Teknik borç ve Sürüm & güvenlik → _tdmPlace)",
+          "_tdmPlace(name)" in html[html.find("name==='techdebt'"):html.find("name==='techdebt'") + 300]
+          and "loadModernRepos()" in pl[:pl.find("\n}\n")])
     tk = js[js.find("async function modernTake"):]
     check("alım sonucu silinmez, yeniden tarama beklenir (butonlar erken açılmaz)", "await modernScan(false,true)" in tk and "keepMsg" in js)
     check("tekrarlayan (recurring) satır da seçilebilir", "t.recurring_of?'':" not in js)
