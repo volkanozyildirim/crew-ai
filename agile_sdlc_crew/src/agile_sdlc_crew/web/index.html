@@ -673,6 +673,7 @@ header {
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Modernleştirme</span>
           <span id="tdmModeSw" style="display:none;gap:4px"><button class="sm-btn small" id="tdmModeMod" onclick="_tdmSetMode('mod')">Modernleştirme</button><button class="sm-btn ghost small" id="tdmModeUp" onclick="_tdmSetMode('up')">Sürüm yükseltme</button></span>
           <span class="chip dim" id="tdmTarget" title="Hedef sürüm: repo dilinin üretimdeki sürümü"></span><span style="flex:1"></span>
+          <button class="sm-btn ghost small" id="tdmBack" style="display:none" onclick="_upBack()" title="Sürüm dağılımına dön"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><path d="M15 18l-6-6 6-6"/></svg>Sürüm dağılımı</button>
           <select class="sprint-select" id="tdmRepo" title="Yerel repolar (PHP, Go, Python, Next.js)" onchange="_tdmRepoChanged()"><option>Yükleniyor…</option></select>
           <select class="sprint-select" id="tdmTo" style="display:none" title="Yükseltme hedef sürümü" onchange="_upToChanged()"></select>
           <button class="sm-btn ghost small" id="tdmRescan" onclick="modernScan(true)" title="Önbelleği atla, yeniden tara">Yeniden tara</button>
@@ -2317,7 +2318,8 @@ function _upOverviewHtml(){
     +'</span><span class="upv-hint">Repoyu seçmek için üzerine tıklayın</span></div><div class="upv-grid">'+langs.map(card).join('')+'</div></div>';
 }
 // Repo seçiliyken sürüm dağılımına (ana görünüm) dönüş: seçimi temizler, devam eden yoklamayı / taramayı bırakır.
-function _upBackBtn(){return `<button class="sm-btn ghost small" style="margin:6px 0 2px" onclick="_upBack()" title="Sürüm dağılımına dön"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><path d="M15 18l-6-6 6-6"/></svg>Sürüm dağılımı</button>`}
+// Düğme kart başlığında, repo seçicinin yanında (#tdmBack); yalnız yükseltme kipinde ve bir repo seçiliyken görünür.
+function _upSyncBack(){const b=document.getElementById('tdmBack');if(b)b.style.display=(_tdm.mode==='up'&&_tdmSel().repo)?'':'none'}
 function _upBack(){clearTimeout(_tdm.upPollT);const s=document.getElementById('tdmRepo');if(s){s.value=''}_tdmRepoChanged()}
 function _upPick(v){const s=document.getElementById('tdmRepo');s.value=v;if(s.value===v)_tdmRepoChanged()}
 function _upShowOverview(){const b=document.getElementById('tdmUpInfo');if(b&&_tdm.mode==='up'&&!_tdmSel().repo)b.innerHTML=_upOverviewHtml()}
@@ -2339,6 +2341,7 @@ function _tdmSetMode(m){
   document.getElementById('tdmTarget').textContent='';
   document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=true;
   if(up)_upShowOverview();
+  _upSyncBack();
 }
 // Modernleştirme kartı iki sekmede kullanılır (tek kod yolu): Teknik borç'ta modernleştirme kipinde,
 // Sürüm & güvenlik'te sürüm yükseltme kipinde. Kart sekmeye göre ilgili yuvaya taşınır; kip düğmeleri gizli kalır.
@@ -2377,7 +2380,7 @@ async function loadUpgradeRepos(keep){
 function _upRepoChanged(){
   const k=_tdmSel();const r=_tdm.upRepos.find(x=>x.repo===k.repo&&x.lang===k.lang);
   _tdm.seq++;_tdm.scan=null;_tdm.userTo=false;clearTimeout(_tdm.upPollT);
-  document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';document.getElementById('tdmUpInfo').innerHTML=k.repo?_upBackBtn():'';
+  document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';document.getElementById('tdmUpInfo').innerHTML='';_upSyncBack();
   document.getElementById('tdmTo').innerHTML='';
   document.getElementById('tdmTarget').textContent=r&&r.current?`${r.label||''} ${r.current}`:'';
   document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=!(r&&r.current);
@@ -2449,7 +2452,7 @@ function renderUpgrade(){
   const probeTxt=pr.ran?`hedef araç: ${esc(String(pr.tool||''))} ✓`:`<span style="color:var(--warning)">${esc(String(pr.reason||'hedef araç çalışmadı'))}</span>`;
   const bl=(r.blockers||[]).map(b=>`<span class="chip dim" title="${esc(String(b.detail||''))}">${esc(String(b.name||''))} ${esc(String(b.constraint||''))}</span>`).join(' ');
   const sites=(r.sites||[]).map(s=>`<li><code>${esc(String(s.where||''))}</code> ${esc(String(s.path||''))}${s.line?':'+esc(String(s.line)):''} <span style="color:var(--text-dim)">${esc(String(s.old||''))} → ${esc(String(s.new||''))}</span>${s.blocked?` <span class="chip" style="background:var(--human-soft);color:var(--danger)">engelli: ${esc(String(s.blocked))}</span>`:''}</li>`).join('');
-  box.innerHTML=_upBackBtn()+`<div style="padding:6px 0"><b>${esc(String(r.repo))} · ${esc(String(r.label||''))}</b> ${esc(String(r.current||'?'))} → ${esc(String(r.target||'?'))}`
+  box.innerHTML=`<div style="padding:6px 0"><b>${esc(String(r.repo))} · ${esc(String(r.label||''))}</b> ${esc(String(r.current||'?'))} → ${esc(String(r.target||'?'))}`
     +(r.up_to_date?' <span class="chip dim">güncel</span>':'')
     +(r.cache&&r.cache.at?` <span class="chip dim" title="Tarama önbellekten; süresi dolunca kendiliğinden yenilenir. 'Yeniden tara' önbelleği atlar.">${r.cache.state==='yenileniyor'?'önbellek '+esc(String(r.cache.at).replace('T',' ').slice(0,16))+' · yenileniyor…':'tarama '+esc(String(r.cache.at).replace('T',' ').slice(0,16))}</span>`:'')+'</div>'
     +_upStatusHtml(r,it)
