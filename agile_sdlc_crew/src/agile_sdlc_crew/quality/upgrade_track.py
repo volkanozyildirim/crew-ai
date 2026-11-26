@@ -27,6 +27,33 @@ TRACK_TAG = "tempo-upgrade-track"
 # Karttan / giderme düğmesinden başlatılan izleme: genel CREW_TECHDEBT_UPGRADE_AUTO kapalı olsa da yoklayıcı bu işi
 # uçtan uca ilerletir (engel işlerinin hepsi açılır, şablon PR'ı, sürüm adımları). Kullanıcı kararı 2026-11-26.
 AUTO_TAG = "tempo-upgrade-auto"
+# Etiket board'da herkesin düzenleyebildiği bir alandır: yetki SAYILMAZ. Otomatik izleme işlerinin kimlikleri yalnız
+# sunucunun yazdığı bu dosyadadır (start / giderme düğmesi); iş ancak etiketi taşıyor VE burada kayıtlıysa otomatiktir.
+AUTO_FILE = Path(__file__).resolve().parent.parent / "config" / "quality_upgrade_auto.json"
+AUTO_TAKE_MAX = 40          # otomatik izlemenin bir turda açabileceği en çok grup (tavansız değil, sınırlı)
+_AUTO_LOCK = threading.Lock()
+
+
+def _auto_ids(path: Path | None = None) -> set[int]:
+    import json
+    try:
+        doc = json.loads(Path(path or AUTO_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {int(x) for x in doc if isinstance(x, int) and not isinstance(x, bool) and x > 0} if isinstance(doc, list) \
+        else set()
+
+
+def _auto_register(wid: int, path: Path | None = None) -> None:
+    import json
+    with _AUTO_LOCK:
+        ids = _auto_ids(path) | {int(wid)}
+        try:
+            p = Path(path or AUTO_FILE)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(sorted(ids)[-500:]), encoding="utf-8")
+        except OSError as e:
+            log.warning(f"⚠️ upgrade: otomatik izleme kaydı yazılamadı: {e}")
 KEY_PREFIX = "tempo-upgrade-key:"
 _KEY_RE = re.compile(r"tempo-upgrade-key:\s*([a-z]+):([A-Za-z0-9][\w.-]*):(\d+\.\d+)")
 SIGNATURE = "<p><small><i>Tempo — Sürüm yükseltme</i></small></p>"
@@ -77,7 +104,8 @@ def _track_rows(client, extra: str = "", *, open_only: bool = True) -> list[dict
             continue
         out.append({"id": int(wi["id"]), "lang": m.group(1), "repo": m.group(2), "to": m.group(3),
                     "title": f.get("System.Title") or "", "area": f.get("System.AreaPath") or "", "open": _is_open(f),
-                    "auto": AUTO_TAG in tags, "tags": str(f.get("System.Tags") or "")})
+                    "auto": AUTO_TAG in tags and int(wi["id"]) in _auto_ids(),
+                    "tags": str(f.get("System.Tags") or "")})
     return out
 
 
@@ -147,11 +175,11 @@ def item_auto(tr: dict) -> bool:
 def _mark_auto(client, row: dict) -> bool:
     """Açık (eski, işaretsiz) izleme işine otomatik etiketini ekler; eklendiyse True."""
     tags = [t.strip() for t in str(row.get("tags") or "").split(";") if t.strip()]
-    if any(t.lower() == AUTO_TAG for t in tags):
-        return True
     try:
-        client.update_work_item(int(row["id"]), [{"op": "add", "path": "/fields/System.Tags",
-                                                  "value": "; ".join(tags + [AUTO_TAG])}])
+        if not any(t.lower() == AUTO_TAG for t in tags):
+            client.update_work_item(int(row["id"]), [{"op": "add", "path": "/fields/System.Tags",
+                                                      "value": "; ".join(tags + [AUTO_TAG])}])
+        _auto_register(int(row["id"]))
         return True
     except Exception as e:  # noqa: BLE001 — etiket eklenemezse iş yine izlenir (genel anahtara bağlı kalır)
         log.warning(f"⚠️ upgrade: #{row.get('id')} otomatik etiketi eklenemedi: {str(e)[:200]}")
@@ -254,6 +282,8 @@ def start(client, repo: str, lang: str, *, to: str | None = None, team: str, dep
         for k, v in (deps.cfg().get("task_fields") or {}).items():
             fields.setdefault(k, v)
         wi = client.create_work_item("Task", fields)
+        if auto:
+            _auto_register(int(wi["id"]))
     log.info(f"⬆️ Yükseltme izleme işi açıldı: #{wi['id']} ({key})")
     return {"id": int(wi["id"]), "created": True, "lang": lang, "repo": repo, "to": tgt, "auto": bool(auto)}
 
@@ -845,9 +875,11 @@ def _auto_take_all(client, tr: dict, auto: list, human: list, res: dict, *, team
     (kullanıcı kararı 2026-11-26: "tüm durumlar için işler açılıp yapılmalı"); `take`'in istek başı tavanı yüzünden
     `max_take`'lik parçalarla çağrılır. Board dedup'ı aynı bulguyu ikinci kez açmaz, sonraki tur yalnız yenileri alır."""
     from agile_sdlc_crew.quality import intake
-    ids = [r["gid"] for r in auto] + [r["gid"] for r in human]
+    ids = ([r["gid"] for r in auto] + [r["gid"] for r in human])[:AUTO_TAKE_MAX]
     if not ids:
         return
+    if len(auto) + len(human) > AUTO_TAKE_MAX:
+        _note(res, f"Bu turda en çok {AUTO_TAKE_MAX} iş alındı; kalanı sonraki turda")
     sprint, mode = _auto_sprint(client, team)
     if not sprint:
         _note(res, f"Takımın {'sonraki' if mode == 'next' else 'aktif'} sprinti yok — otomatik alım yapılmadı")
