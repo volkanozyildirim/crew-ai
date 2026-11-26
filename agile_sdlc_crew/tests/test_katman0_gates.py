@@ -15960,6 +15960,24 @@ def test_upsec_cache_and_auto():
         check("etiketi elle eklenmiş ama sunucu kaydında olmayan iş otomatik SAYILMAZ (etiket yetki değil)",
               rows == {7: True, 8: False}, str(rows))
 
+        # Go probe tabanı (#79308): şimdiki sürümde de olan vet uyarısı yükseltme bulgusu sayılmaz.
+        from agile_sdlc_crew.quality import upgrade as _upg
+        if shutil.which("go") and shutil.which("git"):
+            gd = Path(tempfile.mkdtemp())
+            (gd / "go.mod").write_text("module example.com/p\n\ngo 1.22\n", encoding="utf-8")
+            (gd / "p.go").write_text('package p\n\nimport "fmt"\n\nfunc F() error {\n\treturn nil\n\treturn fmt.Errorf("x")\n}\n',
+                                      encoding="utf-8")
+            for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "i"]):
+                subprocess.run(cmd, cwd=gd, check=True, capture_output=True)
+            tgt = ".".join(subprocess.run(["go", "env", "GOVERSION"], capture_output=True, text=True).stdout
+                           .strip().removeprefix("go").split(".")[:2])
+            ph, pst = _upg._probe_go(gd, tgt, 300)
+            check("go probe: şimdiki sürümde de olan vet uyarısı (unreachable code) bulgu olmaz, taban sayılır",
+                  pst.get("ran") and ph == [] and pst.get("baseline_dropped") == 1, f"{pst} {ph}")
+        else:
+            skip("go probe tabanı", "go / git yok")
+
         html = (Path(__file__).resolve().parent.parent / "src" / "agile_sdlc_crew" / "web" / "index.html").read_text(
             encoding="utf-8")
         check("kart: dil × sürüm grupları, dağılım görünümü, önbellek durumu ve imaj grupları",
