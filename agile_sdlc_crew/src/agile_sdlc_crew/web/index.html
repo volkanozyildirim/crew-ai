@@ -126,6 +126,49 @@ header {
 .card { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; }
 .card-head { display:flex; align-items:center; gap:10px; padding:12px 14px; }
 .h { font-size:11px; font-weight:600; color:var(--text-dim); letter-spacing:.05em; text-transform:uppercase; }
+/* Sürüm dağılımı (yükseltme kartı, repo seçilmemişken) */
+.upv { padding:4px 0 8px; }
+.upv-top { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin:2px 0 10px; font-size:12px; }
+.upv-top > span:first-child { font-weight:650; font-size:13px; color:var(--text); }
+.upv-legend { display:flex; gap:12px; flex-wrap:wrap; color:var(--text-dim); font-size:11.5px; }
+.upv-legend span { display:inline-flex; align-items:center; gap:5px; }
+.upv-hint { margin-left:auto; color:var(--faint); font-size:11.5px; }
+.upv-dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+.upv-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:12px; align-items:start; }
+.upv-card { border:1px solid var(--border); border-radius:10px; background:var(--bg-card); overflow:hidden; }
+.upv-head { display:flex; align-items:baseline; gap:8px; padding:10px 12px 8px; }
+.upv-head .n { font-weight:650; font-size:14px; }
+.upv-head .t { color:var(--text-dim); font-size:11.5px; }
+.upv-head .m { margin-left:auto; color:var(--text-dim); font-size:11.5px; }
+.upv-head .m b { color:var(--text); }
+.upv-bar { display:flex; height:4px; margin:0 12px 6px; border-radius:2px; overflow:hidden; gap:2px; background:var(--bg-elevated); }
+.upv-seg, .upv-dot { background:var(--faint); }
+.upv-seg.hi, .upv-dot.hi { background:var(--danger); }
+.upv-seg.md, .upv-dot.md { background:var(--warning); }
+.upv-seg.lo, .upv-dot.lo { background:var(--accent); }
+.upv-seg.ok, .upv-dot.ok { background:var(--success); }
+.upv-seg.na { background:var(--border); }
+.upv-row { display:grid; grid-template-columns:76px 1fr; gap:10px; padding:8px 12px; border-top:1px solid var(--border); align-items:start; }
+.upv-ver { display:flex; flex-direction:column; gap:1px; padding-left:8px; border-left:3px solid var(--border); font-family:'Geist Mono',ui-monospace,monospace; }
+.upv-ver .cur { font-size:13px; font-weight:600; }
+.upv-ver .tgt { font-size:11px; color:var(--text-dim); }
+.upv-row.hi .upv-ver { border-color:var(--danger); } .upv-row.hi .cur { color:var(--danger); }
+.upv-row.md .upv-ver { border-color:var(--warning); } .upv-row.md .cur { color:var(--warning); }
+.upv-row.lo .upv-ver { border-color:var(--accent); }
+.upv-row.ok .upv-ver { border-color:var(--success); } .upv-row.ok .tgt { color:var(--success); }
+.upv-row.ok .upv-repo { color:var(--text-dim); }
+.upv-repos { display:flex; flex-wrap:wrap; gap:5px; }
+.upv-repo { font:inherit; font-size:12px; line-height:1.5; color:var(--text); background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:1px 8px; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
+.upv-repo:hover { border-color:var(--accent); color:var(--accent); }
+.upv-repo.trk { border-color:var(--accent); background:var(--accent-soft); color:var(--accent-light); }
+.upv-repo .s { font-size:10.5px; color:var(--text-dim); }
+.upv-repo.off { cursor:default; color:var(--faint); border-style:dashed; }
+.upv-repo.off:hover { border-color:var(--border); color:var(--faint); }
+.upv-na { border-top:1px solid var(--border); padding:6px 12px 8px; }
+.upv-na summary { cursor:pointer; font-size:11.5px; color:var(--text-dim); padding:2px 0; }
+.upv-na .upv-repos { margin-top:6px; }
+.upv-empty { padding:10px 12px; color:var(--text-dim); font-size:12px; border-top:1px solid var(--border); }
+@media (max-width:520px){ .upv-grid { grid-template-columns:1fr; } .upv-hint { margin-left:0; } }
 .chip { font-size:11px; padding:2px 8px; border-radius:999px; font-weight:600; white-space:nowrap; display:inline-flex; align-items:center; gap:5px; }
 .chip.run { background:var(--run-soft); color:var(--run); }
 .chip.ok { background:var(--ok-soft); color:var(--success); }
@@ -2215,20 +2258,55 @@ function _upGroups(items){
       items:g.items.sort((a,b)=>String(a.repo).localeCompare(String(b.repo)))}))
     .sort((a,b)=>a.label.localeCompare(b.label)||(!a.current)-(!b.current)||_upVerKey(a.current).localeCompare(_upVerKey(b.current)));
 }
-// Repo seçilmemişken: dil başına sürüm dağılımı. Her repo bir çiptir (tıklayınca seçilir); önbellekte taraması olan
-// repoda aşama / engelleyen sayısı da yazar (sunucunun önbellek özeti — UI hesaplamaz).
+// Repo seçilmemişken: dil başına bir kart. Kartın üstünde dağılım çubuğu (sürüm farkına göre renk), altında sürüm
+// satırları — en eski (en acil) sürüm üstte, güncel olanlar sonda, sürümü bulunamayanlar katlanmış. Repo bir etikettir
+// (tıklayınca seçilir); önbellekte taraması olan repoda aşama / engel sayısı sunucunun özetinden gelir, UI hesaplamaz.
+// Renk: major fark kırmızı · 2+ minor turuncu · yakın sürüm camgöbeği · güncel yeşil.
+function _upSev(g){
+  if(!g.current)return 'na';
+  if(g.items.every(i=>i.up_to_date))return 'ok';
+  const t=g.items.map(i=>i.target).filter(Boolean).sort((a,b)=>_upVerKey(b).localeCompare(_upVerKey(a)))[0];
+  if(!t)return 'ok';
+  const c=String(g.current).split('.').map(Number),d=String(t).split('.').map(Number);
+  if((d[0]||0)>(c[0]||0))return 'hi';
+  return (d[1]||0)-(c[1]||0)>=2?'md':'lo';
+}
+const _UPV_SEV={hi:'major sürüm farkı',md:'2+ minor sürüm geride',lo:'yakın sürüm',ok:'güncel',na:'sürüm bulunamadı'};
+function _upRepoTag(i){
+  const v=(i.lang||'php')+':'+i.repo;
+  const st=i.tracked?'izleniyor':(i.scanned&&i.stage&&i.stage!=='hazırlık'?i.stage:'');
+  const bl=i.blocking?`${Number(i.blocking)} engel`:'';
+  const meta=[st,bl].filter(Boolean).join(' · ');
+  return `<button class="upv-repo${i.tracked?' trk':''}" data-v="${escHtml(v)}" onclick="_upPick(this.dataset.v)" title="${escHtml(i.repo+(meta?' — '+meta:(i.scanned?'':' — henüz taranmadı')))}">${escHtml(i.repo)}${meta?`<span class="s">${escHtml(meta)}</span>`:''}</button>`;
+}
 function _upOverviewHtml(){
   const up=_tdm.upRepos||[];if(!up.length)return '';
-  const groups=_upGroups(up);const langs=[...new Set(groups.map(g=>g.label))];
-  return '<div style="padding:6px 0"><div style="color:var(--text-dim);margin-bottom:4px">Sürüm dağılımı — repo seçmek için tıklayın</div>'
-    +langs.map(lb=>`<div style="margin:6px 0"><b>${escHtml(lb)}</b>`+groups.filter(g=>g.label===lb).map(g=>{
+  const groups=_upGroups(up);
+  const order={hi:0,md:1,lo:2,ok:3};
+  const langs=[...new Set(groups.map(g=>g.label))].map(lb=>{
+    const gs=groups.filter(g=>g.label===lb).map(g=>Object.assign(g,{sev:_upSev(g)}));
+    const known=gs.filter(g=>g.sev!=='na').sort((a,b)=>order[a.sev]-order[b.sev]||_upVerKey(a.current).localeCompare(_upVerKey(b.current)));
+    const na=gs.filter(g=>g.sev==='na').flatMap(g=>g.items);
+    const cnt=s=>known.filter(g=>g.sev===s).reduce((n,g)=>n+g.items.length,0);
+    const c={hi:cnt('hi'),md:cnt('md'),lo:cnt('lo'),ok:cnt('ok'),na:na.length};
+    return {lb,known,na,c,total:gs.reduce((n,g)=>n+g.items.length,0),late:c.hi+c.md+c.lo};
+  }).sort((a,b)=>b.late-a.late||a.lb.localeCompare(b.lb));
+  const card=L=>{
+    const bar=['hi','md','lo','ok','na'].filter(s=>L.c[s]).map(s=>`<span class="upv-seg ${s}" style="flex:${L.c[s]}" title="${escHtml(_UPV_SEV[s])}: ${L.c[s]}"></span>`).join('');
+    const rows=L.known.map(g=>{
       const tg=[...new Set(g.items.map(i=>i.target).filter(Boolean))];
-      return `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:3px 0 3px 10px"><span class="chip dim" style="min-width:64px">${escHtml(g.current||'?')}${tg.length?' → '+escHtml(tg.join(', ')):''}</span>`
-        +g.items.map(i=>{const v=(i.lang||'php')+':'+i.repo;
-          const st=i.tracked?'izleniyor':(i.scanned&&i.stage?i.stage:'');
-          const bl=i.blocking?` · ${Number(i.blocking)} engel`:'';
-          const col=i.up_to_date?'var(--text-dim)':(i.tracked?'var(--accent)':'inherit');
-          return `<button class="sm-btn ghost small" style="color:${col}" ${i.current?'':'disabled'} data-v="${escHtml(v)}" onclick="_upPick(this.dataset.v)" title="${escHtml(i.up_to_date?'güncel':(st||'taranmadı'))}">${escHtml(i.repo)}${st||bl?` <span style="color:var(--text-dim)">${escHtml(st)}${escHtml(bl)}</span>`:''}</button>`}).join('')+'</div>'}).join('')+'</div>').join('')+'</div>';
+      return `<div class="upv-row ${g.sev}"><div class="upv-ver" title="${escHtml(_UPV_SEV[g.sev])}"><span class="cur">${escHtml(g.current)}</span>`
+        +(g.sev==='ok'?'<span class="tgt">güncel</span>':`<span class="tgt">→ ${escHtml(tg.join(', '))}</span>`)
+        +`</div><div class="upv-repos">${g.items.map(_upRepoTag).join('')}</div></div>`;
+    }).join('');
+    const na=L.na.length?`<details class="upv-na"><summary>Sürümü bulunamayan ${L.na.length} repo</summary><div class="upv-repos">${L.na.map(i=>`<span class="upv-repo off" title="Şimdiki sürüm okunamadı — taranamaz">${escHtml(i.repo)}</span>`).join('')}</div></details>`:'';
+    const meta=[L.late?`<b>${L.late}</b> yükseltilecek`:'',L.c.ok?`${L.c.ok} güncel`:'',L.c.na?`${L.c.na} bilinmiyor`:''].filter(Boolean).join(' · ');
+    return `<div class="upv-card"><div class="upv-head"><span class="n">${escHtml(L.lb)}</span><span class="t">${L.total} repo</span><span class="m">${meta}</span></div>`
+      +`<div class="upv-bar">${bar}</div>${rows||'<div class="upv-empty">Sürümü okunan repo yok</div>'}${na}</div>`;
+  };
+  return '<div class="upv"><div class="upv-top"><span>Sürüm dağılımı</span><span class="upv-legend">'
+    +['hi','md','lo','ok'].map(s=>`<span><i class="upv-dot ${s}"></i>${escHtml(_UPV_SEV[s])}</span>`).join('')
+    +'</span><span class="upv-hint">Repoyu seçmek için üzerine tıklayın</span></div><div class="upv-grid">'+langs.map(card).join('')+'</div></div>';
 }
 function _upPick(v){const s=document.getElementById('tdmRepo');s.value=v;if(s.value===v)_tdmRepoChanged()}
 function _upShowOverview(){const b=document.getElementById('tdmUpInfo');if(b&&_tdm.mode==='up'&&!_tdmSel().repo)b.innerHTML=_upOverviewHtml()}
