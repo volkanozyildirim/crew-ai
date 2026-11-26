@@ -2222,7 +2222,18 @@ def _image_fix_run(image: str, team: str, repos: list[str] | None = None) -> tup
         return 409, {"error": "Başlatılacak giderme yok — " + ("; ".join(
             f"{w['kind']}: {w['state']}" + (f" ({w['reason']})" if w["reason"] else "") for w in why) or "eylem yok"),
                      "reasons": why}
-    return 200, {"image": image, "actions": _fx.public(acts)}
+    # Başlatılan giderme takibe alınır: zincirin kalanı (taşıma / etiket PR'ları, izleme adımları) kendiliğinden yürür.
+    _iv.follow_add(image, team, repos)
+    if team:        # yeni açılan izlemelerin ilk turu hemen (engel işleri, şablon PR'ı) — yoklayıcıyı beklemeden
+        from agile_sdlc_crew.quality import upgrade_track as _ut
+        for a in acts:
+            for u in (a.get("repos") or []) if a.get("kind") == "yükseltme" else []:
+                if u.get("state") == "açıldı" and u.get("wi"):
+                    try:
+                        _ut.kick(lambda: AzureDevOpsClient(), int(u["wi"]), team, on_queued=_ensure_worker)
+                    except Exception as e:  # noqa: BLE001
+                        pipeline_log.warning(f"izleme ilk turu başlatılamadı #{u.get('wi')}: {e}")
+    return 200, {"image": image, "actions": _fx.public(acts), "followed": True}
 
 
 @app.post("/api/techdebt/images/fix")
@@ -2341,15 +2352,23 @@ async def techdebt_upgrade_repos(team: str = ""):
                 watch = {(t["lang"], t["repo"].lower()): t["to"] for t in _ut.tracked(client, team.strip())}
             except Exception as e:  # noqa: BLE001 — liste izleme bilgisi olmadan da döner
                 werr = str(e)[:300]
+        try:
+            from agile_sdlc_crew.quality import upgrade_cache as _uc
+            cached = _uc.summary() if _uc.enabled() else {}
+        except Exception:  # noqa: BLE001 — özet yoksa liste yine döner
+            cached = {}
         items = []
         for it in res.get("items", []):
             cur = it.get("version")
             lang = it.get("lang") or "php"
             tgt = _up.default_target(lang, cur, index) if cur else None
             key = (lang, str(it["repo"]).lower())
+            c = cached.get(key) or {}
             items.append({"repo": it["repo"], "lang": lang, "label": it.get("label") or lang,
                           "current": cur, "target": tgt, "up_to_date": bool(cur and not tgt),
-                          "stage": "hazırlık", "tracked": key in watch, "watch_target": watch.get(key, "")})
+                          "stage": c.get("stage") or "hazırlık", "scanned": bool(c),
+                          "blocking": c.get("blocking", 0) if c else None,
+                          "tracked": key in watch, "watch_target": watch.get(key, "")})
         return items, werr
 
     try:
@@ -2362,13 +2381,46 @@ async def techdebt_upgrade_repos(team: str = ""):
         return _techdebt_error(e)
 
 
+def _upgrade_scan_build(repo: str, lang: str, to: str | None, team: str, *, force: bool = False) -> dict:
+    """Bir reponun yükseltme taraması + aşaması (önbelleğin kurucusu; ısıtıcı da bunu çağırır)."""
+    from agile_sdlc_crew.quality import upgrade as _up
+    from agile_sdlc_crew.quality import upgrade_track as _ut
+    client = AzureDevOpsClient()
+    try:
+        res = _up.scan(client, repo, lang, to=to, team=team, force=force)
+    except ValueError:
+        # Üretim izlenen hedefe ulaştıysa hedef artık seçilemez; kod reposu adımı yine görünsün.
+        view = _ut.watch_view(client, repo, lang, to=to)
+        if view is None:
+            raise
+        return view
+    if res.get("up_to_date"):
+        view = _ut.watch_view(client, res.get("repo") or repo, lang, to=to)
+        if view is not None:
+            return view
+    try:
+        res["status"] = _ut.status(client, res.get("repo") or repo, lang, to=to, scan=res)
+    except Exception as e:  # noqa: BLE001 — tarama sonucu durumsuz da gösterilir
+        res["status"] = {"error": str(e)[:500]}
+    return res
+
+
+def _upgrade_cache_drop(lang: str, repo: str) -> None:
+    """Yazan uçtan sonra: reponun önbellek kayıtları silinir (kart eylemden sonra bayat durumu göstermesin)."""
+    from agile_sdlc_crew.quality import upgrade_cache as _uc
+    try:
+        _uc.invalidate((lang or "php").strip(), (repo or "").strip())
+    except Exception as e:  # noqa: BLE001
+        pipeline_log.warning(f"upgrade önbelleği silinemedi: {e}")
+
+
 @app.get("/api/techdebt/upgrade/scan")
 async def techdebt_upgrade_scan(repo: str = "", team: str = "", force: bool = False, lang: str = "php",
                                 to: str = ""):
     """Hedef sürüme geçince kırılan / davranışı değişen / kullanımdan kalkan yerler. Yazma yok.
-    Yanıttaki `status`: bu taramadan türetilen aşama + sıradaki sürüm adımı (ikinci tarama yok)."""
-    from agile_sdlc_crew.quality import upgrade as _up
-    from agile_sdlc_crew.quality import upgrade_track as _ut
+    Yanıttaki `status`: bu taramadan türetilen aşama + sıradaki sürüm adımı (ikinci tarama yok).
+    `cache`: {state: yeni | taze | yenileniyor, at, ttl_h} — `yenileniyor` = eski sonuç, arka planda yenileniyor."""
+    from agile_sdlc_crew.quality import upgrade_cache as _uc
     bad = _upgrade_off()
     if bad:
         return bad
@@ -2377,24 +2429,10 @@ async def techdebt_upgrade_scan(repo: str = "", team: str = "", force: bool = Fa
     lg, tv = (lang or "php").strip(), (to or "").strip() or None
 
     def _do():
-        client = AzureDevOpsClient()
-        try:
-            res = _up.scan(client, repo.strip(), lg, to=tv, team=team, force=bool(force))
-        except ValueError:
-            # Üretim izlenen hedefe ulaştıysa hedef artık seçilemez; kod reposu adımı yine görünsün.
-            view = _ut.watch_view(client, repo.strip(), lg, to=tv)
-            if view is None:
-                raise
-            return view
-        if res.get("up_to_date"):
-            view = _ut.watch_view(client, res.get("repo") or repo.strip(), lg, to=tv)
-            if view is not None:
-                return view
-        try:
-            res["status"] = _ut.status(client, res.get("repo") or repo.strip(), lg, to=tv, scan=res)
-        except Exception as e:  # noqa: BLE001 — tarama sonucu durumsuz da gösterilir
-            res["status"] = {"error": str(e)[:500]}
-        return res
+        # Önbellekli: taze kayıt hemen, süresi dolmuş kayıt eskisiyle hemen + arka planda yenilenir (`cache.state`).
+        return _uc.get(lg, repo.strip(), tv, team.strip(),
+                       lambda: _upgrade_scan_build(repo.strip(), lg, tv, team.strip(), force=bool(force)),
+                       force=bool(force))
 
     try:
         return JSONResponse(await asyncio.to_thread(_do))
@@ -2417,6 +2455,7 @@ async def techdebt_upgrade_take(req: TechdebtUpgradeTakeRequest):
         res = await asyncio.to_thread(_up.take, AzureDevOpsClient(), req.repo.strip(), (req.lang or "php").strip(),
                                       req.group_ids, to=(req.to or "").strip() or None, team=req.team,
                                       sprint=(req.sprint or "").strip())
+        _upgrade_cache_drop(req.lang, req.repo)
         if any(t.get("job_id") for t in res.get("tasks") or []):
             _ensure_worker()
         return JSONResponse(res, status_code=201 if res.get("story") else 200)
@@ -2437,14 +2476,24 @@ def _upgrade_step_check(req: "TechdebtUpgradeStepRequest"):
 
 @app.post("/api/techdebt/upgrade/start")
 async def techdebt_upgrade_start(req: TechdebtUpgradeStepRequest):
-    """Yükseltmeyi başlat: izleme Task'ı (takım alanı, sprint'siz). Açık olan varsa aynısı döner."""
+    """Yükseltmeyi başlat: izleme Task'ı (takım alanı, sprint'siz). Açık olan varsa aynısı döner.
+    İş otomatik işaretliyse (`CREW_TECHDEBT_UPGRADE_AUTO_ON_START`, varsayılan açık) ilk tur HEMEN arka planda koşar:
+    geçişe engel her durumun işi açılır, otomatikler kuyruğa girer, taban imaj şablonu / hazır sürüm adımı atılır;
+    sonrasını yoklayıcı sürdürür. Yanıttaki `kicked`: ilk tur başladı mı."""
     from agile_sdlc_crew.quality import upgrade_track as _ut
     bad = _upgrade_step_check(req)
     if bad:
         return bad
+    lg = (req.lang or "php").strip()
     try:
-        res = await asyncio.to_thread(_ut.start, AzureDevOpsClient(), req.repo.strip(), (req.lang or "php").strip(),
+        res = await asyncio.to_thread(_ut.start, AzureDevOpsClient(), req.repo.strip(), lg,
                                       to=(req.to or "").strip() or None, team=req.team.strip())
+        _upgrade_cache_drop(lg, req.repo)
+        res["kicked"] = False
+        if res.get("auto"):
+            repo_name = res.get("repo") or req.repo.strip()
+            res["kicked"] = _ut.kick(lambda: AzureDevOpsClient(), int(res["id"]), req.team.strip(),
+                                     on_queued=_ensure_worker, on_done=lambda: _upgrade_cache_drop(lg, repo_name))
         return JSONResponse(res, status_code=201 if res.get("created") else 200)
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
@@ -2460,6 +2509,7 @@ async def techdebt_upgrade_stop(req: TechdebtUpgradeStepRequest):
     try:
         res = await asyncio.to_thread(_ut.stop, AzureDevOpsClient(), req.repo.strip(), (req.lang or "php").strip(),
                                       to=(req.to or "").strip() or None, team=req.team.strip())
+        _upgrade_cache_drop(req.lang, req.repo)
         return JSONResponse(res)
     except Exception as e:  # noqa: BLE001
         return _techdebt_error(e)
@@ -2479,6 +2529,7 @@ async def techdebt_upgrade_bump(req: TechdebtUpgradeBumpRequest):
         res = await asyncio.to_thread(_ub.queue_step, AzureDevOpsClient(), req.repo.strip(),
                                       (req.lang or "php").strip(), to=(req.to or "").strip() or None,
                                       team=req.team.strip(), expect_step=step or None)
+        _upgrade_cache_drop(req.lang, req.repo)
         _ensure_worker()
         return JSONResponse(res, status_code=202)
     except _ub.StepChanged as e:
@@ -2504,6 +2555,7 @@ async def techdebt_upgrade_image(req: TechdebtUpgradeImageRequest):
         res = await asyncio.to_thread(_ut.open_image, AzureDevOpsClient(), req.repo.strip(),
                                       (req.lang or "php").strip(), to=(req.to or "").strip() or None,
                                       dir_name=req.dir.strip())
+        _upgrade_cache_drop(req.lang, req.repo)
         return JSONResponse(res)
     except _ut.ImageStateError as e:
         return JSONResponse({"error": str(e)}, status_code=e.code)
@@ -2645,6 +2697,11 @@ async def _start_upgrade_poller():
                          on_queued=lambda: _ensure_worker())
     except Exception as e:
         pipeline_log.warning(f"Sürüm yükseltme yoklayıcısı başlatılamadı: {e}")
+    try:        # tarama önbelleği: süresi dolan kayıtları kimse kartı açmadan yeniler
+        from agile_sdlc_crew.quality import upgrade_cache as _uc
+        _uc.start_warmer(lambda lang, repo, to, team: _upgrade_scan_build(repo, lang, to, team))
+    except Exception as e:
+        pipeline_log.warning(f"Sürüm yükseltme önbellek ısıtıcısı başlatılamadı: {e}")
 
 
 @app.on_event("startup")
@@ -2659,6 +2716,11 @@ async def _start_image_vuln_poller():
         _iv.start_poller(lambda: AzureDevOpsClient(), interval_h=lambda: _pc.get("CREW_TECHDEBT_IMAGE_VULN_SCAN_H"))
     except Exception as e:
         pipeline_log.warning(f"Taban imaj güvenliği yoklayıcısı başlatılamadı: {e}")
+    try:        # elle başlatılan gidermenin zinciri (taşıma / etiket PR'ları, izleme) kendiliğinden yürüsün
+        _iv.start_follow_poller(lambda: AzureDevOpsClient(),
+                                interval_min=lambda: _pc.get("CREW_TECHDEBT_UPGRADE_POLL_MIN"))
+    except Exception as e:
+        pipeline_log.warning(f"Giderme takibi başlatılamadı: {e}")
 
 
 # ── Backlog refinement (Scrum faz 6; backlog_refinement.py) ──

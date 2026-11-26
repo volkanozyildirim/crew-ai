@@ -24,6 +24,9 @@ log = logging.getLogger("pipeline")
 
 STAGES = ("hazırlık", "engelli", "hazır", "test hattı", "üretim", "tamam")
 TRACK_TAG = "tempo-upgrade-track"
+# Karttan / giderme düğmesinden başlatılan izleme: genel CREW_TECHDEBT_UPGRADE_AUTO kapalı olsa da yoklayıcı bu işi
+# uçtan uca ilerletir (engel işlerinin hepsi açılır, şablon PR'ı, sürüm adımları). Kullanıcı kararı 2026-11-26.
+AUTO_TAG = "tempo-upgrade-auto"
 KEY_PREFIX = "tempo-upgrade-key:"
 _KEY_RE = re.compile(r"tempo-upgrade-key:\s*([a-z]+):([A-Za-z0-9][\w.-]*):(\d+\.\d+)")
 SIGNATURE = "<p><small><i>Tempo — Sürüm yükseltme</i></small></p>"
@@ -73,7 +76,8 @@ def _track_rows(client, extra: str = "", *, open_only: bool = True) -> list[dict
         if not m:
             continue
         out.append({"id": int(wi["id"]), "lang": m.group(1), "repo": m.group(2), "to": m.group(3),
-                    "title": f.get("System.Title") or "", "area": f.get("System.AreaPath") or "", "open": _is_open(f)})
+                    "title": f.get("System.Title") or "", "area": f.get("System.AreaPath") or "", "open": _is_open(f),
+                    "auto": AUTO_TAG in tags, "tags": str(f.get("System.Tags") or "")})
     return out
 
 
@@ -119,12 +123,39 @@ def find_stopped(client, lang: str, repo: str, to: str | None = None) -> dict | 
 
 
 def tracked(client, team: str) -> list[dict]:
-    """Takımın alanındaki açık izleme işleri: [{id, lang, repo, to}]."""
+    """Takımın alanındaki açık izleme işleri: [{id, lang, repo, to, auto}]."""
     area = client.get_team_area_path(team) or ""
     if not area:
         raise ValueError(f"Takımın alanı çözümlenemedi: {team!r}")
     rows = _track_rows(client, f" AND [System.AreaPath] UNDER '{_q(area)}'")
-    return [{k: r[k] for k in ("id", "lang", "repo", "to")} for r in rows]
+    return [{"id": r["id"], "lang": r["lang"], "repo": r["repo"], "to": r["to"], "auto": bool(r.get("auto"))}
+            for r in rows]
+
+
+def auto_on_start() -> bool:
+    """Başlatılan izleme uçtan uca otomatik mi (CREW_TECHDEBT_UPGRADE_AUTO_ON_START, varsayılan açık)."""
+    from agile_sdlc_crew import pipeline_config as pc
+    return bool(pc.get("CREW_TECHDEBT_UPGRADE_AUTO_ON_START"))
+
+
+def item_auto(tr: dict) -> bool:
+    """Bu izleme işi otomatik ilerletilir mi: genel anahtar açık ya da iş başlatılırken otomatik işaretlendi."""
+    from agile_sdlc_crew import pipeline_config as pc
+    return bool(pc.get("CREW_TECHDEBT_UPGRADE_AUTO")) or bool(tr.get("auto"))
+
+
+def _mark_auto(client, row: dict) -> bool:
+    """Açık (eski, işaretsiz) izleme işine otomatik etiketini ekler; eklendiyse True."""
+    tags = [t.strip() for t in str(row.get("tags") or "").split(";") if t.strip()]
+    if any(t.lower() == AUTO_TAG for t in tags):
+        return True
+    try:
+        client.update_work_item(int(row["id"]), [{"op": "add", "path": "/fields/System.Tags",
+                                                  "value": "; ".join(tags + [AUTO_TAG])}])
+        return True
+    except Exception as e:  # noqa: BLE001 — etiket eklenemezse iş yine izlenir (genel anahtara bağlı kalır)
+        log.warning(f"⚠️ upgrade: #{row.get('id')} otomatik etiketi eklenemedi: {str(e)[:200]}")
+        return False
 
 
 def _root_iteration(client, team: str) -> str:
@@ -172,8 +203,13 @@ def _repo_root(repo: str, deps, kw: dict) -> Path:
     return pm._root(deps.cfg(), repo, deps)
 
 
-def start(client, repo: str, lang: str, *, to: str | None = None, team: str, deps=None, **kw) -> dict:
-    """İzleme Task'ını aç; repo × dil için açık olan varsa onu döndür (hedefi farklı olsa da)."""
+def start(client, repo: str, lang: str, *, to: str | None = None, team: str, deps=None, auto: bool | None = None,
+          **kw) -> dict:
+    """İzleme Task'ını aç; repo × dil için açık olan varsa onu döndür (hedefi farklı olsa da).
+    `auto` (varsayılan `auto_on_start()`): iş `AUTO_TAG` taşır → yoklayıcı onu genel anahtardan bağımsız, uçtan uca
+    ilerletir; açık ama işaretsiz bir iş varsa etiket ona eklenir."""
+    if auto is None:
+        auto = auto_on_start()
     from agile_sdlc_crew.quality import modern
     _check(repo, lang)
     if not (team or "").strip():
@@ -191,7 +227,10 @@ def start(client, repo: str, lang: str, *, to: str | None = None, team: str, dep
     with _LOCK:
         prev = find_open(client, lang, repo)
         if prev:
-            return {"id": prev["id"], "created": False, "lang": prev["lang"], "repo": prev["repo"], "to": prev["to"]}
+            if auto and not prev.get("auto"):
+                prev["auto"] = _mark_auto(client, prev)
+            return {"id": prev["id"], "created": False, "lang": prev["lang"], "repo": prev["repo"], "to": prev["to"],
+                    "auto": bool(prev.get("auto"))}
         area = client.get_team_area_path(team) or ""
         if not area:
             raise ValueError(f"Takımın alanı çözümlenemedi: {team!r}")
@@ -205,7 +244,7 @@ def start(client, repo: str, lang: str, *, to: str | None = None, team: str, dep
             "System.Title": f"[{repo}] {label} sürüm yükseltme {cur} → {tgt} (izleme)"[:250],
             "System.Description": _track_body(repo, label, cur, tgt, pl["sites"], blk, key),
             "System.AreaPath": area,
-            "System.Tags": TRACK_TAG,
+            "System.Tags": f"{TRACK_TAG}; {AUTO_TAG}" if auto else TRACK_TAG,
         }
         it = _root_iteration(client, team)
         if it:
@@ -216,7 +255,7 @@ def start(client, repo: str, lang: str, *, to: str | None = None, team: str, dep
             fields.setdefault(k, v)
         wi = client.create_work_item("Task", fields)
     log.info(f"⬆️ Yükseltme izleme işi açıldı: #{wi['id']} ({key})")
-    return {"id": int(wi["id"]), "created": True, "lang": lang, "repo": repo, "to": tgt}
+    return {"id": int(wi["id"]), "created": True, "lang": lang, "repo": repo, "to": tgt, "auto": bool(auto)}
 
 
 def stop(client, repo: str, lang: str, *, to: str | None = None, team: str, note: str | None = None) -> dict:
@@ -799,6 +838,41 @@ def _open_work(client, repo: str, lang: str) -> int:
     return sum(1 for t in open_tasks(client, repo, lang) if not t.get("needs_human"))
 
 
+def _auto_take_all(client, tr: dict, auto: list, human: list, res: dict, *, team: str, deps, take_fn, kw: dict,
+                   max_take: int) -> None:
+    """Otomatik işaretli izleme (karttan başlatıldı): geçişe engel olan HER durumun işi bu turda açılır — otomatikler
+    (önce engelleyenler) kuyruğa girer, insan / altyapı işleri needs-human açılır. MAX_OPEN tavanı uygulanmaz
+    (kullanıcı kararı 2026-11-26: "tüm durumlar için işler açılıp yapılmalı"); `take`'in istek başı tavanı yüzünden
+    `max_take`'lik parçalarla çağrılır. Board dedup'ı aynı bulguyu ikinci kez açmaz, sonraki tur yalnız yenileri alır."""
+    from agile_sdlc_crew.quality import intake
+    ids = [r["gid"] for r in auto] + [r["gid"] for r in human]
+    if not ids:
+        return
+    sprint, mode = _auto_sprint(client, team)
+    if not sprint:
+        _note(res, f"Takımın {'sonraki' if mode == 'next' else 'aktif'} sprinti yok — otomatik alım yapılmadı")
+        return
+    by_gid = {r["gid"]: r for r in auto + human}
+    took: list[str] = []
+    for i in range(0, len(ids), max_take):
+        chunk = ids[i:i + max_take]
+        try:
+            out = take_fn(client, tr["repo"], tr["lang"], chunk, to=tr["to"], team=team, sprint=sprint, deps=deps,
+                          **_pick(kw, _SCAN_KW))
+        except (intake.Busy, ValueError) as e:
+            _note(res, f"Alım yarıda kaldı: {str(e)[:300]}")
+            log.info(f"⬆️ upgrade oto: #{tr['id']} ({tr['lang']}:{tr['repo']}) alım yarıda kaldı: {e}")
+            break
+        made = [x for x in (out.get("tasks") or []) + (out.get("human_tasks") or []) if x.get("id")]
+        fps = {fp for x in made for fp in x.get("fingerprints") or []}
+        took += [g for g in chunk if set(by_gid[g].get("fingerprints") or []) & fps]
+        if any(x.get("job_id") for x in out.get("tasks") or []):
+            res["queued"] = True
+    res["took"] = took
+    if took:
+        log.info(f"⬆️ upgrade oto: #{tr['id']} ({tr['lang']}:{tr['repo']}) {len(took)} iş alındı (tümü) → {sprint}")
+
+
 def _auto_take(client, tr: dict, sc: dict, res: dict, *, team: str, deps, open_jobs, take_fn, kw: dict) -> None:
     """§7.1: board'da olmayan otomatik gruplar (önce engelleyenler) — repo başına açık iş MAX_OPEN'ı
     aşmayacak kadar, istek başı max_take ayrıca; needs-human gruplar tavana sayılmaz (board dedup'ı bir kez açar)."""
@@ -812,6 +886,9 @@ def _auto_take(client, tr: dict, sc: dict, res: dict, *, team: str, deps, open_j
     if not auto and not human:
         return
     max_take = max(1, int(deps.cfg().get("max_take", 8)))
+    if tr.get("auto"):
+        _auto_take_all(client, tr, auto, human, res, team=team, deps=deps, take_fn=take_fn, kw=kw, max_take=max_take)
+        return
     mo = pc.get("CREW_TECHDEBT_UPGRADE_MAX_OPEN")
     max_open = 3 if mo is None or mo == "" else max(0, int(mo))
     if max_open == 0:
@@ -1114,7 +1191,8 @@ def advance(client, *, team: str, track_ids=None, deps=None, create_job=None, op
     """Takımın açık her izleme işi için bir tur (spec §7): otomatik alım (tavanlı, sprint
     CREW_TECHDEBT_UPGRADE_SPRINT), kanıt sıradaki adımı bekletiyorsa kırmızı build / CI bekleme bildirimi (bir
     kez), hazırsa tek sürüm adımı (bu adım için hiç iş açılmamışsa), `tamam`da kapanış. Bir öğenin hatası notuna
-    yazılır, sıradakine geçilir; CREW_TECHDEBT_UPGRADE_AUTO kapanırsa sıradaki öğeye geçilmez.
+    yazılır, sıradakine geçilir. Yalnız `item_auto` olan işler (genel CREW_TECHDEBT_UPGRADE_AUTO açık ya da iş
+    `AUTO_TAG` taşıyor) işlenir; otomatik işaretli iş TÜM engel işlerini bir turda alır (`_auto_take_all`).
     `track_ids`: yalnız bu izleme işleri (yoklayıcı takımları gruplarken her işi bir kez verir).
     Enjeksiyon (testler): `open_jobs(repo) -> int` repodaki açık otomatik iş sayısı (varsayılan board);
     `bump_jobs(track_id)` queue_step'in açık adım işi kontrolü; `last_bump_job(track_id, step, to)` son adım işi
@@ -1134,9 +1212,10 @@ def advance(client, *, team: str, track_ids=None, deps=None, create_job=None, op
         items = [t for t in items if int(t["id"]) in want]
     out = []
     for tr in items:
-        if not pc.get("CREW_TECHDEBT_UPGRADE_AUTO"):
-            log.info("⬆️ upgrade oto: CREW_TECHDEBT_UPGRADE_AUTO kapatıldı — tur durdu")
-            break
+        if not item_auto(tr):
+            # genel anahtar kapalı ve iş otomatik işaretli değil (ör. anahtar tur ortasında kapatıldı)
+            log.info(f"⬆️ upgrade oto: #{tr['id']} otomatik değil (CREW_TECHDEBT_UPGRADE_AUTO kapalı) — atlandı")
+            continue
         res = {"id": tr["id"], "repo": tr["repo"], "lang": tr["lang"], "to": tr["to"], "took": [],
                "queued_step": None, "job_id": None, "queued": False, "closed": False, "note": ""}
         try:
@@ -1150,6 +1229,11 @@ def advance(client, *, team: str, track_ids=None, deps=None, create_job=None, op
             log.warning(f"⚠️ upgrade oto: #{tr['id']} ({tr['lang']}:{tr['repo']}) hata: {msg}")
             _note(res, f"Hata: {msg}")
             _error_comment(client, int(tr["id"]), msg, now)
+        try:        # kartın önbelleği: süresi dolar → sonraki açılış eskiyi gösterip tazesini kurar
+            from agile_sdlc_crew.quality import upgrade_cache
+            upgrade_cache.invalidate(tr["lang"], tr["repo"], drop=False)
+        except Exception:  # noqa: BLE001
+            pass
         out.append(res)
     return out
 
@@ -1178,12 +1262,16 @@ def _tick(get_client, on_queued=None, *, advance_fn=None) -> list[dict]:
     """Yoklayıcının bir turu. Ayarlar her turda okunur; otomatik ilerletme kapalıysa Azure'a hiç gidilmez.
     Takımlar açık izleme işlerinin alanından çıkar (proje genelinde tek WIQL); her izleme işi bir kez işlenir."""
     from agile_sdlc_crew import pipeline_config as pc
-    if not all(pc.get(k) for k in _AUTO_KEYS):
+    if not all(pc.get(k) for k in _AUTO_KEYS[:3]):
         return []
+    if not (pc.get("CREW_TECHDEBT_UPGRADE_AUTO") or auto_on_start()):
+        return []           # ikisi de kapalı = tamamen elle: Azure'a hiç gidilmez
     client = get_client()
     groups: dict[str, set] = {}
     cache: dict = {}
     for r in _track_rows(client):
+        if not item_auto(r):            # genel anahtar kapalı: yalnız otomatik işaretli izlemeler
+            continue
         team = _team_for_area(client, r["area"], cache)
         if not team:
             log.warning(f"⚠️ upgrade oto: izleme işi #{r['id']} alanının takımı bulunamadı ({r['area']}) — atlandı")
@@ -1198,6 +1286,51 @@ def _tick(get_client, on_queued=None, *, advance_fn=None) -> list[dict]:
     if on_queued is not None and any(r.get("queued") for r in out):
         on_queued()
     return out
+
+
+_KICKING: set[int] = set()
+_KICK_LOCK = threading.Lock()
+
+
+def kick(get_client, track_id: int, team: str, *, on_queued=None, on_done=None, advance_fn=None,
+         spawn=None) -> bool:
+    """Başlatılan izlemenin ilk turunu HEMEN, arka planda koşar (yoklayıcının 30 dk'sını beklemeden): engel işleri
+    açılır, otomatikler kuyruğa girer, şablon PR'ı / hazır sürüm adımı atılır. İzleme işi başına aynı anda tek tur;
+    `False` = zaten koşuyor. Ön koşul ayarları yoklayıcıyla aynı (`_AUTO_KEYS[:3]`)."""
+    from agile_sdlc_crew import pipeline_config as pc
+    if not all(pc.get(k) for k in _AUTO_KEYS[:3]):
+        return False
+    tid = int(track_id)
+    with _KICK_LOCK:
+        if tid in _KICKING:
+            return False
+        _KICKING.add(tid)
+
+    def job():
+        try:
+            out = (advance_fn or advance)(get_client(), team=team, track_ids=[tid])
+            if on_queued is not None and any(r.get("queued") for r in out):
+                on_queued()
+            for r in out:
+                log.info(f"⬆️ upgrade başlatma turu #{tid}: alınan {len(r.get('took') or [])}, adım "
+                         f"{r.get('queued_step') or '-'}{' · ' + r['note'] if r.get('note') else ''}")
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"⚠️ upgrade başlatma turu #{tid} hata verdi: {str(e)[:300]}")
+        finally:
+            with _KICK_LOCK:
+                _KICKING.discard(tid)
+            if on_done is not None:
+                try:
+                    on_done()
+                except Exception:  # noqa: BLE001
+                    pass
+    try:
+        (spawn or (lambda fn: threading.Thread(target=fn, daemon=True, name=f"upgrade-kick-{tid}").start()))(job)
+    except Exception:
+        with _KICK_LOCK:
+            _KICKING.discard(tid)
+        raise
+    return True
 
 
 def start_poller(get_client, *, interval_min, on_queued=None, sleep=None, tick=None,
