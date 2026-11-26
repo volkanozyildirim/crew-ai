@@ -2087,6 +2087,7 @@ function _tdmRepoChanged(){
       +(mixed?'\n\nAynı kod hepsinde çalıştığı için hedef en düşük sürüm.':'')
     :(r.source?`Kaynak: ${r.source}`:'')+(r.images&&r.images.length?'\n'+r.images.join('\n'):'')):'Hedef sürüm: repo dilinin üretimdeki sürümü';
   document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=!(r&&r.version);
+  _upSyncBack();
   _tdm.scan=null;_tdm.seq++;document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';
   document.getElementById('tdmMsg').textContent=r&&!r.version?(r.reason||`Bu repo için hedef ${r.label||''} sürümü bulunamadı — tarama yapılmaz.`):'';
   // Repo seçilince liste kendiliğinden oluşur (ayrı "Tara" adımı yok)
@@ -2225,6 +2226,7 @@ function renderModern(){
     +(auto.length?sec('Otomatik işler',r.tool_fix?'— yalnız kod düzenlemesiyle çözülür; Task açılır, düzeltmeyi araç uygular, LLM inceler':'— yalnız kod düzenlemesiyle çözülür; Task açılır ve pipeline kuyruğuna alınır'):'')+(auto.length?tbl(auto,false):'')
     +(infra.length?sec('Altyapı (DevOps) gerektiren işler','— kod dışı ön koşul var (ör. PHP eklentisi); Task needs-human açılır, DevOps takımına ayrı iş açılır')+tbl(infra,true):'')
     +(hum.length?sec('İnsan kararı gerektiren yapısal işler','— Task needs-human açılır; kapsamı insan belirler, etiket kalkınca kuyruğa alınabilir')+tbl(hum,true):'');
+  _upSyncBack();
 }
 function _tdmRuleToggle(el){
   document.querySelectorAll(`.tdmSel[data-rule="${CSS.escape(el.dataset.rule)}"]`).forEach(c=>c.checked=el.checked);
@@ -2322,7 +2324,18 @@ function _upOverviewHtml(){
 }
 // Repo seçiliyken sürüm dağılımına (ana görünüm) dönüş: seçimi temizler, devam eden yoklamayı / taramayı bırakır.
 // Düğme kart başlığında, repo seçicinin yanında (#tdmBack); yalnız yükseltme kipinde ve bir repo seçiliyken görünür.
-function _upSyncBack(){const b=document.getElementById('tdmBack');if(b)b.style.display=(_tdm.mode==='up'&&_tdmSel().repo)?'':'none'}
+// Başlık denetimleri yalnız kullanılabilirken görünür (kullanıcı isteği 2026-11-26): repo seçilmeden hedef sürüm,
+// Yeniden tara, sprint ve İşleri aç gizli; İşleri aç ayrıca seçilebilir öneri yokken gizli.
+function _upSyncBack(){
+  const repo=!!_tdmSel().repo,up=_tdm.mode==='up';
+  const show=(id,on)=>{const e=document.getElementById(id);if(e)e.style.display=on?'':'none'};
+  show('tdmBack',up&&repo);
+  show('tdmTo',up&&repo);
+  show('tdmRescan',repo);
+  const canTake=repo&&!!document.querySelector('#tdmResult .tdmSel');
+  show('tdmSprint',canTake);
+  show('tdmTake',canTake);
+}
 function _upBack(){clearTimeout(_tdm.upPollT);const s=document.getElementById('tdmRepo');if(s){s.value=''}_tdmRepoChanged()}
 function _upPick(v){const s=document.getElementById('tdmRepo');s.value=v;if(s.value===v)_tdmRepoChanged()}
 function _upShowOverview(){const b=document.getElementById('tdmUpInfo');if(b&&_tdm.mode==='up'&&!_tdmSel().repo)b.innerHTML=_upOverviewHtml()}
@@ -2336,7 +2349,6 @@ function _tdmSetMode(m){
   const up=m==='up';
   document.getElementById('tdmModeMod').className='sm-btn small'+(up?' ghost':'');
   document.getElementById('tdmModeUp').className='sm-btn small'+(up?'':' ghost');
-  document.getElementById('tdmTo').style.display=up?'':'none';
   document.getElementById('tdmTake').textContent=up?'İşleri aç':'Seçilenleri iş olarak aç';
   document.getElementById('tdmResult').innerHTML='';document.getElementById('tdmAdoption').textContent='';
   document.getElementById('tdmUpInfo').innerHTML='';document.getElementById('tdmMsg').textContent='';
