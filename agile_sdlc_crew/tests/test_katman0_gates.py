@@ -75,6 +75,8 @@ os.environ["CREW_TECHDEBT_UPGRADE_AUTO_ON_START"] = "0"
 import tempfile as _tempfile  # noqa: E402
 from agile_sdlc_crew.quality import upgrade_cache as _upgrade_cache  # noqa: E402
 _upgrade_cache.CACHE_DIR = Path(_tempfile.mkdtemp(prefix="upcache-"))
+from agile_sdlc_crew.quality import upgrade_track as _upgrade_track  # noqa: E402
+_upgrade_track.AUTO_FILE = _upgrade_cache.CACHE_DIR / "auto.json"
 
 PASS, FAIL, SKIP = [], [], []
 
@@ -15945,9 +15947,18 @@ def test_upsec_cache_and_auto():
             def __init__(self): self.ops = []
             def update_work_item(self, wid, ops): self.ops.append((wid, ops))
         wc = _WiC()
-        check("açık işaretsiz izlemeye otomatik etiketi eklenir",
+        check("açık işaretsiz izlemeye otomatik etiketi eklenir ve sunucu kaydına girer",
               ut._mark_auto(wc, {"id": 7, "tags": "tempo-upgrade-track"})
-              and wc.ops and "tempo-upgrade-auto" in wc.ops[0][1][0]["value"])
+              and wc.ops and "tempo-upgrade-auto" in wc.ops[0][1][0]["value"] and 7 in ut._auto_ids())
+
+        class _RowsC:
+            def query_work_items(self, q):
+                return [{"id": i, "fields": {"System.State": "To Do", "System.Tags":
+                         "tempo-upgrade-track; tempo-upgrade-auto",
+                         "System.Description": f"tempo-upgrade-key: php:r{i}:8.4"}} for i in (7, 8)]
+        rows = {r["id"]: r["auto"] for r in saved["rows"](_RowsC())}
+        check("etiketi elle eklenmiş ama sunucu kaydında olmayan iş otomatik SAYILMAZ (etiket yetki değil)",
+              rows == {7: True, 8: False}, str(rows))
 
         html = (Path(__file__).resolve().parent.parent / "src" / "agile_sdlc_crew" / "web" / "index.html").read_text(
             encoding="utf-8")
