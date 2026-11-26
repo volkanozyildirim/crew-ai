@@ -92,7 +92,7 @@ header {
 .qproj-menu .n { margin-left:auto; color:var(--text-dim); font-family:'Geist Mono',Menlo,monospace; font-size:12px; }
 .sprint-select {
   background:var(--bg-card); border:1px solid var(--border); color:var(--text);
-  height:32px; padding:0 30px 0 10px; border-radius:8px; font-size:13px; font-weight:600; font-family:inherit; outline:none; cursor:pointer;
+  height:30px; padding:0 30px 0 10px; border-radius:8px; font-size:12.5px; font-weight:600; font-family:inherit; outline:none; cursor:pointer;
   max-width:190px; appearance:none; -webkit-appearance:none;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%236f6c66' stroke-width='1.5'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
   background-repeat:no-repeat; background-position:right 8px center; background-size:14px;
@@ -118,6 +118,9 @@ header {
 .sm-btn.settings-btn { background:var(--bg-card); color:var(--text); border:1px solid var(--border); padding:0 10px; gap:6px; justify-content:center; font-weight:600; }
 .sm-btn.settings-btn:hover { color:var(--accent-light); border-color:var(--accent); }
 .sm-btn.small { height:26px; padding:0 10px; font-size:12px; }
+/* Kart başlıklarında seçici ve düğmeler aynı boy (kullanıcı isteği 2026-11-26): hepsi 30px, aynı yazı boyu. */
+.card-head .sm-btn, .card-head .sm-btn.small, .card-head .sprint-select { height:30px; font-size:12.5px; box-sizing:border-box; }
+.card-head .sm-btn.small { padding:0 12px; }
 
 /* ── Sekmeler / ana alan ── */
 .main { min-height:calc(100vh - 56px); }
@@ -676,7 +679,7 @@ header {
           <button class="sm-btn ghost small" id="tdmBack" style="display:none" onclick="_upBack()" title="Sürüm dağılımına dön"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><path d="M15 18l-6-6 6-6"/></svg>Sürüm dağılımı</button>
           <select class="sprint-select" id="tdmRepo" title="Yerel repolar (PHP, Go, Python, Next.js)" onchange="_tdmRepoChanged()"><option>Yükleniyor…</option></select>
           <select class="sprint-select" id="tdmTo" style="display:none" title="Yükseltme hedef sürümü" onchange="_upToChanged()"></select>
-          <button class="sm-btn ghost small" id="tdmRescan" onclick="modernScan(true)" title="Önbelleği atla, yeniden tara">Yeniden tara</button>
+          <button class="sm-btn ghost small" id="tdmRescan" onclick="modernScan(true)" title="Önbelleği atla, yeniden tara"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>Yeniden tara</button>
           <select class="sprint-select" id="tdmSprint" title="İşlerin açılacağı sprint (varsayılan: aktif sprint)"><option value="">Aktif sprint</option></select>
           <button class="sm-btn small" id="tdmTake" onclick="modernTake()">Seçilenleri iş olarak aç</button>
         </div>
@@ -698,7 +701,7 @@ header {
       <div class="card" id="tdImgCard" style="display:none;flex-direction:column;overflow:hidden">
         <div class="card-head" style="flex-wrap:wrap;gap:8px"><span class="h">Taban imaj güvenliği</span><span id="tdImgCount" class="chip dim"></span><span style="flex:1"></span>
           <span id="tdImgStatus" style="font-size:12px;color:var(--text-dim)"></span>
-          <button class="sm-btn ghost small" id="tdImgRescan" onclick="loadImageVuln(true)" title="Önbelleği atla, imajları yeniden tara (dakikalar sürebilir)">Yeniden tara</button>
+          <button class="sm-btn ghost small" id="tdImgRescan" onclick="loadImageVuln(true)" title="Önbelleği atla, imajları yeniden tara (dakikalar sürebilir)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>Yeniden tara</button>
         </div>
         <div id="tdImgNote" style="padding:0 14px 8px;font-size:12px;color:var(--text-dim)"></div>
         <div id="tdImgFixMsg" style="padding:0 14px 8px;font-size:12px"></div>
