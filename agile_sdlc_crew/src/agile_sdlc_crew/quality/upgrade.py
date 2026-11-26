@@ -1067,47 +1067,68 @@ def _probe_go(root: Path, to: str, timeout: int) -> tuple[list[dict], dict]:
     wt = tmp / "wt"
     hits: list[dict] = []
     reason = ""
+    dropped = 0
     try:
         code, out = verify._run([*git, "worktree", "add", "-q", "--detach", str(wt), "HEAD"], root, 120)
         if code != 0:
             return [], {"ran": False, "tool": "go", "reason": f"geçici worktree açılamadı: {out[:200]}"}
+        mod = "-mod=vendor" if (wt / "vendor" / "modules.txt").is_file() else "-mod=readonly"
+        deadline = time.monotonic() + timeout
+
+        def checks() -> tuple[list[dict], str, str]:
+            """build + vet → (bulgular, süre nedeni, konumsuz hata). vet derleme hatasında koşmaz."""
+            got: list[dict] = []
+            for cmd, rule in ((["go", "build", mod, "./..."], "probe:error"),
+                              (["go", "vet", mod, "./..."], "probe:deprecation")):
+                left = deadline - time.monotonic()
+                if left <= 1:
+                    return got, "süre doldu", ""
+                try:
+                    rc, out = verify._run(cmd, wt, int(left))
+                except subprocess.TimeoutExpired:
+                    return got, "süre doldu", ""
+                found = 0
+                for ln in out.splitlines():
+                    m = _GO_MSG.match(ln.strip())
+                    if m:
+                        rel = m.group(1).removeprefix("./")
+                        if _inside(wt, rel):
+                            got.append(_hit(rule, rel, int(m.group(2)), _src_line(wt, rel, int(m.group(2))), m.group(3)))
+                            found += 1
+                if rc != 0 and not found:
+                    return got, "", f"{cmd[1]} konumsuz hata verdi: {out[:200]}"
+                if rc != 0 and rule == "probe:error":
+                    break  # vet, derleme hatalarını `vet:` önekiyle tekrarlar; hatalı derlemede çalıştırılmaz
+            return got, "", ""
+
+        # Taban: aynı araç, go.mod DEĞİŞMEDEN (şimdiki sürüm). Yükseltmeyle ilgisiz bulgular (ör. vet "unreachable
+        # code") burada da çıkar ve hedef taramasından düşülür: yalnız hedef sürümün GETİRDİĞİ kırılma / uyarı iş
+        # olur. stock-api #79308: 1.25'te de olan bir vet uyarısı "1.25→1.27 yükseltme" işi diye açılmıştı.
+        base, _bres, berr = checks()
+        base_keys = set() if berr else {(h["rule"], h["file"], h["message"]) for h in base}
         gm = wt / "go.mod"
         text = gm.read_text(encoding="utf-8", errors="replace")
         text = re.sub(r"(?m)^toolchain\s+.*\n?", "", text)
         text = re.sub(r"(?m)^go\s+\S+\s*$", f"go {to}", text) if re.search(r"(?m)^go\s+\S+\s*$", text) \
             else text.rstrip("\n") + f"\n\ngo {to}\n"
         gm.write_text(text, encoding="utf-8")
-        mod = "-mod=vendor" if (wt / "vendor" / "modules.txt").is_file() else "-mod=readonly"
-        deadline = time.monotonic() + timeout
-        for cmd, rule in ((["go", "build", mod, "./..."], "probe:error"), (["go", "vet", mod, "./..."], "probe:deprecation")):
-            left = deadline - time.monotonic()
-            if left <= 1:
-                reason = "süre doldu"
-                break
-            try:
-                rc, out = verify._run(cmd, wt, int(left))
-            except subprocess.TimeoutExpired:
-                reason = "süre doldu"
-                break
-            found = 0
-            for ln in out.splitlines():
-                m = _GO_MSG.match(ln.strip())
-                if m:
-                    rel = m.group(1).removeprefix("./")
-                    if _inside(wt, rel):
-                        hits.append(_hit(rule, rel, int(m.group(2)), _src_line(wt, rel, int(m.group(2))), m.group(3)))
-                        found += 1
-            if rc != 0 and not found:
-                # Konumsuz hata (ör. go.mod güncellenmeli): derleme bir yere varmadı → doğrulanamadı, temiz değil.
-                return [], {"ran": False, "tool": "go",
-                            "reason": f"doğrulanamadı: {cmd[1]} konumsuz hata verdi: {out[:200]}"}
-            if rc != 0 and rule == "probe:error":
-                break  # vet, derleme hatalarını `vet:` önekiyle tekrarlar; hatalı derlemede çalıştırılmaz
+        got, reason, err = checks()
+        if err:
+            # Konumsuz hata (ör. go.mod güncellenmeli): derleme bir yere varmadı → doğrulanamadı, temiz değil.
+            return [], {"ran": False, "tool": "go", "reason": f"doğrulanamadı: {err}"}
+        # Yalnız vet uyarıları (probe:deprecation) tabanla süzülür; derleme hatası her durumda bildirilir — şimdiki
+        # sürümde de derlenmeyen kod yükseltmeyi zaten durdurur, gizlenmemeli.
+        hits = [h for h in got if h["rule"] != "probe:deprecation"
+                or (h["rule"], h["file"], h["message"]) not in base_keys]
+        dropped = len(got) - len(hits)
     finally:
         verify._run([*git, "worktree", "remove", "--force", str(wt)], root, 60)
         verify._run([*git, "worktree", "prune"], root, 60)
         shutil.rmtree(tmp, ignore_errors=True)
-    return hits, {"ran": True, "tool": "go", "reason": reason}
+    st = {"ran": True, "tool": "go", "reason": reason}
+    if dropped:
+        st["baseline_dropped"] = dropped        # şimdiki sürümde de olan, yükseltmeyle ilgisiz bulgu sayısı
+    return hits, st
 
 
 def probe(root: Path, lang: str, current: str, to: str, *, files: list[str] | None = None,
