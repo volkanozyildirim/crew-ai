@@ -1269,7 +1269,7 @@ function renderImageVuln(r){
   document.getElementById('tdImgCount').textContent=rows.length+' imaj'+(nrep.size?' · '+nrep.size+' repo':'');
   const crit=rows.filter(x=>x.level==='kritik').length;
   document.getElementById('tdImgStatus').innerHTML=r.scanning
-    ?'<span style="color:var(--run)">Taranıyor… (imaj başına dakikalar sürebilir)</span>'
+    ?(r.stale?`<span style="color:var(--run)">Önbellekteki sonuç gösteriliyor · ${Number(r.stale)} imajın süresi doldu, arka planda yeniden taranıyor…</span>`:'<span style="color:var(--run)">Taranıyor… (imaj başına dakikalar sürebilir)</span>')
     :(r.scanner===false?'<span style="color:var(--warning)">Tarayıcı yok — yalnız sürüm işaretleri</span>':`${crit} kritik · son tarama ${_ivE((r.scanned_at||'').replace('T',' '))}`);
   document.getElementById('tdImgRescan').disabled=!!r.scanning;
   document.getElementById('tdImgNote').textContent=r.note||'Yayınlanmış imaj değil, dayandığı resmî imaj taranır; sonuç alt sınırdır.';
@@ -1279,14 +1279,23 @@ function renderImageVuln(r){
   // etkilenen kod repoları açıkça listelenir (repo → bölgeler; derleme dizinleri ipucunda). Alan yoksa eski bölge sayaçları.
   const reps=x=>{const m=x.repos||{},ks=Object.keys(m);if(!ks.length)return x.unused?'<span style="color:var(--text-dim)">kullanan servis yok</span>':reg(x.users);
     return ks.map(c=>{const rg=m[c]||{};return `<div style="white-space:nowrap" title="${_ivE(Object.keys(rg).map(r=>r+': '+(rg[r]||[]).join(', ')).join('\n'))}"><b>${_ivE(c)}</b> <span style="color:var(--text-dim);font-size:11.5px">${_ivE(Object.keys(rg).join(', '))}</span></div>`}).slice(0,3).join('')+(ks.length>3?`<div style="color:var(--text-dim);font-size:11.5px">+${ks.length-3} repo daha</div>`:'')};
-  // düzeltmesi yayınlanmış açığı (kritik / yüksek) olan imajlar listenin tepesinde ayrı bölümdür; sunucu sırası bölüm içinde korunur
+  // İmajlar dil × sürüm (major.minor) gruplarındadır: "PHP 8.4", "Go 1.24"…; dili / sürümü çözülemeyenler sonda.
+  // Grup içinde düzeltmesi yayınlanmış açığı (kritik / yüksek) olanlar önce; sunucu sırası (seviye) korunur.
   const vuln=x=>{const c=x.scan||{};return c.state==='tamam'&&((c.critical||0)+(c.high||0))>0};
-  const secs=[['Güvenlik açığı olan imajlar',rows.filter(vuln),'fail'],['Diğer imajlar',rows.filter(x=>!vuln(x)),'']];
+  const _lgName={php:'PHP',go:'Go',python:'Python',node:'Node.js'};
+  const _mm=v=>String(v||'').split('.').slice(0,2).join('.');
+  const gm=new Map();
+  rows.forEach(x=>{const ok=!!(x.lang&&_lgName[x.lang]);const k=ok?x.lang+'|'+_mm(x.version):'~';
+    if(!gm.has(k))gm.set(k,{lang:ok?_lgName[x.lang]:'',ver:ok?_mm(x.version):'',list:[]});gm.get(k).list.push(x)});
+  const secs=[...gm.values()].sort((a,b)=>(!a.lang)-(!b.lang)||a.lang.localeCompare(b.lang)||(!a.ver)-(!b.ver)||_upVerKey(a.ver).localeCompare(_upVerKey(b.ver)))
+    .map(g=>{const list=g.list.filter(vuln).concat(g.list.filter(x=>!vuln(x)));const nv=g.list.filter(vuln).length;
+      const title=g.lang?`${g.lang} ${g.ver||'— sürüm çözülemedi'}`:'Diğer / dili çözülemeyen';
+      return [`${title}${nv?` · ${nv} açıklı`:''}`,list,nv?'fail':'']});
   // Satır yalnız özet taşır (seviye, imaj, repolar, sayılar, en eski açık, işaretler, giderme durumu);
   // açık listesi, eylemler ve giderme planı "Detay" penceresindedir (openIvDetail).
   const num=(n,cls)=>n>0?`<b style="color:var(--${cls})">${n}</b>`:'0';
   box.innerHTML='<table class="perf iv"><tr><th>İmaj</th><th>Etkilenen repolar</th><th class="num">Kritik</th><th class="num">Yüksek</th><th class="num" title="En eski açığın duyurulmasından bugüne">En eski açık</th><th>İşaretler</th><th>Giderme</th><th></th></tr>'
-    +secs.map(([title,list,cls])=>!list.length?'':(secs.filter(q=>q[1].length).length>1||cls?`<tr class="sec"><td colspan="8" style="${cls?'color:var(--danger);border-left:3px solid var(--danger)':'color:var(--text-dim);border-left:3px solid var(--border)'}">${_ivE(title)} · ${list.length}</td></tr>`:'')
+    +secs.map(([title,list,cls])=>!list.length?'':(`<tr class="sec"><td colspan="8" style="${cls?'color:var(--danger);border-left:3px solid var(--danger)':'color:var(--text-dim);border-left:3px solid var(--border)'}">${_ivE(title)} · ${list.length} imaj</td></tr>`)
     +list.map(x=>{
       const sc=x.scan||{};const ok=sc.state==='tamam';
       const old=_ivOldestDays(sc.packages||[]);
@@ -1464,7 +1473,7 @@ async function runImageFix(image){
     const r=await resp.json().catch(()=>({}));
     if(resp.ok)delete _ivSel[image];      // başlatılanın seçimi kalmaz; kart yeniden çizilince kutular boş gelir
     if(!resp.ok)html=`<span style="color:var(--danger)">${_ivE(r.error||'HTTP '+resp.status)}</span>`;
-    else html=`Giderme başlatıldı (${_ivE(image)}): `+(r.actions||[]).map(a=>`${_ivE(_ivKindLabel(a))} — ${_ivE(_ivStateLabel(a.state))}${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${(a.repos||[]).filter(u=>u.wi&&u.state==='açıldı').map(u=>' '+_ivLink(u.url,u.repo+' #'+u.wi)).join(',')}${a.reason?' ('+_ivE(a.reason)+')':''}`).join('; ');
+    else html=`Giderme başlatıldı (${_ivE(image)})${r.followed?' — takipte: sonraki adımlar (taşıma / etiket PR\'ları, izleme işleri) kendiliğinden yürür':''}: `+(r.actions||[]).map(a=>`${_ivE(_ivKindLabel(a))} — ${_ivE(_ivStateLabel(a.state))}${a.pr?' '+_ivLink(a.pr.url,'PR #'+a.pr.id):''}${(a.repos||[]).filter(u=>u.wi&&u.state==='açıldı').map(u=>' '+_ivLink(u.url,u.repo+' #'+u.wi)).join(',')}${a.reason?' ('+_ivE(a.reason)+')':''}`).join('; ');
   }catch(e){html=`<span style="color:var(--danger)">${_ivE(String(e))}</span>`}
   finally{btns.forEach(b=>{if(b.isConnected)b.disabled=false})}
   msg.innerHTML=html;
@@ -2068,7 +2077,8 @@ async function loadModernRepos(){
       const s2=document.getElementById('tdmRepo');
       if(_tdm.mode==='up'){
         const up=_tdm.upRepos;
-        s2.innerHTML=up.length?'<option value="" selected>Repo seçiniz…</option>'+up.map(i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.current?'':'disabled'}>${esc(i.repo)} · ${esc(i.label||'')} ${i.current?esc(i.current)+(i.up_to_date?' (güncel)':(i.target?' → '+esc(i.target):'')):'— sürüm bilinmiyor'}</option>`).join(''):'<option value="">Yerel repo yok</option>';
+        // dil × şimdiki sürüm grupları (optgroup): "PHP 8.2", "Go 1.24"…; sürümü bilinmeyenler en sonda
+        s2.innerHTML=up.length?'<option value="" selected>Repo seçiniz…</option>'+_upGroups(up).map(g=>`<optgroup label="${esc(g.title)} (${g.items.length})">`+g.items.map(i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.current?'':'disabled'}>${esc(i.repo)}${i.current?(i.up_to_date?' (güncel)':(i.target?' → '+esc(i.target):'')):' — sürüm bilinmiyor'}${i.tracked?' · izleniyor':''}</option>`).join('')+'</optgroup>').join(''):'<option value="">Yerel repo yok</option>';
       }else{
         s2.innerHTML=_tdmModRepoHtml;
       }
@@ -2195,6 +2205,33 @@ async function modernTake(){
 }
 // Sürüm yükseltme görünümü: aynı kartta, aynı repo seçici / sprint seçici / liste çizimi (renderModern).
 // Eşik hesaplamaz: sayılar, engeller, aşama ve metinler sunucudan gelir.
+// Repolar dil × şimdiki sürüm gruplarına ayrılır (dil adı, sonra sürüm küçükten büyüğe; sürümü bilinmeyen sonda).
+function _upVerKey(v){return String(v||'').split('.').map(n=>('00000'+(parseInt(n,10)||0)).slice(-5)).join('.')}
+function _upGroups(items){
+  const m=new Map();
+  (items||[]).forEach(i=>{const lang=i.lang||'php',k=lang+'|'+(i.current||'');
+    if(!m.has(k))m.set(k,{lang,label:i.label||lang,current:i.current||'',items:[]});m.get(k).items.push(i)});
+  return [...m.values()].map(g=>Object.assign(g,{title:g.current?`${g.label} ${g.current}`:`${g.label} — sürüm bilinmiyor`,
+      items:g.items.sort((a,b)=>String(a.repo).localeCompare(String(b.repo)))}))
+    .sort((a,b)=>a.label.localeCompare(b.label)||(!a.current)-(!b.current)||_upVerKey(a.current).localeCompare(_upVerKey(b.current)));
+}
+// Repo seçilmemişken: dil başına sürüm dağılımı. Her repo bir çiptir (tıklayınca seçilir); önbellekte taraması olan
+// repoda aşama / engelleyen sayısı da yazar (sunucunun önbellek özeti — UI hesaplamaz).
+function _upOverviewHtml(){
+  const up=_tdm.upRepos||[];if(!up.length)return '';
+  const groups=_upGroups(up);const langs=[...new Set(groups.map(g=>g.label))];
+  return '<div style="padding:6px 0"><div style="color:var(--text-dim);margin-bottom:4px">Sürüm dağılımı — repo seçmek için tıklayın</div>'
+    +langs.map(lb=>`<div style="margin:6px 0"><b>${escHtml(lb)}</b>`+groups.filter(g=>g.label===lb).map(g=>{
+      const tg=[...new Set(g.items.map(i=>i.target).filter(Boolean))];
+      return `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:3px 0 3px 10px"><span class="chip dim" style="min-width:64px">${escHtml(g.current||'?')}${tg.length?' → '+escHtml(tg.join(', ')):''}</span>`
+        +g.items.map(i=>{const v=(i.lang||'php')+':'+i.repo;
+          const st=i.tracked?'izleniyor':(i.scanned&&i.stage?i.stage:'');
+          const bl=i.blocking?` · ${Number(i.blocking)} engel`:'';
+          const col=i.up_to_date?'var(--text-dim)':(i.tracked?'var(--accent)':'inherit');
+          return `<button class="sm-btn ghost small" style="color:${col}" ${i.current?'':'disabled'} data-v="${escHtml(v)}" onclick="_upPick(this.dataset.v)" title="${escHtml(i.up_to_date?'güncel':(st||'taranmadı'))}">${escHtml(i.repo)}${st||bl?` <span style="color:var(--text-dim)">${escHtml(st)}${escHtml(bl)}</span>`:''}</button>`}).join('')+'</div>'}).join('')+'</div>').join('')+'</div>';
+}
+function _upPick(v){const s=document.getElementById('tdmRepo');s.value=v;if(s.value===v)_tdmRepoChanged()}
+function _upShowOverview(){const b=document.getElementById('tdmUpInfo');if(b&&_tdm.mode==='up'&&!_tdmSel().repo)b.innerHTML=_upOverviewHtml()}
 function _upSaved(){try{return JSON.parse(localStorage.getItem('tempo_upgrade_to')||'{}')||{}}catch(e){return {}}}
 // Kayıtlı hedef artık seçilemiyorsa (repo yükseltildi, sürüm listesi değişti) sunucu 400 döner: bir kez, kayıtsız yeniden tara.
 function _upShouldRetry(status,sentTo,savedTo,userPicked){return status===400&&!!sentTo&&sentTo===savedTo&&!userPicked}
@@ -2212,6 +2249,7 @@ function _tdmSetMode(m){
   _tdmFillRepoSel();
   document.getElementById('tdmTarget').textContent='';
   document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=true;
+  if(up)_upShowOverview();
 }
 // Modernleştirme kartı iki sekmede kullanılır (tek kod yolu): Teknik borç'ta modernleştirme kipinde,
 // Sürüm & güvenlik'te sürüm yükseltme kipinde. Kart sekmeye göre ilgili yuvaya taşınır; kip düğmeleri gizli kalır.
@@ -2255,6 +2293,7 @@ function _upRepoChanged(){
   document.getElementById('tdmTarget').textContent=r&&r.current?`${r.label||''} ${r.current}`:'';
   document.getElementById('tdmRescan').disabled=document.getElementById('tdmTake').disabled=!(r&&r.current);
   document.getElementById('tdmMsg').textContent=r&&!r.current?'Şimdiki sürüm bulunamadı — yükseltme taranamaz.':'';
+  if(!k.repo){_upShowOverview();return}
   if(r&&r.current)upgradeScan(false);
 }
 function _upToChanged(){
@@ -2289,7 +2328,7 @@ async function upgradeScan(force,keepMsg,retried){
   const watch=_upWatchTarget(repo,lang);
   const saved=_upSaved()[lang+':'+repo]||'';
   const to=watch||(_tdm.userTo?sel.value:saved)||'';
-  box.innerHTML=`<div class="board-empty" style="padding:12px 0">${esc(repo)} taranıyor…</div>`;if(!keepMsg)msg.textContent='';
+  if(retried!=='poll')box.innerHTML=`<div class="board-empty" style="padding:12px 0">${esc(repo)} taranıyor…</div>`;if(!keepMsg)msg.textContent='';
   const btns=[document.getElementById('tdmRescan'),document.getElementById('tdmTake'),sel];
   btns.forEach(b=>b.disabled=true);
   try{
@@ -2301,6 +2340,15 @@ async function upgradeScan(force,keepMsg,retried){
       box.innerHTML='';msg.innerHTML=`<span style="color:var(--danger)">${esc(r.error||'HTTP '+resp.status)}</span>`;return false}
     _tdm.scan=r;_upFillTo(r);
     renderUpgrade();renderModern();
+    // Süresi dolmuş önbellek: eski sonuç gösterildi, sunucu arka planda yeniliyor → 8 sn'de bir yeniden sor
+    // (aynı repo seçiliyken, sekme görünürken; en çok ~3 dk).
+    clearTimeout(_tdm.upPollT);
+    if(r.cache&&r.cache.state==='yenileniyor'){
+      _tdm.upPolls=(retried==='poll'?(_tdm.upPolls||0):0)+1;
+      if(_tdm.upPolls<=22){const mySeq=_tdm.seq;_tdm.upPollT=setTimeout(()=>{
+        const p=document.getElementById('paneUpsec');
+        if(mySeq===_tdm.seq&&p&&p.classList.contains('on')&&!document.hidden&&_tdmSel().repo===repo)upgradeScan(false,true,'poll')},8000)}
+    }
     return true;
   }catch(e){if(seq===_tdm.seq){box.innerHTML='';msg.textContent=String(e);return false}return null}
   finally{if(seq===_tdm.seq){btns.forEach(b=>b.disabled=false);sel.disabled=!!watch}}
@@ -2313,7 +2361,8 @@ function renderUpgrade(){
   const bl=(r.blockers||[]).map(b=>`<span class="chip dim" title="${esc(String(b.detail||''))}">${esc(String(b.name||''))} ${esc(String(b.constraint||''))}</span>`).join(' ');
   const sites=(r.sites||[]).map(s=>`<li><code>${esc(String(s.where||''))}</code> ${esc(String(s.path||''))}${s.line?':'+esc(String(s.line)):''} <span style="color:var(--text-dim)">${esc(String(s.old||''))} → ${esc(String(s.new||''))}</span>${s.blocked?` <span class="chip" style="background:var(--human-soft);color:var(--danger)">engelli: ${esc(String(s.blocked))}</span>`:''}</li>`).join('');
   box.innerHTML=`<div style="padding:6px 0"><b>${esc(String(r.repo))} · ${esc(String(r.label||''))}</b> ${esc(String(r.current||'?'))} → ${esc(String(r.target||'?'))}`
-    +(r.up_to_date?' <span class="chip dim">güncel</span>':'')+'</div>'
+    +(r.up_to_date?' <span class="chip dim">güncel</span>':'')
+    +(r.cache&&r.cache.at?` <span class="chip dim" title="Tarama önbellekten; süresi dolunca kendiliğinden yenilenir. 'Yeniden tara' önbelleği atlar.">${r.cache.state==='yenileniyor'?'önbellek '+esc(String(r.cache.at).replace('T',' ').slice(0,16))+' · yenileniyor…':'tarama '+esc(String(r.cache.at).replace('T',' ').slice(0,16))}</span>`:'')+'</div>'
     +_upStatusHtml(r,it)
     +`<div style="padding:2px 0">Kırılır <b>${c.error||0}</b> · Davranış değişir <b>${c.behavior||0}</b> · Kullanımdan kalkar <b>${c.deprecation||0}</b>`
     +(r.blocking?` · <span style="color:var(--danger)">${r.blocking} engelleyen iş</span>`:'')+` · ${probeTxt}</div>`
@@ -2442,7 +2491,9 @@ async function _upPost(path,confirmText,extra){
       return;
     }
     let t='Tamam.';
-    if(path.endsWith('/start'))t=r.created?`İzleme işi açıldı: #${r.id}`:`Açık izleme işi var: #${r.id}`;
+    if(path.endsWith('/start'))t=(r.created?`İzleme işi açıldı: #${r.id}`:`Açık izleme işi var: #${r.id}`)
+      +(r.auto?(r.kicked?' — otomatik: engel işleri açılıyor, taban imaj ve sürüm adımları arka planda başlatıldı; sonrasını izleme sürdürür.':' — otomatik: sonraki izleme turunda ilerler.'):'');
+    if(path.endsWith('/start')&&r.kicked){const rp=repo;setTimeout(()=>{if(_tdm.mode==='up'&&_tdmSel().repo===rp)upgradeScan(false,true)},60000)}
     else if(path.endsWith('/stop'))t=`İzleme işi kapatıldı: #${r.id}`;
     else if(isBump)t=`Sürüm adımı kuyruğa alındı (iş #${r.job_id}) — ${_UP_STEP_LABEL[r.step]||r.step}`;
     if(isImg)t=r.pr&&r.pr.id?`Şablon PR'ı: #${r.pr.id} (${r.state||''})`:`Şablon PR'ı açılmadı: ${r.state||''} ${r.reason||''}`;

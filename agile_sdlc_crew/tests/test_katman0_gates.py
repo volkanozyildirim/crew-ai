@@ -67,6 +67,14 @@ import agile_sdlc_crew.server  # noqa: E402,F401
 
 for _k in [k for k in os.environ if k.startswith(("CREW_TECHDEBT", "CREW_UPGRADE_"))]:
     os.environ.pop(_k, None)
+# Varsayılanı AÇIK iki yeni anahtar (2026-11-26) eski kontrollerin davranışını değiştirmesin: tarama önbelleği aynı
+# anahtarlı ikinci isteğe ilk sahte sonucu döndürür, başlatınca-otomatik de /start'ta arka plan turu açar. Yeni
+# davranışı sınayan test (`test_upsec_cache_and_auto`) bunları kendisi açar; önbellek hiçbir zaman gerçek dizine yazmaz.
+os.environ["CREW_TECHDEBT_UPGRADE_CACHE"] = "0"
+os.environ["CREW_TECHDEBT_UPGRADE_AUTO_ON_START"] = "0"
+import tempfile as _tempfile  # noqa: E402
+from agile_sdlc_crew.quality import upgrade_cache as _upgrade_cache  # noqa: E402
+_upgrade_cache.CACHE_DIR = Path(_tempfile.mkdtemp(prefix="upcache-"))
 
 PASS, FAIL, SKIP = [], [], []
 
@@ -7371,7 +7379,8 @@ def test_upgrade_status_and_steps():
             check("geçersiz hedef → ValueError", False)
         except ValueError:
             check("geçersiz hedef → ValueError", True)
-        check("tracked", ut.tracked(c, "T") == [{"id": first_id, "lang": "php", "repo": "core", "to": "8.4"}],
+        check("tracked", ut.tracked(c, "T") == [{"id": first_id, "lang": "php", "repo": "core", "to": "8.4",
+                                                  "auto": False}],
               str(ut.tracked(c, "T")))
         r = ut.stop(c, "core", "php", team="T")
         check("stop: yorum + Done", r["closed"] and c.states == [(first_id, "Done")]
@@ -13792,9 +13801,9 @@ def test_image_vuln_alerts():
     check("kart: etkilenen repolar görünür liste; yüklenirken kart gösterilir; sekmenin son kartı",
           "Etkilenen repolar" in seg and "x.repos" in seg and "_tdLoad(" in seg and "_tdOff('img')" in seg
           and html_src.index('id="tdImgCard"') > html_src.index('id="tdModernCard"'))
-    check("kart: açığı olan imajlar listenin tepesinde ayrı bölüm (kritik + yüksek > 0), kalanı 'Diğer imajlar'",
-          "Güvenlik açığı olan imajlar" in seg and "Diğer imajlar" in seg
-          and seg.index("Güvenlik açığı olan imajlar") < seg.index("Diğer imajlar")
+    # 2026-11-26: iki bölüm (açıklı / diğer) yerine dil × sürüm grupları; grup içinde açığı olanlar önce.
+    check("kart: imajlar dil × sürüm gruplarında, grup içinde açığı olanlar (kritik + yüksek > 0) önce",
+          "_lgName" in seg and "g.list.filter(vuln).concat(g.list.filter(x=>!vuln(x)))" in seg
           and "(c.critical||0)+(c.high||0))>0" in seg)
     check("kart: CVE bağlantıları + duyuru tarihi / gün sayısı; adres yalnız tam kalıba uyan kimlikten",
           "_ivCves(p)" in html_src and "nvd.nist.gov/vuln/detail/" in html_src and "_ivOldestDays(" in seg
@@ -15812,6 +15821,145 @@ def test_repo_docs():
     check("ayar kayıtlı (bool) ve açıklaması Türkçe", f.get("type") == "bool" and "belgeleri" in f.get("desc", "") and f.get("label"))
 
 
+def test_upsec_cache_and_auto():
+    """Sürüm & güvenlik (2026-11-26): yükseltme taraması önbelleği (taze / süresi dolmuş → eskisi + arka planda
+    yenileme / force / silme / ısıtıcı), imaj taramasının süresi dolmuş önbelleği, giderme takibi, başlatınca uçtan uca
+    otomatik izleme (etiket, tüm engel işleri, yoklayıcı süzgeci, ilk tur) ve kartın gruplama işlevleri."""
+    import time as _t
+    from agile_sdlc_crew import pipeline_config as pc
+    from agile_sdlc_crew.quality import image_vuln as iv
+    from agile_sdlc_crew.quality import upgrade_cache as uc
+    from agile_sdlc_crew.quality import upgrade_track as ut
+    print("\n[Sürüm & güvenlik: önbellek, gruplama, uçtan uca otomatik]")
+    orig_get = pc.get
+    pc.get = lambda k: True if k in ("CREW_TECHDEBT_UPGRADE_CACHE", "CREW_TECHDEBT", "CREW_TECHDEBT_PHP_MODERN",
+                                      "CREW_TECHDEBT_UPGRADE", "CREW_TECHDEBT_UPGRADE_AUTO_ON_START") else orig_get(k)
+    saved = {"report": iv.report, "sprint": ut._auto_sprint, "rows": ut._track_rows, "team": ut._team_for_area}
+    try:
+        d = Path(tempfile.mkdtemp())
+        calls = []
+
+        def build():
+            calls.append(1)
+            return {"repo": "core", "target": "8.4", "blocking": 2, "status": {"stage": "engelli"}}
+        r1 = uc.get("php", "core", None, "T", build, cache_dir=d)
+        r2 = uc.get("php", "core", None, "T", build, cache_dir=d)
+        check("önbellek: ilk istek kurar, ikincisi taze kayıttan (kurucu çağrılmaz)",
+              r1["cache"]["state"] == "yeni" and r2["cache"]["state"] == "taze" and len(calls) == 1)
+        r3 = uc.get("php", "core", None, "T", build, cache_dir=d, now=_t.time() + 7 * 3600, spawn=lambda fn: fn())
+        check("önbellek: süresi dolmuş kayıt eskisiyle döner + arka planda yenilenir",
+              r3["cache"]["state"] == "yenileniyor" and len(calls) == 2)
+        uc.get("php", "core", None, "T", build, cache_dir=d, force=True)
+        check("önbellek: Yeniden tara (force) eşzamanlı kurar", len(calls) == 3)
+        sm = uc.summary(d)
+        check("önbellek özeti: repo listesi için aşama / engel", sm.get(("php", "core"), {}).get("stage") == "engelli"
+              and sm[("php", "core")]["blocking"] == 2)
+        check("önbellek: oto tur süreyi doldurur, ısıtıcı yeniler",
+              uc.invalidate("php", "CORE", drop=False, cache_dir=d) == 1
+              and uc.warm_once(lambda *a: build(), cache_dir=d) == 1 and len(calls) == 4)
+        check("önbellek: yazan uç kaydı siler", uc.invalidate("php", "core", cache_dir=d) == 1 and uc.summary(d) == {})
+        uc.get("php", "x", None, "", lambda: {"error": "e"}, cache_dir=d)
+        check("önbellek: hata sonucu yazılmaz", uc.summary(d) == {})
+        (d / "bozuk.json").write_text("{", encoding="utf-8")
+        check("önbellek: bozuk dosya yok sayılır", uc.summary(d) == {})
+
+        cd = Path(tempfile.mkdtemp())
+        iv._cache_write(cd, "php:8.4", {"state": "tamam", "packages": [], "critical": 1, "high": 2}, 100.0)
+        st = iv._cache_read(cd, "php:8.4", 1, 7300.0, stale_ok=True)
+        check("imaj önbelleği: süresi dolmuşsa yalnız stale_ok ile, `stale` işaretli",
+              iv._cache_read(cd, "php:8.4", 1, 7300.0) is None and st and st["stale"] is True
+              and "stale" not in iv._cache_read(cd, "php:8.4", 1, 110.0))
+
+        iv.follow_add("php:8.4", "T", ["core"], cache_dir=cd)
+        iv.follow_add("php:8.4", "T", ["web"], cache_dir=cd)
+        iv.follow_add("bad image!!", "T", None, cache_dir=cd)
+        fl = iv.follow_load(cd)
+        check("giderme takibi: repo seçimi birleşir, geçersiz imaj adı yazılmaz",
+              fl.get("php:8.4", {}).get("repos") == ["core", "web"] and "bad image!!" not in fl)
+
+        class _Deps:
+            def board(self, c): return {}
+            def now(self): return _t.time()
+        got = []
+
+        def _ap(client, rec, **k):
+            got.append(k)
+            return [{"kind": "taban-yama", "state": "pr açık", "ran": False}]
+        iv.report = lambda client, **k: {"images": [{"image": "php:8.4", "level": "kritik"}]}
+        iv.follow_round(None, index={}, resolver=object(), apply_fn=_ap, deps=_Deps(), cache_dir=cd)
+        check("giderme takibi: apply(auto=True) kullanıcının repo seçimiyle", got and got[0]["auto"] is True
+              and got[0]["repos"] == ["core", "web"])
+        iv.report = lambda client, **k: {"images": [{"image": "php:8.4", "level": "temiz"}]}
+        iv.follow_round(None, index={}, resolver=object(), apply_fn=_ap, deps=_Deps(), cache_dir=cd)
+        check("giderme takibi: imaj temizlenince takip biter", iv.follow_load(cd) == {} and len(got) == 1)
+
+        class _BoardDown:
+            def board(self, c): raise RuntimeError("down")
+            def now(self): return _t.time()
+        iv.follow_add("php:8.4", "T", None, cache_dir=cd)
+        got.clear()
+        iv.report = lambda client, **k: {"images": [{"image": "php:8.4", "level": "kritik"}]}
+        iv.follow_round(None, index={}, resolver=object(), apply_fn=_ap, deps=_BoardDown(), cache_dir=cd)
+        check("giderme takibi: pano okunamazsa hiçbir şey yazılmaz", got == [] and "php:8.4" in iv.follow_load(cd))
+
+        ut._auto_sprint = lambda client, team: ("P\\S1", "next")
+        takes = []
+
+        def _tf(client, repo, lang, ids, **k):
+            takes.append(list(ids))
+            return {"tasks": [{"id": 1, "job_id": 5, "fingerprints": ["fp-" + i for i in ids]}]}
+
+        class _D:
+            def cfg(self): return {"max_take": 2}
+        auto = [{"gid": g, "blocking": g == "a", "fingerprints": ["fp-" + g]} for g in ("a", "b", "c")]
+        human = [{"gid": "h", "fingerprints": ["fp-h"]}]
+        res = {"note": "", "took": []}
+        ut._auto_take(object(), {"id": 9, "repo": "core", "lang": "php", "to": "8.4", "auto": True},
+                      {"auto": auto, "human": human}, res, team="T", deps=_D(), open_jobs=lambda r: 99, take_fn=_tf,
+                      kw={})
+        check("otomatik izleme: tavansız TÜM işler (otomatik + insan) parçalarla alınır",
+              takes == [["a", "b"], ["c", "h"]] and res["took"] == ["a", "b", "c", "h"] and res.get("queued"))
+        takes.clear()
+        res = {"note": "", "took": []}
+        ut._auto_take(object(), {"id": 9, "repo": "core", "lang": "php", "to": "8.4", "auto": False},
+                      {"auto": auto, "human": human}, res, team="T", deps=_D(), open_jobs=lambda r: 99, take_fn=_tf,
+                      kw={})
+        check("işaretsiz izleme: MAX_OPEN tavanı korunur", takes == [["h"]] and "Tavan dolu" in res["note"])
+
+        check("item_auto: genel anahtar kapalıyken yalnız etiketli iş",
+              not orig_get("CREW_TECHDEBT_UPGRADE_AUTO") and ut.item_auto({"auto": True})
+              and not ut.item_auto({"auto": False}))
+        ut._track_rows = lambda client, extra="", open_only=True: [{"id": 1, "area": "A", "auto": True},
+                                                                    {"id": 2, "area": "A", "auto": False}]
+        ut._team_for_area = lambda c, a, cache: "T"
+        seen = []
+        ut._tick(lambda: object(), advance_fn=lambda client, team, track_ids: seen.append(set(track_ids)) or [])
+        check("yoklayıcı: genel anahtar kapalıyken etiketli izlemeyi ilerletir, ötekini atlar", seen == [{1}])
+        ran = []
+        ok = ut.kick(lambda: object(), 1, "T",
+                     advance_fn=lambda c, team, track_ids: ran.append(list(track_ids)) or [{"queued": True}],
+                     on_queued=lambda: ran.append("q"), spawn=lambda fn: fn())
+        check("başlatma: ilk tur hemen (o izleme işi için), kuyruğa iş girerse işçi uyanır", ok and ran == [[1], "q"])
+
+        class _WiC:
+            def __init__(self): self.ops = []
+            def update_work_item(self, wid, ops): self.ops.append((wid, ops))
+        wc = _WiC()
+        check("açık işaretsiz izlemeye otomatik etiketi eklenir",
+              ut._mark_auto(wc, {"id": 7, "tags": "tempo-upgrade-track"})
+              and wc.ops and "tempo-upgrade-auto" in wc.ops[0][1][0]["value"])
+
+        html = (Path(__file__).resolve().parent.parent / "src" / "agile_sdlc_crew" / "web" / "index.html").read_text(
+            encoding="utf-8")
+        check("kart: dil × sürüm grupları, dağılım görünümü, önbellek durumu ve imaj grupları",
+              all(n in html for n in ("function _upGroups", "function _upOverviewHtml", "<optgroup",
+                                      "r.cache.state==='yenileniyor'", "_lgName", "r.followed")))
+    finally:
+        pc.get = orig_get
+        iv.report, ut._auto_sprint = saved["report"], saved["sprint"]
+        ut._track_rows, ut._team_for_area = saved["rows"], saved["team"]
+
+
 def main():
     print("Katman 0 kapıları — regresyon testleri")
     print("=" * 62)
@@ -15929,7 +16077,8 @@ def main():
               test_scan_line_text_multibyte,
               test_tool_fix_quiet_comments, test_tool_fix_build_gate, test_stale_team_status,
               test_pr_review_prior_discussion, test_pr_review_coverage, test_pr_review_tracking, test_tool_branch_conflicts, test_hero_latest_job,
-              test_tool_fix_result_and_logs, test_nr_app_infer, test_quality_detail, test_repo_docs):
+              test_tool_fix_result_and_logs, test_nr_app_infer, test_quality_detail, test_repo_docs,
+              test_upsec_cache_and_auto):
         try:
             t()
         except Exception as e:

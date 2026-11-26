@@ -566,7 +566,9 @@ def _cache_path(cache_dir: Path, image: str) -> Path:
     return Path(cache_dir) / f"{hashlib.sha256(image.encode('utf-8')).hexdigest()[:40]}.json"
 
 
-def _cache_read(cache_dir: Path, image: str, ttl_h: float, now: float) -> dict | None:
+def _cache_read(cache_dir: Path, image: str, ttl_h: float, now: float, *, stale_ok: bool = False) -> dict | None:
+    """Süresi geçmiş kayıt: `stale_ok` ise `stale: True` ile döner (kart eski sonucu gösterip arka planda yeniler,
+    "bekliyor" satırlarına düşmez); değilse None (yeniden taranır)."""
     try:
         doc = json.loads(_cache_path(cache_dir, image).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -581,9 +583,11 @@ def _cache_read(cache_dir: Path, image: str, ttl_h: float, now: float) -> dict |
             or not all(isinstance(scan.get(k), int) and not isinstance(scan.get(k), bool) for k in ("critical", "high"))
             or not all(isinstance(p, dict) for p in scan["packages"])):
         return None
+    out = {**scan, "os": str(scan.get("os") or ""), "created": str(scan.get("created") or "")}
+    out.pop("stale", None)
     if not (ttl_h > 0 and 0 <= now - built < ttl_h * 3600):
-        return None
-    return {**scan, "os": str(scan.get("os") or ""), "created": str(scan.get("created") or "")}
+        return {**out, "stale": True} if stale_ok else None
+    return out
 
 
 def _cache_write(cache_dir: Path, image: str, scan: dict, now: float) -> None:
@@ -695,9 +699,10 @@ def apply_ignore(scan: dict, ignore: set[str]) -> dict:
 
 def report(client, *, index: dict | None = None, force: bool = False, scan_fn=None, resolver=None, eol_fn=None,
            read=None, cache_dir: Path | None = None, ttl_h: float | None = None, now: float | None = None,
-           today: date | None = None, ignore_packages: set[str] | None = None) -> dict:
+           today: date | None = None, ignore_packages: set[str] | None = None, stale_ok: bool = False) -> dict:
     """Envanter + üç işaret; imaj başına tarama sonucu `CACHE_DIR`'de (TTL `CREW_TECHDEBT_IMAGE_VULN_SCAN_H`).
-    Önbellek HAM taramayı tutar; yok sayılan paketler (`config/image_vuln.yaml`) rapor kurulurken süzülür."""
+    Önbellek HAM taramayı tutar; yok sayılan paketler (`config/image_vuln.yaml`) rapor kurulurken süzülür.
+    `stale_ok`: süresi geçmiş tarama `scan.stale = True` ile kullanılır (anlık görüntü; `serve` onu arka planda yeniler)."""
     from agile_sdlc_crew.quality import modern
     if index is None:
         index = modern.build_index(client)
@@ -716,7 +721,7 @@ def report(client, *, index: dict | None = None, force: bool = False, scan_fn=No
             scan = _empty_scan("harici kayıt deposu")
             scan["reason"] = "yalnız herkese açık Docker Hub imajı taranır; kayıt deposu adlı imaj taranmaz"
         else:
-            scan = None if force else _cache_read(cache_dir, rec["image"], ttl, clock)
+            scan = None if force else _cache_read(cache_dir, rec["image"], ttl, clock, stale_ok=stale_ok)
             if scan is not None and _counts_missing(scan, ignore):
                 scan = None
             if scan is None:
@@ -733,7 +738,7 @@ def report(client, *, index: dict | None = None, force: bool = False, scan_fn=No
     scanner = False if "tarayıcı yok" in states else (bool(states - {"dayanak çözülemedi", "geçersiz imaj"})
                                                       or trivy_cmd() is not None)
     return {"scanned_at": datetime.fromtimestamp(clock).isoformat(timespec="seconds"), "scanner": scanner,
-            "images": images, "note": NOTE}
+            "images": images, "note": NOTE, "stale": sum(1 for r in images if r["scan"].get("stale"))}
 
 
 # ── Uç: önbellekten dön, taramayı arka planda yap ────────────────────────
@@ -792,7 +797,7 @@ def _snapshot(client, clock, decorate, snap_kw: dict) -> dict:
             snap, at = _RUN["snap"], _RUN["snap_at"]
         if snap is not None and 0 <= now - at < SNAP_S:
             return snap
-        rep = report(client, force=False, scan_fn=lambda image: _empty_scan("bekliyor"), **snap_kw)
+        rep = report(client, force=False, scan_fn=lambda image: _empty_scan("bekliyor"), stale_ok=True, **snap_kw)
         rep = _decorated(rep, decorate)
         with _STATE_LOCK:
             _RUN.update(snap=rep, snap_at=now)
@@ -836,7 +841,8 @@ def serve(client, *, force: bool = False, spawn=None, clock=None, decorate=None,
     `decorate(rapor)` anlık görüntü kurulurken uygulanır (giderme planı). `kw` `report`'a gider."""
     clock = clock or time.time
     base = _snapshot(client, clock, decorate, {k: v for k, v in kw.items() if k != "scan_fn"})
-    pending = sum(1 for r in base["images"] if r["scan"]["state"] == "bekliyor")
+    # süresi dolan tarama da bekleyen sayılır: eski sonuç gösterilir, arka planda kendiliğinden yenilenir
+    pending = sum(1 for r in base["images"] if r["scan"]["state"] == "bekliyor" or r["scan"].get("stale"))
     with _STATE_LOCK:
         running, last, done_at = _RUN["running"], _RUN["report"], _RUN["done_at"]
     if running:
@@ -1022,6 +1028,167 @@ def _fix_round(client, rep: dict, results: list[dict] | None, *, team: str, inde
     if memo != memo0:
         _fix_err_save(cache_dir, memo)
     return out
+
+
+# ── Başlatılmış gidermenin takibi (kullanıcı kararı 2026-11-26: "güvenlik yaması başlatıldığında tüm işlemler
+# otomatik yapılmalı") ─────────────────────────────────────────────────────
+# Karttaki "Gidermeyi başlat" bir imajın gidermesini bir kez yürütüyordu; zincirin sonraki halkaları (yama PR'ı
+# birleşince taşıma PR'ı, sonra bölge etiket PR'ları, izleme işinin adımları) yalnız `_FIX` açıkken gece turunda
+# yürüyordu. Elle başlatılan imaj artık `fix_follow.json`'a yazılır ve takip turu (`follow_round`, yükseltme
+# yoklayıcısıyla aynı sıklıkta) onu `_FIX`'ten ve seviyeden bağımsız `apply(auto=True)` ile sürdürür. `apply` yalnız
+# `yok` durumundaki eylemleri yürütür (idempotent). Takip biter: imaj üretim envanterinden çıktı, seviyesi `temiz`,
+# yürütülecek eylem kalmadı ya da insan uyarı işini iptal etti. Dosya güvenilmezdir: biçim tutmazsa boş.
+
+FOLLOW_MAX = 50
+
+
+def _follow_path(cache_dir: Path) -> Path:
+    return Path(cache_dir) / "fix_follow.json"
+
+
+def follow_load(cache_dir: Path | None = None) -> dict:
+    try:
+        doc = json.loads(_follow_path(cache_dir or CACHE_DIR).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    out = {}
+    for k, v in list(doc.items())[:FOLLOW_MAX]:
+        if not (isinstance(k, str) and valid_image(k) and isinstance(v, dict)):
+            continue
+        team = v.get("team") if isinstance(v.get("team"), str) else ""
+        repos = v.get("repos")
+        if repos is not None and not (isinstance(repos, list) and all(isinstance(r, str) for r in repos)):
+            repos = []
+        out[k] = {"team": team[:200], "repos": repos, "at": float(v.get("at") or 0)
+                  if isinstance(v.get("at"), (int, float)) and not isinstance(v.get("at"), bool) else 0.0}
+    return out
+
+
+def _follow_save(items: dict, cache_dir: Path | None = None) -> None:
+    try:
+        d = Path(cache_dir or CACHE_DIR)
+        d.mkdir(parents=True, exist_ok=True)
+        _follow_path(d).write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        log.warning(f"⚠️ image_vuln: giderme takibi yazılamadı: {e}")
+
+
+def follow_add(image: str, team: str, repos: list[str] | None, *, cache_dir: Path | None = None) -> None:
+    """Elle başlatılan gidermeyi takibe al (aynı imaj yeniden başlatılırsa seçim birleşir)."""
+    if not valid_image(image):
+        return
+    with _STATE_LOCK:
+        items = follow_load(cache_dir)
+        prev = items.get(image) or {}
+        if repos is None or prev.get("repos", []) is None:
+            merged = None
+        else:
+            merged = sorted(set(prev.get("repos") or []) | {str(r) for r in repos})
+        items[image] = {"team": team or prev.get("team") or "", "repos": merged, "at": time.time()}
+        _follow_save(dict(list(items.items())[-FOLLOW_MAX:]), cache_dir)
+
+
+def _follow_drop(images: set[str], cache_dir: Path | None = None) -> None:
+    if not images:
+        return
+    with _STATE_LOCK:
+        items = follow_load(cache_dir)
+        for i in images:
+            items.pop(i, None)
+        _follow_save(items, cache_dir)
+
+
+_FOLLOW_TERMINAL = {"temiz"}
+
+
+def follow_round(client, *, index: dict | None = None, resolver=None, apply_fn=None, deps=None,
+                 cache_dir: Path | None = None) -> list[dict]:
+    """Takipteki her imaj için `apply(auto=True)`: taze index, önbellekteki tarama (yeni tarama başlatılmaz).
+    Pano (bastırma) okunamazsa tur hiçbir şey yazmaz. → [{"image", "actions" | "state"}]"""
+    from agile_sdlc_crew.quality import image_fix, modern, upgrade_registry
+    items = follow_load(cache_dir)
+    if not items:
+        return []
+    deps = deps or _default_deps()
+    try:
+        verdicts = _board_verdicts(deps, client, list(items))
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"⚠️ image_vuln: pano okunamadı, giderme takibi yapılmadı: {str(e)[:200]}")
+        return []
+    if index is None:
+        index = modern.build_index(client, max_age_h=0)
+    resolver = resolver or upgrade_registry.default()
+    apply_fn = apply_fn or image_fix.apply
+    rep = report(client, index=index, scan_fn=lambda _image: _empty_scan("bekliyor"), stale_ok=True,
+                 resolver=resolver)
+    recs = {r["image"]: r for r in rep.get("images") or []}
+    done: set[str] = set()
+    out = []
+    for image, it in items.items():
+        rec = recs.get(image)
+        why = ("üretim envanterinde yok" if rec is None else
+               "temiz" if rec.get("level") in _FOLLOW_TERMINAL else
+               "uyarı işi iptal edildi" if (verdicts.get(image) or ("",))[0] == "suppressed" else "")
+        if why:
+            done.add(image)
+            out.append({"image": image, "state": f"takip bitti: {why}", "actions": []})
+            log.info(f"image_vuln: {image} giderme takibi bitti ({why})")
+            continue
+        kw = {} if it.get("repos") is None else {"repos": it["repos"]}
+        try:
+            try:
+                acts = apply_fn(client, rec, team=it.get("team") or "", index=index, resolver=resolver, auto=True, **kw)
+            except image_fix.SelectionError:
+                acts = apply_fn(client, rec, team=it.get("team") or "", index=index, resolver=resolver, auto=True,
+                                repos=[])     # seçilen repo artık imajı kullanmıyor: PR eylemleri yine yürür
+        except Exception as e:  # noqa: BLE001 — bir imajın hatası ötekileri durdurmaz
+            log.warning(f"⚠️ image_vuln: {image} giderme takibi başarısız: {str(e)[:300]}")
+            continue
+        out.append({"image": image, "actions": image_fix.public(acts)})
+        if any(a.get("ran") for a in acts):
+            log.info(f"image_vuln: {image} giderme takibi ilerledi: "
+                     + "; ".join(f"{a['kind']}={a['state']}" for a in acts if a.get("ran")))
+        if not acts:
+            done.add(image)
+    _follow_drop(done, cache_dir)
+    return out
+
+
+_FOLLOW_POLLER: threading.Thread | None = None
+
+
+def start_follow_poller(get_client, *, interval_min, sleep=None, stop_event: threading.Event | None = None):
+    """Giderme takibi: süreç başına tek daemon thread, `interval_min`'de bir (en az 5 dk; ilk tur bir aralık sonra).
+    Takipte imaj yoksa Azure'a gidilmez."""
+    global _FOLLOW_POLLER
+    with _POLLER_LOCK:
+        if _FOLLOW_POLLER is not None and _FOLLOW_POLLER.is_alive():
+            return _FOLLOW_POLLER
+        sleep = sleep or time.sleep
+        stop_event = stop_event or threading.Event()
+
+        def loop():
+            from agile_sdlc_crew import pipeline_config as pc
+            while not stop_event.is_set():
+                try:
+                    v = interval_min() if callable(interval_min) else interval_min
+                    sleep(max(5, int(v or 30)) * 60)
+                except Exception:  # noqa: BLE001
+                    sleep(1800)
+                if stop_event.is_set():
+                    break
+                if not (pc.get("CREW_TECHDEBT") and pc.get("CREW_TECHDEBT_IMAGE_VULN")) or not follow_load():
+                    continue
+                try:
+                    follow_round(get_client())
+                except Exception as e:  # noqa: BLE001
+                    log.warning(f"⚠️ image_vuln: giderme takibi turu hata verdi: {str(e)[:300]}")
+
+        _FOLLOW_POLLER = threading.Thread(target=loop, daemon=True, name="image-fix-follow")
+        _FOLLOW_POLLER.start()
+        return _FOLLOW_POLLER
 
 
 def attach_fix(client, rep: dict, *, index: dict | None = None, resolver=None) -> dict:
