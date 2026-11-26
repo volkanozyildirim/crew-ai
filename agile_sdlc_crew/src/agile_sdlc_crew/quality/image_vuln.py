@@ -748,7 +748,10 @@ TASK_REPO = "base-images"           # giderme (yeniden üretim) bu repoda yapıl
 TASK_TAG = "tempo-image-vuln"
 LIMIT = ("Yayınlanmış imaj değil, dayandığı resmî imaj tarandı; kendi eklediğimiz katmanlar ve derleme anında "
          "kurulan yamalar görülmez — sonuç alt sınırdır.")
-GUARD_S = 300                       # bir tarama (başarılı ya da çöken) bitince 5 dk yenisi başlamaz: GET döngüsü / POST seli yok
+GUARD_S = 300                       # bir tarama (başarılı ya da çöken) bitince 5 dk OTOMATİK yenisi başlamaz: GET döngüsü yok
+# Elle "Yeniden tara" (POST) yalnız kısa bir sıçrama korumasına takılır (kullanıcı isteği 2026-11-26: "manuel
+# tetikleyebilmeliyim"); tarama tek uçuşlu olduğundan POST seli üst üste tarama biriktiremez.
+MANUAL_GUARD_S = 30
 SNAP_S = 60                         # bellekteki anlık görüntü en çok bu kadar eskir; GET Azure'a gitmez
 
 _STATE_LOCK = threading.Lock()
@@ -855,15 +858,15 @@ def serve(client, *, force: bool = False, spawn=None, clock=None, decorate=None,
 
 
 def rescan(client, *, spawn=None, clock=None, decorate=None, **kw) -> dict:
-    """POST (kartın "Yeniden tara"sı): yalnız tarama sürmüyorsa VE son tarama `GUARD_S`'den önce bittiyse tam yeniden
+    """POST (kartın "Yeniden tara"sı): tarama sürmüyorsa VE son tarama `MANUAL_GUARD_S`'den önce bittiyse tam yeniden
     tarama başlatır; aksi halde anlık görüntüyü Türkçe nedenle (ve `cooldown`: kalan sn) döner."""
     clock = clock or time.time
     base = _snapshot(client, clock, decorate, {k: v for k, v in kw.items() if k != "scan_fn"})
     with _STATE_LOCK:
         running, done_at = _RUN["running"], _RUN["done_at"]
     if running:
-        return {**base, "scanning": True, "message": "Tarama zaten sürüyor."}
-    left = GUARD_S - (clock() - done_at) if done_at else 0
+        return {**base, "scanning": True, "message": "Tarama zaten sürüyor — bitince sonuç kendiliğinden gelir."}
+    left = MANUAL_GUARD_S - (clock() - done_at) if done_at else 0
     if left > 0:
         n = int(left) + (0 if left == int(left) else 1)
         return {**base, "scanning": False, "cooldown": n,

@@ -1281,7 +1281,7 @@ async function loadImageVuln(force){
     if(!_tdOff('img'))card.style.display='flex';
   }else if(force){btn.disabled=true;st.innerHTML='<span style="color:var(--run)">Yeniden tarama isteniyor…</span>'}
   try{
-    // GET yan etkisizdir; yeniden tarama yalnız POST (sunucu 5 dk bekleme uygular, nedeni `message` ile döner)
+    // GET yan etkisizdir; yeniden tarama yalnız POST (sunucu 30 sn sıçrama koruması uygular, nedeni `message` ile döner)
     const resp=force?await fetch('/api/techdebt/images/rescan',{method:'POST'}):await fetch('/api/techdebt/images');
     if(resp.status===403){card.style.display='none';_tdOff('img',true);return}
     const r=await resp.json();
@@ -1292,7 +1292,8 @@ async function loadImageVuln(force){
       return}
     _ivLoaded=true;
     renderImageVuln(r);
-    if(r.message&&!r.scanning)st.innerHTML=_ivE(r.message);
+    if(r.message&&(force||!r.scanning))st.innerHTML=`<span style="color:var(--${r.cooldown?'warning':'run'})">${_ivE(r.message)}</span>`;
+    else if(force&&r.scanning)st.innerHTML='<span style="color:var(--run)">Yeniden tarama başladı — imaj başına dakikalar sürebilir, sonuç kendiliğinden gelir.</span>';
     // tarama sürerken (sekme açık ve görünürken) 8 sn'de bir yeniden sor; bitince durur
     if(r.scanning){_ivTimer=setTimeout(()=>{const p=document.getElementById('paneUpsec');if(p&&p.classList.contains('on')&&!document.hidden)loadImageVuln(false)},8000)}
   }catch(e){card.style.display='flex';st.textContent=String(e);btn.disabled=false;
@@ -1314,7 +1315,8 @@ function renderImageVuln(r){
   document.getElementById('tdImgStatus').innerHTML=r.scanning
     ?(r.stale?`<span style="color:var(--run)">Önbellekteki sonuç gösteriliyor · ${Number(r.stale)} imajın süresi doldu, arka planda yeniden taranıyor…</span>`:'<span style="color:var(--run)">Taranıyor… (imaj başına dakikalar sürebilir)</span>')
     :(r.scanner===false?'<span style="color:var(--warning)">Tarayıcı yok — yalnız sürüm işaretleri</span>':`${crit} kritik · son tarama ${_ivE((r.scanned_at||'').replace('T',' '))}`);
-  document.getElementById('tdImgRescan').disabled=!!r.scanning;
+  // Düğme tarama sürerken de basılabilir (kullanıcı isteği 2026-11-26); sunucu sürüyorsa "zaten sürüyor" der.
+  document.getElementById('tdImgRescan').disabled=false;
   document.getElementById('tdImgNote').textContent=r.note||'Yayınlanmış imaj değil, dayandığı resmî imaj taranır; sonuç alt sınırdır.';
   const box=document.getElementById('tdImgList');
   if(!rows.length){box.innerHTML='<div class="board-empty" style="padding:12px 14px">Üretim imajı bulunamadı.</div>';return}
@@ -2121,7 +2123,13 @@ async function loadModernRepos(){
       if(_tdm.mode==='up'){
         const up=_tdm.upRepos;
         // dil × şimdiki sürüm grupları (optgroup): "PHP 8.2", "Go 1.24"…; sürümü bilinmeyenler en sonda
-        s2.innerHTML=up.length?'<option value="" selected>Repo seçiniz…</option>'+_upGroups(up).map(g=>`<optgroup label="${esc(g.title)} (${g.items.length})">`+g.items.map(i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.current?'':'disabled'}>${esc(i.repo)}${i.current?(i.up_to_date?' (güncel)':(i.target?' → '+esc(i.target):'')):' — sürüm bilinmiyor'}${i.tracked?' · izleniyor':''}</option>`).join('')+'</optgroup>').join(''):'<option value="">Yerel repo yok</option>';
+        // Sürümü bilinen repolar dil × sürüm gruplarında; sürümü bilinmeyenler (tüm diller) en altta TEK grupta
+        // (kullanıcı isteği 2026-11-26), adın yanında dili yazar.
+        const opt=i=>`<option value="${esc((i.lang||'php')+':'+i.repo)}" ${i.current?'':'disabled'}>${esc(i.repo)}${i.current?(i.up_to_date?' (güncel)':(i.target?' → '+esc(i.target):'')):' · '+esc(i.label||i.lang||'')}${i.tracked?' · izleniyor':''}</option>`;
+        const unk=up.filter(i=>!i.current).sort((a,b)=>String(a.repo).localeCompare(String(b.repo)));
+        s2.innerHTML=up.length?'<option value="" selected>Repo seçiniz…</option>'
+          +_upGroups(up.filter(i=>i.current)).map(g=>`<optgroup label="${esc(g.title)} (${g.items.length})">`+g.items.map(opt).join('')+'</optgroup>').join('')
+          +(unk.length?`<optgroup label="Sürümü bilinmeyen (${unk.length})">`+unk.map(opt).join('')+'</optgroup>':''):'<option value="">Yerel repo yok</option>';
       }else{
         s2.innerHTML=_tdmModRepoHtml;
       }
